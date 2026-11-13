@@ -93,6 +93,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         activity: None,
         handling: None,
         harnesses: None,
+        escalate_to: Vec::new(),
     }
 }
 
@@ -293,6 +294,7 @@ mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         }
     }
 

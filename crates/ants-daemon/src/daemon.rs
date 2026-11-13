@@ -1847,6 +1847,7 @@ mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
         let post = ChannelPost::new(entry.channel.clone(), PersonaId::human(), "the build is red");

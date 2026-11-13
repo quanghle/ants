@@ -45,6 +45,8 @@ pub const CHANNELS_BUCKET: &str = "ants_channels";
 pub const HUMANS_BUCKET: &str = "ants_humans";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
+/// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
+pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;
 
 /// Errors from parsing ants identifiers and building replies.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -733,6 +735,10 @@ pub struct RosterEntry {
     /// Live harness processes (sessions) at the last refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harnesses: Option<u32>,
+    /// The persona's escalation chain, in order: what it cannot settle goes to these personas before a human. The first
+    /// leads. Published so any daemon can follow the chain while the persona is offline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<PersonaId>,
 }
 
 /// What a persona is doing, as its roster entry reports it.
@@ -771,6 +777,11 @@ impl RosterEntry {
             return Ok(());
         }
         Err(Error::ForeignPersona { kind: "roster entry", persona: self.persona.clone(), at: format!("key {key}") })
+    }
+
+    /// The leader of the persona's escalation chain, if it has one.
+    pub fn leader(&self) -> Option<&PersonaId> {
+        self.escalate_to.first()
     }
 }
 
@@ -871,6 +882,14 @@ pub struct Envelope {
     /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<PersonaId>,
+    /// The escalation the message carries up a chain, or answers. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`]: the daemon sets it with [`Envelope::with_escalation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Box<Escalation>>,
+    /// An agent's decision on an approval request of `to`, for its daemon rather than its harness. The subject pins the
+    /// sender, and the requester takes it only from its own chain ([`Envelope::chain_decision`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Box<ApprovalDecision>>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -891,6 +910,8 @@ impl Envelope {
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
             owner: None,
+            escalation: None,
+            approval: None,
             sent_at: Utc::now(),
         }
     }
@@ -898,6 +919,34 @@ impl Envelope {
     /// The envelope with `owner` as the human who started its thread.
     pub fn with_owner(self, owner: Option<PersonaId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The envelope carrying `escalation`.
+    pub fn with_escalation(self, escalation: Option<Escalation>) -> Self {
+        Self { escalation: escalation.map(Box::new), ..self }
+    }
+
+    /// `from`'s decision on an approval request, to the requesting persona on `thread_id`, the request's thread.
+    pub fn decision(thread_id: ThreadId, from: PersonaId, decision: ApprovalDecision) -> Self {
+        let text = format!("{} on approval request {}", decision.verdict.as_str(), decision.request_id);
+        let to = decision.persona.clone();
+        Self { approval: Some(Box::new(decision)), ..Self::on_thread(thread_id, from, to, text) }
+    }
+
+    /// Whether the sender is in `chain`, the escalate_to of the persona the envelope is for. Trust it only once the
+    /// envelope passed [`Envelope::check_subject`].
+    pub fn is_from_chain(&self, chain: &[PersonaId]) -> bool {
+        chain.contains(&self.from)
+    }
+
+    /// The approval decision the envelope carries on `request`, if it comes from `chain`, the requester's escalate_to,
+    /// and is for that request. A verdict the request did not offer counts as [`Verdict::Reject`]. Trust it only once
+    /// the envelope passed [`Envelope::check_subject`].
+    pub fn chain_decision(&self, request: &ApprovalRequest, chain: &[PersonaId]) -> Option<ApprovalDecision> {
+        let decision = self.approval.as_ref()?;
+        let ours = self.to == request.persona && decision.persona == request.persona;
+        (ours && decision.request_id == request.id && self.is_from_chain(chain))
+            .then(|| request.decide(decision.verdict))
     }
 
     /// A message on this envelope's thread, with a fresh budget and the same owner.
@@ -922,6 +971,8 @@ impl Envelope {
             turn_budget,
             in_reply_to: Some(self.id),
             owner: self.owner.clone(),
+            escalation: None,
+            approval: None,
             sent_at: Utc::now(),
         })
     }
@@ -937,6 +988,140 @@ impl Envelope {
             return Ok(());
         }
         Err(Error::WrongSubject { subject: subject.to_owned(), from: self.from.clone(), to: self.to.clone() })
+    }
+}
+
+/// Why a persona escalates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationReason {
+    /// The thread's turn budget is spent.
+    TurnBudget,
+    /// A prompt limit or a spending cap was reached.
+    Cap,
+    /// The thread's plan room is out of turns.
+    PlanRoom,
+    /// A message on the thread became a dead letter.
+    DeadLetter,
+    /// A tool request needs a decision ([`Escalation::request_id`]).
+    Approval,
+    /// The agent asked for help with the escalate tool.
+    Asked,
+    /// A value from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+impl EscalationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnBudget => "turn_budget",
+            Self::Cap => "cap",
+            Self::PlanRoom => "plan_room",
+            Self::DeadLetter => "dead_letter",
+            Self::Approval => "approval",
+            Self::Asked => "asked",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// An issue a persona could not settle on a thread, as it climbs escalation chains on [`Envelope::escalation`].
+///
+/// Level 0 is the stuck persona itself ([`Escalation::new`]); each [`Escalation::up`] goes to the escalate_to of the
+/// current leader, one level higher, and every member of that chain gets it. Only the leader resolves or escalates
+/// further. The details travel in the envelope's text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Escalation {
+    /// The persona that got stuck.
+    pub stuck: PersonaId,
+    /// The thread the escalation is about, the stuck persona's.
+    pub thread_id: ThreadId,
+    pub reason: EscalationReason,
+    /// The approval request awaiting a decision, for [`EscalationReason::Approval`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
+    /// The chain level: 1 for the stuck persona's own escalate_to, 0 before the escalation went anywhere.
+    pub level: u32,
+    /// Who leads at this level: the first of the chain it went to, the stuck persona at level 0.
+    pub leader: PersonaId,
+    /// Every persona the escalation went through, in order, the stuck one first.
+    pub visited: Vec<PersonaId>,
+}
+
+/// Where an escalation goes next ([`Escalation::up`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hop {
+    /// To every persona of `to`, the leader's chain without those already visited, its leader first, carrying
+    /// `escalation`.
+    Chain { escalation: Escalation, to: Vec<PersonaId> },
+    /// To the thread's owner, else the default human.
+    Owner(OwnerBecause),
+}
+
+/// Why an escalation goes to the thread's owner rather than up a chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerBecause {
+    /// The leader has no escalate_to.
+    NoChain,
+    /// The next leader was already visited: the chains loop.
+    Visited(PersonaId),
+    /// The next level would pass the hop limit.
+    HopLimit(u32),
+}
+
+impl Escalation {
+    /// `stuck`'s issue on `thread_id`, before it goes anywhere.
+    pub fn new(stuck: PersonaId, thread_id: ThreadId, reason: EscalationReason) -> Self {
+        Self {
+            leader: stuck.clone(),
+            visited: vec![stuck.clone()],
+            stuck,
+            thread_id,
+            reason,
+            request_id: None,
+            level: 0,
+        }
+    }
+
+    /// The escalation of the tool request `request`, before it goes anywhere.
+    pub fn of_request(request: &ApprovalRequest) -> Self {
+        Self {
+            request_id: Some(request.id),
+            ..Self::new(request.persona.clone(), request.thread_id.clone(), EscalationReason::Approval)
+        }
+    }
+
+    pub fn is_visited(&self, persona: &PersonaId) -> bool {
+        self.visited.contains(persona)
+    }
+
+    pub fn is_leader(&self, persona: &PersonaId) -> bool {
+        &self.leader == persona
+    }
+
+    /// Where the escalation goes one level up, given `chain`, the escalate_to of its [`Escalation::leader`]: up the
+    /// chain, or to the owner when the chain is empty, its leader was visited, or the level would pass `max_hops`.
+    /// Members already visited are left out.
+    pub fn up(&self, chain: &[PersonaId], max_hops: u32) -> Hop {
+        let Some(leader) = chain.first() else { return Hop::Owner(OwnerBecause::NoChain) };
+        if self.is_visited(leader) {
+            return Hop::Owner(OwnerBecause::Visited(leader.clone()));
+        }
+        let level = self.level.saturating_add(1);
+        if level > max_hops {
+            return Hop::Owner(OwnerBecause::HopLimit(max_hops));
+        }
+        let mut to: Vec<PersonaId> = Vec::with_capacity(chain.len());
+        for persona in chain {
+            if !self.is_visited(persona) && !to.contains(persona) {
+                to.push(persona.clone());
+            }
+        }
+        let mut visited = self.visited.clone();
+        visited.extend(to.iter().cloned());
+        let escalation = Self { level, leader: leader.clone(), visited, ..self.clone() };
+        Hop::Chain { escalation, to }
     }
 }
 
@@ -1331,6 +1516,16 @@ pub enum Verdict {
     Reject,
 }
 
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowAlways => "allow_always",
+            Self::Reject => "reject",
+        }
+    }
+}
+
 /// The tool call a harness asks permission for, as the human gets to see it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -1411,7 +1606,8 @@ impl ApprovalRequest {
     }
 }
 
-/// The human's answer to an [`ApprovalRequest`], published to `ants.approvals.<persona>.<request id>`.
+/// The answer to an [`ApprovalRequest`]: a human's, published to `ants.approvals.<persona>.<request id>`, or an agent's
+/// of the persona's chain, on [`Envelope::approval`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalDecision {
     pub request_id: Uuid,
@@ -1421,6 +1617,12 @@ pub struct ApprovalDecision {
 }
 
 impl ApprovalDecision {
+    /// A decision on the request `request_id` of `persona`, made now, as an agent of its chain makes one from the
+    /// [`Escalation`] alone. The requester maps a verdict it did not offer to [`Verdict::Reject`].
+    pub fn new(request_id: Uuid, persona: PersonaId, verdict: Verdict) -> Self {
+        Self { request_id, persona, verdict, decided_at: Utc::now() }
+    }
+
     pub fn subject(&self) -> String {
         subject::approval_decision(&self.persona, &self.request_id)
     }
@@ -2155,10 +2357,18 @@ mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
+        assert!(!json.contains("escalate_to"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
+        assert_eq!(entry.leader(), None);
+        let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
+        let json = serde_json::to_string(&chained).unwrap();
+        assert!(json.contains(r#""escalate_to":["lead","dev-b"]"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), chained);
+        assert_eq!(chained.leader(), Some(&p("lead")));
         let busy =
             RosterEntry { activity: Some(Activity::Working), handling: Some(2), harnesses: Some(1), ..entry.clone() };
         let json = serde_json::to_string(&busy).unwrap();
@@ -2172,7 +2382,7 @@ mod tests {
         let minimal = r#"{"persona":"dev-b","machine":"m","harness":"copilot","state":"idle",
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
-        assert!(entry.capabilities.is_empty());
+        assert!(entry.capabilities.is_empty() && entry.escalate_to.is_empty());
         assert_eq!(entry.whoami, None);
         assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
 
@@ -2180,6 +2390,96 @@ mod tests {
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(newer).unwrap();
         assert_eq!((entry.activity, entry.harnesses), (Some(Activity::Unknown), Some(3)));
+    }
+
+    #[test]
+    fn escalations_are_left_out_when_none_and_round_trip_otherwise() {
+        let msg = Envelope::new(p("dev-a"), p("lead"), "stuck");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("escalation") && !json.contains("approval"), "{json}");
+        let stuck = Escalation::new(p("dev-a"), msg.thread_id.clone(), EscalationReason::TurnBudget);
+        let Hop::Chain { escalation, .. } = stuck.up(&[p("lead")], DEFAULT_MAX_ESCALATION_HOPS) else { panic!() };
+        let escalated = msg.clone().with_escalation(Some(escalation));
+        let json = serde_json::to_string(&escalated).unwrap();
+        assert!(
+            json.contains(r#""reason":"turn_budget","level":1,"leader":"lead","visited":["dev-a","lead"]"#),
+            "{json}"
+        );
+        assert!(!json.contains("request_id"), "{json}");
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), escalated);
+        let reply = escalated.reply(p("lead"), "done", Role::Persona).unwrap();
+        assert_eq!((reply.escalation, escalated.follow_up(p("dev-a"), p("dev-b"), "x").escalation), (None, None));
+
+        let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
+            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
+        let older = serde_json::from_str::<Envelope>(older).unwrap();
+        assert_eq!((older.escalation, older.approval), (None, None));
+        let newer = r#"{"stuck":"dev-a","thread_id":"t1","reason":"melted","level":2,"leader":"lead",
+            "visited":["dev-a","lead"],"since":"2026-01-01T00:00:00Z"}"#;
+        assert_eq!(serde_json::from_str::<Escalation>(newer).unwrap().reason, EscalationReason::Unknown);
+    }
+
+    #[test]
+    fn escalations_climb_chains_until_a_loop_or_the_hop_limit_sends_them_to_the_owner() {
+        let thread: ThreadId = "t1".parse().unwrap();
+        let stuck = Escalation::new(p("dev-a"), thread.clone(), EscalationReason::Asked);
+        assert_eq!((stuck.level, &stuck.leader, &stuck.visited[..]), (0, &p("dev-a"), &[p("dev-a")][..]));
+        assert_eq!(stuck.up(&[], 3), Hop::Owner(OwnerBecause::NoChain));
+
+        // The stuck persona in its own group is left out of the fan-out.
+        let Hop::Chain { escalation: one, to } = stuck.up(&[p("lead"), p("dev-a"), p("dev-b"), p("lead")], 3) else {
+            panic!("level 1 goes up the chain")
+        };
+        assert_eq!(to, [p("lead"), p("dev-b")]);
+        assert_eq!((one.level, &one.leader, &one.stuck, &one.thread_id), (1, &p("lead"), &p("dev-a"), &thread));
+        assert_eq!(one.visited, [p("dev-a"), p("lead"), p("dev-b")]);
+        assert!(one.is_leader(&p("lead")) && !one.is_leader(&p("dev-b")));
+        assert!(one.is_visited(&p("dev-b")) && !one.is_visited(&p("boss")));
+
+        // A member already visited is skipped, a leader already visited is a loop.
+        let Hop::Chain { escalation: two, to } = one.up(&[p("boss"), p("dev-b")], 3) else { panic!("level 2") };
+        assert_eq!((two.level, &to[..]), (2, &[p("boss")][..]));
+        assert_eq!(two.up(&[p("lead"), p("cto")], 3), Hop::Owner(OwnerBecause::Visited(p("lead"))));
+
+        let Hop::Chain { escalation: three, .. } = two.up(&[p("cto")], 3) else { panic!("level 3 is within 3 hops") };
+        assert_eq!(three.up(&[p("board")], 3), Hop::Owner(OwnerBecause::HopLimit(3)));
+        assert_eq!(stuck.up(&[p("lead")], 0), Hop::Owner(OwnerBecause::HopLimit(0)));
+    }
+
+    #[test]
+    fn a_requester_takes_approval_decisions_only_from_its_chain() {
+        let request = ApprovalRequest::new(
+            p("dev-a"),
+            "t1".parse().unwrap(),
+            ToolCall::default(),
+            vec![Verdict::AllowOnce],
+            Duration::from_secs(60),
+        );
+        let escalation = Escalation::of_request(&request);
+        assert_eq!((escalation.reason, escalation.request_id), (EscalationReason::Approval, Some(request.id)));
+        let chain = [p("lead"), p("dev-b")];
+
+        let verdict = ApprovalDecision::new(request.id, request.persona.clone(), Verdict::AllowOnce);
+        let msg = Envelope::decision(request.thread_id.clone(), p("dev-b"), verdict.clone());
+        assert_eq!(msg.subject(), "ants.inbox.dev-a.dev-b", "the subject pins the decider");
+        assert_eq!(msg.thread_id, request.thread_id);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), msg);
+        assert!(msg.is_from_chain(&chain));
+        assert_eq!(msg.chain_decision(&request, &chain).map(|d| d.verdict), Some(Verdict::AllowOnce));
+
+        assert_eq!(msg.chain_decision(&request, &[p("lead")]), None, "not in the chain");
+        let other = ApprovalRequest { id: Uuid::now_v7(), ..request.clone() };
+        assert_eq!(msg.chain_decision(&other, &chain), None, "another request");
+        let foreign = ApprovalDecision::new(request.id, p("dev-c"), Verdict::AllowOnce);
+        let foreign = Envelope { to: p("dev-a"), ..Envelope::decision(request.thread_id.clone(), p("lead"), foreign) };
+        assert_eq!(foreign.chain_decision(&request, &chain), None, "a decision on another persona's request");
+        assert_eq!(Envelope::new(p("lead"), p("dev-a"), "hi").chain_decision(&request, &chain), None);
+
+        let always = ApprovalDecision::new(request.id, request.persona.clone(), Verdict::AllowAlways);
+        let always = Envelope::decision(request.thread_id.clone(), p("lead"), always);
+        let decided = always.chain_decision(&request, &chain).unwrap();
+        assert_eq!(decided.verdict, Verdict::Reject, "a verdict not offered rejects");
     }
 
     #[test]

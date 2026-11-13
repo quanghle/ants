@@ -154,6 +154,8 @@ pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
         turn_budget: post.turn_budget,
         in_reply_to: None,
         owner: post.owner.clone(),
+        escalation: None,
+        approval: None,
         sent_at: post.sent_at,
     }
 }
@@ -471,6 +473,7 @@ mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &context, 7);

@@ -27,6 +27,7 @@ fn entry_on(persona: &str, machine: &str) -> RosterEntry {
         activity: None,
         handling: None,
         harnesses: None,
+        escalate_to: Vec::new(),
     }
 }
 

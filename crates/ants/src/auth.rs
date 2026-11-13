@@ -565,6 +565,7 @@ pub(crate) mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         };
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();

@@ -796,6 +796,16 @@ name (see CLI); daemons read the bucket (see Escalations). An envelope may carry
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
+Escalation chains (wire only so far; daemons publish no chain and route nothing by these fields yet): a roster entry may
+carry `escalate_to`, the persona's chain in order, whose first persona leads. An envelope may carry `escalation`
+(`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
+`dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the
+level's leader and the personas visited. One level up goes to every persona of the leader's chain not visited yet; an
+empty chain, a leader already visited, or a level past 3 hands it to the thread's owner instead. An agent's decision
+on another persona's approval request travels as an envelope's `approval` on `ants.inbox.<requester>.<decider>`, so the
+subject pins the decider and persona credentials need no rights on `ants.approvals.*`; the requester takes it only from
+a persona of its own chain. Envelopes and entries without these fields stay valid.
+
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI

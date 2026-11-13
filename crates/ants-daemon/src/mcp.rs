@@ -1026,6 +1026,7 @@ mod tests {
             activity: None,
             handling: None,
             harnesses: None,
+            escalate_to: Vec::new(),
         }
     }
 
