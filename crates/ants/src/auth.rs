@@ -595,6 +595,29 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn personas_keep_their_own_escalation_chain_and_read_everyone_s() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, lead) = (PersonaId::human(), p("dev-a"), p("lead"));
+        let (_a, a_js) = server.connect(&dev_a).await;
+        assert!(bus::ensure_chains(&a_js).await.is_err(), "only the human creates the bucket");
+        let (_h, h_js) = server.connect(&human).await;
+        let h_kv = bus::ensure_chains(&h_js).await.unwrap();
+
+        let (_l, l_js) = server.connect(&lead).await;
+        ants_daemon::chains::publish(&l_js, &lead, std::slice::from_ref(&dev_a)).await.unwrap();
+        let a_kv = bus::ensure_chains(&a_js).await.unwrap();
+        assert_eq!(ants_daemon::chains::read(&a_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
+        assert_eq!(ants_daemon::chains::read(&h_kv, &lead).await.unwrap(), Some(vec![dev_a.clone()]));
+
+        // dev-a writes its own key only, and an entry there naming lead is skipped.
+        assert!(a_kv.put("lead", "spoof".into()).await.is_err(), "dev-a cannot rewrite lead's chain");
+        let forged = ants_proto::ChainEntry::new(lead.clone(), vec![human.clone()]);
+        a_kv.put("dev-a", serde_json::to_vec(&forged).unwrap().into()).await.unwrap();
+        assert_eq!(ants_daemon::chains::read(&h_kv, &dev_a).await.unwrap(), None);
+        assert!(h_kv.put("lead", "spoof".into()).await.is_err(), "the human does not write chains");
+    }
+
+    #[tokio::test]
     async fn personas_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));

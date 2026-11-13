@@ -143,14 +143,18 @@ pub async fn run(config: Config) -> Result<()> {
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js).await?;
     let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps));
-    let escalator = std::sync::Arc::new(Escalator::new(
+    let escalator = Escalator::new(
         config.persona.clone(),
         config.escalation.clone(),
         roster.clone(),
         humans.clone(),
         ledger.clone(),
         escalation::jetstream_sender(js.clone()),
-    ));
+    );
+    let escalator = std::sync::Arc::new(escalator.with_chains(crate::chains::jetstream_chains(js.clone())));
+    if let Err(e) = crate::chains::publish(&js, &config.persona, &config.escalation.escalate_to).await {
+        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
+    }
     let mut mcp = Mcp::start(
         config.persona.clone(),
         &config.home,

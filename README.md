@@ -22,14 +22,15 @@ Headless agent teams on several machines, talking to each other and to a human a
 |   MCP server for the sessions |      |   KV ants_roster,        |      |            |             |
 |            |                  |      |      ants_sessions,      |      |            |             |
 |            |                  |      |      ants_attempts,      |      |            |             |
-| nats-server (leaf, outbox)  --+----->|      ants_channels       |<-----+-- nats-server (leaf)     |
+|            |                  |      |      ants_channels,      |      |            |             |
+| nats-server (leaf, outbox)  --+----->|      ants_chains         |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
                           uplink: wss://, tls:// or a Dev Tunnel
 ```
 
 - **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, plan rooms,
-  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers and
-  channels. In operator
+  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
+  channels and escalation chains. In operator
   mode (`ants auth`), every persona and the human connect with their own NKey/JWT credentials, limited to the subjects
   of their role.
 - **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
@@ -259,21 +260,22 @@ started the thread), else to the daemon's default human, the config file key `hu
 persona). Without a chain it goes to the owner at once.
 
 The chain is the persona's `escalate_to` key, a list of other personas whose first one leads; the roster publishes it,
-so any daemon can follow a chain past a persona that is offline. Every member gets the escalation in its inbox, on the
-stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level and the leader, followed by the
-notice the owner would have got. The members coordinate in the thread's plan room; only the leader resolves it, by
-answering the escalating persona on the thread (a reply to the notice does), or escalates it further. The leader's
-answer gives the thread a fresh turn budget and allowance, once per level: the next time the persona is stuck on the
-thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster) not visited
-yet. A chain member stuck while working on an escalation sends it one level higher the same way. A level past
-`max_escalation_hops` (default 3), a chain leading back to a persona already visited, or a leader without a chain hands
-the thread to the owner, with the escalation and the reason. Until the leader answers, a persona stuck again on the
-thread sends the same members the new notice. Members offline are not skipped: their inboxes keep the escalation. When
-the leader does not answer within `escalate_after_secs` (default 1800, as long as a prompt may run; 0 waits
-indefinitely), the persona that escalated sends it one level higher. Only a human's message on the thread ends its
-escalation, and the next one starts at the persona's own chain again. The thread's escalation, its level, whether the
-leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
-keep them.
+and the daemon also keeps it on start in the KV bucket `ants_chains` under the persona id, whose entries never expire,
+so any daemon can follow a chain past a persona that is offline, even after its roster entry expired. Every member gets
+the escalation in its inbox, on the stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level
+and the leader, followed by the notice the owner would have got. The members coordinate in the thread's plan room; only
+the leader resolves it, by answering the escalating persona on the thread (a reply to the notice does), or escalates it
+further. The leader's answer gives the thread a fresh turn budget and allowance, once per level: the next time the
+persona is stuck on the thread, the escalation goes one level higher, to every member of the leader's own chain (from
+the roster, else `ants_chains`) not visited yet. A chain member stuck while working on an escalation sends it one level
+higher the same way. A level past `max_escalation_hops` (default 3), a chain leading back to a persona already visited,
+or a leader without a chain hands the thread to the owner, with the escalation and the reason. Until the leader answers,
+a persona stuck again on the thread sends the same members the new notice. Members offline are not skipped: their
+inboxes keep the escalation. When the leader does not answer within `escalate_after_secs` (default 1800, as long as a
+prompt may run; 0 waits indefinitely), the persona that escalated sends it one level higher. Only a human's message on
+the thread ends its escalation, and the next one starts at the persona's own chain again. The thread's escalation, its
+level, whether the leader's answer was used and the deadline live with the thread's spend in the KV bucket
+`ants_sessions`, so restarts keep them.
 
 The daemon tells humans by the KV bucket
 `ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
@@ -822,7 +824,11 @@ thread: replies, messages an agent sends on or from the thread, escalations and 
 without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
 Escalation chains (see Escalations; approvals do not go up chains yet): a roster entry may carry `escalate_to`, the
-persona's chain in order, whose first persona leads. An envelope may carry `escalation`
+persona's chain in order, whose first persona leads. The KV bucket `ants_chains` keeps it past the roster entry, as a
+`ChainEntry` under the persona id that only the persona's credentials write and every credential reads by key; readers
+skip an entry whose persona disagrees with its key. Credentials issued before `ants_chains` need `ants auth user` (and
+`ants auth leaf`) again, and `ants init` creates the bucket; until then daemons follow chains through the roster only.
+An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the
 level's leader and the personas visited. One level up goes to every persona of the leader's chain not visited yet; an

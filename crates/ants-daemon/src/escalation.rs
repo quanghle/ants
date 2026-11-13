@@ -5,8 +5,9 @@
 //! The members coordinate in the thread's plan room; only the leader resolves it, by answering the persona on the
 //! thread, or escalates it further. The leader's answer gives the thread a fresh turn budget and allowance once per
 //! level ([`Escalator::arrived`]); the next escalation goes one level higher, to the leader's own chain, which the
-//! roster publishes. With no chain, a chain that loops back or past `max_escalation_hops`, it goes to the thread's
-//! owner, else the default human, as it did before chains. Only a human's message ends an escalation.
+//! roster publishes and the chains bucket keeps once the leader is offline ([`crate::chains`]). With no chain, a chain
+//! that loops back or past `max_escalation_hops`, it goes to the thread's owner, else the default human, as it did
+//! before chains. Only a human's message ends an escalation.
 //!
 //! Without an answer from the leader within `escalate_after`, the persona that escalated sends it one level higher
 //! ([`Escalator::deadlines`]). The thread's escalation lives with its spend in `ants_sessions` ([`Pending`]), so
@@ -26,6 +27,7 @@ use uuid::Uuid;
 
 use crate::bus;
 use crate::caps::{Ledger, Pending};
+use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
 
@@ -113,6 +115,8 @@ pub struct Escalator {
     persona: PersonaId,
     chain: Chain,
     roster: Roster,
+    /// The chains kept past the roster, for a leader that is offline.
+    chains: Option<Chains>,
     humans: Registry,
     ledger: Arc<Ledger>,
     send: Sender,
@@ -132,7 +136,14 @@ impl Escalator {
         ledger: Arc<Ledger>,
         send: Sender,
     ) -> Self {
-        Self { persona, chain, roster, humans, ledger, send, busy: Mutex::default(), deadline_set: Notify::new() }
+        let (busy, deadline_set) = (Mutex::default(), Notify::new());
+        Self { persona, chain, roster, chains: None, humans, ledger, send, busy, deadline_set }
+    }
+
+    /// Follow the chain of a leader missing from the roster through `chains`.
+    pub fn with_chains(mut self, chains: Chains) -> Self {
+        self.chains = Some(chains);
+        self
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -332,17 +343,25 @@ impl Escalator {
         Ok(Escalated::Owner(human))
     }
 
-    /// The escalate_to of `leader`: the persona's own, else what the roster lists, else none.
+    /// The escalate_to of `leader`: the persona's own, else what the roster lists, else the chain kept for it once its
+    /// roster entry expired, else none.
     async fn chain_of(&self, leader: &PersonaId) -> Vec<PersonaId> {
         if *leader == self.persona {
             return self.chain.escalate_to.clone();
         }
         match (self.roster)().await {
             Ok(entries) => {
-                entries.into_iter().find(|e| e.persona == *leader).map(|e| e.escalate_to).unwrap_or_default()
+                if let Some(entry) = entries.into_iter().find(|e| e.persona == *leader) {
+                    return entry.escalate_to;
+                }
             }
+            Err(e) => tracing::warn!(%leader, error = format!("{e:#}"), "reading the roster"),
+        }
+        let Some(chains) = &self.chains else { return Vec::new() };
+        match chains(leader.clone()).await {
+            Ok(chain) => chain.unwrap_or_default(),
             Err(e) => {
-                tracing::warn!(%leader, error = format!("{e:#}"), "reading the roster; the escalation goes to the owner");
+                tracing::warn!(%leader, error = format!("{e:#}"), "reading the chains; the escalation goes to the owner");
                 Vec::new()
             }
         }
