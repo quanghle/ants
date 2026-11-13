@@ -30,15 +30,18 @@ pub enum HarnessKind {
     /// Claude Code through its ACP adapter, `claude-agent-acp` (npm `@agentclientprotocol/claude-agent-acp`). Uses
     /// the sign-in from `claude login`, or `ANTHROPIC_API_KEY`.
     Claude,
+    /// Google Antigravity CLI, `agy acp`. Uses the sign-in from `agy` (or `agy acp --login`), or a Gemini API key.
+    Antigravity,
 }
 
 impl HarnessKind {
-    pub const ALL: [HarnessKind; 2] = [HarnessKind::Copilot, HarnessKind::Claude];
+    pub const ALL: [HarnessKind; 3] = [HarnessKind::Copilot, HarnessKind::Claude, HarnessKind::Antigravity];
 
     pub fn name(self) -> &'static str {
         match self {
             HarnessKind::Copilot => "copilot",
             HarnessKind::Claude => "claude",
+            HarnessKind::Antigravity => "antigravity",
         }
     }
 
@@ -46,15 +49,17 @@ impl HarnessKind {
         match self {
             HarnessKind::Copilot => ("copilot", &["--acp"]),
             HarnessKind::Claude => ("claude-agent-acp", &[]),
+            HarnessKind::Antigravity => ("agy", &["acp", "--disable-telemetry"]),
         }
     }
 
     /// The ACP session mode every session must run in, so tool requests reach the client instead of being approved
-    /// by the harness itself. Claude Code starts in its `auto` mode, where a classifier approves tools.
+    /// by the harness itself. Claude Code starts in its `auto` mode, where a classifier approves tools; Antigravity
+    /// CLI starts in the saved `agentMode`, `auto` unless set, where edits and commands it deems safe run unasked.
     fn mode(self) -> Option<&'static str> {
         match self {
             HarnessKind::Copilot => None,
-            HarnessKind::Claude => Some("default"),
+            HarnessKind::Claude | HarnessKind::Antigravity => Some("default"),
         }
     }
 

@@ -22,7 +22,7 @@ pub struct DaemonArgs {
     /// The persona's own files, its bd workspace of to-dos and memories among them (default: ~/.ants/<persona>).
     #[arg(long)]
     home: Option<PathBuf>,
-    /// Agent harness: `copilot` (default) or `claude`.
+    /// Agent harness: `copilot` (default), `claude` or `antigravity`.
     #[arg(long)]
     harness: Option<HarnessKind>,
     /// Let the harness run tool requests matching RULE without asking: `*`, a tool kind such as `read`, or

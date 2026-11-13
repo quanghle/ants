@@ -7,7 +7,8 @@ Headless agent teams on several machines, talking to each other and to a human a
 - **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
   bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default)
-  or Claude Code through its ACP adapter (`claude-agent-acp`). See [Harnesses](#harnesses).
+  Claude Code through its ACP adapter (`claude-agent-acp`), or Google Antigravity CLI (`agy acp`). See
+  [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and its MCP server.
 
 ## Build
@@ -86,7 +87,7 @@ js_domain = "hub"                          # the hub's JetStream domain, if it h
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "copilot"                        # default; or "claude"
+harness = "copilot"                        # default; or "claude", "antigravity"
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
 allow = ["read", "search"]                 # tool allowlist, see Tool permissions
 approval_timeout_secs = 300                # default
@@ -143,6 +144,7 @@ messages on the thread are not prompted; each goes to the human the same way.
 Spending counts what the harness reports: the session cost of ACP `usage_update` and the tokens of each prompt
 response. Claude's ACP adapter reports both, at the end of each turn, so a cap usually takes effect after the turn that
 crossed it. Copilot CLI reports neither, so spending caps never trigger for it; the per-prompt limits still apply.
+Whether Antigravity CLI reports either has not been verified, so its spending caps may never trigger either.
 Spending is kept in the KV bucket `ants_sessions`, under `<persona>.<thread>.spend` and `<persona>.day.<YYYY-MM-DD>`,
 so it survives daemon and harness restarts; entries expire 30 days after their last update.
 
@@ -232,6 +234,7 @@ existed lacks `ants.dead.>`; `ants init` adds it.
 |---|---|---|
 | `copilot` (default) | `copilot --acp` | `copilot login` |
 | `claude` | `claude-agent-acp`, from `npm install -g @agentclientprotocol/claude-agent-acp` | `claude login`, or `ANTHROPIC_API_KEY` |
+| `antigravity` | `agy acp --disable-telemetry`, from `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` once (or `agy acp --login` without a browser), or a Gemini API key |
 
 The command must be on the daemon's `PATH`. `ants harness check --harness claude` tests the handshake.
 
@@ -240,6 +243,12 @@ tools without asking the client; a Claude Code that does not offer `default` fai
 decides some requests on its own before ants sees them: read-only tools and commands (such as `Read`, `Grep`, `ls`,
 `echo`), and anything its own settings allow (`permissions.allow` in `~/.claude/settings.json` and the workdir's
 `.claude/settings*.json`). It also reads `CLAUDE.md` and runs its own hooks from those settings.
+
+Antigravity CLI sessions are likewise switched to its `default` mode, since its saved `agentMode` (Auto unless set)
+runs edits and commands it deems safe without asking the client. Its own rules still decide some requests first: the
+allow and deny rules in `~/.gemini/antigravity-cli/settings.json`, and reads and edits inside the workspace. It reads
+`GEMINI.md` and `AGENTS.md`. Sign-in is kept in the OS keychain, so a daemon running as a launchd or systemd service
+must run as the user who signed in. Its logs are in `~/.gemini/antigravity-cli/log/`.
 
 ## Tool permissions
 
@@ -374,7 +383,8 @@ Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<pe
 (`--home` moves it). The daemon creates it on first start and runs every harness session with `BD_DB` pointing at it,
 so `bd remember`, `bd ready` and the session-start `bd prime` hook all see the persona's workspace, not the workdir's.
 `bd` must be on the daemon's `PATH`, and the harness needs the bd session-start hooks (`bd setup copilot` or
-`bd setup claude` in the workdir, or user-level hooks.
+`bd setup claude` in the workdir, or user-level hooks; for Antigravity CLI, `bd setup gemini` writes instructions to
+run `bd prime` into `GEMINI.md`).
 
 ## Credentials
 
