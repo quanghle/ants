@@ -234,6 +234,10 @@ any sender, to replay dead letters as they were; `ants dead replay` replays only
 it. Messages left on the older `ants.inbox.<persona>` subjects are no longer delivered; daemons and `ants inbox` move
 their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
 
+Plan room posts work the same way: a post by `<from>` to the room of thread `<thread>` goes on
+`ants.plan.<thread>.<from>`, every credential (the human's too) posts only on `ants.plan.*.<persona>`, and readers
+drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
+
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI

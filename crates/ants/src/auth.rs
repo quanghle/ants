@@ -337,6 +337,14 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
         }
+        // It posts to plan rooms only under its own name too.
+        let room: ThreadId = "t2".parse().unwrap();
+        a_raw.publish(subject::plan(&room, &dev_a), "ok".into()).await.unwrap();
+        for spoof in [subject::plan(&room, &dev_b), subject::plan(&room, &human)] {
+            a_raw.publish(spoof.clone(), "spoof".into()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
+        }
         // dev-a hears the human's decisions on its approval requests, but cannot decide them itself.
         let request = ants_proto::Uuid::now_v7();
         let mut decisions = a_raw.subscribe(subject::approval_decision(&dev_a, &request)).await.unwrap();

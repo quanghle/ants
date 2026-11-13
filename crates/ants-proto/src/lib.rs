@@ -36,6 +36,8 @@ pub enum Error {
     BudgetExhausted(ThreadId),
     #[error("envelope from {from} to {to} arrived on {subject}")]
     WrongSubject { subject: String, from: PersonaId, to: PersonaId },
+    #[error("plan post from {from} on thread {thread} arrived on {subject}")]
+    WrongPlanSubject { subject: String, from: PersonaId, thread: ThreadId },
 }
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -141,10 +143,30 @@ pub mod subject {
         Some((to.parse().ok()?, from.parse().ok()?))
     }
 
-    /// Shared planning room of a thread.
-    pub fn plan(thread: &ThreadId) -> String {
-        format!("ants.plan.{thread}")
+    /// A post by `from` to the planning room of `thread`. Like an inbox subject it names the sender, so credentials can
+    /// pin it there ([`plan_from`]).
+    pub fn plan(thread: &ThreadId, from: &PersonaId) -> String {
+        format!("ants.plan.{thread}.{from}")
     }
+
+    /// Every post to the planning room of `thread`, whoever wrote it.
+    pub fn plan_room(thread: &ThreadId) -> String {
+        format!("ants.plan.{thread}.*")
+    }
+
+    /// Every plan subject `persona` may post on.
+    pub fn plan_from(persona: &PersonaId) -> String {
+        format!("ants.plan.*.{persona}")
+    }
+
+    /// The thread and the sender a plan subject names, or `None` when it is no plan subject.
+    pub fn parse_plan(subject: &str) -> Option<(ThreadId, PersonaId)> {
+        let (thread, from) = subject.strip_prefix("ants.plan.")?.split_once('.')?;
+        Some((thread.parse().ok()?, from.parse().ok()?))
+    }
+
+    /// Every planning room.
+    pub const ALL_PLANS: &str = "ants.plan.>";
 
     /// Permission requests a persona escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
     pub fn approvals(persona: &PersonaId) -> String {
@@ -215,8 +237,8 @@ pub struct Permissions {
 impl Permissions {
     /// What the credentials of `persona` allow.
     ///
-    /// Any persona may write to every inbox, but only as itself (the sender is the last token of an inbox subject),
-    /// and to every plan room. It speaks only for itself on status, approvals and dead letters, reads only its own inbox
+    /// Any persona may write to every inbox and every plan room, but only as itself (the sender is the last token of
+    /// inbox and plan subjects). It speaks only for itself on status, approvals and dead letters, reads only its own inbox
     /// (consumer and live), its own replies and the decisions on its own approval requests, reads the roster to find
     /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions
     /// bucket. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and upgrade
@@ -229,7 +251,7 @@ impl Permissions {
         let sessions = kv_stream(SESSIONS_BUCKET);
         let mut publish = vec![
             if persona.is_human() { "ants.inbox.>".to_owned() } else { subject::inbox_from(persona) },
-            "ants.plan.>".to_owned(),
+            subject::plan_from(persona),
             format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.STREAM.INFO.{roster_stream}"),
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
@@ -271,7 +293,7 @@ impl Permissions {
                 subject::roster(persona),
             ]);
             subscribe.extend([
-                "ants.plan.>".to_owned(),
+                subject::ALL_PLANS.to_owned(),
                 format!("{}.*", subject::approvals(persona)),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(persona),
@@ -378,6 +400,40 @@ impl Envelope {
             return Ok(());
         }
         Err(Error::WrongSubject { subject: subject.to_owned(), from: self.from.clone(), to: self.to.clone() })
+    }
+}
+
+/// A post to the planning room of a thread, on [`subject::plan`]. Personas on a thread plan there together; every one
+/// of them reads the whole room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanPost {
+    pub id: Uuid,
+    pub thread_id: ThreadId,
+    pub from: PersonaId,
+    pub text: String,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl PlanPost {
+    pub fn new(thread_id: ThreadId, from: PersonaId, text: impl Into<String>) -> Self {
+        Self { id: Uuid::now_v7(), thread_id, from, text: text.into(), sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::plan(&self.thread_id, &self.from)
+    }
+
+    /// Check that the post arrived on its own [`PlanPost::subject`]. Credentials pin the sender token of a plan
+    /// subject, so a `from` that disagrees with it is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::WrongPlanSubject {
+            subject: subject.to_owned(),
+            from: self.from.clone(),
+            thread: self.thread_id.clone(),
+        })
     }
 }
 
@@ -585,7 +641,10 @@ mod tests {
         assert_eq!(subject::inbox(&p("dev-a"), &PersonaId::human()), "ants.inbox.dev-a.human");
         assert_eq!(subject::inbox_of(&p("dev-a")), "ants.inbox.dev-a.*");
         assert_eq!(subject::inbox_from(&p("dev-a")), "ants.inbox.*.dev-a");
-        assert_eq!(subject::plan(&t), "ants.plan.t1");
+        assert_eq!(subject::plan(&t, &p("dev-a")), "ants.plan.t1.dev-a");
+        assert_eq!(subject::plan_room(&t), "ants.plan.t1.*");
+        assert_eq!(subject::plan_from(&p("dev-a")), "ants.plan.*.dev-a");
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_PLANS), "plan rooms are durable");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
@@ -639,6 +698,19 @@ mod tests {
         assert!(msg.check_subject("ants.inbox.dev-c.dev-a").is_err(), "addressed to another inbox");
         for bad in ["ants.inbox.dev-b", "ants.inbox.dev-b.dev-a.x", "ants.plan.t1.dev-a", "ants.inbox.dev-b.*"] {
             assert_eq!(subject::parse_inbox(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_plan_subject_names_the_sender() {
+        let post = PlanPost::new("t1".parse().unwrap(), p("dev-a"), "split the work");
+        assert_eq!(subject::parse_plan(&post.subject()), Some(("t1".parse().unwrap(), p("dev-a"))));
+        assert_eq!(post.check_subject("ants.plan.t1.dev-a"), Ok(()));
+        let err = post.check_subject("ants.plan.t1.dev-b").unwrap_err();
+        assert_eq!(err.to_string(), "plan post from dev-a on thread t1 arrived on ants.plan.t1.dev-b");
+        assert!(post.check_subject("ants.plan.t2.dev-a").is_err(), "posted to another room");
+        for bad in ["ants.plan.t1", "ants.plan.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.plan.t1.*"] {
+            assert_eq!(subject::parse_plan(bad), None, "{bad}");
         }
     }
 

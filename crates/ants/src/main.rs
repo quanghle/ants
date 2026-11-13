@@ -9,7 +9,7 @@ mod serve;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness};
-use ants_proto::{DeadLetter, Envelope, PersonaId, ThreadId, subject};
+use ants_proto::{DeadLetter, Envelope, PersonaId, PlanPost, ThreadId, subject};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
@@ -374,6 +374,12 @@ async fn watch(url: &str, creds: Option<&Path>, filter: String) -> Result<()> {
                 Err(_) => format!(" (forged: sent on {})", msg.subject),
             };
             println!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text);
+        } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
+            let forged = match post.check_subject(&msg.subject) {
+                Ok(()) => String::new(),
+                Err(_) => format!(" (forged: sent on {})", msg.subject),
+            };
+            println!("[{}] {} -> plan room{forged}: {}", post.thread_id, post.from, post.text);
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             println!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error);
         } else {
