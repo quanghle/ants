@@ -147,7 +147,8 @@ async fn store(
     let id = format!("dead-notice-{}", dead.stream_seq);
     match escalator {
         Some(escalator) => {
-            escalator.escalate(Stuck::new(EscalationReason::DeadLetter, notice, id, about)).await?;
+            let stuck = Stuck::new(EscalationReason::DeadLetter, notice, id, about);
+            escalator.escalate(Stuck { channel: post.map(|p| p.channel.clone()), ..stuck }).await?;
         }
         None => {
             bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;

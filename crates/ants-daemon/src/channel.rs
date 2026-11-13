@@ -231,6 +231,16 @@ pub fn prompt(persona: &PersonaId, post: &ChannelPost, context: &Context, left: 
     text
 }
 
+/// What the prompt of the escalation leader's answer on a thread of `channel` adds: the answer is posted back to the
+/// thread, with the fresh turns the leader's answer gave it. `left` is the turns the thread keeps after the post.
+pub fn resume_note(channel: &ChannelId, thread: &ThreadId, left: u32) -> String {
+    format!(
+        "[ants] The escalation's leader answered with fresh turns for thread {thread} of #{channel}. The final answer \
+         of this turn is posted to #{channel} on that thread and spends one of its turns ({left} left after it). An \
+         @persona mention in it wakes that member of the channel; mentioning nobody wakes nobody."
+    )
+}
+
 /// The prompt of the channel's messenger for `post`, a post of a human that mentions nobody, after the `context` of
 /// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `roster` shows them. `left` is the turns the thread
 /// keeps after the answer.
