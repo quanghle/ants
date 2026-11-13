@@ -20,14 +20,17 @@ use ants_proto::{JsDomain, PersonaId};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer};
 
+use crate::caps::Caps;
 use crate::daemon::Config;
-use crate::harness::HarnessKind;
+use crate::harness::{self, HarnessKind, PromptLimits};
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
 pub const DEFAULT_MAX_HARNESSES: usize = 4;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = crate::approvals::DEFAULT_TIMEOUT.as_secs();
+pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = harness::DEFAULT_PROMPT_TIMEOUT.as_secs();
+pub const DEFAULT_MAX_TOOL_CALLS: usize = harness::DEFAULT_MAX_TOOL_CALLS;
 
 /// `~/.ants/config.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -78,6 +81,20 @@ pub struct Persona {
     pub max_harnesses: usize,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// Seconds a prompt may run before it is cancelled; 0 for no limit.
+    #[serde(default = "default_prompt_timeout_secs")]
+    pub prompt_timeout_secs: u64,
+    /// Tool calls a prompt may start before it is cancelled; 0 for no limit.
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: usize,
+    /// Tokens a thread may spend between messages from the human.
+    pub max_thread_tokens: Option<u64>,
+    /// Cost a thread may spend between messages from the human, in the harness's unit.
+    pub max_thread_cost: Option<f64>,
+    /// Tokens the persona may spend in a UTC day.
+    pub max_daily_tokens: Option<u64>,
+    /// Cost the persona may spend in a UTC day.
+    pub max_daily_cost: Option<f64>,
 }
 
 fn default_max_harnesses() -> usize {
@@ -90,6 +107,14 @@ fn default_idle_timeout_secs() -> u64 {
 
 fn default_approval_timeout_secs() -> u64 {
     DEFAULT_APPROVAL_TIMEOUT_SECS
+}
+
+fn default_prompt_timeout_secs() -> u64 {
+    DEFAULT_PROMPT_TIMEOUT_SECS
+}
+
+fn default_max_tool_calls() -> usize {
+    DEFAULT_MAX_TOOL_CALLS
 }
 
 fn harness<'de, D: Deserializer<'de>>(d: D) -> Result<HarnessKind, D::Error> {
@@ -113,6 +138,12 @@ impl Persona {
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            prompt_timeout_secs: DEFAULT_PROMPT_TIMEOUT_SECS,
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            max_thread_tokens: None,
+            max_thread_cost: None,
+            max_daily_tokens: None,
+            max_daily_cost: None,
         }
     }
 
@@ -138,6 +169,16 @@ impl Persona {
             allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
             approval_timeout: Duration::from_secs(self.approval_timeout_secs),
             capabilities: self.capabilities,
+            limits: PromptLimits {
+                timeout: Some(Duration::from_secs(self.prompt_timeout_secs)).filter(|t| !t.is_zero()),
+                max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
+            },
+            caps: Caps {
+                thread_tokens: self.max_thread_tokens,
+                thread_cost: self.max_thread_cost,
+                daily_tokens: self.max_daily_tokens,
+                daily_cost: self.max_daily_cost,
+            },
             persona: self.name,
         })
     }
@@ -218,6 +259,10 @@ mod tests {
             capabilities = ["rust", "review"]
             max_harnesses = 2
             idle_timeout_secs = 60
+            prompt_timeout_secs = 0
+            max_tool_calls = 50
+            max_thread_cost = 2.5
+            max_daily_tokens = 1000000
 
             [[persona]]
             name = "dev-b"
@@ -236,6 +281,10 @@ mod tests {
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
         assert_eq!((a.allow.len(), a.capabilities.len()), (2, 2));
         assert_eq!((a.max_harnesses, a.idle_timeout_secs), (2, 60));
+        let config = a.clone().into_config("nats://unused").unwrap();
+        assert_eq!(config.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
+        let caps = Caps { thread_cost: Some(2.5), daily_tokens: Some(1_000_000), ..Caps::default() };
+        assert_eq!(config.caps, caps);
 
         let b = personas[1].clone();
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
@@ -248,6 +297,8 @@ mod tests {
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
         assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
         assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
+        assert_eq!(config.limits, PromptLimits::default());
+        assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
         assert!(config.home.ends_with(".ants/dev-b"));
     }
 

@@ -8,7 +8,7 @@ publish.workspace = true
 description = "The persona daemon: JetStream inbox consumer and ACP harness pool"
 
 [dependencies]
-agent-client-protocol = { version = "5.2.0", features = ["process"] }
+agent-client-protocol = { version = "5.2.0", features = ["process", "unstable_end_turn_token_usage"] }
 ants-proto = { path = "../ants-proto" }
 anyhow = "1.0.104"
 async-nats = { version = "0.52.0", default-features = false, features = ["ring", "jetstream", "kv", "nkeys", "websockets", "nuid", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }

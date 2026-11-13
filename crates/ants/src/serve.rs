@@ -44,6 +44,26 @@ pub struct DaemonArgs {
     /// 600).
     #[arg(long)]
     idle_timeout_secs: Option<u64>,
+    /// Seconds a prompt may run, tool requests waiting for the human included, before it is cancelled and the thread
+    /// goes to the human; 0 for no limit (default: 1800).
+    #[arg(long)]
+    prompt_timeout_secs: Option<u64>,
+    /// Tool calls a prompt may start before it is cancelled and the thread goes to the human; 0 for no limit
+    /// (default: 300).
+    #[arg(long)]
+    max_tool_calls: Option<usize>,
+    /// Tokens a thread may spend between messages from the human, as the harness reports them (default: no cap).
+    #[arg(long)]
+    max_thread_tokens: Option<u64>,
+    /// Cost a thread may spend between messages from the human, in the harness's unit such as USD (default: no cap).
+    #[arg(long)]
+    max_thread_cost: Option<f64>,
+    /// Tokens the persona may spend in a UTC day (default: no cap).
+    #[arg(long)]
+    max_daily_tokens: Option<u64>,
+    /// Cost the persona may spend in a UTC day (default: no cap).
+    #[arg(long)]
+    max_daily_cost: Option<f64>,
     /// Tag the persona is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
     /// the file's `capabilities`.
     #[arg(long = "capability", value_name = "TAG", value_delimiter = ',')]
@@ -60,6 +80,12 @@ impl DaemonArgs {
             || self.approval_timeout_secs.is_some()
             || self.max_harnesses.is_some()
             || self.idle_timeout_secs.is_some()
+            || self.prompt_timeout_secs.is_some()
+            || self.max_tool_calls.is_some()
+            || self.max_thread_tokens.is_some()
+            || self.max_thread_cost.is_some()
+            || self.max_daily_tokens.is_some()
+            || self.max_daily_cost.is_some()
             || !self.capabilities.is_empty()
     }
 
@@ -85,6 +111,16 @@ impl DaemonArgs {
         if let Some(secs) = self.idle_timeout_secs {
             p.idle_timeout_secs = secs;
         }
+        if let Some(secs) = self.prompt_timeout_secs {
+            p.prompt_timeout_secs = secs;
+        }
+        if let Some(n) = self.max_tool_calls {
+            p.max_tool_calls = n;
+        }
+        p.max_thread_tokens = self.max_thread_tokens.or(p.max_thread_tokens);
+        p.max_thread_cost = self.max_thread_cost.or(p.max_thread_cost);
+        p.max_daily_tokens = self.max_daily_tokens.or(p.max_daily_tokens);
+        p.max_daily_cost = self.max_daily_cost.or(p.max_daily_cost);
         if !self.capabilities.is_empty() {
             p.capabilities.clone_from(&self.capabilities);
         }
@@ -232,7 +268,8 @@ mod tests {
         let picked = pick(
             all.clone(),
             &args(
-                "--persona dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp",
+                "--persona dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp \
+                 --max-tool-calls 20 --max-daily-cost 7.5",
             ),
             path,
         )
@@ -243,6 +280,8 @@ mod tests {
         assert_eq!(picked[0].allow, ["read"]);
         assert_eq!(picked[0].capabilities, ["rust", "nats", "acp"]);
         assert_eq!(picked[0].idle_timeout_secs, config::DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!((picked[0].max_tool_calls, picked[0].max_daily_cost), (20, Some(7.5)));
+        assert_eq!(picked[0].prompt_timeout_secs, config::DEFAULT_PROMPT_TIMEOUT_SECS);
 
         assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
         let err = pick(all.clone(), &args("--persona dev-c"), path).unwrap_err().to_string();

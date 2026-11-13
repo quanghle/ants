@@ -77,6 +77,10 @@ capabilities = ["rust", "review"]          # advertised in the roster
 max_harnesses = 4                          # default
 idle_timeout_secs = 600                    # default
 allow_tools = false                        # default
+prompt_timeout_secs = 1800                 # default; 0 for no limit (see Limits and caps)
+max_tool_calls = 300                       # default; 0 for no limit
+max_thread_cost = 5.0                      # default: no cap; also max_thread_tokens
+max_daily_cost = 50.0                      # default: no cap; also max_daily_tokens
 
 [[persona]]
 name = "dev-b"
@@ -100,6 +104,30 @@ How flags and the file combine:
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
   `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one persona is served.
   `nats` and `js_domain` may also be set per persona.
+
+## Limits and caps
+
+Every prompt has a time limit, `--prompt-timeout-secs` (default 1800, tool requests waiting for the human included),
+and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spending can be capped per thread,
+`--max-thread-tokens` and `--max-thread-cost`, and per persona per UTC day, `--max-daily-tokens` and
+`--max-daily-cost`; there are no spending caps by default. The config file keys have the same names with underscores.
+
+A prompt that passes a limit or a cap is cancelled with ACP `session/cancel` (a harness that does not stop within 30 s
+is restarted, and its session resumes on the next message). The reply carries what the harness wrote so far and an
+`[ants]` notice naming the limit. When the message came from another agent, the thread then goes to the human like a
+spent turn budget: the human gets the notice, "needs a decision", and the last message. While a cap is reached, later
+messages on the thread are not prompted; each goes to the human the same way.
+
+- Per-prompt limits start afresh with every prompt.
+- A thread's allowance starts afresh with every message from the human on it.
+- A persona's daily allowance starts afresh at 00:00 UTC (or when the daemon restarts with a higher cap); a message
+  from the human does not lift it.
+
+Spending counts what the harness reports: the session cost of ACP `usage_update` and the tokens of each prompt
+response. Claude's ACP adapter reports both, at the end of each turn, so a cap usually takes effect after the turn that
+crossed it. Copilot CLI reports neither, so spending caps never trigger for it; the per-prompt limits still apply.
+Spending is kept in the KV bucket `ants_sessions`, under `<persona>.<thread>.spend` and `<persona>.day.<YYYY-MM-DD>`,
+so it survives daemon and harness restarts; entries expire 30 days after their last update.
 
 ## Services
 
