@@ -1,6 +1,7 @@
 //! The daemon config file, `~/.ants/config.toml`: the personas one daemon process serves.
 //!
 //! ```toml
+//! provider = "copilot"              # default harness of every persona; also serves the built-in messenger
 //! nats = "wss://hub.example/nats"   # default server for every persona
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per persona
 //!
@@ -11,6 +12,9 @@
 //! ```
 //!
 //! `~` expands to the home directory; other relative paths are relative to the file's directory.
+//!
+//! A file with `provider` also serves the built-in messenger ([`builtin_messenger`]) unless it lists a persona named
+//! `messenger`; `provider` alone is a complete file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -45,6 +49,9 @@ fn home_dir() -> Result<PathBuf> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
+    /// Default harness of the file's personas, and the harness of the built-in messenger.
+    #[serde(default, deserialize_with = "some_harness")]
+    provider: Option<HarnessKind>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     #[serde(default, rename = "persona")]
@@ -72,8 +79,9 @@ pub struct Persona {
     /// Added to the harness's inherited environment.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default, deserialize_with = "harness")]
-    pub harness: HarnessKind,
+    /// The file's top-level `provider`, then the default harness, when absent.
+    #[serde(default, deserialize_with = "some_harness")]
+    pub harness: Option<HarnessKind>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context: Option<String>,
@@ -106,6 +114,9 @@ pub struct Persona {
     pub max_daily_tokens: Option<u64>,
     /// Cost the persona may spend in a UTC day.
     pub max_daily_cost: Option<f64>,
+    /// The built-in messenger, which waits to start while the roster lists a live messenger on another machine.
+    #[serde(skip)]
+    pub builtin: bool,
 }
 
 fn default_max_harnesses() -> usize {
@@ -128,8 +139,8 @@ fn default_max_tool_calls() -> usize {
     DEFAULT_MAX_TOOL_CALLS
 }
 
-fn harness<'de, D: Deserializer<'de>>(d: D) -> Result<HarnessKind, D::Error> {
-    String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+fn some_harness<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HarnessKind>, D::Error> {
+    String::deserialize(d)?.parse().map(Some).map_err(serde::de::Error::custom)
 }
 
 impl Persona {
@@ -146,7 +157,7 @@ impl Persona {
             memory: None,
             tasks: None,
             env: BTreeMap::new(),
-            harness: HarnessKind::default(),
+            harness: None,
             model: None,
             reasoning_effort: None,
             context: None,
@@ -162,6 +173,7 @@ impl Persona {
             max_thread_cost: None,
             max_daily_tokens: None,
             max_daily_cost: None,
+            builtin: false,
         }
     }
 
@@ -169,9 +181,14 @@ impl Persona {
     pub fn into_config(self, default_nats: &str) -> Result<Config> {
         validate_env(&self.env)?;
         let instructions = self.prompt_instructions();
+        let harness = self.harness.unwrap_or_default();
         let model_settings =
             ModelSettings { model: self.model, reasoning_effort: self.reasoning_effort, context: self.context };
-        model_settings.validate(self.harness)?;
+        model_settings.validate(harness)?;
+        if self.builtin {
+            std::fs::create_dir_all(&self.workdir)
+                .with_context(|| format!("persona {}: creating workdir {}", self.name, self.workdir.display()))?;
+        }
         let workdir = self
             .workdir
             .canonicalize()
@@ -189,7 +206,7 @@ impl Persona {
             instructions,
             whoami: self.whoami,
             env: self.env,
-            harness: self.harness,
+            harness,
             model_settings,
             max_harnesses: self.max_harnesses,
             idle_timeout: Duration::from_secs(self.idle_timeout_secs),
@@ -207,6 +224,7 @@ impl Persona {
                 daily_cost: self.max_daily_cost,
             },
             persona: self.name,
+            defer_to_other_machines: self.builtin,
         })
     }
 
@@ -234,6 +252,23 @@ fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+/// The persona a file with `provider` serves unless it lists one named `messenger`: the provider's harness with its
+/// default model, reasoning effort and context, and otherwise the settings of a persona that sets nothing. Its home and
+/// workdir are `~/.ants/messenger`, created when it starts, and its credentials
+/// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
+pub fn builtin_messenger(provider: HarnessKind, home: &Path) -> Persona {
+    let name = PersonaId::messenger();
+    let dir = home.join(".ants").join(name.as_str());
+    let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
+    Persona {
+        harness: Some(provider),
+        home: Some(dir.clone()),
+        creds: creds.is_file().then_some(creds),
+        builtin: true,
+        ..Persona::new(name, dir)
+    }
+}
+
 /// Read and check the config file at `path`.
 pub fn load(path: &Path) -> Result<Vec<Persona>> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
@@ -241,11 +276,17 @@ pub fn load(path: &Path) -> Result<Vec<Persona>> {
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `nats` and `js_domain`, and check that names are unique and workdirs exist.
+/// directory, apply the top-level `provider`, `nats` and `js_domain`, check that names are unique and workdirs exist,
+/// and add the built-in messenger when `provider` is set and no persona is named `messenger`.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
-    let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
-    if file.personas.is_empty() {
-        bail!("config {}: no [[persona]] entries", path.display());
+    let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+    if file.personas.is_empty() && file.provider.is_none() {
+        bail!("config {}: no provider and no [[persona]] entries", path.display());
+    }
+    if let Some(provider) = file.provider
+        && !file.personas.iter().any(|p| p.name == PersonaId::messenger())
+    {
+        file.personas.push(builtin_messenger(provider, home));
     }
     let base = path.parent().unwrap_or(Path::new("."));
     let mut names = BTreeSet::new();
@@ -255,12 +296,17 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
             bail!("config {}: persona {} is listed twice", path.display(), p.name);
         }
         validate_env(&p.env)?;
-        let abs = |dir: &Path| resolve(dir, base, home);
-        p.workdir = abs(&p.workdir).canonicalize().with_context(|| {
-            format!("config {}: persona {}: workdir {}", path.display(), p.name, p.workdir.display())
-        })?;
-        p.home = p.home.as_deref().map(abs);
-        p.creds = p.creds.as_deref().map(abs);
+        if p.harness.is_none() {
+            p.harness = file.provider;
+        }
+        if !p.builtin {
+            let abs = |dir: &Path| resolve(dir, base, home);
+            p.workdir = abs(&p.workdir).canonicalize().with_context(|| {
+                format!("config {}: persona {}: workdir {}", path.display(), p.name, p.workdir.display())
+            })?;
+            p.home = p.home.as_deref().map(abs);
+            p.creds = p.creds.as_deref().map(abs);
+        }
         if p.nats.is_none() {
             p.nats.clone_from(&file.nats);
         }
@@ -407,7 +453,7 @@ Review changes for correctness."""
             (HarnessKind::Antigravity, None, None, Some("long_context"), "no separate context selector"),
         ] {
             let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
-            p.harness = harness;
+            p.harness = Some(harness);
             p.model = model.map(str::to_owned);
             p.reasoning_effort = effort.map(str::to_owned);
             p.context = context.map(str::to_owned);
@@ -439,6 +485,75 @@ Review changes for correctness."""
     }
 
     #[test]
+    fn provider_is_the_default_harness_and_serves_the_builtin_messenger() {
+        let personas = parse_here(
+            "provider = \"claude\"\njs_domain = \"hub\"\n\
+             [[persona]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[persona]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
+        )
+        .unwrap();
+        let harnesses: Vec<_> = personas.iter().map(|p| (p.name.as_str(), p.harness, p.builtin)).collect();
+        assert_eq!(
+            harnesses,
+            [
+                ("dev-a", Some(HarnessKind::Claude), false),
+                ("dev-b", Some(HarnessKind::Antigravity), false),
+                ("messenger", Some(HarnessKind::Claude), true),
+            ]
+        );
+        let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
+        let messenger = &personas[2];
+        let dir = root.join(".ants/messenger");
+        assert_eq!((&messenger.workdir, messenger.home.as_ref()), (&dir, Some(&dir)));
+        assert_eq!(messenger.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
+        let stock = Persona {
+            harness: Some(HarnessKind::Claude),
+            home: Some(dir.clone()),
+            js_domain: messenger.js_domain.clone(),
+            builtin: true,
+            ..Persona::new(PersonaId::messenger(), dir)
+        };
+        assert_eq!(messenger, &stock, "provider defaults for model, reasoning effort and context; stock settings");
+
+        let alone = parse_here("provider = \"copilot\"").unwrap();
+        assert_eq!(alone.len(), 1, "provider alone is a complete file");
+        assert_eq!((alone[0].name.as_str(), alone[0].builtin), ("messenger", true));
+    }
+
+    #[test]
+    fn a_listed_messenger_replaces_the_builtin_one() {
+        let personas = parse_here("provider = \"claude\"\n[[persona]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
+        assert_eq!(personas.len(), 1);
+        assert_eq!((personas[0].harness, personas[0].builtin), (Some(HarnessKind::Claude), false));
+        assert_eq!(personas[0].workdir, manifest_dir().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn without_provider_there_is_no_builtin_messenger() {
+        let personas = parse_here("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+        assert_eq!(personas.len(), 1);
+        assert_eq!(personas[0].harness, None);
+        let config = personas[0].clone().into_config("nats://unused").unwrap();
+        assert_eq!((config.harness, config.defer_to_other_machines), (HarnessKind::Copilot, false));
+    }
+
+    #[test]
+    fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
+        let home = ants_test_support::scratch_dir("config-home").canonicalize().unwrap();
+        let auth = home.join(".config/ants/auth");
+        assert_eq!(builtin_messenger(HarnessKind::Copilot, &home).creds, None, "no credentials issued");
+        std::fs::create_dir_all(&auth).unwrap();
+        std::fs::write(auth.join("messenger.creds"), "").unwrap();
+        let messenger = builtin_messenger(HarnessKind::Copilot, &home);
+        assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
+        let config = messenger.into_config("nats://unused").unwrap();
+        assert!(config.defer_to_other_machines);
+        assert_eq!(config.workdir, home.join(".ants/messenger").canonicalize().unwrap());
+        assert_eq!(config.model_settings, ModelSettings::default());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn rejects_bad_files() {
         let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
         let twice =
@@ -447,7 +562,8 @@ Review changes for correctness."""
         assert!(twice.contains("config.toml"), "{twice}");
         let missing = err("[[persona]]\nname = \"dev-a\"\nworkdir = \"no/such/dir\"");
         assert!(missing.contains("workdir no/such/dir"), "{missing}");
-        assert!(err("nats = \"nats://x\"").contains("no [[persona]] entries"));
+        assert!(err("nats = \"nats://x\"").contains("no provider and no [[persona]] entries"));
+        assert!(err("provider = \"vim\"").contains("unknown harness"));
         assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
         assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
         assert!(err("[[persona]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));

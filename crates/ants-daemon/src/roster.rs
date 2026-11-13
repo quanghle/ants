@@ -78,12 +78,10 @@ impl Drop for Working<'_> {
     }
 }
 
-/// List the persona of `config` in the roster and keep its entry fresh, with its `workload`, until the registration
-/// ends.
-pub async fn register(js: &jetstream::Context, config: &Config, workload: Arc<Workload>) -> Result<Registration> {
-    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
+/// The roster entry of the persona of `config` on this machine, started now.
+pub async fn entry(config: &Config) -> RosterEntry {
     let now = Utc::now();
-    let entry = RosterEntry {
+    RosterEntry {
         persona: config.persona.clone(),
         machine: machine().await,
         harness: config.harness.to_string(),
@@ -95,8 +93,61 @@ pub async fn register(js: &jetstream::Context, config: &Config, workload: Arc<Wo
         activity: None,
         handling: None,
         harnesses: None,
-    };
+    }
+}
+
+/// List `entry` in the roster and keep it fresh, with its `workload`, until the registration ends.
+pub async fn register(
+    js: &jetstream::Context,
+    mut entry: RosterEntry,
+    workload: Arc<Workload>,
+) -> Result<Registration> {
+    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
+    entry.heartbeat_at = Utc::now();
     Registration::start_with(kv, entry, ROSTER_HEARTBEAT, Some(workload)).await
+}
+
+/// Whether a daemon on `machine` may start serving a persona whose roster entry is `current` without serving it twice:
+/// only if the roster lists no entry for it from another machine. An entry stays in the roster until its daemon stops
+/// or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are compared.
+pub fn may_start(current: Option<&RosterEntry>, machine: &str) -> bool {
+    current.is_none_or(|e| e.machine == machine)
+}
+
+/// Wait until [`may_start`] allows `entry`, looking at the roster every `every`, then put `entry`, started now. The
+/// put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
+pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<()> {
+    let key = entry.key().to_owned();
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut waiting_for = None;
+    loop {
+        ticks.tick().await;
+        let found = kv.entry(key.as_str()).await.with_context(|| format!("reading {key} in the roster"))?;
+        let current = found
+            .as_ref()
+            .filter(|e| e.operation == kv::Operation::Put)
+            .and_then(|e| serde_json::from_slice::<RosterEntry>(&e.value).ok());
+        if !may_start(current.as_ref(), &entry.machine) {
+            let other = current.map(|e| e.machine);
+            if waiting_for != other {
+                tracing::info!(persona = key, machine = other, "waiting while the roster lists it on another machine");
+                waiting_for = other;
+            }
+            continue;
+        }
+        let now = Utc::now();
+        (entry.started_at, entry.heartbeat_at) = (now, now);
+        let value = serde_json::to_vec(entry)?.into();
+        let claimed = match &found {
+            Some(e) => kv.update(&key, value, e.revision).await.map(drop).map_err(anyhow::Error::from),
+            None => kv.create(&key, value).await.map(drop).map_err(anyhow::Error::from),
+        };
+        match claimed {
+            Ok(()) => return Ok(()),
+            Err(e) => tracing::info!(persona = key, error = format!("{e:#}"), "roster entry changed; looking again"),
+        }
+    }
 }
 
 impl Registration {
@@ -225,10 +276,14 @@ mod tests {
     use super::*;
 
     fn entry(persona: &str, capabilities: &[&str]) -> RosterEntry {
+        entry_on(persona, "m", capabilities)
+    }
+
+    fn entry_on(persona: &str, machine: &str, capabilities: &[&str]) -> RosterEntry {
         let now = Utc::now();
         RosterEntry {
             persona: persona.parse().unwrap(),
-            machine: "m".to_owned(),
+            machine: machine.to_owned(),
             harness: "copilot".to_owned(),
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
@@ -277,5 +332,12 @@ mod tests {
         assert_eq!(picked("rust-ops"), Some("ops"));
         assert_eq!(picked("ops"), None, "tags match whole, not in part");
         assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap()).map(|e| e.persona.as_str()), Some("dev-a"));
+    }
+
+    #[test]
+    fn starts_unless_another_machine_lists_the_persona() {
+        assert!(may_start(None, "m1"), "nobody serves it");
+        assert!(may_start(Some(&entry_on("messenger", "m1", &[])), "m1"), "left by this machine's last run");
+        assert!(!may_start(Some(&entry_on("messenger", "m2", &[])), "m1"), "served on another machine");
     }
 }
