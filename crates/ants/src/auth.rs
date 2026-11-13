@@ -828,6 +828,8 @@ pub(crate) mod tests {
                 serde_json::from_slice(&timeout(WAIT, human_inbox.next()).await.unwrap().unwrap().payload).unwrap();
             assert_eq!((notice.from.clone(), notice.in_reply_to), (dev_a.clone(), Some(ask.id)));
             assert!(notice.text.contains(&format!("ants dead replay {dead_seq}")), "{}", notice.text);
+            assert!(notice.text.contains("told to a human directly, past the escalation chain"), "{}", notice.text);
+            assert_eq!(notice.escalation, None, "the human's side skips the persona's chain");
 
             // A later advisory of the same message, past the duplicate window, finds the dead letter.
             let advisory = dead::MaxDeliveries {

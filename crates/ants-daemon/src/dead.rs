@@ -3,6 +3,10 @@
 //! default human ([`crate::escalation`]); the human's side tells the owner directly. A channel post is kept as a payload,
 //! which is not replayed: a human posts again instead.
 //!
+//! The human's side skips the chain on purpose: it only stores what the persona's daemon failed to store, so that daemon
+//! is in trouble, which no chain member can fix, and human credentials can neither read nor write the escalation the
+//! persona keeps in `ants_sessions` (level, visited personas, renewal, deadline) that a step up the chain must follow.
+//!
 //! The daemon writes a dead letter itself, with the message in hand: after its last attempt fails, or on the one
 //! extra delivery the consumer allows when the last attempt never finished (the daemon stopped, or the ack wait ran
 //! out). Watching JetStream's max-deliveries advisory instead would mean fetching the message by sequence, and
@@ -222,7 +226,7 @@ pub async fn watch(
 
 /// Dead-letter the message `advisory` names, unless it is not a persona's inbox message or channel post, is gone, or
 /// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
-/// else the default human of `humans`.
+/// else the default human of `humans`, not up the persona's escalation chain.
 pub async fn bury_undelivered(
     js: &jetstream::Context,
     stream: &stream::Stream,
@@ -248,7 +252,7 @@ pub async fn bury_undelivered(
     };
     let error = format!(
         "no outcome after {} deliveries, and the daemon could not dead-letter it; kept from JetStream's \
-         max-deliveries advisory",
+         max-deliveries advisory and told to a human directly, past the escalation chain, as the daemon is failing",
         advisory.deliveries
     );
     let (dead, post) = match consumer {

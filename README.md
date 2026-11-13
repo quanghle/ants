@@ -455,7 +455,9 @@ existed lacks `ants.dead.>`; `ants init` adds it.
 If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
 only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
 --follow` while it runs, turn each such advisory of a persona's inbox consumer into a dead letter in the same format,
-with the same notice, unless that message is a dead letter already. Fetching a message by sequence
+with the same notice, unless that message is a dead letter already. That notice goes to the thread's owner, else the
+default human, directly and not up the persona's escalation chain: the persona's daemon is failing, which no chain member
+can fix, and human credentials cannot follow the escalation the persona keeps in `ants_sessions`. Fetching a message by sequence
 (`STREAM.MSG.GET`) would let a persona read every inbox, so only human credentials hear the advisories; those
 issued before must be issued again with `ants auth user human`. Advisories are core NATS and not stored: one published
 while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
