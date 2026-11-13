@@ -779,7 +779,7 @@ Approval decisions go on `ants.approvals.<persona>.<request id>`, which only hum
 decisions on its own requests and reads back the one the stream stored with a direct get
 (`$JS.API.DIRECT.GET.ANTS.ants.approvals.<persona>.*`, which returns only the last message on that subject), so it
 reads no one else's; the stream allows direct gets for this. Credentials and streams set up before then need
-`ants auth user` and `ants init` again.
+`ants auth user`, `ants auth leaf` (leaf uplinks carry their personas' rights) and `ants init` again.
 
 Humans: a team may have several, each with its own name, credentials and inbox, and all with the same rights. A
 human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a `HumanEntry` naming
