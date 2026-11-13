@@ -1,19 +1,20 @@
-//! ACP client side: start a harness over stdio and run prompts through it.
+//! ACP client side: start harnesses over stdio, keep their sessions, and run prompts through them.
 
 use std::fmt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent,
+    ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionId, SessionNotification, SessionUpdate, TextContent,
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use anyhow::{Result, anyhow};
+use tokio::sync::{mpsc, oneshot};
 
 /// An agent harness ants can drive over ACP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -98,26 +99,118 @@ pub async fn check(kind: HarnessKind) -> Result<String> {
         .map_err(|e| anyhow!("{kind} ACP handshake: {e}"))
 }
 
-/// Run one prompt in a fresh session rooted at `cwd`, with `env` added to the harness environment, and return the
-/// agent's reply text.
-pub async fn prompt_once(
-    kind: HarnessKind,
-    cwd: &Path,
-    env: &[(String, String)],
-    text: &str,
+/// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
+type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
+
+/// How to start a harness and open sessions in it.
+#[derive(Clone)]
+pub struct Launch {
+    name: String,
+    connect: Connector,
+    cwd: PathBuf,
     policy: PermissionPolicy,
-) -> Result<String> {
-    let reply = Arc::new(Mutex::new(String::new()));
+}
+
+impl Launch {
+    /// `kind` working in `cwd`, with `env` added to the daemon's environment.
+    pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
+        let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
+        Self { name: kind.name().to_owned(), connect, cwd, policy }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transport(connect: Connector, cwd: PathBuf) -> Self {
+        Self { name: "test".to_owned(), connect, cwd, policy: PermissionPolicy::Reject }
+    }
+}
+
+impl fmt::Debug for Launch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Launch")
+            .field("name", &self.name)
+            .field("cwd", &self.cwd)
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+struct Turn {
+    text: String,
+    reply: oneshot::Sender<Result<String>>,
+}
+
+/// A live harness holding one ACP session. Dropping it stops the harness once a running prompt is done.
+pub struct Session {
+    id: SessionId,
+    turns: mpsc::Sender<Turn>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Session {
+    /// Start a harness and open a session in it: `resume` through session/load when the harness can, else a new one.
+    pub async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
+        let (opened_tx, opened) = oneshot::channel();
+        let (turns, turns_rx) = mpsc::channel(1);
+        let task = tokio::spawn(serve(launch.clone(), resume, opened_tx, turns_rx));
+        let id = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.name))??;
+        Ok(Self { id, turns, task })
+    }
+
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// False once the harness has exited or a prompt failed; the session can then only be resumed in a new one.
+    pub fn is_alive(&self) -> bool {
+        !self.turns.is_closed()
+    }
+
+    /// Run one prompt and return the agent's reply text.
+    pub async fn prompt(&self, text: &str) -> Result<String> {
+        let (reply, answer) = oneshot::channel();
+        self.turns.send(Turn { text: text.to_owned(), reply }).await.map_err(|_| anyhow!("harness session ended"))?;
+        answer.await.map_err(|_| anyhow!("harness exited mid-prompt"))?
+    }
+
+    /// Stop the harness and wait for it to exit.
+    pub async fn close(self) {
+        drop(self.turns);
+        if let Err(e) = self.task.await {
+            tracing::warn!(error = %e, "harness task");
+        }
+    }
+}
+
+/// Run one prompt in a fresh session, and return the agent's reply text.
+pub async fn prompt_once(launch: &Launch, text: &str) -> Result<String> {
+    let session = Session::start(launch, None).await?;
+    let reply = session.prompt(text).await;
+    session.close().await;
+    reply
+}
+
+/// Own the harness connection: open the session, then run turns until the session is dropped or a prompt fails.
+async fn serve(
+    launch: Launch,
+    resume: Option<SessionId>,
+    opened: oneshot::Sender<Result<SessionId>>,
+    mut turns: mpsc::Receiver<Turn>,
+) {
+    // Some while a prompt runs. session/load replays the history as chunks; those land in None and are dropped.
+    let reply: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = reply.clone();
-    Client
+    let policy = launch.policy;
+    let mut opened = Some(opened);
+    let result = Client
         .v1()
         .name("ants")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
                 if let SessionUpdate::AgentMessageChunk(chunk) = n.update
                     && let ContentBlock::Text(t) = chunk.content
+                    && let Some(buf) = sink.lock().expect("reply buffer").as_mut()
                 {
-                    sink.lock().expect("reply buffer").push_str(&t.text);
+                    buf.push_str(&t.text);
                 }
                 Ok(())
             },
@@ -130,20 +223,58 @@ pub async fn prompt_once(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(kind.agent(env), async |cx: ConnectionTo<Agent>| {
-            cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            let session = cx.send_request(NewSessionRequest::new(cwd.to_path_buf())).block_task().await?;
-            let done = cx
-                .send_request(PromptRequest::new(
-                    session.session_id,
-                    vec![ContentBlock::Text(TextContent::new(text.to_owned()))],
-                ))
-                .block_task()
-                .await?;
-            tracing::debug!(stop_reason = ?done.stop_reason, "prompt finished");
+        .connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+            let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+            let id = open(&cx, &launch, resume, init.agent_capabilities.load_session).await?;
+            if let Some(tx) = opened.take() {
+                let _ = tx.send(Ok(id.clone()));
+            }
+            while let Some(turn) = turns.recv().await {
+                *reply.lock().expect("reply buffer") = Some(String::new());
+                let done = cx
+                    .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(turn.text))]))
+                    .block_task()
+                    .await;
+                let text = reply.lock().expect("reply buffer").take().unwrap_or_default();
+                match done {
+                    Ok(done) => {
+                        tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
+                        let _ = turn.reply.send(Ok(text));
+                    }
+                    Err(e) => {
+                        let _ = turn.reply.send(Err(anyhow!("{} prompt: {e}", launch.name)));
+                        return Err(e);
+                    }
+                }
+            }
             Ok(())
         })
-        .await
-        .map_err(|e| anyhow!("{kind} prompt: {e}"))?;
-    Ok(std::mem::take(&mut *reply.lock().expect("reply buffer")))
+        .await;
+    if let Err(e) = result {
+        match opened {
+            Some(tx) => {
+                let _ = tx.send(Err(anyhow!("{} session: {e}", launch.name)));
+            }
+            None => tracing::warn!(error = %e, "{} session ended", launch.name),
+        }
+    }
+}
+
+async fn open(
+    cx: &ConnectionTo<Agent>,
+    launch: &Launch,
+    resume: Option<SessionId>,
+    can_load: bool,
+) -> Result<SessionId, agent_client_protocol::Error> {
+    if let Some(id) = resume {
+        if !can_load {
+            tracing::warn!(session = %id, "{} cannot load sessions; starting a new one", launch.name);
+        } else {
+            match cx.send_request(LoadSessionRequest::new(id.clone(), launch.cwd.clone())).block_task().await {
+                Ok(_) => return Ok(id),
+                Err(e) => tracing::warn!(session = %id, error = %e, "session/load failed; starting a new session"),
+            }
+        }
+    }
+    Ok(cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?.session_id)
 }

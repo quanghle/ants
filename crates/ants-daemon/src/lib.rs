@@ -3,7 +3,8 @@
 pub mod bus;
 pub mod daemon;
 pub mod harness;
+pub mod pool;
 pub mod workspace;
 
 pub use daemon::{Config, run};
-pub use harness::{HarnessKind, PermissionPolicy};
+pub use harness::{HarnessKind, Launch, PermissionPolicy};

@@ -4,7 +4,7 @@ mod auth;
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::{HarnessKind, PermissionPolicy, bus, harness};
+use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, harness};
 use ants_proto::{Envelope, PersonaId, ThreadId, subject};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -62,6 +62,12 @@ enum Command {
         /// Allow every tool request once instead of rejecting it. Only for trusted, sandboxed workdirs.
         #[arg(long)]
         allow_tools: bool,
+        /// Most harness processes alive at once, one per active thread.
+        #[arg(long, default_value_t = 4)]
+        max_harnesses: usize,
+        /// Seconds without a message before a thread's harness stops; its session resumes on the next message.
+        #[arg(long, default_value_t = 600)]
+        idle_timeout_secs: u64,
     },
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
@@ -123,7 +129,7 @@ async fn main() -> Result<()> {
             println!("stream {} ready", ants_proto::STREAM);
             Ok(())
         }
-        Command::Daemon { persona, workdir, home, harness, allow_tools } => {
+        Command::Daemon { persona, workdir, home, harness, allow_tools, max_harnesses, idle_timeout_secs } => {
             let workdir = match workdir {
                 Some(dir) => dir,
                 None => std::env::current_dir()?,
@@ -140,6 +146,8 @@ async fn main() -> Result<()> {
                 home,
                 harness,
                 permissions: if allow_tools { PermissionPolicy::AllowOnce } else { PermissionPolicy::Reject },
+                max_harnesses,
+                idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
             })
             .await
         }
@@ -148,14 +156,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Harness(HarnessCommand::Prompt { harness, words }) => {
-            let reply = harness::prompt_once(
-                harness,
-                &std::env::current_dir()?,
-                &[],
-                &words.join(" "),
-                PermissionPolicy::Reject,
-            )
-            .await?;
+            let launch = Launch::new(harness, std::env::current_dir()?, Vec::new(), PermissionPolicy::Reject);
+            let reply = harness::prompt_once(&launch, &words.join(" ")).await?;
             println!("{reply}");
             Ok(())
         }

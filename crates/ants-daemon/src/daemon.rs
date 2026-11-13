@@ -1,14 +1,15 @@
 //! The inbox loop of one persona.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ants_proto::{Envelope, Error as ProtoError, PersonaId, subject};
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 
-use crate::harness::{self, HarnessKind, PermissionPolicy};
+use crate::harness::{HarnessKind, Launch, PermissionPolicy};
+use crate::pool::Pool;
 use crate::{bus, workspace};
 
 /// Redelivery window. The daemon extends it with progress acks while a prompt runs, so a crash mid-task redelivers.
@@ -17,6 +18,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 /// Deliveries before a message is given up on.
 const MAX_DELIVER: i64 = 5;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How often idle harnesses are looked for.
+const EVICT_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,12 +33,17 @@ pub struct Config {
     pub home: PathBuf,
     pub harness: HarnessKind,
     pub permissions: PermissionPolicy,
+    /// Most harness processes alive at once; the least recently used stops to make room.
+    pub max_harnesses: usize,
+    /// A thread's harness stops after this long without a message, and resumes its session on the next one.
+    pub idle_timeout: Duration,
 }
 
 /// Serve the persona's inbox until Ctrl-C. A message in hand is finished first.
 pub async fn run(config: Config) -> Result<()> {
     let db = workspace::ensure(&config.home, &config.persona).await?;
-    let env = workspace::harness_env(&db)?;
+    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, config.permissions);
+    let mut pool = Pool::new(launch, config.max_harnesses, config.idle_timeout);
     let (client, js) =
         bus::connect(&config.nats_url, config.creds.as_deref(), &config.persona, &format!("antsd-{}", config.persona))
             .await?;
@@ -46,25 +54,32 @@ pub async fn run(config: Config) -> Result<()> {
         harness = %config.harness,
         workdir = %config.workdir.display(),
         workspace = %db.display(),
+        max_harnesses = config.max_harnesses,
+        idle_timeout = ?config.idle_timeout,
         "serving inbox"
     );
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
+    let mut evict = tokio::time::interval(EVICT_EVERY.min(config.idle_timeout).max(Duration::from_secs(1)));
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
+            _ = evict.tick() => {
+                pool.evict_idle(Instant::now());
+            }
             next = messages.next() => match next {
                 None => break,
                 Some(Err(e)) => tracing::warn!(error = %e, "inbox stream"),
                 Some(Ok(msg)) => {
-                    if let Err(e) = handle(&client, &js, &config, &env, msg).await {
+                    if let Err(e) = handle(&client, &js, &config, &mut pool, msg).await {
                         tracing::error!(error = format!("{e:#}"), "handling message");
                     }
                 }
             }
         }
     }
+    pool.shutdown().await;
     tracing::info!("stopped");
     Ok(())
 }
@@ -73,7 +88,7 @@ async fn handle(
     client: &async_nats::Client,
     js: &jetstream::Context,
     config: &Config,
-    env: &[(String, String)],
+    pool: &mut Pool,
     msg: jetstream::Message,
 ) -> Result<()> {
     let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
@@ -100,7 +115,7 @@ async fn handle(
     tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "prompting {}", config.harness);
     client.publish(status.clone(), "working".into()).await?;
 
-    let prompt = harness::prompt_once(config.harness, &config.workdir, env, &envelope.text, config.permissions);
+    let prompt = pool.prompt(&envelope.thread_id, &envelope.text);
     tokio::pin!(prompt);
     let mut progress = tokio::time::interval(PROGRESS_EVERY);
     progress.tick().await;

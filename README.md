@@ -26,6 +26,10 @@ ants watch                                          # live traffic
 
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`.
 
+The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). A thread's harness
+stops after `--idle-timeout-secs` (default 600) without a message, and its session resumes with ACP `session/load` on
+the next one.
+
 ## Persona memory
 
 Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
