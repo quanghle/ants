@@ -6,6 +6,7 @@ use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::Utc;
+use futures::TryStreamExt as _;
 use tokio::task::JoinHandle;
 
 use crate::bus;
@@ -70,6 +71,22 @@ impl Drop for Registration {
     fn drop(&mut self) {
         self.heartbeat.abort();
     }
+}
+
+/// The entries in the roster, by persona. An entry removed while listing is left out, and a malformed one is skipped
+/// with a warning.
+pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
+    let mut keys: Vec<String> = kv.keys().await.context("listing the roster")?.try_collect().await?;
+    keys.sort();
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the roster"))? else { continue };
+        match serde_json::from_slice(&value) {
+            Ok(entry) => entries.push(entry),
+            Err(e) => tracing::warn!(key, error = %e, "skipping a malformed roster entry"),
+        }
+    }
+    Ok(entries)
 }
 
 async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {

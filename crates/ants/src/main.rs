@@ -2,6 +2,7 @@
 
 mod auth;
 mod inbox;
+mod roster;
 mod serve;
 
 use std::path::{Path, PathBuf};
@@ -56,6 +57,12 @@ enum Command {
         #[arg(long, short)]
         follow: bool,
         /// One JSON envelope per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the personas being served: harness, machine, capabilities, last heartbeat, and whether it is recent.
+    Roster {
+        /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
     },
@@ -151,6 +158,7 @@ async fn main() -> Result<()> {
             let select = inbox::Select { thread, limit, peek };
             show_inbox(&cli.nats, cli.creds.as_deref(), &select, follow, json).await
         }
+        Command::Roster { json } => roster::show(&cli.nats, cli.creds.as_deref(), json).await,
         Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), subject).await,
         Command::Init => {
             let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;

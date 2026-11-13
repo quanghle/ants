@@ -23,6 +23,7 @@ ants harness check                                  # ACP handshake with Copilot
 ants daemon --persona dev-a --workdir ~/src/some-repo &
 ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
+ants roster                                         # personas being served
 ants watch                                          # live traffic
 ```
 
@@ -93,6 +94,12 @@ deletes it on a clean stop. The bucket keeps an entry 30 s after its last refres
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; the human's read the
 roster.
+
+`ants roster` lists the entries: persona, state, harness, machine, time since the last heartbeat, uptime,
+capabilities and workdir. An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
+without one: its daemon is likely gone and the entry expires shortly. Ages come from the daemons' clocks, so skew
+between machines shifts them. `--json` prints one entry per line with its `state` added.
+
 ## Dead letters
 
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
