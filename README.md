@@ -24,6 +24,7 @@ ants daemon --persona dev-a --workdir ~/src/some-repo &
 ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
 ants roster                                         # personas being served
+ants approve                                        # tool requests waiting for an answer
 ants watch                                          # live traffic
 ```
 
@@ -140,6 +141,17 @@ waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants
 Only the human's credentials may publish decisions. The verdict is `allow_once`, `allow_always` (the harness remembers
 it for the session) or `reject`; no decision in time rejects the request. `--allow-tools` is `--allow '*'`, for
 trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
+
+```sh
+ants approve                        # pending requests: id, persona, thread, tool, files, options, time left
+ants approve --follow               # then keep printing new ones until Ctrl-C (--json: one request per line)
+ants approve 019a7d2e               # one request in full, with the tool input; a unique start of the id will do
+ants approve 019a7d2e allow-once    # answer it: allow-once, allow-always or reject
+```
+
+A request is pending until it has a decision or expires; both requests and decisions are read back from the stream,
+so requests made while no CLI was running show up too. Answering stores the decision in the stream before returning,
+and refuses a request already answered, an expired one, or a verdict the harness did not offer.
 
 ## MCP tools
 
