@@ -3,6 +3,7 @@
 mod approve;
 mod auth;
 mod inbox;
+mod leaf;
 mod roster;
 mod serve;
 
@@ -115,6 +116,9 @@ enum Command {
     /// Issue NATS credentials: one operator and account for the team, one user per persona.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// The machine's local NATS leaf node, which every ants process on it connects to.
+    #[command(subcommand)]
+    Leaf(LeafCommand),
 }
 
 #[derive(Subcommand)]
@@ -158,6 +162,41 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the credentials (default: <dir>/leaf-<machine>.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LeafCommand {
+    /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, without
+    /// JetStream, with one uplink to the hub. Run it again to switch the uplink, then reload the leaf (SIGHUP).
+    Config {
+        /// Machine name, as given to `ants auth leaf`.
+        machine: String,
+        /// Hub URL: nats-leaf:// or tls:// for its leafnode port (also through `devtunnel connect`), ws:// or wss://
+        /// for its websocket listener (a leaf node asks for <path>/leafnode). Repeatable, all of one scheme.
+        #[arg(long = "uplink", value_name = "URL", required = true)]
+        uplinks: Vec<String>,
+        /// Uplink credentials from `ants auth leaf` (default: <dir>/leaf-<machine>.creds).
+        #[arg(long)]
+        uplink_creds: Option<PathBuf>,
+        /// The team's server.conf from `ants auth init` (default: <dir>/server.conf).
+        #[arg(long)]
+        server_conf: Option<PathBuf>,
+        /// Team directory holding server.conf and the credentials (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// CA certificate of a hub the platform does not trust (tls:// and wss:// uplinks).
+        #[arg(long)]
+        ca_file: Option<PathBuf>,
+        /// HTTP CONNECT forward proxy for the uplink, http://host:port or https://host:port.
+        #[arg(long, value_name = "URL")]
+        proxy: Option<String>,
+        /// Address for the machine's ants processes; loopback only.
+        #[arg(long, default_value = leaf::DEFAULT_LISTEN)]
+        listen: String,
+        /// Where to write the configuration (default: ~/.config/ants/leaf.conf).
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -253,6 +292,42 @@ async fn main() -> Result<()> {
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
             auth::issue_leaf(&dir, &machine, &personas, domain, &out)?;
             println!("{}", out.display());
+            Ok(())
+        }
+        Command::Leaf(LeafCommand::Config {
+            machine,
+            uplinks,
+            uplink_creds,
+            server_conf,
+            dir,
+            ca_file,
+            proxy,
+            listen,
+            out,
+        }) => {
+            let dir = team_dir(dir)?;
+            let creds = uplink_creds.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
+            let server_conf = server_conf.unwrap_or_else(|| dir.join(auth::SERVER_CONF));
+            let out = match out {
+                Some(out) => out,
+                None => auth::default_dir()?.with_file_name("leaf.conf"),
+            };
+            let config = leaf::Leaf {
+                machine: &machine,
+                uplinks: &uplinks,
+                creds: &creds,
+                server_conf: &server_conf,
+                ca_file: ca_file.as_deref(),
+                proxy: proxy.as_deref(),
+                listen: &listen,
+            };
+            leaf::write(&config, &out)?;
+            println!(
+                "{0}\nstart: nats-server -c {0}\n\
+                 switch the uplink: run this again, then send the running leaf SIGHUP\n\
+                 clients on this machine: nats://{listen} (the default) with the hub's --js-domain",
+                out.display()
+            );
             Ok(())
         }
     }

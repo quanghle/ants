@@ -276,6 +276,31 @@ listed personas may do together, and only for a leaf node connection, never a cl
 machine runs the CLI. The leaf still checks each local client against its own credentials; the uplink credentials
 bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
 
+`ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on
+`127.0.0.1:4222` only (the default server of every `ants` process), runs without JetStream, includes the team's
+`server.conf` and has one uplink to the hub:
+
+```sh
+# on macbook, with server.conf and leaf-macbook.creds copied into ~/.config/ants/auth
+ants leaf config macbook --uplink wss://hub.example.com/nats             # the hub's websocket, behind a proxy
+ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422             # its leafnode port, via devtunnel connect
+nats-server -c ~/.config/ants/leaf.conf
+```
+
+| Uplink | Reaches |
+|---|---|
+| `nats-leaf://host[:port]` (or `nats://`) | the hub's leafnode port, default 7422, in plain text (a tunnel provides the encryption) |
+| `tls://host[:port]` | the same port with TLS |
+| `ws://host[:port]/path`, `wss://host[:port]/path` | the hub's websocket listener, directly or through a reverse proxy; the leaf asks for `<path>/leafnode` |
+
+`--ca-file ca.pem` trusts a private CA (`tls://` and `wss://`), `--proxy http://proxy:3128` goes through an HTTP
+`CONNECT` forward proxy. `--uplink-creds` and `--server-conf` default to `leaf-<machine>.creds` and `server.conf` in
+the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the credentials by absolute path and includes
+`server.conf` by a relative one, as nats-server requires. Switching the uplink changes nothing else on the machine:
+run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`; local
+clients stay connected.
+While the uplink is down, publishing fails at once: the leaf does not store and forward.
+
 ## Footprint
 
 An idle daemon serving one persona stays under 20 MB resident memory. `scripts/footprint.sh` checks it: it starts a
