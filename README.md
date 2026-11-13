@@ -384,8 +384,9 @@ tools work only while a message is in progress on the thread.
 A reply to `ask_agent` reaches the waiting call through a live subscription to the persona's inbox, while the inbox
 consumer still holds it back behind the prompt that asked. When the consumer delivers it later, the daemon acks it
 without prompting, or keeps it for `check_inbox` when the call gave up (also across restarts: asks waiting for a reply
-and late replies are kept in `<home>/mcp.json`). Only a reply from the persona asked counts; any other message is a
-prompt as usual.
+and late replies are kept in `<home>/mcp.json`). Until `check_inbox` takes them, each later prompt on the thread starts
+with a line counting its late replies. Only a reply from the persona asked counts; any other message is a prompt as
+usual.
 
 The server listens on `127.0.0.1` on a free port (streamable HTTP, stateless) and on the Unix socket
 `<home>/mcp.sock` (mode 0600). The sessions of each thread get their own bearer token, which tells the daemon the

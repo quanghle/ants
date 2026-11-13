@@ -189,6 +189,11 @@ impl Mcp {
         self.hub.claim(envelope).await
     }
 
+    /// How many late replies on `thread` wait for `check_inbox`.
+    pub async fn late_on(&self, thread: &ThreadId) -> usize {
+        self.hub.asks.lock().await.stored.late.iter().filter(|e| &e.thread_id == thread).count()
+    }
+
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
@@ -1255,8 +1260,11 @@ mod tests {
         let (mcp, _sent) = start(&dir).await;
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
+        assert_eq!(mcp.late_on(&current.thread_id).await, 1);
+        assert_eq!(mcp.late_on(&ThreadId::generate()).await, 0, "only its own thread's");
         let (ok, text) = call(&client, "check_inbox", serde_json::json!({})).await;
         assert!(ok && text.contains("From dev-b") && text.contains("late answer"), "{text}");
+        assert_eq!(mcp.late_on(&current.thread_id).await, 0, "taken");
         let (_, text) = call(&client, "check_inbox", serde_json::json!({"all_threads": true})).await;
         assert_eq!(text, "No messages.");
     }
