@@ -19,7 +19,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::caps::{Caps, Ledger};
-use crate::channel::{self, Channels, Threads, Wake};
+use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::mcp::{Mcp, Roster};
@@ -563,15 +563,6 @@ impl Inbox<'_> {
     ) -> Result<()> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        let spent = match &incoming.post {
-            Some(posted) => posted.post.reply(self.persona.clone(), "").err(),
-            None => envelope.reply(self.persona.clone(), "").err(),
-        };
-        if let Some(ProtoError::BudgetExhausted(_)) = spent {
-            // Out of turns: hand the thread to the human instead of spending another prompt.
-            self.escalate(incoming, "Turn budget spent", seq).await?;
-            return bus::double_ack(self.client, msg).await;
-        }
         let cut_off = match marker {
             Some(Marker::Replied(reply)) => {
                 tracing::info!(%thread, "sending the reply an earlier attempt recorded");
@@ -580,6 +571,22 @@ impl Inbox<'_> {
             Some(Marker::Started) => true,
             None => false,
         };
+        // A post's thread has the turns its posts since left, which other members' replies may have spent.
+        let read = match &incoming.post {
+            Some(posted) => Some(self.threads.context(&posted.post, seq, true).await?),
+            None => None,
+        };
+        let spent = match (&incoming.post, &read) {
+            (Some(posted), Some(read)) => posted.post.reply(self.persona.clone(), "", &read.later).err(),
+            _ => envelope.reply(self.persona.clone(), "").err(),
+        };
+        if let Some(ProtoError::BudgetExhausted(_)) = spent {
+            // Out of turns: hand the thread to the human instead of spending another prompt.
+            self.escalate(incoming, "Turn budget spent", seq, None).await?;
+            bus::double_ack(self.client, msg).await?;
+            self.attempts.forget(seq).await;
+            return Ok(());
+        }
         if envelope.from.is_human()
             && let Err(e) = self.ledger.fresh_allowance(thread).await
         {
@@ -588,7 +595,7 @@ impl Inbox<'_> {
         match self.ledger.reached(thread).await {
             Ok(Some(cap)) => {
                 // Out of allowance: the same, until the human answers or the day ends.
-                self.escalate(incoming, &cap, seq).await?;
+                self.escalate(incoming, &cap, seq, None).await?;
                 bus::double_ack(self.client, msg).await?;
                 self.attempts.forget(seq).await;
                 return Ok(());
@@ -617,9 +624,9 @@ impl Inbox<'_> {
             Some(mcp) => mcp.late_on(thread).await,
             None => 0,
         };
-        let text = match &incoming.post {
-            Some(posted) => self.channel_prompt(posted, seq).await?,
-            None => envelope.text.clone(),
+        let text = match (&incoming.post, &read) {
+            (Some(posted), Some(read)) => self.channel_prompt(posted, read).await,
+            _ => envelope.text.clone(),
         };
         let text = prompt_text(&text, cut_off, late);
         let prompt =
@@ -668,16 +675,37 @@ impl Inbox<'_> {
                 [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
             }
         };
-        let reply = match &incoming.post {
-            Some(posted) => Reply::Post(posted.post.reply(self.persona.clone(), text)?),
-            None => Reply::Message(envelope.reply(self.persona.clone(), text)?),
+        let reply = match (&incoming.post, read) {
+            (Some(posted), Some(read)) => {
+                // Other members' replies stored during the prompt spent the thread's turns too.
+                let later = match self.threads.context(&posted.post, seq, false).await {
+                    Ok(now) => now.later,
+                    Err(e) => {
+                        tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
+                        read.later
+                    }
+                };
+                match posted.post.reply(self.persona.clone(), text.as_str(), &later) {
+                    Ok(post) => Reply::Post(post),
+                    Err(ProtoError::BudgetExhausted(_)) => {
+                        // The answer is not posted: the human gets it with the thread.
+                        let why = "Turn budget spent before the answer was posted";
+                        self.escalate(incoming, why, seq, Some(&text)).await?;
+                        bus::double_ack(self.client, msg).await?;
+                        self.attempts.forget(seq).await;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            _ => Reply::Message(envelope.reply(self.persona.clone(), text)?),
         };
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
             && !envelope.from.is_human()
         {
-            self.escalate(incoming, &limit, seq).await?;
+            self.escalate(incoming, &limit, seq, None).await?;
         }
         // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
         // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
@@ -688,17 +716,16 @@ impl Inbox<'_> {
         self.deliver(incoming, &reply, msg, seq).await
     }
 
-    /// The prompt for a channel post, at stream sequence `seq`, with the posts on its thread not shown before.
-    async fn channel_prompt(&self, posted: &Posted, seq: u64) -> Result<String> {
+    /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
+    async fn channel_prompt(&self, posted: &Posted, read: &Context) -> String {
         let post = &posted.post;
-        let context = self.threads.context(post, seq).await?;
-        let left = post.turn_budget.saturating_sub(1);
-        let Some(entry) = &posted.triage else { return Ok(channel::prompt(self.persona, post, &context, left)) };
+        let left = post.turns_left(&read.later).saturating_sub(1);
+        let Some(entry) = &posted.triage else { return channel::prompt(self.persona, post, read, left) };
         let roster = (self.roster)().await.unwrap_or_else(|e| {
             tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
             Vec::new()
         });
-        Ok(channel::triage_prompt(post, entry, &roster, &context, left))
+        channel::triage_prompt(post, entry, &roster, read, left)
     }
 
     /// Store `reply` to `request`, the message at stream sequence `seq`, in the hub's stream or, out of its reach, in
@@ -743,20 +770,21 @@ impl Inbox<'_> {
     }
 
     /// Hand the thread to the human, in the human's inbox: `why` it needs a decision, and the message or post it was
-    /// on. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
-    async fn escalate(&self, incoming: &Incoming, why: &str, seq: u64) -> Result<()> {
+    /// on, and an `unposted` answer. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from
+    /// escalating twice.
+    async fn escalate(&self, incoming: &Incoming, why: &str, seq: u64, unposted: Option<&str>) -> Result<()> {
         let envelope = &incoming.envelope;
         tracing::info!(thread = %envelope.thread_id, why, "escalating to the human");
         let last = match &incoming.post {
             Some(posted) => format!("Last post from {} in #{}", envelope.from, posted.post.channel),
             None => format!("Last message from {}", envelope.from),
         };
-        let mut escalation = Envelope::on_thread(
-            envelope.thread_id.clone(),
-            self.persona.clone(),
-            PersonaId::human(),
-            format!("{why}; needs a decision. {last}:\n{}", envelope.text),
-        );
+        let mut text = format!("{why}; needs a decision. {last}:\n{}", envelope.text);
+        if let Some(answer) = unposted {
+            text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.persona));
+        }
+        let mut escalation =
+            Envelope::on_thread(envelope.thread_id.clone(), self.persona.clone(), PersonaId::human(), text);
         escalation.in_reply_to = Some(envelope.id);
         let id = format!("escalation-{}-{seq}", self.persona);
         bus::store(self.js, escalation.subject(), &escalation, &id).await?;
@@ -1577,7 +1605,7 @@ mod tests {
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
         let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
         bus.post(&root).await;
-        let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?").unwrap();
+        let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?", &[]).unwrap();
         let ask_seq = bus.post(&ask).await;
 
         let ctrl_c = Arc::new(Semaphore::new(0));
@@ -1595,9 +1623,9 @@ mod tests {
         assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
 
         // After a restart, only what was posted since shows, without the persona's own reply.
-        let more = root.reply(PersonaId::human(), "rollback plan is ready").unwrap();
+        let more = root.reply(PersonaId::human(), "rollback plan is ready", &[]).unwrap();
         bus.post(&more).await;
-        let again = root.reply(PersonaId::human(), "@dev-a and now?").unwrap();
+        let again = root.reply(PersonaId::human(), "@dev-a and now?", &[]).unwrap();
         let again_seq = bus.post(&again).await;
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
@@ -1649,6 +1677,42 @@ mod tests {
         let answered = log.lock().unwrap().answered.clone();
         assert_eq!(answered.len(), 1, "{answered:?}");
         assert!(answered[0].contains("Post from human mentioning dev-a:\n@dev-a go"), "{}", answered[0]);
+    }
+
+    #[tokio::test]
+    async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
+        let Some((bus, mut human)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b", "dev-c"]).await;
+        let human_id = PersonaId::human();
+        let mut review = ChannelPost::new(ops.clone(), human_id.clone(), "@dev-a @dev-b @dev-c review");
+        review.turn_budget = 3;
+        bus.post(&review).await;
+        // The other members answered first, each spending one of the thread's turns.
+        let b = review.reply("dev-b".parse().unwrap(), "fine", &[]).unwrap();
+        bus.post(&b).await;
+        let c = review.reply("dev-c".parse().unwrap(), "fine", std::slice::from_ref(&b)).unwrap();
+        let reviewed = bus.post(&c).await;
+        let mut ship = ChannelPost::new(ops.clone(), human_id, "@dev-a @dev-b ship it");
+        ship.turn_budget = 1;
+        bus.post(&ship).await;
+        let shipped = bus.post(&ship.reply("dev-b".parse().unwrap(), "shipped", &[]).unwrap()).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let answer = next_post(&mut replies).await;
+            assert_eq!((answer.in_reply_to, answer.turn_budget), (Some(review.id), 0), "the last turn of the thread");
+            let escalation = next_envelope(&mut human).await;
+            assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&ship.thread_id, Some(ship.id)));
+            assert!(escalation.text.starts_with("Turn budget spent; needs a decision."), "{}", escalation.text);
+            bus.until_posts_acked(reviewed.max(shipped)).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 1, "no prompt once the thread is out of turns: {answered:?}");
+        assert!(answered[0].contains("(0 left after it)"), "{}", answered[0]);
     }
 
     #[tokio::test]

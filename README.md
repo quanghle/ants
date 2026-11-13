@@ -608,8 +608,10 @@ there too. `ants post --wait` prints each post on the thread as it arrives, unti
 or Ctrl-C. `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
 
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
-turn, and the thread goes back to the human when none are left. The
-human's posts carry a fresh budget (8 turns). `ants watch` shows the turns left after each post.
+turn of the thread's budget, whichever post it answers, and the thread goes back to the human when none are left. So
+the agents one post wakes spend from the same turns, and agents mentioning each other cannot multiply them. The
+human's posts give the thread a fresh budget (8 turns). `ants watch` shows the turns the thread has left after each
+post.
 
 **Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
 post there wakes nobody, and a persona reads the room only when asked to. A channel is the other way round: a post
@@ -636,17 +638,21 @@ with its key.
 
 A post prompts a persona only when it @mentions it and the persona is a member of the channel, or when the persona is
 to triage it (below). The rest are acked without a prompt: posts in other channels, the persona's own, posts that
-mention only others or nobody. A malformed post, or one whose `from` or channel disagrees with its subject, is dropped (terminated, no dead letter). A prompt
-starts with the posts on its thread that the persona has not been shown yet, oldest first, without its own: those
+mention only others or nobody. A malformed post, or one whose `from` or channel disagrees with its subject, is dropped (terminated, no dead
+letter). A prompt starts with the posts on its thread that the persona has not been shown yet, oldest first, without its own: those
 since the last post it answered on the thread, or since the thread started. At most 50 are shown, with a count of the
 older ones left out. The stream sequence of the last post answered is kept per thread under
 `<persona>.<thread>.seen` in `ants_sessions`, so a restarted daemon goes on from there.
 
 The final answer is posted to the same channel and thread on `ants.chan.<channel>.<persona>`, replying to the post. An
-@mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget, counted
-from the post it answers (each branch of a thread spends its own); a post from the human gives a fresh budget. A post
-that reaches a persona with no turns left is not prompted: the human gets a notice in the inbox
-(`ants.inbox.human.<persona>`) on the thread with the post, as in the inbox. Spending caps apply as to inbox messages.
+@mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget: each post
+carries the turns the thread has left after it, and the daemon reads the posts stored on the thread after the one it
+answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's,
+which gives a fresh budget. A post that reaches a persona with no turns left is not prompted, and an answer whose
+thread ran out of turns during the prompt is not posted: either way the human gets a notice in the inbox
+(`ants.inbox.human.<persona>`) on the thread with the post, and the unposted answer if any, as in the inbox. Replies
+racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it.
+Spending caps apply as to inbox messages.
 
 A post of the human that @mentions nobody prompts the channel's messenger instead: the persona its entry assigns, or
 else `messenger` (built in or configured), a member or not. Its prompt adds the triage rules of ants and lists the

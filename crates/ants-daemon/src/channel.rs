@@ -156,47 +156,58 @@ pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
     }
 }
 
-/// The earlier posts on a thread to show with a prompt.
+/// The earlier posts on a thread to show with a prompt, and the later ones its turns left go by.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Context {
     pub posts: Vec<ChannelPost>,
     /// Unseen posts left out, the oldest ones.
     pub skipped: usize,
+    /// The posts stored on the thread after the one being answered, from the human's last one on: what
+    /// [`ChannelPost::turns_left`] goes by.
+    pub later: Vec<ChannelPost>,
 }
 
 /// Picks the context of a prompt from the posts of a channel, read in stream order.
 struct Collect<'a> {
     persona: &'a PersonaId,
     thread: &'a ThreadId,
-    /// Stream sequence of the post being answered: the context ends before it.
-    before: u64,
+    /// Stream sequence of the post being answered: the context ends before it, and the later posts start after it.
+    at: u64,
     posts: VecDeque<ChannelPost>,
     skipped: usize,
+    later: Vec<ChannelPost>,
 }
 
 impl<'a> Collect<'a> {
-    fn new(persona: &'a PersonaId, thread: &'a ThreadId, before: u64) -> Self {
-        Self { persona, thread, before, posts: VecDeque::new(), skipped: 0 }
+    fn new(persona: &'a PersonaId, thread: &'a ThreadId, at: u64) -> Self {
+        Self { persona, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
     }
 
-    /// Take the post at stream sequence `seq`; false once past the post being answered.
-    fn push(&mut self, seq: u64, post: ChannelPost) -> bool {
-        if seq >= self.before {
-            return false;
+    /// Take the post at stream sequence `seq`.
+    fn push(&mut self, seq: u64, post: ChannelPost) {
+        if post.thread_id != *self.thread || seq == self.at {
+            return;
         }
-        if post.thread_id != *self.thread || post.from == *self.persona {
-            return true;
+        if seq > self.at {
+            // The human's post gives the thread a fresh budget: the ones before it no longer count.
+            if post.from.is_human() {
+                self.later.clear();
+            }
+            self.later.push(post);
+            return;
+        }
+        if post.from == *self.persona {
+            return;
         }
         if self.posts.len() == MAX_CONTEXT {
             self.posts.pop_front();
             self.skipped += 1;
         }
         self.posts.push_back(post);
-        true
     }
 
     fn done(self) -> Context {
-        Context { posts: self.posts.into(), skipped: self.skipped }
+        Context { posts: self.posts.into(), skipped: self.skipped, later: self.later }
     }
 }
 
@@ -290,17 +301,18 @@ impl Threads {
         Self { js, persona, seen: sessions, reading: tokio::sync::Mutex::new(()) }
     }
 
-    /// The posts on the thread of `post`, at stream sequence `seq`, that the persona has not been shown: those after
-    /// the last one shown, or since the thread started, up to `post`. Its own posts are left out.
-    pub async fn context(&self, post: &ChannelPost, seq: u64) -> Result<Context> {
+    /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with `earlier`, also those before
+    /// it that the persona has not been shown: after the last one shown, or since the thread started, without its own.
+    /// The read ends at the last post stored as it starts.
+    pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: bool) -> Result<Context> {
         let mut collect = Collect::new(&self.persona, &post.thread_id, seq);
-        if post.starts_thread() {
-            return Ok(collect.done());
-        }
-        let start = match self.last_seen(&post.thread_id).await? {
-            Some(seen) if seen + 1 >= seq => return Ok(collect.done()),
-            Some(seen) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seen + 1 },
-            None => match thread_start(&post.thread_id) {
+        let after = consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 };
+        let seen = if earlier && !post.starts_thread() { Some(self.last_seen(&post.thread_id).await?) } else { None };
+        let start = match seen {
+            None => after,
+            Some(Some(seen)) if seen + 1 >= seq => after,
+            Some(Some(seen)) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seen + 1 },
+            Some(None) => match thread_start(&post.thread_id) {
                 Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
                 None => consumer::DeliverPolicy::All,
             },
@@ -362,11 +374,7 @@ async fn read(consumer: &consumer::PullConsumer, collect: &mut Collect<'_>) -> R
                 .map_err(|e| e.to_string())
                 .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
             match post {
-                Ok(post) => {
-                    if !collect.push(seq, post) {
-                        return Ok(());
-                    }
-                }
+                Ok(post) => collect.push(seq, post),
                 Err(error) => tracing::debug!(subject = %msg.subject, error, "dropping a channel post"),
             }
         }
@@ -449,7 +457,7 @@ mod tests {
             handling: None,
             harnesses: None,
         };
-        let context = Context { posts: vec![post("dev-b", "earlier")], skipped: 0 };
+        let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &context, 7);
         let expected = format!(
             "[ants] Channel #ops, thread {}.\n\n\
@@ -482,25 +490,45 @@ mod tests {
             ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
         };
         let mut collect = Collect::new(&a, &root.thread_id, 1000);
-        assert!(collect.push(1, root.clone()));
-        assert!(collect.push(2, post("human", "another thread")));
-        assert!(collect.push(3, on("dev-a", "its own")));
+        collect.push(1, root.clone());
+        collect.push(2, post("human", "another thread"));
+        collect.push(3, on("dev-a", "its own"));
         for i in 0..MAX_CONTEXT {
-            assert!(collect.push(4 + i as u64, on("dev-b", &format!("note {i}"))));
+            collect.push(4 + i as u64, on("dev-b", &format!("note {i}")));
         }
-        assert!(!collect.push(1000, on("human", "@dev-a the post itself")));
+        collect.push(1000, on("human", "@dev-a the post itself"));
         let context = collect.done();
         assert_eq!(context.skipped, 1, "the root is the oldest, left out");
         assert_eq!(context.posts.len(), MAX_CONTEXT);
         assert_eq!(context.posts[0].text, "note 0");
         assert!(context.posts.iter().all(|p| p.thread_id == root.thread_id && p.from.as_str() == "dev-b"));
+        assert!(context.later.is_empty());
+    }
+
+    #[test]
+    fn the_later_posts_are_the_thread_s_since_the_post_or_the_human_s_last() {
+        let (a, root) = (p("dev-a"), post("human", "deploy"));
+        let on = |from: &str, text: &str| {
+            ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
+        };
+        let mut collect = Collect::new(&a, &root.thread_id, 5);
+        collect.push(5, root.clone());
+        collect.push(6, on("dev-b", "first"));
+        collect.push(7, post("human", "another thread"));
+        collect.push(8, on("dev-a", "its own counts too"));
+        let later = |c: &Collect| c.later.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+        assert_eq!(later(&collect), ["first", "its own counts too"]);
+        collect.push(9, on("human", "go on"));
+        collect.push(10, on("dev-c", "then"));
+        assert_eq!(later(&collect), ["go on", "then"], "the human's post resets the budget");
+        assert!(collect.done().posts.is_empty());
     }
 
     #[test]
     fn the_prompt_shows_the_thread_then_the_post_and_where_the_reply_goes() {
         let root = post("human", "deploy friday?");
         let ask = ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p("dev-b"), "@dev-a agree?");
-        let context = Context { posts: vec![root.clone()], skipped: 2 };
+        let context = Context { posts: vec![root.clone()], skipped: 2, ..Context::default() };
         let text = prompt(&p("dev-a"), &ask, &context, 6);
         let expected = format!(
             "[ants] Channel #ops, thread {}.\n\n\

@@ -971,8 +971,9 @@ impl ChannelEntry {
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
 /// post on an existing thread.
 ///
-/// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn
-/// ([`ChannelPost::spend`]), and at zero the thread goes to the human; the human's posts carry a fresh budget.
+/// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn of what the
+/// thread has left ([`ChannelPost::turns_left`]), and at zero the thread goes to the human; the human's posts give the
+/// thread a fresh budget. Each post carries the turns the thread has left after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelPost {
     pub id: Uuid,
@@ -1017,19 +1018,29 @@ impl ChannelPost {
         }
     }
 
-    /// The post as an agent's, with what is left of `budget` (the turns of the post the agent is answering): one turn
-    /// less, whoever it wakes, which fails when none are left.
+    /// The post as an agent's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
+    /// wakes, which fails when none are left.
     pub fn spend(self, budget: u32) -> Result<Self, Error> {
         let turn_budget = budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?;
         Ok(Self { turn_budget, ..self })
     }
 
-    /// A reply on the same channel and thread. The human's has a fresh budget; an agent's spends from this post's as
-    /// [`ChannelPost::spend`] does.
-    pub fn reply(&self, from: PersonaId, text: impl Into<String>) -> Result<Self, Error> {
+    /// The turns the thread has left for an answer to this post, given the posts stored on the thread `later` than it,
+    /// in order: a post of the human gives the thread a fresh budget, and any other leaves the lower of what was left
+    /// and what it carries. So the agents answering one post spend from the thread's turns together, not each from
+    /// the post's.
+    pub fn turns_left(&self, later: &[ChannelPost]) -> u32 {
+        later.iter().filter(|post| post.thread_id == self.thread_id).fold(self.turn_budget, |left, post| {
+            if post.from.is_human() { post.turn_budget } else { left.min(post.turn_budget) }
+        })
+    }
+
+    /// A reply on the same channel and thread, after the posts stored on it `later` than this one. The human's has a
+    /// fresh budget; an agent's spends one of the [`ChannelPost::turns_left`].
+    pub fn reply(&self, from: PersonaId, text: impl Into<String>, later: &[ChannelPost]) -> Result<Self, Error> {
         let mut reply = Self::on_thread(self.channel.clone(), self.thread_id.clone(), from, text);
         reply.in_reply_to = Some(self.id);
-        if reply.from.is_human() { Ok(reply) } else { reply.spend(self.turn_budget) }
+        if reply.from.is_human() { Ok(reply) } else { reply.spend(self.turns_left(later)) }
     }
 
     /// Whether the post is a top-level one, which started its thread.
@@ -1644,22 +1655,45 @@ mod tests {
     fn every_agent_channel_post_spends_a_turn() {
         let c: ChannelId = "ops".parse().unwrap();
         let ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a deploy?");
-        let answer = ask.reply(p("dev-a"), "done, @human").unwrap();
+        let answer = ask.reply(p("dev-a"), "done, @human", &[]).unwrap();
         assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
         assert_eq!(answer.in_reply_to, Some(ask.id));
         assert_eq!(answer.turn_budget, DEFAULT_TURN_BUDGET - 1, "waking nobody spends a turn too");
-        let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait").unwrap();
+        let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait", &[]).unwrap();
         assert_eq!(handoff.turn_budget, DEFAULT_TURN_BUDGET - 1);
         handoff.turn_budget = 1;
-        let back = handoff.reply(p("dev-b"), "@dev-a fine").unwrap();
+        let back = handoff.reply(p("dev-b"), "@dev-a fine", &[]).unwrap();
         assert_eq!(back.turn_budget, 0);
-        assert_eq!(back.reply(p("dev-a"), "@dev-b again"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
-        assert_eq!(back.reply(p("dev-a"), "@human over to you"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
-        let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on").unwrap();
+        let spent = Err(Error::BudgetExhausted(ask.thread_id.clone()));
+        assert_eq!(back.reply(p("dev-a"), "@dev-b again", &[]), spent);
+        assert_eq!(back.reply(p("dev-a"), "@human over to you", &[]), spent);
+        let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on", &[]).unwrap();
         assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
+        assert_eq!(handoff.reply(p("dev-c"), "late", &[back.clone(), human]).unwrap().turn_budget, 7, "reset since");
+        assert_eq!(handoff.reply(p("dev-c"), "late", &[back]), spent, "an older post spends the thread's turns");
         let own = ChannelPost::new(c, p("dev-a"), "@dev-b status?").spend(3).unwrap();
         assert!(own.starts_thread());
         assert_eq!(own.turn_budget, 2);
+    }
+
+    #[test]
+    fn agents_woken_by_one_post_spend_the_thread_s_turns_together() {
+        let c: ChannelId = "ops".parse().unwrap();
+        let mut ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a @dev-b @dev-c review");
+        ask.turn_budget = 4;
+        let a = ask.reply(p("dev-a"), "@dev-b @dev-c fine", &[]).unwrap();
+        let b = ask.reply(p("dev-b"), "@dev-a @dev-c fine", std::slice::from_ref(&a)).unwrap();
+        let other = ChannelPost::on_thread(c, "other".parse().unwrap(), p("dev-z"), "elsewhere");
+        let c_ = ask.reply(p("dev-c"), "@dev-a @dev-b fine", &[a.clone(), other, b.clone()]).unwrap();
+        assert_eq!([a.turn_budget, b.turn_budget, c_.turn_budget], [3, 2, 1], "one budget, run down across branches");
+        let a2 = a.reply(p("dev-a"), "@dev-b again", &[b.clone(), c_.clone()]).unwrap();
+        assert_eq!(a2.turn_budget, 0);
+        // Every post of the thread is spent out: no branch gets another turn.
+        let thread = [ask, a, b, c_, a2];
+        for (i, post) in thread.iter().enumerate() {
+            let spent = Err(Error::BudgetExhausted(post.thread_id.clone()));
+            assert_eq!(post.reply(p("dev-b"), "more", &thread[i + 1..]), spent, "after {}", post.text);
+        }
     }
 
     #[test]

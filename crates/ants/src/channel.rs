@@ -437,10 +437,10 @@ mod tests {
     fn posts_group_by_thread_with_replies_indented() {
         let a = at(ChannelPost::new(ops(), PersonaId::human(), "build is red @dev-a"), 0);
         let b = at(ChannelPost::new(ops(), p("dev-b"), "deploying"), 1);
-        let a1 = at(a.reply(p("dev-a"), "on it\nsee the log").unwrap(), 2);
+        let a1 = at(a.reply(p("dev-a"), "on it\nsee the log", &[]).unwrap(), 2);
         // A reply stored before the post that started its thread, as one kept in an outbox can be.
         let c = at(ChannelPost::new(ops(), PersonaId::human(), "late start"), 4);
-        let c1 = at(c.reply(p("dev-a"), "early reply").unwrap(), 3);
+        let c1 = at(c.reply(p("dev-a"), "early reply", &[]).unwrap(), 3);
         let orphan = at(ChannelPost::on_thread(ops(), "t1".parse().unwrap(), p("dev-b"), "lost root"), 5);
         let grouped = threads(vec![a.clone(), b.clone(), a1.clone(), c1.clone(), c.clone(), orphan.clone()]);
         let ids: Vec<&ThreadId> = grouped.iter().map(|t| &t.id).collect();
@@ -498,7 +498,7 @@ mod tests {
         let top = human_post(ops(), None, "build is red @dev-a".to_owned());
         bus::store(&js, top.subject(), &top, &top.id.to_string()).await.unwrap();
         let (_, a_js) = server.connect(&dev_a).await;
-        let answer = top.reply(dev_a.clone(), "on it").unwrap();
+        let answer = top.reply(dev_a.clone(), "on it", &[]).unwrap();
         bus::publish_json(&a_js, answer.subject(), &answer, None).await.unwrap();
         let mut seen = Vec::new();
         let shown = follow_thread(&mut sub, &top, Duration::from_secs(2), std::future::pending(), |p| {
