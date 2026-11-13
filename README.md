@@ -96,7 +96,7 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 
 | Command | Does |
 |---|---|
-| `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner; without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
+| `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner (with a persona's credentials, a thread without owner); without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the CLI's human. |
@@ -254,9 +254,10 @@ What needs a human goes to the thread's owner (the envelope's `owner`, the human
 daemon's default human, the config file key `human` (default `human`; top-level or per persona): a spent turn budget, a
 reached limit or cap, a dead letter's notice, a plan room out of turns. The daemon tells humans by the KV bucket
 `ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
-looks again every 30 s, knowing only `human` and the default human meanwhile. A reply to any human spends no turn, a
-message from any human renews the thread's allowance, and `send_message` to a human spends no turn either; `ask_agent`
-refuses a human.
+looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
+ignores an `owner` that is no human, as a persona may name any, and neither escalates to it nor passes it on. A reply
+to any human spends no turn, a message from any human renews the thread's allowance, and `send_message` to a human
+spends no turn either; `ask_agent` refuses a human.
 
 ## Limits and caps
 
@@ -784,7 +785,7 @@ issues its own credentials with `ants auth user NAME --human`. A human joins `an
 credentials are issued: until then daemons take its messages for an agent's. The CLI acts as the human its credentials
 name (see CLI); daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
-without one stay valid. Credentials issued before `ants_humans` need `ants auth user` again.
+without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth

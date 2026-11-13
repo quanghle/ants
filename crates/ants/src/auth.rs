@@ -804,7 +804,7 @@ pub(crate) mod tests {
                 stream_seq: seq,
                 deliveries: 2,
             };
-            assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory).await.unwrap(), None);
+            assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &Default::default()).await.unwrap(), None);
             tokio::time::sleep(Duration::from_secs(1)).await;
             assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
             let letters = dead::list(&stream).await.unwrap();

@@ -404,9 +404,10 @@ impl Inbox<'_> {
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, and a reply to an
-    /// `ask_agent` call is handed over.
+    /// `ask_agent` call is handed over. An owner that is no human is dropped ([`Registry::human_owner`]), so neither
+    /// the escalations nor the messages that follow on from this one name it.
     async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
-        let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
+        let mut envelope: Envelope = match serde_json::from_slice(&msg.payload) {
             Ok(e) => e,
             Err(e) => {
                 self.bury_unanswerable(msg, &format!("not an envelope: {e}")).await;
@@ -418,6 +419,7 @@ impl Inbox<'_> {
             self.bury_unanswerable(msg, &format!("sender mismatch: {e}")).await;
             return None;
         }
+        envelope.owner = self.humans.human_owner(envelope.owner.as_ref());
         if self.claim(&envelope, msg).await {
             return None;
         }
@@ -427,7 +429,7 @@ impl Inbox<'_> {
     /// The channel post `msg` to answer, if it wakes the persona ([`channel::wake`]). Any other is acked at once: the
     /// persona's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
     /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. The post kept names
-    /// its thread's owner ([`ChannelPost::thread_owner`]).
+    /// its thread's owner ([`ChannelPost::thread_owner`]), a human.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -559,10 +561,10 @@ impl Inbox<'_> {
     /// Store `msg` as a dead letter, telling the thread's owner, else the default human, and terminate it. A channel
     /// post names its thread's owner ([`Inbox::admit_post`]), and its envelope does too.
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<u64> {
-        let human = self.humans.default_human();
+        let humans = self.humans;
         match &incoming.post {
-            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error, human).await,
-            None => dead::bury_to(self.js, self.persona, msg, Some(&incoming.envelope), error, human).await,
+            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error, humans).await,
+            None => dead::bury_to(self.js, self.persona, msg, Some(&incoming.envelope), error, humans).await,
         }
     }
 
@@ -1471,6 +1473,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owner_that_is_no_human_is_dropped_and_the_default_human_gets_the_thread() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        // dev-b names itself the owner, so an escalation would reach it with a fresh budget, again and again.
+        let t1 = ThreadId::generate();
+        let ask = Envelope::on_thread(t1.clone(), dev_b.clone(), bus.dev.clone(), "hi").with_owner(Some(dev_b.clone()));
+        let mut spent =
+            Envelope::on_thread(t1.clone(), dev_b.clone(), bus.dev.clone(), "again").with_owner(Some(dev_b.clone()));
+        spent.turn_budget = 0;
+        for envelope in [&ask, &spent] {
+            bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!((reply.in_reply_to, reply.owner), (Some(ask.id), None), "the owner is not passed on");
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!((&escalation.to, &escalation.owner), (&PersonaId::human(), &None));
+            assert!(escalation.text.starts_with("Turn budget spent; needs a decision."), "{}", escalation.text);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        assert!(timeout(Duration::from_millis(200), to_dev_b.next()).await.is_err(), "no escalation went to dev-b");
+        assert_eq!(log.lock().unwrap().answered, ["hi"]);
+    }
+
+    #[tokio::test]
     async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
         let Some((bus, mut replies)) = Bus::start().await else { return };
         let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
@@ -1860,7 +1895,7 @@ mod tests {
             assert_eq!((&answer.thread_id, answer.in_reply_to), (&root.thread_id, Some(root.id)));
             assert_eq!((answer.owner.as_ref(), answer.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET - 1));
             let mut spent =
-                answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &Humans::default()).unwrap();
+                answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &bus.humans.humans()).unwrap();
             spent.turn_budget = 0;
             assert_eq!(spent.owner.as_ref(), Some(&alice), "agents' posts keep the owner");
             let seq = bus.post(&spent).await;

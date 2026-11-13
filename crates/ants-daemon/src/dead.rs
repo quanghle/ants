@@ -21,6 +21,7 @@ use futures::StreamExt as _;
 use serde::Deserialize;
 
 use crate::bus;
+use crate::humans::Registry;
 
 /// Where a delivery stands among the `attempts` a message gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +45,7 @@ impl Attempt {
     }
 }
 
-/// [`bury_to`], with `human` as the default human.
+/// [`bury_to`], with `human` as the only human.
 pub async fn bury(
     js: &jetstream::Context,
     persona: &PersonaId,
@@ -52,24 +53,24 @@ pub async fn bury(
     envelope: Option<&Envelope>,
     error: &str,
 ) -> Result<u64> {
-    bury_to(js, persona, msg, envelope, error, &PersonaId::human()).await
+    bury_to(js, persona, msg, envelope, error, &Registry::default()).await
 }
 
-/// Store `msg` as a dead letter of `persona`, tell the thread's owner (else `human`, the default human) when it was an
-/// envelope, then terminate it. Returns the stream sequence of the dead letter. `envelope` is `None` for a payload that
-/// is not an envelope.
+/// Store `msg` as a dead letter of `persona`, tell the thread's owner (else the default human of `humans`) when it was
+/// an envelope, then terminate it. Returns the stream sequence of the dead letter. `envelope` is `None` for a payload
+/// that is not an envelope.
 pub async fn bury_to(
     js: &jetstream::Context,
     persona: &PersonaId,
     msg: &jetstream::Message,
     envelope: Option<&Envelope>,
     error: &str,
-    human: &PersonaId,
+    humans: &Registry,
 ) -> Result<u64> {
     let info = msg.info().map_err(|e| anyhow!(e))?;
     let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
     let dead = letter_of(persona, seq, deliveries, error, &msg.payload, envelope);
-    let (dead_seq, _) = store(js, &dead, None, human).await?;
+    let (dead_seq, _) = store(js, &dead, None, humans).await?;
     // Only now: a crash before this redelivers the message, and the message ids in `store` keep the copies single.
     msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
     tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered");
@@ -77,20 +78,20 @@ pub async fn bury_to(
 }
 
 /// Store channel post `msg` (`post`, checked against its subject) as a dead letter of `persona`, keeping its payload,
-/// tell the owner of the post's thread, else `human`, the default human, on that thread, then terminate it. Returns the stream sequence of the dead
-/// letter.
+/// tell the owner of the post's thread, else the default human of `humans`, on that thread, then terminate it. Returns
+/// the stream sequence of the dead letter.
 pub async fn bury_post(
     js: &jetstream::Context,
     persona: &PersonaId,
     msg: &jetstream::Message,
     post: &ChannelPost,
     error: &str,
-    human: &PersonaId,
+    humans: &Registry,
 ) -> Result<u64> {
     let info = msg.info().map_err(|e| anyhow!(e))?;
     let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
     let dead = DeadLetter::of_payload(persona.clone(), seq, deliveries, error, &msg.payload);
-    let (dead_seq, _) = store(js, &dead, Some(post), human).await?;
+    let (dead_seq, _) = store(js, &dead, Some(post), humans).await?;
     msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
     tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered a channel post");
     Ok(dead_seq)
@@ -110,14 +111,14 @@ fn letter_of(
     }
 }
 
-/// Store `dead`, then tell the thread's owner, else `human`, the default human, when it holds an envelope or is of
+/// Store `dead`, then tell the thread's owner, else the default human of `humans`, when it holds an envelope or is of
 /// channel post `post`. Returns the stream sequence of the dead letter, and whether it was stored already: the message
 /// ids make a second store within the duplicate window store nothing.
 async fn store(
     js: &jetstream::Context,
     dead: &DeadLetter,
     post: Option<&ChannelPost>,
-    human: &PersonaId,
+    humans: &Registry,
 ) -> Result<(u64, bool)> {
     let message = PublishMessage::build().payload(serde_json::to_vec(dead)?.into()).message_id(dead.msg_id());
     let ack = js
@@ -127,11 +128,11 @@ async fn store(
         .await
         .context("waiting for JetStream to store the message")?;
     if let Some(e) = &dead.envelope {
-        let notice = notice(&dead.persona, e, dead, ack.sequence, human);
+        let notice = notice(&dead.persona, e, dead, ack.sequence, humans);
         let id = format!("dead-notice-{}", dead.stream_seq);
         bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
     } else if let Some(post) = post {
-        let notice = post_notice(&dead.persona, post, dead, human);
+        let notice = post_notice(&dead.persona, post, dead, humans);
         let id = format!("dead-notice-{}", dead.stream_seq);
         bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
     }
@@ -187,6 +188,8 @@ pub async fn watch(
         .await
         .context("subscribing to max-deliveries advisories")?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+    let humans = Registry::default();
+    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
             Ok(advisory) => advisory,
@@ -195,7 +198,7 @@ pub async fn watch(
                 continue;
             }
         };
-        match bury_undelivered(js, &stream, &advisory).await {
+        match bury_undelivered(js, &stream, &advisory, &humans).await {
             Ok(Some((seq, dead))) => buried(seq, &dead),
             Ok(None) => {}
             Err(e) => tracing::warn!(stream_seq = advisory.stream_seq, error = format!("{e:#}"), "dead-lettering"),
@@ -205,11 +208,13 @@ pub async fn watch(
 }
 
 /// Dead-letter the message `advisory` names, unless it is not a persona's inbox message or channel post, is gone, or
-/// already is a dead letter. Returns the new dead letter and its stream sequence.
+/// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
+/// else the default human of `humans`.
 pub async fn bury_undelivered(
     js: &jetstream::Context,
     stream: &stream::Stream,
     advisory: &MaxDeliveries,
+    humans: &Registry,
 ) -> Result<Option<(u64, DeadLetter)>> {
     let Some((persona, consumer)) = advisory.persona() else {
         tracing::debug!(consumer = advisory.consumer, "ignoring an advisory of a consumer that is no persona's inbox");
@@ -253,7 +258,7 @@ pub async fn bury_undelivered(
             (DeadLetter::of_payload(persona.clone(), seq, advisory.deliveries, &error, &msg.payload), post)
         }
     };
-    let (dead_seq, duplicate) = store(js, &dead, post.as_ref(), &PersonaId::human()).await?;
+    let (dead_seq, duplicate) = store(js, &dead, post.as_ref(), humans).await?;
     if duplicate {
         return Ok(None);
     }
@@ -278,34 +283,38 @@ async fn find(stream: &stream::Stream, persona: &PersonaId, seq: u64) -> Result<
     }
 }
 
-/// The message on the thread that tells its owner, else `human`, the default human, that a message died, so
-/// `ants ask --wait` returns too.
-fn notice(persona: &PersonaId, envelope: &Envelope, dead: &DeadLetter, dead_seq: u64, human: &PersonaId) -> Envelope {
-    let mut notice = envelope.follow_up(
+/// The message on the thread that tells its owner, else the default human of `humans`, that a message died, so
+/// `ants ask --wait` returns too. An owner that is no human is ignored ([`Registry::human_owner`]).
+fn notice(persona: &PersonaId, envelope: &Envelope, dead: &DeadLetter, dead_seq: u64, humans: &Registry) -> Envelope {
+    let owner = humans.human_owner(envelope.owner.as_ref());
+    let mut notice = Envelope::on_thread(
+        envelope.thread_id.clone(),
         persona.clone(),
-        envelope.owner.clone().unwrap_or_else(|| human.clone()),
+        owner.clone().unwrap_or_else(|| humans.default_human().clone()),
         format!(
             "Gave up on the message from {} after {} deliveries: {}\n`ants dead replay {dead_seq}` sends it again.",
             envelope.from, dead.deliveries, dead.error
         ),
-    );
+    )
+    .with_owner(owner);
     notice.in_reply_to = Some(envelope.id);
     notice
 }
 
-/// The message on a channel post's thread that tells the thread's owner, else `human`, the default human, the persona
-/// gave up on the post.
-fn post_notice(persona: &PersonaId, post: &ChannelPost, dead: &DeadLetter, human: &PersonaId) -> Envelope {
+/// The message on a channel post's thread that tells the thread's owner, else the default human of `humans`, the
+/// persona gave up on the post.
+fn post_notice(persona: &PersonaId, post: &ChannelPost, dead: &DeadLetter, humans: &Registry) -> Envelope {
+    let owner = humans.human_owner(post.owner.as_ref());
     Envelope::on_thread(
         post.thread_id.clone(),
         persona.clone(),
-        post.owner.clone().unwrap_or_else(|| human.clone()),
+        owner.clone().unwrap_or_else(|| humans.default_human().clone()),
         format!(
             "Gave up on the post from {} in #{} after {} deliveries: {}\nPosting on the thread again retries it.",
             post.from, post.channel, dead.deliveries, dead.error
         ),
     )
-    .with_owner(post.owner.clone())
+    .with_owner(owner)
 }
 
 /// Every dead letter in the stream, oldest first, with its stream sequence. Needs the human's credentials.
@@ -406,27 +415,34 @@ mod tests {
     fn the_notice_goes_to_the_owner_else_the_default_human_on_the_thread() {
         let persona: PersonaId = "dev-a".parse().unwrap();
         let alice: PersonaId = "alice".parse().unwrap();
+        let humans = Registry::with(alice.clone(), &["bob"]);
         let ask = Envelope::new("dev-b".parse().unwrap(), persona.clone(), "build it");
         let dead = DeadLetter::of_envelope(persona.clone(), 3, 5, "harness crashed", ask.clone());
-        let told = notice(&persona, &ask, &dead, 9, &alice);
+        let told = notice(&persona, &ask, &dead, 9, &humans);
         assert_eq!((&told.from, &told.to), (&persona, &alice));
         assert_eq!((told.thread_id, told.in_reply_to), (ask.thread_id.clone(), Some(ask.id)));
         assert!(told.text.contains("from dev-b after 5 deliveries: harness crashed"), "{}", told.text);
         assert!(told.text.contains("ants dead replay 9"), "{}", told.text);
-        let owned = ask.with_owner(Some("bob".parse().unwrap()));
-        let told = notice(&persona, &owned, &dead, 9, &alice);
+        let owned = ask.clone().with_owner(Some("bob".parse().unwrap()));
+        let told = notice(&persona, &owned, &dead, 9, &humans);
         assert_eq!((told.to.as_str(), told.owner), ("bob", owned.owner));
+        let by_persona = ask.with_owner(Some("dev-c".parse().unwrap()));
+        let told = notice(&persona, &by_persona, &dead, 9, &humans);
+        assert_eq!((&told.to, told.owner), (&alice, None), "a persona owns no thread");
     }
 
     #[test]
     fn the_notice_of_a_channel_post_goes_to_the_thread_s_owner_else_the_default_human() {
         let (persona, human) = ("dev-a".parse::<PersonaId>().unwrap(), PersonaId::human());
+        let humans = Registry::with(human.clone(), &["alice"]);
         let post = ChannelPost::new("ops".parse().unwrap(), "dev-b".parse().unwrap(), "@dev-a check");
         let dead = DeadLetter::of_payload(persona.clone(), 3, 5, "harness crashed", b"{}");
-        let told = post_notice(&persona, &post, &dead, &human);
+        let told = post_notice(&persona, &post, &dead, &humans);
         assert_eq!((&told.to, &told.thread_id, &told.owner), (&human, &post.thread_id, &None));
-        let owned = post.with_owner(Some("alice".parse().unwrap()));
-        let told = post_notice(&persona, &owned, &dead, &human);
+        let owned = post.clone().with_owner(Some("alice".parse().unwrap()));
+        let told = post_notice(&persona, &owned, &dead, &humans);
         assert_eq!((told.to.as_str(), told.owner), ("alice", owned.owner));
+        let by_persona = post.with_owner(Some("dev-c".parse().unwrap()));
+        assert_eq!(post_notice(&persona, &by_persona, &dead, &humans).to, human, "a persona owns no thread");
     }
 }

@@ -43,9 +43,22 @@ impl Registry {
         &self.default
     }
 
-    /// The human who gets the escalations of `envelope`'s thread: its owner, else the default human.
+    /// `owner`, the owner a message names for its thread, when it is a human. Any persona can name any owner, and a
+    /// persona's daemon answers what goes to the owner with a fresh turn budget: a thread a persona owned would never
+    /// run out of turns. So an owner that is no human is no owner.
+    pub fn human_owner(&self, owner: Option<&PersonaId>) -> Option<PersonaId> {
+        owner.filter(|owner| self.is_human(owner)).cloned()
+    }
+
+    /// The human who gets what is meant for the owner `owner` names: it when a human ([`Registry::human_owner`]),
+    /// else the default human.
+    pub fn owner_or_default(&self, owner: Option<&PersonaId>) -> PersonaId {
+        self.human_owner(owner).unwrap_or_else(|| self.default.clone())
+    }
+
+    /// The human who gets the escalations of `envelope`'s thread: its owner when a human, else the default human.
     pub fn owner_of(&self, envelope: &Envelope) -> PersonaId {
-        envelope.owner.clone().unwrap_or_else(|| self.default.clone())
+        self.owner_or_default(envelope.owner.as_ref())
     }
 
     pub fn role(&self, persona: &PersonaId) -> Role {
@@ -186,11 +199,14 @@ mod tests {
 
     #[test]
     fn escalations_go_to_the_owner_else_the_default_human() {
-        let registry = Registry::new(persona("alice"));
+        let registry = Registry::with(persona("alice"), &["carol"]);
         let envelope = Envelope::new(persona("bob"), persona("coder"), "hi");
         assert_eq!(registry.owner_of(&envelope), persona("alice"));
-        let owned = envelope.with_owner(Some(persona("carol")));
+        let owned = envelope.clone().with_owner(Some(persona("carol")));
         assert_eq!(registry.owner_of(&owned), persona("carol"));
+        let by_persona = envelope.with_owner(Some(persona("dev-a")));
+        assert_eq!(registry.owner_of(&by_persona), persona("alice"), "a persona owns no thread");
+        assert_eq!(registry.human_owner(by_persona.owner.as_ref()), None);
     }
 
     #[test]

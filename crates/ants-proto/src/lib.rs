@@ -1168,10 +1168,11 @@ impl ChannelPost {
         Self { owner, ..self }
     }
 
-    /// The owner of the post's thread: the one it carries, else its author when one of the `humans`, as for a post
-    /// stored before posts carried owners.
+    /// The owner of the post's thread, one of the `humans`: the one it carries, else its author, as for a post stored
+    /// before posts carried owners. An owner that is no human is ignored: only a human owns a thread.
     pub fn thread_owner(&self, humans: &Humans) -> Option<PersonaId> {
-        self.owner.clone().or_else(|| humans.contains(&self.from).then(|| self.from.clone()))
+        let human = |persona: &PersonaId| humans.contains(persona).then(|| persona.clone());
+        self.owner.as_ref().and_then(human).or_else(|| human(&self.from))
     }
 
     /// The post as an agent's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
@@ -1953,6 +1954,10 @@ mod tests {
         let agents = ChannelPost::new(c, p("dev-a"), "@dev-b status?");
         assert_eq!(agents.reply(p("dev-b"), "b", &[], &humans).unwrap().owner, None);
         assert_eq!(agents.reply(bob.clone(), "b", &[], &humans).unwrap().owner, Some(bob));
+        // Only a human owns a thread: an owner a persona names is ignored.
+        let named = ChannelPost::new("ops".parse().unwrap(), p("dev-a"), "@dev-b go").with_owner(Some(p("dev-a")));
+        assert_eq!(named.thread_owner(&humans), None);
+        assert_eq!(named.reply(p("dev-b"), "b", &[], &humans).unwrap().owner, None);
 
         let json = serde_json::to_string(&old).unwrap();
         assert!(!json.contains("owner"), "{json}");

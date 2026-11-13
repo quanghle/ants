@@ -338,7 +338,7 @@ impl Hub {
             .expect("sessions")
             .current
             .get(thread)
-            .map(|e| (e.turn_budget, e.owner.clone(), self.humans.owner_of(e)));
+            .map(|e| (e.turn_budget, self.humans.human_owner(e.owner.as_ref()), self.humans.owner_of(e)));
         let (budget, owner, human) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
@@ -1189,7 +1189,8 @@ mod tests {
     #[tokio::test]
     async fn plan_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
         let rooms = Arc::new(MemoryRooms::default());
-        let (mcp, mut sent) = start_with(&home("plan"), Vec::new(), rooms.clone(), Registry::default()).await;
+        let humans = Registry::with(PersonaId::human(), &["alice"]);
+        let (mcp, mut sent) = start_with(&home("plan"), Vec::new(), rooms.clone(), humans).await;
         let mut current = Envelope::new(persona("dev-b"), persona("dev-a"), "plan the release with me")
             .with_owner(Some(persona("alice")));
         current.turn_budget = 5;

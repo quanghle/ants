@@ -615,7 +615,7 @@ fn recipient(mut words: Vec<String>) -> Result<(PersonaId, String)> {
 }
 
 async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
-    let envelope = ask_envelope(&nats.me.id, thread, words)?;
+    let envelope = ask_envelope(&nats.me, thread, words)?;
     let (client, js) = nats.connect("ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
     let mut replies = client.subscribe(subject::inbox_of(&nats.me.id)).await?;
@@ -650,14 +650,15 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<S
     bail!("connection closed before a reply arrived")
 }
 
-/// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it.
-fn ask_envelope(me: &PersonaId, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
+/// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
+/// a persona starts has no owner: only a human gets a thread's escalations, with a fresh turn budget.
+fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
     let (to, text) = recipient(words)?;
     let envelope = match thread {
-        Some(thread) => Envelope::on_thread(thread, me.clone(), to, text),
-        None => Envelope::new(me.clone(), to, text),
+        Some(thread) => Envelope::on_thread(thread, me.id.clone(), to, text),
+        None => Envelope::new(me.id.clone(), to, text),
     };
-    Ok(envelope.with_owner(Some(me.clone())))
+    Ok(envelope.with_owner(me.role.is_human().then(|| me.id.clone())))
 }
 
 async fn post(
@@ -1057,11 +1058,19 @@ mod tests {
     #[test]
     fn an_ask_comes_from_and_belongs_to_the_cli_human() {
         let alice: PersonaId = "alice".parse().unwrap();
-        let ask = ask_envelope(&alice, None, words("@dev-b check the build")).unwrap();
+        let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+        let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
         assert_eq!((&ask.from, ask.to.as_str(), ask.owner.as_ref()), (&alice, "dev-b", Some(&alice)));
         let thread: ThreadId = "t1".parse().unwrap();
-        let follow_up = ask_envelope(&alice, Some(thread.clone()), words("and the docs")).unwrap();
+        let follow_up = ask_envelope(&me, Some(thread.clone()), words("and the docs")).unwrap();
         assert_eq!((follow_up.thread_id, follow_up.owner), (thread, Some(alice)));
+    }
+
+    #[test]
+    fn an_ask_with_a_persona_s_credentials_has_no_owner() {
+        let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Persona };
+        let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
+        assert_eq!((&ask.from, ask.owner), (&me.id, None));
     }
 
     #[test]
