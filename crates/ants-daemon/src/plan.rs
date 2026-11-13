@@ -14,6 +14,8 @@ use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 
+use crate::bus;
+
 /// How long a consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
 /// Messages asked for at once.
@@ -122,14 +124,17 @@ async fn collect(consumer: &consumer::PullConsumer, thread: &ThreadId) -> Result
 }
 
 /// Store `post` in its room once JetStream has it. With `last_seq`, only if the room's last message is still that one
-/// (0: the room is empty); false otherwise.
+/// (0: the room is empty); false otherwise. Without, the post may wait in the machine's outbox while the hub is out of
+/// reach ([`bus::store`]); a post that takes a turn cannot, as only the hub knows whose turn it is.
 pub async fn publish(js: &jetstream::Context, post: &PlanPost, last_seq: Option<u64>) -> Result<bool> {
-    let mut message = jetstream::message::PublishMessage::build().payload(serde_json::to_vec(post)?.into());
-    if let Some(seq) = last_seq {
-        message = message
-            .expected_last_subject_sequence(seq)
-            .header(EXPECTED_LAST_SUBJECT, subject::plan_room(&post.thread_id).as_str());
-    }
+    let Some(seq) = last_seq else {
+        bus::store(js, post.subject(), post, &post.id.to_string()).await?;
+        return Ok(true);
+    };
+    let message = jetstream::message::PublishMessage::build()
+        .payload(serde_json::to_vec(post)?.into())
+        .expected_last_subject_sequence(seq)
+        .header(EXPECTED_LAST_SUBJECT, subject::plan_room(&post.thread_id).as_str());
     let ack = js.send_publish(post.subject(), message).await.context("posting")?;
     match ack.await {
         Ok(_) => Ok(true),

@@ -123,6 +123,7 @@ ants leaf config macbook --uplink wss://hub.example.com/nats             # ~/.co
 $EDITOR ~/.ants/config.toml                                               # js_domain = "hub" and the personas, see Config file
 scripts/install-units.sh                                                  # installs and starts both services
 export ANTS_JS_DOMAIN=hub ANTS_CREDS=~/.config/ants/auth/human.creds      # for the CLI, in the shell profile
+ants leaf outbox macbook --persona dev-a --persona dev-b --persona human  # store and forward, see Leaf nodes
 ants roster
 ```
 
@@ -339,8 +340,8 @@ nats-server resolves `include` relative to the including file, even for a path t
 
 ### Leaf nodes
 
-A machine can run its own nats-server as a leaf node of the hub, and point every `ants` process at it. A leaf without
-JetStream reaches the hub's JetStream only through a JetStream domain: give the hub `jetstream { domain: hub }`, set
+A machine can run its own nats-server as a leaf node of the hub, and point every `ants` process at it. A client on a
+leaf reaches the hub's JetStream only through a JetStream domain: give the hub `jetstream { domain: hub }`, set
 `--js-domain hub` (or `ANTS_JS_DOMAIN=hub`, or `js_domain` in the config file) for every `ants` process, on the hub
 as well, and issue every credential with it:
 
@@ -357,8 +358,9 @@ machine runs the CLI. The leaf still checks each local client against its own cr
 bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
 
 `ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on
-`127.0.0.1:4222` only (the default server of every `ants` process), runs without JetStream, includes the team's
-`server.conf` and has one uplink to the hub:
+`127.0.0.1:4222` only (the default server of every `ants` process), runs JetStream in the machine's own domain for
+its outbox only (stored next to the configuration, in `jetstream/`), includes the team's `server.conf` and has one
+uplink to the hub:
 
 ```sh
 # on macbook, with server.conf and leaf-macbook.creds copied into ~/.config/ants/auth
@@ -379,7 +381,21 @@ the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the crede
 `server.conf` by a relative one, as nats-server requires. Switching the uplink changes nothing else on the machine:
 run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
 (`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
-While the uplink is down, publishing fails at once: the leaf does not store and forward.
+
+While the uplink is down, inbox messages, replies and plan posts wait in the machine's outbox, a stream on the leaf,
+and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
+the human sets it up once per machine, with the leaf connected:
+
+```sh
+ants leaf outbox macbook --persona dev-a --persona dev-b --persona human   # again when the personas change
+ants leaf outbox macbook --remove                                          # stop taking from the machine
+```
+
+The hub's stream takes from a machine's outbox only what the listed personas may send themselves, so issue the leaf's
+uplink credentials for the same personas. Whatever needs an answer from the hub at once still fails while the uplink
+is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters, approvals and replays. A
+message sent while the uplink is down lands after what reached the hub meanwhile; a reply whose request could not be
+acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
 ## Footprint
 

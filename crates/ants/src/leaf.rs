@@ -5,14 +5,16 @@
 //! websocket listener (`ws://`, `wss://`, also behind a reverse proxy). Switching the uplink rewrites this file and
 //! reloads the leaf; nothing else on the machine changes.
 //!
-//! The leaf runs without JetStream: clients reach the hub's through its JetStream domain. It trusts the team's
-//! operator through the same `server.conf` as the hub, so it checks local clients against their own credentials, and
-//! its uplink carries the credentials of `ants auth leaf`.
+//! Clients reach the hub's JetStream through the hub's domain. The leaf runs a JetStream of its own, in a domain named
+//! after the machine, only to keep the machine's outbox (`ants leaf outbox`) while the uplink is down; the hub sources
+//! it from there. It trusts the team's operator through the same `server.conf` as the hub, so it checks local clients
+//! against their own credentials, and its uplink carries the credentials of `ants auth leaf`.
 
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
+use ants_proto::{JsDomain, Machine};
 use anyhow::{Context as _, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
@@ -24,8 +26,10 @@ const LEAFNODE_PORT: u16 = 7422;
 
 /// A machine's leaf node.
 pub struct Leaf<'a> {
-    /// Machine name, the leaf's `server_name`.
-    pub machine: &'a str,
+    /// Machine name, the leaf's `server_name` and JetStream domain.
+    pub machine: &'a Machine,
+    /// The hub's JetStream domain, which the machine's must differ from.
+    pub hub_domain: Option<&'a JsDomain>,
     /// Hub URLs of the one remote, all of one scheme.
     pub uplinks: &'a [String],
     /// Uplink credentials from `ants auth leaf`.
@@ -52,11 +56,8 @@ pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
 /// The configuration of `leaf`, for a file in `dir`.
 fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     let dir = normalize(dir)?;
-    if leaf.machine.is_empty()
-        || leaf.machine.starts_with('.')
-        || !leaf.machine.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    {
-        bail!("invalid machine name {:?}: use letters, digits, '-', '_' and '.'", leaf.machine);
+    if leaf.hub_domain.is_some_and(|hub| hub.as_str() == leaf.machine.as_str()) {
+        bail!("machine {} would take the hub's JetStream domain; name it otherwise", leaf.machine);
     }
     let listen: SocketAddr = leaf
         .listen
@@ -119,13 +120,16 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
          listen: {listen}\n\
          # Notices a dead uplink in about a minute, and keeps proxies with idle timeouts from dropping it.\n\
          ping_interval: \"20s\"\n\
-         # Without JetStream: clients reach the hub's through its JetStream domain.\n\
          include {include}\n\
+         # Only for the outbox, which keeps what the hub could not take while the uplink was down; clients reach the\n\
+         # hub's JetStream through its domain.\n\
+         jetstream {{\n  domain: {name}\n  store_dir: {store}\n  max_memory_store: 64MB\n  max_file_store: 1GB\n}}\n\
          leafnodes {{\n  remotes: [\n    {{\n{remote}    }}\n  ]\n}}\n",
         machine = leaf.machine,
-        name = quote(leaf.machine),
+        name = quote(leaf.machine.as_str()),
         listen = quote(&listen.to_string()),
         include = quote(&include.to_string_lossy()),
+        store = quote(&dir.join("jetstream").to_string_lossy()),
     ))
 }
 
@@ -293,7 +297,7 @@ mod tests {
     use std::time::Duration;
 
     use ants_daemon::bus;
-    use ants_proto::{JsDomain, PersonaId};
+    use ants_proto::PersonaId;
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
 
@@ -326,17 +330,28 @@ mod tests {
         }
     }
 
+    static M1: std::sync::LazyLock<Machine> = std::sync::LazyLock::new(|| "m1".parse().unwrap());
+
     /// A team with leaf credentials for m1, in a scratch directory.
     fn team() -> (PathBuf, PathBuf) {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, "m1", &["dev-a".parse().unwrap()], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &["dev-a".parse().unwrap()], None, &creds).unwrap();
         (dir, creds)
     }
 
     fn leaf<'a>(uplinks: &'a [String], creds: &'a Path, server_conf: &'a Path) -> Leaf<'a> {
-        Leaf { machine: "m1", uplinks, creds, server_conf, ca_file: None, proxy: None, listen: DEFAULT_LISTEN }
+        Leaf {
+            machine: &M1,
+            hub_domain: None,
+            uplinks,
+            creds,
+            server_conf,
+            ca_file: None,
+            proxy: None,
+            listen: DEFAULT_LISTEN,
+        }
     }
 
     #[test]
@@ -353,7 +368,12 @@ mod tests {
         assert!(text.contains("listen: \"127.0.0.1:4222\"\n"), "{text}");
         assert!(text.contains("urls: [\"wss://hub.example.com:443/nats\"]"), "{text}");
         assert!(text.contains("tls {}\n") && text.contains("proxy { url: \"http://proxy:3128\" }"), "{text}");
-        assert!(!text.contains("jetstream"), "{text}");
+        let store = normalize(&dir).unwrap().join("jetstream");
+        let js = format!("jetstream {{\n  domain: \"m1\"\n  store_dir: {}\n", quote(&store.to_string_lossy()));
+        assert!(text.contains(&js), "{text}");
+        let hub: JsDomain = "m1".parse().unwrap();
+        let taken = Leaf { hub_domain: Some(&hub), ..leaf(&wss, &creds, &server_conf) };
+        assert!(err(taken).contains("hub's JetStream domain"));
 
         assert!(err(Leaf { listen: "0.0.0.0:4222", ..leaf(&wss, &creds, &server_conf) }).contains("loopback"));
         let mixed = [wss[0].clone(), tcp[0].clone()];
@@ -426,7 +446,7 @@ mod tests {
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, "m1", std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);
