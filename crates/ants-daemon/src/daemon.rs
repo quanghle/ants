@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ants_proto::{Envelope, Error as ProtoError, PersonaId, inbox_consumer, subject};
-use anyhow::{Context as _, Result};
-use async_nats::jetstream::{self, AckKind, consumer::pull};
+use ants_proto::{Envelope, Error as ProtoError, PersonaId, subject};
+use anyhow::Result;
+use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 
 use crate::bus;
@@ -22,6 +22,8 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 pub struct Config {
     pub persona: PersonaId,
     pub nats_url: String,
+    /// Credentials file of the persona, when the server requires them.
+    pub creds: Option<PathBuf>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
     pub harness: HarnessKind,
@@ -30,26 +32,11 @@ pub struct Config {
 
 /// Serve the persona's inbox until Ctrl-C. A message in hand is finished first.
 pub async fn run(config: Config) -> Result<()> {
-    let (client, js) = bus::connect(&config.nats_url, &format!("antsd-{}", config.persona)).await?;
+    let (client, js) =
+        bus::connect(&config.nats_url, config.creds.as_deref(), &config.persona, &format!("antsd-{}", config.persona))
+            .await?;
     let stream = bus::ensure_stream(&js).await?;
-    let name = inbox_consumer(&config.persona);
-    let consumer: jetstream::consumer::PullConsumer = stream
-        .get_or_create_consumer(
-            &name,
-            pull::Config {
-                durable_name: Some(name.clone()),
-                filter_subject: subject::inbox(&config.persona),
-                ack_policy: jetstream::consumer::AckPolicy::Explicit,
-                ack_wait: ACK_WAIT,
-                max_deliver: MAX_DELIVER,
-                // One message at a time keeps one harness alive at most; per-thread concurrency comes later.
-                max_ack_pending: 1,
-                ..Default::default()
-            },
-        )
-        .await
-        .with_context(|| format!("creating consumer {name}"))?;
-    let mut messages = consumer.messages().await?;
+    let mut messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER).await?;
     tracing::info!(persona = %config.persona, harness = %config.harness, workdir = %config.workdir.display(), "serving inbox");
 
     let shutdown = tokio::signal::ctrl_c();

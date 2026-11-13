@@ -26,6 +26,21 @@ ants watch                                          # live traffic
 
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`.
 
+## Credentials
+
+On a shared hub, each persona and the human connect with their own NKey/JWT credentials. Each persona may publish
+only to the subjects its role allows (see `Permissions::for_persona` in `ants-proto`).
+
+```sh
+ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
+ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI
+ants auth user dev-a                   # copy to the machine that runs dev-a
+```
+
+Add `include "/path/to/server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
+with the human's credentials to create the stream, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+`ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
+
 ## Layout
 
 | Crate | Role |

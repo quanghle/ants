@@ -1,6 +1,8 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the persona daemon.
 
-use std::path::PathBuf;
+mod auth;
+
+use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, PermissionPolicy, bus, harness};
 use ants_proto::{Envelope, PersonaId, ThreadId, subject};
@@ -14,6 +16,10 @@ struct Cli {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats: String,
+
+    /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-persona permissions.
+    #[arg(long, global = true, env = "ANTS_CREDS")]
+    creds: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -57,6 +63,29 @@ enum Command {
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
+    /// Issue NATS credentials: one operator and account for the team, one user per persona.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Create the team operator and account, and the server.conf that makes nats-server trust them.
+    Init {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Issue credentials for a persona, allowing only the subjects of its role. `human` is the CLI user.
+    User {
+        persona: PersonaId,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the credentials (default: <dir>/<persona>.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -83,10 +112,10 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Ask { thread, wait, words } => ask(&cli.nats, thread, wait, words).await,
-        Command::Watch { subject } => watch(&cli.nats, subject).await,
+        Command::Ask { thread, wait, words } => ask(&cli.nats, cli.creds.as_deref(), thread, wait, words).await,
+        Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), subject).await,
         Command::Init => {
-            let (_, js) = bus::connect(&cli.nats, "ants-cli").await?;
+            let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;
             bus::ensure_stream(&js).await?;
             println!("stream {} ready", ants_proto::STREAM);
             Ok(())
@@ -99,6 +128,7 @@ async fn main() -> Result<()> {
             ants_daemon::run(ants_daemon::Config {
                 persona,
                 nats_url: cli.nats,
+                creds: cli.creds,
                 workdir: workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?,
                 harness,
                 permissions: if allow_tools { PermissionPolicy::AllowOnce } else { PermissionPolicy::Reject },
@@ -116,6 +146,30 @@ async fn main() -> Result<()> {
             println!("{reply}");
             Ok(())
         }
+        Command::Auth(AuthCommand::Init { dir }) => {
+            let dir = team_dir(dir)?;
+            auth::init(&dir)?;
+            println!(
+                "team keys in {0}\ninclude {0}/{1} from the nats-server configuration",
+                dir.display(),
+                auth::SERVER_CONF
+            );
+            Ok(())
+        }
+        Command::Auth(AuthCommand::User { persona, dir, out }) => {
+            let dir = team_dir(dir)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("{persona}.creds")));
+            auth::issue(&dir, &persona, &out)?;
+            println!("{}", out.display());
+            Ok(())
+        }
+    }
+}
+
+fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    match dir {
+        Some(dir) => Ok(dir),
+        None => auth::default_dir(),
     }
 }
 
@@ -135,13 +189,13 @@ fn recipient(mut words: Vec<String>) -> Result<(PersonaId, String)> {
     Ok((to, words.join(" ")))
 }
 
-async fn ask(url: &str, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
+async fn ask(url: &str, creds: Option<&Path>, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
     let (to, text) = recipient(words)?;
     let envelope = match thread {
         Some(thread) => Envelope::on_thread(thread, PersonaId::human(), to, text),
         None => Envelope::new(PersonaId::human(), to, text),
     };
-    let (client, js) = bus::connect(url, "ants-cli").await?;
+    let (client, js) = bus::connect(url, creds, &PersonaId::human(), "ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
     let mut replies = client.subscribe(subject::inbox(&PersonaId::human())).await?;
     bus::publish(&js, &envelope).await?;
@@ -159,8 +213,8 @@ async fn ask(url: &str, thread: Option<ThreadId>, wait: bool, words: Vec<String>
     bail!("connection closed before a reply arrived")
 }
 
-async fn watch(url: &str, filter: String) -> Result<()> {
-    let (client, _) = bus::connect(url, "ants-watch").await?;
+async fn watch(url: &str, creds: Option<&Path>, filter: String) -> Result<()> {
+    let (client, _) = bus::connect(url, creds, &PersonaId::human(), "ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
     while let Some(msg) = sub.next().await {
         match serde_json::from_slice::<Envelope>(&msg.payload) {
