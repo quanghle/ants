@@ -6,9 +6,9 @@
 //! persona of a request is the one its subject names, as credentials pin it there; a request whose body names another
 //! is skipped with a warning.
 //!
-//! Any human decides, and the first decision wins, as the persona takes the first one it hears: a decision is stored
-//! only while the request's subject holds none ([`answer`]), so of two humans answering at once, the second is told the
-//! request was already answered.
+//! Any human decides, and the first decision wins: a decision is stored only while the request's subject holds none
+//! ([`answer`]), so of two humans answering at once, the second is told the request was already answered. The persona
+//! acts on the stored decision, not on the first it hears, since a refused publish still reaches subscribers.
 //!
 //! Request ids are unique only per persona: any persona can publish a request reusing another's id. So a request is
 //! written `<persona>/<id>`, and a bare id (or start of one) matching requests of several personas is refused with
@@ -513,9 +513,12 @@ mod tests {
             assert_eq!(state(stream, &push, Utc::now()).await.unwrap(), State::Decided(first.clone()));
             assert!(pending(stream, Utc::now()).await.unwrap().is_empty());
         }
-        // The persona takes the first decision it hears: alice's.
+        // The persona hears alice's decision, and acts on the one stored, which is alice's too.
         let msg = tokio::time::timeout(Duration::from_secs(5), heard.next()).await.unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<ApprovalDecision>(&msg.payload).unwrap(), first);
+        let agent_stream = agent.get_stream_no_info(STREAM).await.unwrap();
+        let stored = agent_stream.direct_get_last_for_subject(push.decision_subject()).await.unwrap();
+        assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), first);
     }
 
     #[test]

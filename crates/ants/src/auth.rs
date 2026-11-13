@@ -408,6 +408,13 @@ pub(crate) mod tests {
         h_client.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
         let got = timeout(WAIT, decisions.next()).await.unwrap().unwrap();
         assert_eq!(&got.payload[..], b"allow");
+        // It reads back the decision stored on its own request, and on no one else's.
+        let stored = stream.direct_get_last_for_subject(subject::approval_decision(&dev_a, &request)).await.unwrap();
+        assert_eq!(&stored.payload[..], b"allow");
+        let of_b = format!("$JS.API.DIRECT.GET.{STREAM}.{}", subject::approval_decision(&dev_b, &request));
+        a_raw.publish(of_b.clone(), "".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{of_b}\"")), "{v}");
         // Its own inbox it may watch live; a denial would be the next violation below.
         let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
         for denied in [subject::inbox_of(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()] {
@@ -677,7 +684,7 @@ pub(crate) mod tests {
         let (h_client, h_js) = server.connect(&human).await;
         let (_, a_js) = server.connect(&dev_a).await;
 
-        // A stream from before dead letters gains their subject on `ants init`.
+        // A stream from before dead letters and direct gets gains them on `ants init`.
         let old: Vec<String> =
             STREAM_SUBJECTS.iter().filter(|s| **s != subject::DEAD_ALL).map(|s| (*s).to_owned()).collect();
         h_js.create_stream(jetstream::stream::Config { name: STREAM.to_owned(), subjects: old, ..Default::default() })
@@ -685,6 +692,7 @@ pub(crate) mod tests {
             .unwrap();
         let stream = bus::init_stream(&h_js).await.unwrap();
         assert!(bus::missing_subjects(&stream.cached_info().config.subjects).is_empty());
+        assert!(stream.cached_info().config.allow_direct, "and direct gets");
 
         let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
         h_client.flush().await.unwrap();
@@ -912,6 +920,10 @@ pub(crate) mod tests {
         msg.double_ack().await.unwrap();
         let got = timeout(WAIT, human_inbox.next()).await.unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&got.payload).unwrap(), reply);
+        // And reads the decision stored on one of its approval requests.
+        let decision = subject::approval_decision(&dev_a, &ants_proto::Uuid::now_v7());
+        h_js.publish(decision.clone(), "allow".into()).await.unwrap().await.unwrap();
+        assert_eq!(&stream.direct_get_last_for_subject(decision).await.unwrap().payload[..], b"allow");
 
         // The uplink carries only what dev-a may do: the leaf accepts dev-b, but nothing of dev-b crosses either way.
         let b_js = connect_to(&leaf.url, &hub.creds_in(&dev_b, Some(&domain)), Some(&domain), &dev_b).await;

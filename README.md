@@ -106,7 +106,7 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
 | `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
-| `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. Needs a human's credentials. |
+| `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects and direct gets an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
 | `ants auth init` / `user NAME [--human]` / `leaf MACHINE` | Issues the team's operator and account, persona or human credentials, and leaf uplink credentials. |
@@ -495,10 +495,13 @@ A request is pending until it has a decision or expires; both requests and decis
 without consuming anything, so every human sees every request, including those made while no CLI was running.
 Answering stores the decision in the stream before returning, and refuses a request already answered, an expired one,
 or a verdict the harness did not offer. The decision is stored only while the request's decision subject holds none
-(`Nats-Expected-Last-Subject-Sequence`), so when two humans answer at once, the first decision wins, as the persona
-takes the first it hears, and the second human is told the request was already answered. A request belongs to
-the persona its subject names; one whose body names another persona is skipped with a warning, so it is neither
-listed nor answerable.
+(`Nats-Expected-Last-Subject-Sequence`), so when two humans answer at once, the first decision wins and the second
+human is told the request was already answered. The persona acts on the decision stored, which it reads back from the
+stream with a direct get once it hears one, not on the first it hears: core NATS still delivers a publish the stream
+refuses. On a stream from before direct gets, or with credentials from before them, the persona takes the first
+decision it hears and logs a warning; `ants init` and new credentials from `ants auth user` fix that. A request
+belongs to the persona its subject names; one whose body names another persona is skipped with a warning, so it is
+neither listed nor answerable.
 
 ## MCP tools
 
@@ -771,6 +774,12 @@ only humans write it, personas read it, and readers skip an entry whose channel 
 channel posts through its own consumer `chan-<persona>` and reads channels back through `chanread-<persona>`;
 credentials pin the filter of both under `ants.chan.>`, so neither reaches an inbox. Credentials and streams set up
 before channels need `ants auth user` and `ants init` again.
+
+Approval decisions go on `ants.approvals.<persona>.<request id>`, which only humans publish to. A persona hears the
+decisions on its own requests and reads back the one the stream stored with a direct get
+(`$JS.API.DIRECT.GET.ANTS.ants.approvals.<persona>.*`, which returns only the last message on that subject), so it
+reads no one else's; the stream allows direct gets for this. Credentials and streams set up before then need
+`ants auth user` and `ants init` again.
 
 Humans: a team may have several, each with its own name, credentials and inbox, and all with the same rights. A
 human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a `HumanEntry` naming

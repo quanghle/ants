@@ -496,12 +496,12 @@ impl Permissions {
     /// last token of inbox, plan and channel subjects). It speaks only for itself on status, approvals and dead letters,
     /// reads only its own inbox (consumer and live), every plan room (live, and from the stream through its own plan
     /// consumer), every channel (live, and from the stream through its own channel consumer and reader), its own
-    /// replies and the decisions on its own approval requests, reads the roster to find personas by capability but
-    /// writes only its own entry, reads the channels and humans buckets but never writes them, and reads and writes
-    /// only its own keys in the sessions and attempts buckets. The filter of each of its consumers is part of the
-    /// subject that creates it, so none can be pointed at another inbox: a consumer with several filters has none in
-    /// that subject, so no persona may create one. A human (a CLI user; [`Role::Human`], whatever its name) also watches
-    /// all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
+    /// replies and the decisions on its own approval requests (live, and as stored), reads the roster to find personas
+    /// by capability but writes only its own entry, reads the channels and humans buckets but never writes them, and
+    /// reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
+    /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
+    /// has none in that subject, so no persona may create one. A human (a CLI user; [`Role::Human`], whatever its
+    /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
     /// attempts, channels and humans buckets, writes the channels and humans buckets, and reads and removes dead
     /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
     /// any sender, to replay a dead letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it
@@ -603,6 +603,9 @@ impl Permissions {
                 own_attempts,
                 // Exactly its requests subject: a persona cannot answer its own requests one level below.
                 subject::approvals(persona),
+                // Reading the decision stored on one of its requests: a direct get naming the subject in its own
+                // subject returns only the last message on that subject, so nothing else is readable this way.
+                format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(persona)),
                 subject::dead(persona),
                 subject::status_of(persona),
                 // Put and delete of its own roster entry.

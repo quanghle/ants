@@ -122,7 +122,7 @@ enum Command {
         thread: Option<ThreadId>,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels and humans buckets on the server, or add the
-    /// stream subjects an older version lacks. Needs a human's credentials.
+    /// stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
     /// Tool requests personas escalate: list the pending ones, show one, or answer it. Every human sees every
     /// request; the first decision wins.

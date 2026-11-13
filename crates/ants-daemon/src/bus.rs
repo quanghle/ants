@@ -138,6 +138,8 @@ fn stream_config() -> stream::Config {
         subjects: STREAM_SUBJECTS.iter().map(|s| (*s).to_owned()).collect(),
         storage: stream::StorageType::File,
         max_age: RETENTION,
+        // A persona reads the decision stored on its approval requests with a direct get (`approvals`).
+        allow_direct: true,
         ..Default::default()
     }
 }
@@ -162,7 +164,8 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
 }
 
 /// Create the `ANTS` stream, or return it as it is. Only the human's credentials may create it. A stream from an older
-/// version that lacks some of [`STREAM_SUBJECTS`] is returned with a warning: [`init_stream`] upgrades it.
+/// version that lacks some of [`STREAM_SUBJECTS`] or direct gets is returned with a warning: [`init_stream`] upgrades
+/// it.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = js
         .get_or_create_stream(stream_config())
@@ -172,19 +175,24 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     if !missing.is_empty() {
         tracing::warn!(?missing, "stream {STREAM} lacks subjects; `ants init` as the human adds them");
     }
+    if !stream.cached_info().config.allow_direct {
+        tracing::warn!("stream {STREAM} lacks direct gets; `ants init` as the human allows them");
+    }
     Ok(stream)
 }
 
-/// Create the `ANTS` stream, or add the subjects an older version did not capture. Needs the human's credentials.
+/// Create the `ANTS` stream, or add the subjects an older version did not capture and allow direct gets. Needs the
+/// human's credentials.
 pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = ensure_stream(js).await?;
     let mut config = stream.cached_info().config.clone();
     let missing = missing_subjects(&config.subjects);
-    if missing.is_empty() {
+    if missing.is_empty() && config.allow_direct {
         return Ok(stream);
     }
     config.subjects.extend(missing);
-    js.update_stream(&config).await.context("adding subjects to the ANTS stream")?;
+    config.allow_direct = true;
+    js.update_stream(&config).await.context("upgrading the ANTS stream")?;
     Ok(js.get_stream(STREAM).await?)
 }
 
