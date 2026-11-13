@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
 use ants_proto::{
-    ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, StatusEvent, StatusUpdate,
-    ThreadId, subject,
+    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation, JsDomain, Machine,
+    PersonaId, PlanPost, StatusEvent, StatusUpdate, ThreadId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -78,7 +78,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List the personas being served: harness, machine, capabilities, last heartbeat, and whether it is recent.
+    /// List the personas being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
+    /// is recent.
     Roster {
         /// One JSON entry per line, with its state.
         #[arg(long)]
@@ -113,7 +114,8 @@ enum Command {
         /// The post. Without it, show the room.
         words: Vec<String>,
     },
-    /// Print ants traffic as it happens, or the live progress of a persona: state, reply text, tool calls and plan.
+    /// Print ants traffic as it happens, escalations with their level, leader and personas visited, or the live
+    /// progress of a persona: state, reply text, tool calls and plan.
     Watch {
         /// Subject filter, or a persona to follow its progress on every thread.
         #[arg(default_value = subject::ALL)]
@@ -121,11 +123,11 @@ enum Command {
         /// With a persona, follow only this thread.
         thread: Option<ThreadId>,
     },
-    /// Create the ANTS stream and the roster, sessions, attempts, channels and humans buckets on the server, or add the
-    /// stream subjects and direct gets an older version lacks. Needs a human's credentials.
+    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
+    /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
     /// Tool requests personas escalate: list the pending ones, show one, or answer it. Every human sees every
-    /// request; the first decision wins.
+    /// request; the first decision wins, a human's or that of an agent of the persona's escalation chain.
     Approve {
         /// Request as `<persona>/<id>`, or a bare id when only one persona has it; a unique start of the id will do.
         /// Without it, list the pending requests.
@@ -954,8 +956,7 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         let out = if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload) {
             printer.status(&event, &forged(event.check_subject(&msg.subject).is_ok()))
         } else if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
-            let forged = forged(e.check_subject(&msg.subject).is_ok());
-            printer.line(&format!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text))
+            printer.line(&envelope_line(&e, &forged(e.check_subject(&msg.subject).is_ok())))
         } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
             // Before plan posts: a channel post has every field of one.
             printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
@@ -965,6 +966,11 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
             printer.line(&format!("[{thread}] {from} -> plan room ({left} turns left){forged}: {}", post.text))
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             printer.line(&format!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error))
+        } else if let Ok(r) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
+            printer.line(&request_line(&r, &forged(r.check_subject(&msg.subject).is_ok())))
+        } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
+            let forged = forged(d.subject() == msg.subject.as_str());
+            printer.line(&format!("{}/{}{forged}: answered {}", d.persona, d.request_id, approve::spelling(d.verdict)))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };
@@ -973,6 +979,42 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck persona and thread,
+/// leader and the personas visited; an agent's approval decision in place of its text.
+fn envelope_line(e: &Envelope, forged: &str) -> String {
+    let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
+    if let Some(d) = &e.approval {
+        return format!(
+            "{head} decides {} on approval request {}/{}",
+            approve::spelling(d.verdict),
+            d.persona,
+            d.request_id
+        );
+    }
+    match &e.escalation {
+        Some(x) => format!("{head} [{}]: {}", escalation_note(x), e.text),
+        None => format!("{head}: {}", e.text),
+    }
+}
+
+/// An escalation in one line: `escalation level 1, turn_budget: dev-a stuck on t1, leader lead, visited dev-a > lead`.
+fn escalation_note(x: &Escalation) -> String {
+    let reason = match x.request_id {
+        Some(id) => format!("{} {}/{id}", x.reason.as_str(), x.stuck),
+        None => x.reason.as_str().to_owned(),
+    };
+    let visited = x.visited.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(" > ");
+    let (level, stuck, thread, leader) = (x.level, &x.stuck, &x.thread_id, &x.leader);
+    format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}")
+}
+
+/// A tool request as `ants watch` prints it.
+fn request_line(r: &ApprovalRequest, forged: &str) -> String {
+    let options = r.options.iter().map(|v| approve::spelling(*v)).collect::<Vec<_>>().join("|");
+    let (thread, persona, id) = (&r.thread_id, &r.persona, r.id);
+    format!("[{thread}] {persona}{forged} asks approval {persona}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
 
 /// A channel post as `ants watch` prints it.
@@ -1135,6 +1177,43 @@ mod tests {
         assert_eq!(channel_line(&post, ""), "[t1] dev-a -> #ops (3 turns left): @dev-b ready?");
         let forged = " (forged: sent on ants.chan.ops.dev-b)";
         assert_eq!(channel_line(&post, forged), format!("[t1] dev-a -> #ops (3 turns left){forged}: @dev-b ready?"));
+    }
+
+    #[test]
+    fn watched_escalations_show_level_reason_leader_and_visited() {
+        let p = |s: &str| -> PersonaId { s.parse().unwrap() };
+        let t1: ThreadId = "t1".parse().unwrap();
+        let start = Escalation::new(p("dev-a"), t1.clone(), ants_proto::EscalationReason::TurnBudget);
+        let ants_proto::Hop::Chain { escalation, .. } = start.up(&[p("lead"), p("dev-b")], 3) else { panic!("up") };
+        let notice =
+            Envelope::on_thread(t1.clone(), p("dev-a"), p("lead"), "[ants] stuck").with_escalation(Some(escalation));
+        assert_eq!(
+            envelope_line(&notice, ""),
+            "[t1] dev-a -> lead [escalation level 1, turn_budget: dev-a stuck on t1, leader lead, \
+             visited dev-a > lead > dev-b]: [ants] stuck"
+        );
+
+        let tool = ants_proto::ToolCall { kind: "execute".into(), title: "git push".into(), ..Default::default() };
+        let options = vec![ants_proto::Verdict::AllowOnce];
+        let request = ApprovalRequest::new(p("dev-a"), t1.clone(), tool, options, std::time::Duration::from_secs(60));
+        let id = request.id;
+        let ants_proto::Hop::Chain { escalation, .. } = Escalation::of_request(&request).up(&[p("lead")], 3) else {
+            panic!("up")
+        };
+        assert_eq!(
+            escalation_note(&escalation),
+            format!("escalation level 1, approval dev-a/{id}: dev-a stuck on t1, leader lead, visited dev-a > lead")
+        );
+        assert_eq!(
+            request_line(&request, ""),
+            format!("[t1] dev-a asks approval dev-a/{id} (allow-once|reject): execute: git push")
+        );
+        let decision = ApprovalDecision::new(id, p("dev-a"), ants_proto::Verdict::AllowOnce);
+        let decided = Envelope::decision(t1, p("lead"), decision);
+        assert_eq!(
+            envelope_line(&decided, ""),
+            format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
+        );
     }
 
     #[test]

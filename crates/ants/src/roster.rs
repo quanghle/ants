@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ants_daemon::{bus, roster};
-use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
+use ants_proto::{PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -48,6 +48,14 @@ fn short(duration: Duration) -> String {
     }
 }
 
+/// The persona's escalation chain, leader first, or `-` for none.
+fn chain(entry: &RosterEntry) -> String {
+    if entry.escalate_to.is_empty() {
+        return "-".to_owned();
+    }
+    entry.escalate_to.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(",")
+}
+
 /// The roster as a table: one row per persona under a header, columns padded to line up.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     let header = [
@@ -60,10 +68,11 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
         "HEARTBEAT",
         "UP",
         "CAPABILITIES",
+        "ESCALATE_TO",
         "WORKDIR",
     ]
     .map(str::to_owned);
-    let rows: Vec<[String; 10]> = std::iter::once(header)
+    let rows: Vec<[String; 11]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
                 e.persona.to_string(),
@@ -75,11 +84,12 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
                 format!("{} ago", short(since(e.heartbeat_at, now))),
                 short(since(e.started_at, now)),
                 if e.capabilities.is_empty() { "-".to_owned() } else { e.capabilities.join(",") },
+                chain(e),
                 e.workdir.clone().unwrap_or_else(|| "-".to_owned()),
             ]
         }))
         .collect();
-    let mut widths = [0; 10];
+    let mut widths = [0; 11];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -130,7 +140,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
-    use ants_proto::{Activity, PersonaId};
+    use ants_proto::Activity;
 
     use super::*;
     use crate::auth::tests::Server;
@@ -160,6 +170,7 @@ mod tests {
         quiet.workdir = None;
         let mut busy = entry("dev-a", 190, 4, now);
         (busy.activity, busy.handling, busy.harnesses) = (Some(Activity::Working), Some(1), Some(2));
+        busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
         let table = table(&[busy, quiet], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
         assert_eq!(
@@ -174,20 +185,36 @@ mod tests {
                 "HEARTBEAT",
                 "UP",
                 "CAPABILITIES",
+                "ESCALATE_TO",
                 "WORKDIR"
             ]
         );
         assert_eq!(
             rows[1],
-            ["dev-a", "live", "working", "2", "copilot", "m1", "4s", "ago", "3m", "rust,review", "/src/app"]
+            [
+                "dev-a",
+                "live",
+                "working",
+                "2",
+                "copilot",
+                "m1",
+                "4s",
+                "ago",
+                "3m",
+                "rust,review",
+                "lead,dev-b",
+                "/src/app"
+            ]
         );
-        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "25s", "ago", "2h", "-", "-"]);
+        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "25s", "ago", "2h", "-", "-", "-"]);
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
 
-        let json: serde_json::Value =
-            serde_json::from_str(&super::json(&entry("dev-a", 0, 30, now), now).unwrap()).unwrap();
+        let mut led = entry("dev-a", 0, 30, now);
+        led.escalate_to = vec!["lead".parse().unwrap()];
+        let json: serde_json::Value = serde_json::from_str(&super::json(&led, now).unwrap()).unwrap();
         assert_eq!((json["persona"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
+        assert_eq!(json["escalate_to"], serde_json::json!(["lead"]));
     }
 
     /// With the human's credentials, so it also checks that they read the roster.

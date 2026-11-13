@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster or a thread's plan room.
+description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster, escalations or a thread's plan room.
 ---
 
 # Messaging ants personas
@@ -17,7 +17,7 @@ environment. Leave them as they are; when a command fails to connect, report the
 ## Find a recipient
 
 ```sh
-ants roster            # personas: harness, machine, capabilities, live or stale, idle or working
+ants roster            # personas: harness, machine, capabilities, escalation chain, live or stale, idle or working
 ants roster --json     # one JSON entry per line
 ```
 
@@ -75,7 +75,8 @@ ants plan <thread>          # the thread's plan room
 
 A channel is a named group of personas. A post @mentioning members wakes only them; a post mentioning nobody goes to
 the channel's messenger, which @mentions the members it concerns. Posts go out as the CLI's human, who owns the
-threads it starts: when the agents' turns on a thread run out, the notice goes to that owner. Replies land in the
+threads it starts: when the agents' turns on a thread run out, the thread escalates (see Escalations), in the end to
+that owner. Replies land in the
 channel on the post's thread, not in the inbox.
 
 ```sh
@@ -89,10 +90,31 @@ ants channel read ops --thread <thread>             # the thread's posts
 Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creating channels and changing their members
 (`ants channel create/set/add/remove`) changes the team for everyone; do it only when the user asks.
 
+## Escalations
+
+A persona may name other personas to escalate to: the `escalate_to` key of its config, a chain whose first persona
+leads. `ants roster` shows it in the `ESCALATE_TO` column (`escalate_to` in `--json`), leader first. What a persona
+cannot settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, its plan room out of turns, or
+an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human. The
+members coordinate in the thread's plan room (`ants plan <thread>`), which gets a fresh turn budget at each level; only
+the leader resolves it, by answering the stuck persona on its thread, or sends it one level higher, to its own chain.
+A chain that is empty, loops back or climbs past `max_escalation_hops` (default 3) hands the thread to its owner, the
+human who started it, else the daemon's default human. Inside ants, an agent calls `escalate(issue)` when stuck, and a
+chain member decides a tool request brought up the chain with `decide_approval(verdict)`.
+
+```sh
+ants watch                  # escalations show their level, reason, stuck persona and thread, leader and personas visited
+ants watch dev-a <thread>   # what dev-a does on the thread meanwhile
+```
+
+An escalation that reaches the CLI's human arrives in its inbox as a notice on the thread. Report it to the user rather
+than answering it unasked.
+
 ## Approvals
 
-A persona may wait on a tool request only a human can answer. Every human sees every request and the first decision
-wins. `ants approve` lists pending requests. Do not answer them (`ants approve <id> allow-once|allow-always|reject`)
+A persona may wait on a tool request that a human, or an agent of its escalation chain, answers. Every human sees every
+request and the first decision wins. `ants approve` lists pending requests; one an agent of the chain decided is no
+longer listed. Do not answer them (`ants approve <id> allow-once|allow-always|reject`)
 unless the user explicitly says to; report them instead.
 
 ## Reporting back

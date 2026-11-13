@@ -99,13 +99,13 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 |---|---|
 | `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner (with a persona's credentials, a thread without owner); without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
-| `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
+| `ants roster` | Lists the personas being served, live or stale, idle or working, with their escalation chains (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the CLI's human. |
 | `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
-| `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
-| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins. |
+| `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and personas visited; with a persona, its streamed harness progress. |
+| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins, a human's or that of an agent of the persona's chain. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
 | `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects and direct gets an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
@@ -131,7 +131,7 @@ persona's daemon reads its inbox), and `ants ask --wait` marks nothing read.
 
 `contrib/skills/ants/SKILL.md` teaches a coding agent outside ants (an interactive Copilot CLI session, say) to
 message personas as the CLI's human through this CLI: `ants roster`, `ants ask`, `ants inbox --thread`,
-`ants watch`. Install it as a personal skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the
+`ants watch`, and how escalation chains show there. Install it as a personal skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the
 directory into another agent's skills directory.
 
 ## Delivery
@@ -287,6 +287,16 @@ the thread ends its escalation, and the next one starts at the persona's own cha
 level, whether the leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
 keep them.
 
+`ants roster` shows each live persona's chain, leader first, in its `ESCALATE_TO` column. `ants watch` prints each
+message carrying an escalation with its level, reason (and request, for a tool request), stuck persona and thread,
+leader and the personas visited so far, and an agent's approval decision in place of its text:
+
+```text
+[t1] dev-a -> lead [escalation level 1, turn_budget: dev-a stuck on t1, leader lead, visited dev-a > lead > dev-b]: [ants] ...
+[t1] dev-a -> lead [escalation level 1, approval dev-a/019a7d2e-...: dev-a stuck on t1, leader lead, visited dev-a > lead]: [ants] ...
+[t1] lead -> dev-a decides allow-once on approval request dev-a/019a7d2e-...
+```
+
 The daemon tells humans by the KV bucket
 `ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
 looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
@@ -404,7 +414,7 @@ docs/transport.md, "`devtunnel connect` as a service". Other tunnels, such as `a
 ## Roster
 
 Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, harness, workdir,
-capabilities, `whoami`, start and last heartbeat time, activity (`idle`, or `working` while a message is being
+capabilities, `whoami`, escalation chain (`escalate_to`), start and last heartbeat time, activity (`idle`, or `working` while a message is being
 handled), the number of messages being handled and of live harnesses (`RosterEntry` in `ants-proto`). It refreshes the
 entry every 10 s, and at once when the persona turns idle or working, and deletes it on a clean stop. Entries from older
 daemons lack the activity fields. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
@@ -415,9 +425,11 @@ skip, with a warning, an entry that names another. Persona credentials issued be
 `ants auth user` again.
 
 `ants roster` lists the entries: persona, state, activity, live harnesses, harness, machine, time since the last
-heartbeat, uptime, capabilities and workdir (`-` for a field an older daemon leaves out). An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
+heartbeat, uptime, capabilities, escalation chain (`ESCALATE_TO`, leader first) and workdir (`-` for a field an older
+daemon leaves out, or for no chain). An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
 without one: its daemon is likely gone and the entry expires shortly. Ages come from the daemons' clocks, so skew
-between machines shifts them. `--json` prints one entry per line with its `state` added.
+between machines shifts them. `--json` prints one entry per line with its `state` added, and `escalate_to` when the
+persona has a chain.
 
 ### Persona identity and role
 
@@ -527,7 +539,12 @@ wins, whether a human's or an agent's: an agent's loses to a human's already sto
 not climb past the persona's own chain, and the time limit stays the same: the `escalate` tool refuses to send it higher,
 and no member leads it, so a member's reply to the notice goes to the requesting persona as any reply. Without a chain
 only humans decide.
-`ants approve` lists a request decided by an agent as pending until it expires.
+`ants approve` reads such decisions back from the requesting persona's inbox in the stream (human credentials read every
+inbox) and takes them as the persona does: from a persona of its `escalate_to` (its roster entry's, else the one kept in
+`ants_chains`), on one of its own requests, sent before the request expired, and stored before any human's decision. A
+request so decided is no longer listed, shows `answered allow-once by lead`, and answering it is refused with
+`request dev-a/019a7d2e-... was already answered by lead: allow-once`. A human answering in the moment between that
+check and an agent's decision still stores a decision the persona may not act on: the persona takes the first one.
 `--allow-tools` is `--allow '*'`, for trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ```sh
@@ -535,6 +552,7 @@ ants approve                              # pending requests: persona/id, thread
 ants approve --follow                     # then keep printing new ones until Ctrl-C (--json: one request per line)
 ants approve dev-a/019a7d2e               # one request in full, with the tool input; a unique start of the id will do
 ants approve dev-a/019a7d2e allow-once    # answer it: allow-once, allow-always or reject
+ants watch 'ants.approvals.>'             # requests and humans' decisions as they come
 ```
 
 A request is named `<persona>/<id>`. Ids are unique only per persona, as any persona may publish a request reusing
@@ -568,7 +586,7 @@ speak as the persona, on the thread the session serves:
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting persona. |
-| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the persona's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the plan room instead. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
+| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the persona's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the plan room instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
 from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -864,7 +882,8 @@ An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the
 level's leader and the personas visited. One level up goes to every persona of the leader's chain not visited yet; an
-empty chain, a leader already visited, or a level past 3 hands it to the thread's owner instead. An agent's decision
+empty chain, a leader already visited, or a level past `max_escalation_hops` (default 3) hands it to the thread's owner
+instead. An agent's decision
 on another persona's approval request travels as an envelope's `approval` on `ants.inbox.<requester>.<decider>`, so the
 subject pins the decider and persona credentials need no rights on `ants.approvals.*`; the requester takes it only from
 a persona of its own chain. Envelopes and entries without these fields stay valid.
@@ -877,7 +896,7 @@ ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with a human's credentials to create the stream and the roster, sessions, attempts, channels and humans buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with a human's credentials to create the stream and the roster, sessions, attempts, channels, humans and chains buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 Credentials carry their permissions in the CONNECT line, past the 4 KB nats-server allows by default, so `server.conf`
 sets `max_control_line: 16384`; add that line to a `server.conf` written before channels.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
