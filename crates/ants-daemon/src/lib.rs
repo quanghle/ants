@@ -8,6 +8,7 @@ pub mod dead;
 pub mod harness;
 pub mod mcp;
 pub mod permission;
+pub mod plan;
 pub mod pool;
 pub mod roster;
 pub mod workspace;

@@ -8,8 +8,8 @@ mod serve;
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness};
-use ants_proto::{DeadLetter, Envelope, JsDomain, PersonaId, ThreadId, subject};
+use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
+use ants_proto::{DeadLetter, Envelope, JsDomain, PersonaId, PlanPost, ThreadId, subject};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
@@ -71,6 +71,12 @@ enum Command {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
+    },
+    /// Show the plan room of a thread, or post to it as the human, which gives the room a fresh turn budget.
+    Plan {
+        thread: ThreadId,
+        /// The post. Without it, show the room.
+        words: Vec<String>,
     },
     /// Print ants traffic as it happens.
     Watch {
@@ -196,6 +202,7 @@ async fn main() -> Result<()> {
             show_inbox(&cli.nats, cli.creds.as_deref(), domain, &select, follow, json).await
         }
         Command::Roster { json } => roster::show(&cli.nats, cli.creds.as_deref(), domain, json).await,
+        Command::Plan { thread, words } => plan_room(&cli.nats, cli.creds.as_deref(), domain, thread, words).await,
         Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), domain, subject).await,
         Command::Init => {
             let (_, js) =
@@ -408,6 +415,31 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
+async fn plan_room(
+    url: &str,
+    creds: Option<&Path>,
+    domain: Option<&JsDomain>,
+    thread: ThreadId,
+    words: Vec<String>,
+) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+    if !words.is_empty() {
+        let post = PlanPost::new(thread, PersonaId::human(), words.join(" "));
+        plan::publish(&js, &post, None).await?;
+        println!("posted to the plan room of thread {} ({} turns left)", post.thread_id, post.turn_budget);
+        return Ok(());
+    }
+    let room = plan::read(&js, &PersonaId::human(), &thread).await?;
+    if room.posts.is_empty() {
+        println!("the plan room of thread {thread} is empty");
+    }
+    for post in &room.posts {
+        let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
+        println!("{time} {} ({} turns left): {}", post.from, post.turn_budget, post.text);
+    }
+    Ok(())
+}
+
 async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filter: String) -> Result<()> {
     let (client, _) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
@@ -418,6 +450,13 @@ async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filte
                 Err(_) => format!(" (forged: sent on {})", msg.subject),
             };
             println!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text);
+        } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
+            let forged = match post.check_subject(&msg.subject) {
+                Ok(()) => String::new(),
+                Err(_) => format!(" (forged: sent on {})", msg.subject),
+            };
+            let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
+            println!("[{thread}] {from} -> plan room ({left} turns left){forged}: {}", post.text);
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             println!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error);
         } else {

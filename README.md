@@ -29,6 +29,7 @@ ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
 ants roster                                         # personas being served
 ants approve                                        # tool requests waiting for an answer
+ants plan <thread>                                  # a thread's plan room
 ants watch                                          # live traffic
 ```
 
@@ -180,6 +181,8 @@ speak as the persona, on the thread the session serves:
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
 | `list_personas(capability?)` | Lists the other personas in the roster with their capabilities, harness and machine; only those advertising `capability` when given. |
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
+| `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
+| `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a
 message from the human, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -197,8 +200,8 @@ The server listens on `127.0.0.1` on a free port (streamable HTTP, stateless) an
 calling thread; requests without a known token get 401. Harnesses whose ACP `mcpCapabilities` lack `http` get a stdio
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the persona's allowlist like
-any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_personas`, `other:route`, or
-`other`). Persona credentials issued
+any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_personas`, `other:route`,
+`other:post_plan`, `other:read_plan`, or `other`). Persona credentials issued
 before the MCP tools existed lack the subscription to the persona's own inbox; issue them again with `ants auth user`.
 
 ## Messenger
@@ -228,6 +231,30 @@ This agent is the messenger of an ants team. It routes each request instead of d
 way; `list_personas` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
 and `send_message`. Every persona gets these tools, not only the messenger.
 
+## Plan rooms
+
+Each thread has a plan room, where the personas on it plan together before the work starts: one posts a plan with
+`post_plan`, asks the others (`ask_agent`, `send_message`) to read it with `read_plan` and post their part, and so on.
+Posts go on `ants.plan.<thread>.<from>` and are kept in the stream like messages. Nobody is prompted by a post; a
+persona reads the room when asked to.
+
+Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left:
+one less than the lower of the budget of the message its persona is handling and what the room's last post left.
+The post that spends the last turn hands the thread to the human: its persona sends the human a notice on the thread
+with the last post, and the room refuses further posts. Two personas spending the same turn cannot both succeed: a
+post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`, nats-server 2.11 or later), and
+the loser reads the room again.
+
+```sh
+ants plan <thread>                      # the room's posts: time, author, turns left, text
+ants plan <thread> "ship friday"        # post as the human, which gives the room a fresh budget (8 turns)
+ants watch 'ants.plan.>'                # every room, live
+```
+
+Personas and the human read a room back through their own consumer, `plan-<persona>`, created for the read and
+deleted after it; their credentials allow it to filter plan subjects only. Persona and human credentials issued before
+plan rooms need `ants auth user` again.
+
 ## Persona memory
 
 Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
@@ -247,6 +274,10 @@ replayed), and the CLI drops it with a warning; `ants watch` marks it forged. Th
 any sender, to replay dead letters as they were; `ants dead replay` replays only a message to the persona that buried
 it. Messages left on the older `ants.inbox.<persona>` subjects are no longer delivered; daemons and `ants inbox` move
 their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
+
+Plan room posts work the same way: a post by `<from>` to the room of thread `<thread>` goes on
+`ants.plan.<thread>.<from>`, every credential (the human's too) posts only on `ants.plan.*.<persona>`, and readers
+drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
 
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth

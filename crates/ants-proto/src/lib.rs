@@ -39,6 +39,8 @@ pub enum Error {
     /// A body naming another persona than the key or subject it was stored under, which credentials pin.
     #[error("{kind} of {persona} found at {at}")]
     ForeignPersona { kind: &'static str, persona: PersonaId, at: String },
+    #[error("plan post from {from} on thread {thread} arrived on {subject}")]
+    WrongPlanSubject { subject: String, from: PersonaId, thread: ThreadId },
 }
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -147,10 +149,30 @@ pub mod subject {
         Some((to.parse().ok()?, from.parse().ok()?))
     }
 
-    /// Shared planning room of a thread.
-    pub fn plan(thread: &ThreadId) -> String {
-        format!("ants.plan.{thread}")
+    /// A post by `from` to the planning room of `thread`. Like an inbox subject it names the sender, so credentials can
+    /// pin it there ([`plan_from`]).
+    pub fn plan(thread: &ThreadId, from: &PersonaId) -> String {
+        format!("ants.plan.{thread}.{from}")
     }
+
+    /// Every post to the planning room of `thread`, whoever wrote it.
+    pub fn plan_room(thread: &ThreadId) -> String {
+        format!("ants.plan.{thread}.*")
+    }
+
+    /// Every plan subject `persona` may post on.
+    pub fn plan_from(persona: &PersonaId) -> String {
+        format!("ants.plan.*.{persona}")
+    }
+
+    /// The thread and the sender a plan subject names, or `None` when it is no plan subject.
+    pub fn parse_plan(subject: &str) -> Option<(ThreadId, PersonaId)> {
+        let (thread, from) = subject.strip_prefix("ants.plan.")?.split_once('.')?;
+        Some((thread.parse().ok()?, from.parse().ok()?))
+    }
+
+    /// Every planning room.
+    pub const ALL_PLANS: &str = "ants.plan.>";
 
     /// Permission requests a persona escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
     pub fn approvals(persona: &PersonaId) -> String {
@@ -206,6 +228,12 @@ pub fn session_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}")
 }
 
+/// JetStream consumer a persona reads plan rooms through, one room at a time. Its name is fixed, so its credentials
+/// need not let it pull from other consumers.
+pub fn plan_consumer(persona: &PersonaId) -> String {
+    format!("plan-{persona}")
+}
+
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
@@ -221,9 +249,9 @@ pub struct Permissions {
 impl Permissions {
     /// What the credentials of `persona` allow.
     ///
-    /// Any persona may write to every inbox, but only as itself (the sender is the last token of an inbox subject),
-    /// and to every plan room. It speaks only for itself on status, approvals and dead letters, reads only its own inbox
-    /// (consumer and live), its own replies and the decisions on its own approval requests, reads the roster to find
+    /// Any persona may write to every inbox and every plan room, but only as itself (the sender is the last token of
+    /// inbox and plan subjects). It speaks only for itself on status, approvals and dead letters, reads only its own inbox
+    /// (consumer and live), every plan room (live, and from the stream through its own plan consumer), its own replies and the decisions on its own approval requests, reads the roster to find
     /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions
     /// bucket. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and upgrade
     /// the stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
@@ -231,11 +259,12 @@ impl Permissions {
     /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
+        let plan = plan_consumer(persona);
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let mut publish = vec![
             if persona.is_human() { "ants.inbox.>".to_owned() } else { subject::inbox_from(persona) },
-            "ants.plan.>".to_owned(),
+            subject::plan_from(persona),
             format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.STREAM.INFO.{roster_stream}"),
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
@@ -243,6 +272,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox_of(persona)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.ACK.{STREAM}.{consumer}.>"),
+            // Reading plan rooms back through its own consumer, which only ever filters plan subjects.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{plan}.{}", subject::ALL_PLANS),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{plan}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{plan}"),
             format!("$JS.API.STREAM.INFO.{sessions}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
@@ -277,7 +310,7 @@ impl Permissions {
                 subject::roster(persona),
             ]);
             subscribe.extend([
-                "ants.plan.>".to_owned(),
+                subject::ALL_PLANS.to_owned(),
                 format!("{}.*", subject::approvals(persona)),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(persona),
@@ -433,6 +466,68 @@ impl Envelope {
             return Ok(());
         }
         Err(Error::WrongSubject { subject: subject.to_owned(), from: self.from.clone(), to: self.to.clone() })
+    }
+}
+
+/// A post to the planning room of a thread, on [`subject::plan`]. Personas on a thread plan there together; every one
+/// of them reads the whole room.
+///
+/// Posts spend the thread's turn budget like messages between agents do, and each carries what is left. The post that
+/// spends the last turn hands the thread to the human, and the room takes no more agent posts until the human posts
+/// there with a fresh budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanPost {
+    pub id: Uuid,
+    pub thread_id: ThreadId,
+    pub from: PersonaId,
+    pub text: String,
+    /// Turns left in the room after this post.
+    pub turn_budget: u32,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl PlanPost {
+    /// A post with a fresh budget, as the human posts.
+    pub fn new(thread_id: ThreadId, from: PersonaId, text: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            thread_id,
+            from,
+            text: text.into(),
+            turn_budget: DEFAULT_TURN_BUDGET,
+            sent_at: Utc::now(),
+        }
+    }
+
+    /// An agent's post, spending one turn of what is left: the lower of `budget`, the turns of the message the agent
+    /// is handling, and those the room's `last` post left. Fails when none are left.
+    pub fn spend(
+        thread_id: ThreadId,
+        from: PersonaId,
+        text: impl Into<String>,
+        budget: u32,
+        last: Option<&PlanPost>,
+    ) -> Result<Self, Error> {
+        let left = last.map_or(budget, |last| last.turn_budget.min(budget));
+        let turn_budget = left.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(thread_id.clone()))?;
+        Ok(Self { turn_budget, ..Self::new(thread_id, from, text) })
+    }
+
+    pub fn subject(&self) -> String {
+        subject::plan(&self.thread_id, &self.from)
+    }
+
+    /// Check that the post arrived on its own [`PlanPost::subject`]. Credentials pin the sender token of a plan
+    /// subject, so a `from` that disagrees with it is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::WrongPlanSubject {
+            subject: subject.to_owned(),
+            from: self.from.clone(),
+            thread: self.thread_id.clone(),
+        })
     }
 }
 
@@ -656,8 +751,9 @@ mod tests {
             "$JS.hub.API.DIRECT.GET.KV_ants_sessions.$KV.ants_sessions.dev-a.>",
             "$JS.hub.API.$KV.ants_sessions.dev-a.>",
             "$JS.hub.API.$KV.ants_roster.dev-a",
+            "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.plan-dev-a",
             "$JS.ACK.ANTS.inbox-dev-a.>",
-            "ants.plan.>",
+            "ants.plan.*.dev-a",
         ] {
             assert!(publish.iter().any(|have| have == s), "{s} missing from {publish:?}");
         }
@@ -673,7 +769,7 @@ mod tests {
             assert!(own.publish.iter().all(|s| leaf.publish.contains(s)), "{persona} publish");
             assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)), "{persona} subscribe");
         }
-        assert_eq!(leaf.publish.iter().filter(|s| *s == "ants.plan.>").count(), 1);
+        assert_eq!(leaf.publish.iter().filter(|s| *s == "$JS.API.STREAM.INFO.ANTS").count(), 1);
         let only_a = Permissions::for_leaf([&a]);
         assert_eq!(only_a, Permissions::for_persona(&a));
     }
@@ -684,7 +780,10 @@ mod tests {
         assert_eq!(subject::inbox(&p("dev-a"), &PersonaId::human()), "ants.inbox.dev-a.human");
         assert_eq!(subject::inbox_of(&p("dev-a")), "ants.inbox.dev-a.*");
         assert_eq!(subject::inbox_from(&p("dev-a")), "ants.inbox.*.dev-a");
-        assert_eq!(subject::plan(&t), "ants.plan.t1");
+        assert_eq!(subject::plan(&t, &p("dev-a")), "ants.plan.t1.dev-a");
+        assert_eq!(subject::plan_room(&t), "ants.plan.t1.*");
+        assert_eq!(subject::plan_from(&p("dev-a")), "ants.plan.*.dev-a");
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_PLANS), "plan rooms are durable");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
@@ -742,6 +841,37 @@ mod tests {
         for bad in ["ants.inbox.dev-b", "ants.inbox.dev-b.dev-a.x", "ants.plan.t1.dev-a", "ants.inbox.dev-b.*"] {
             assert_eq!(subject::parse_inbox(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_plan_subject_names_the_sender() {
+        let post = PlanPost::new("t1".parse().unwrap(), p("dev-a"), "split the work");
+        assert_eq!(subject::parse_plan(&post.subject()), Some(("t1".parse().unwrap(), p("dev-a"))));
+        assert_eq!(post.check_subject("ants.plan.t1.dev-a"), Ok(()));
+        let err = post.check_subject("ants.plan.t1.dev-b").unwrap_err();
+        assert_eq!(err.to_string(), "plan post from dev-a on thread t1 arrived on ants.plan.t1.dev-b");
+        assert!(post.check_subject("ants.plan.t2.dev-a").is_err(), "posted to another room");
+        for bad in ["ants.plan.t1", "ants.plan.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.plan.t1.*"] {
+            assert_eq!(subject::parse_plan(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn plan_posts_spend_the_lower_of_the_message_and_the_room_budget() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let first = PlanPost::spend(t.clone(), p("dev-a"), "draft", 3, None).unwrap();
+        assert_eq!(first.turn_budget, 2, "an empty room starts from the message's budget");
+        let second = PlanPost::spend(t.clone(), p("dev-b"), "agreed", 8, Some(&first)).unwrap();
+        assert_eq!(second.turn_budget, 1, "the room's budget is lower");
+        let last = PlanPost::spend(t.clone(), p("dev-a"), "done", 1, Some(&second)).unwrap();
+        assert_eq!(last.turn_budget, 0);
+        let refused = PlanPost::spend(t.clone(), p("dev-b"), "more", 8, Some(&last));
+        assert_eq!(refused, Err(Error::BudgetExhausted(t.clone())));
+        let human = PlanPost::new(t.clone(), PersonaId::human(), "go on");
+        assert_eq!(
+            PlanPost::spend(t, p("dev-b"), "more", 8, Some(&human)).unwrap().turn_budget,
+            DEFAULT_TURN_BUDGET - 1
+        );
     }
 
     #[test]
