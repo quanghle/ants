@@ -132,7 +132,8 @@ pub async fn run(config: Config) -> Result<()> {
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let registration = roster::register(&js, &config).await?;
+    let workload = std::sync::Arc::new(roster::Workload::default());
+    let registration = roster::register(&js, &config, workload.clone()).await?;
     tracing::info!(
         persona = %config.persona,
         harness = %config.harness,
@@ -156,6 +157,7 @@ pub async fn run(config: Config) -> Result<()> {
         attempts: &attempts,
         answered: &answered,
         mcp: Some(&mcp),
+        workload: &workload,
         limits: config.limits,
         ledger: &ledger,
         retry_delay: RETRY_DELAY,
@@ -217,6 +219,8 @@ struct Inbox<'a> {
     attempts: &'a Attempts,
     answered: &'a Answered,
     mcp: Option<&'a Mcp>,
+    /// Counts the messages being handled and the live harnesses, for the roster.
+    workload: &'a roster::Workload,
     limits: PromptLimits,
     ledger: &'a Ledger,
     retry_delay: Duration,
@@ -311,6 +315,7 @@ impl Inbox<'_> {
                     running.push(self.handle(envelope, msg));
                 }
             }
+            self.workload.set_harnesses(self.pool.live());
         }
 
         drop(messages);
@@ -365,6 +370,7 @@ impl Inbox<'_> {
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter.
     /// Returns its thread, and the redelivery to wait for when there is one.
     async fn handle(&self, envelope: Envelope, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
+        let _working = self.workload.working();
         let thread = envelope.thread_id.clone();
         let (delivered, seq) = match msg.info() {
             Ok(info) => (info.delivered, info.stream_sequence),
@@ -672,6 +678,7 @@ mod tests {
         dev: PersonaId,
         limits: PromptLimits,
         ledger: Ledger,
+        workload: roster::Workload,
     }
 
     impl Bus {
@@ -694,7 +701,8 @@ mod tests {
             client.flush().await.unwrap();
             let ledger = Ledger::memory(dev.clone(), Caps::default());
             let limits = PromptLimits::default();
-            let bus = Self { _server: server, client, js, stream, attempts, answered, markers, dev, limits, ledger };
+            let workload = roster::Workload::default();
+            let bus = Self { _server: server, client, js, stream, attempts, answered, markers, dev, limits, ledger, workload };
             (bus, replies)
         }
 
@@ -734,6 +742,7 @@ mod tests {
                 attempts: &self.attempts,
                 answered: &self.answered,
                 mcp: None,
+                workload: &self.workload,
                 limits: self.limits,
                 ledger: &self.ledger,
                 retry_delay: Duration::from_millis(300),
@@ -810,9 +819,13 @@ mod tests {
         let check = async {
             assert_eq!(next_reply(&mut replies).await, (t2.clone(), "c".to_owned()), "t2 does not wait for t1");
             assert_eq!(log.lock().unwrap().answered, ["c"], "b waits for the message before it on t1");
+            until("c to be done", || bus.workload.handling() == 1).await;
+            assert_eq!(bus.workload.activity(), ants_proto::Activity::Working);
             gate.add_permits(1);
             assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
             assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
+            until("the inbox to go idle", || bus.workload.activity() == ants_proto::Activity::Idle).await;
+            assert_eq!(bus.workload.harnesses(), 2, "a harness per thread stays live");
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);

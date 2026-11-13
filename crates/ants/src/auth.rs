@@ -443,6 +443,9 @@ pub(crate) mod tests {
             workdir: None,
             started_at: now,
             heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
         };
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
