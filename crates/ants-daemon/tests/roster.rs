@@ -10,10 +10,14 @@ use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::kv;
 
 fn entry(persona: &str) -> RosterEntry {
+    entry_on(persona, "test")
+}
+
+fn entry_on(persona: &str, machine: &str) -> RosterEntry {
     let now = chrono::Utc::now();
     RosterEntry {
         persona: persona.parse().unwrap(),
-        machine: "test".to_owned(),
+        machine: machine.to_owned(),
         harness: "copilot".to_owned(),
         capabilities: vec!["rust".to_owned()],
         whoami: Some("Maintain the Rust backend.".to_owned()),
@@ -118,4 +122,44 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     assert_eq!(busy.handling, Some(1));
     drop(working);
     wait_activity(&kv, "dev-a", Activity::Idle, Duration::from_secs(5)).await;
+}
+
+/// The built-in messenger waits while another machine serves the messenger, takes over once that one stops, and of
+/// two daemons starting at once only one goes ahead.
+#[tokio::test]
+async fn the_builtin_messenger_waits_for_another_machines_messenger() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let every = Duration::from_millis(100);
+
+    let mut here = entry_on("messenger", "here");
+    roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
+    assert_eq!(read(&kv, "messenger").await.map(|e| e.machine).as_deref(), Some("here"), "nobody served it");
+    roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
+    assert_eq!(read(&kv, "messenger").await.unwrap().machine, "here", "this machine's own entry");
+    kv.delete("messenger").await.unwrap();
+
+    let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(10)).await.unwrap();
+    let waiting = tokio::spawn({
+        let kv = kv.clone();
+        async move { roster::wait_for_turn(&kv, &mut here, every).await }
+    });
+    tokio::time::sleep(every * 5).await;
+    assert!(!waiting.is_finished(), "started while another machine serves the messenger");
+    assert_eq!(read(&kv, "messenger").await.unwrap().machine, "there");
+    there.deregister().await;
+    tokio::time::timeout(Duration::from_secs(5), waiting).await.expect("took over").unwrap().unwrap();
+    assert_eq!(read(&kv, "messenger").await.unwrap().machine, "here");
+    kv.delete("messenger").await.unwrap();
+
+    let racing = |machine: &str| {
+        let (kv, mut entry) = (kv.clone(), entry_on("messenger", machine));
+        tokio::spawn(async move { roster::wait_for_turn(&kv, &mut entry, every).await })
+    };
+    let (a, b) = (racing("a"), racing("b"));
+    tokio::time::sleep(every * 5).await;
+    assert!(a.is_finished() != b.is_finished(), "exactly one of two daemons starting at once goes ahead");
+    a.abort();
+    b.abort();
 }

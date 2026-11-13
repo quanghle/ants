@@ -81,6 +81,10 @@ ants watch                                          # live traffic
 ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, plan
 ```
 
+The minimum config file is one line, `provider = "copilot"` (or `"claude"`, `"antigravity"`) in `~/.ants/config.toml`:
+`ants daemon` with no flags then serves the built-in messenger, which takes `ants ask` without `@persona` (see
+[Messenger](#messenger)).
+
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`. A team across machines adds
 credentials ([Credentials](#credentials)), a leaf node per machine ([Leaf nodes](#leaf-nodes)), a config file listing
 the personas ([Config file](#config-file)) and services ([Services](#services)).
@@ -158,9 +162,17 @@ daemon resumes it too. `ants init` (or a daemon without credentials) creates the
 ## Config file
 
 One daemon process can serve several personas, each over its own NATS connection with its own credentials. List them
-in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`:
+in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`. The minimum file
+names a provider and serves the built-in messenger alone (see [Messenger](#messenger)):
 
 ```toml
+provider = "copilot"                       # or "claude", "antigravity"
+```
+
+A fuller file:
+
+```toml
+provider = "copilot"                       # default harness of every persona; serves the built-in messenger
 nats = "wss://hub.example/nats"            # server for every persona that sets none
 js_domain = "hub"                          # the hub's JetStream domain, if it has one (see Leaf nodes)
 
@@ -168,7 +180,7 @@ js_domain = "hub"                          # the hub's JetStream domain, if it h
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "copilot"                        # default; or "claude", "antigravity"
+harness = "claude"                         # default: provider, else "copilot"; or "antigravity"
 model = "gpt-6.1-sol"                      # optional; exact model ID offered by the harness
 reasoning_effort = "high"                  # optional; a value offered by the selected model
 context = "long_context"                  # optional; provider-native tier/window, not a token cap
@@ -196,7 +208,7 @@ creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
 `~` expands to the home directory; other relative paths are relative to the file. Names must be unique and unknown
-keys are errors. A persona that fails to start (a missing credentials file, credentials the server rejects) is logged and
+keys are errors. A file needs `provider` or at least one `[[persona]]`. A persona that fails to start (a missing credentials file, credentials the server rejects) is logged and
 the others keep running; the daemon exits with an error only when none could start. A persona whose server cannot be
 reached yet waits for it: the connection is retried after 1 s, then twice as long each time up to 30 s, with a warning
 naming the URL. Ctrl-C stops them all, waiting or not.
@@ -207,6 +219,7 @@ How flags and the file combine:
 - `ants daemon --persona dev-a` ignores that default file and takes the persona from the flags (`--workdir`, `--home`,
   `--harness`, `--max-harnesses`, ...), as before.
 - `ants daemon --config FILE --persona dev-a` serves only `dev-a` from `FILE`; persona flags given override its entries.
+- `ants daemon --config FILE --persona messenger` serves only the built-in messenger of a file with `provider`.
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
   `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one persona is served.
   `nats` and `js_domain` may also be set per persona.
@@ -280,16 +293,17 @@ Setting up a machine (`macbook`, personas `dev-a` and `dev-b`, hub `wss://hub.ex
 ```sh
 # on the machine holding the team directory
 ants auth user dev-a --js-domain hub && ants auth user dev-b --js-domain hub && ants auth user human --js-domain hub
-ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub
+ants auth user messenger --js-domain hub                                  # for the built-in messenger
+ants auth leaf macbook --persona dev-a --persona dev-b --persona messenger --persona human --js-domain hub
 # copy server.conf, leaf-macbook.creds and the persona and human .creds to ~/.config/ants/auth on macbook (not the .nk seeds)
 
 # on macbook
 cargo install --path crates/ants                                          # ~/.cargo/bin/ants
 ants leaf config macbook --uplink wss://hub.example.com/nats             # ~/.config/ants/leaf.conf
-$EDITOR ~/.ants/config.toml                                               # js_domain = "hub" and the personas, see Config file
+$EDITOR ~/.ants/config.toml                                               # provider, js_domain = "hub", the personas; see Config file
 scripts/install-units.sh                                                  # installs and starts both services
 export ANTS_JS_DOMAIN=hub ANTS_CREDS=~/.config/ants/auth/human.creds      # for the CLI, in the shell profile
-ants leaf outbox macbook --persona dev-a --persona dev-b --persona human  # store and forward, see Leaf nodes
+ants leaf outbox macbook --persona dev-a --persona dev-b --persona messenger --persona human  # store and forward, see Leaf nodes
 ants roster
 ```
 
@@ -488,8 +502,21 @@ before the MCP tools existed lack the subscription to the persona's own inbox; i
 
 `ants ask` without `@persona` goes to the persona `messenger`. The messenger is a persona like any other, served by
 `ants daemon`, whose job is to route: it finds the persona for a request by the capabilities in the roster, with
-`list_personas` and `route`, and answers with that persona's reply. Its MCP server instructions say so; a workdir with
-an `AGENTS.md` (or the harness's own instructions file) along these lines makes it firmer:
+`list_personas` and `route`, and answers with that persona's reply.
+
+A daemon whose config file sets `provider` serves a built-in messenger on that provider, with the provider's default
+model, reasoning effort and context and the settings of a persona that sets nothing else: no allowlist, capabilities
+or `whoami`, the file's `nats` and `js_domain`. Its home and workdir are `~/.ants/messenger`, created on start, and its
+credentials `~/.config/ants/auth/messenger.creds` (`ants auth user messenger`) when that file exists; with no other
+persona served, `--creds` (`ANTS_CREDS`) fills in otherwise. One messenger keeps one session store, so a daemon does not
+start the built-in messenger while the roster lists a messenger on another machine: it checks the roster every 10 s
+and starts once that entry is gone, deleted on a clean stop or expired 30 s after its daemon's last heartbeat. Of two
+daemons starting at once, one claims the roster entry and the other waits. A daemon on a machine whose entry is
+already there (its own earlier run) starts at once. A persona named `messenger` in the file replaces the built-in one
+and starts without the check.
+
+The messenger's MCP server instructions say what to do; a persona `messenger` with a workdir holding an `AGENTS.md` (or
+the harness's own instructions file) along these lines makes it firmer:
 
 ```toml
 [[persona]]

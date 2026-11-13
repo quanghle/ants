@@ -85,6 +85,8 @@ pub struct Config {
     pub limits: PromptLimits,
     /// Token and cost caps of each thread and of the persona.
     pub caps: Caps,
+    /// Wait to serve the persona while the roster lists it on another machine, as the built-in messenger does.
+    pub defer_to_other_machines: bool,
 }
 
 /// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -108,6 +110,21 @@ pub async fn run(config: Config) -> Result<()> {
         tracing::info!("stopped before connecting");
         return Ok(());
     };
+    let mut entry = roster::entry(&config).await;
+    if config.defer_to_other_machines {
+        let kv = bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
+        tokio::select! {
+            result = roster::wait_for_turn(&kv, &mut entry, ants_proto::ROSTER_HEARTBEAT) => result?,
+            () = async {
+                if stop_signal().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                tracing::info!("stopped before serving");
+                return Ok(());
+            }
+        }
+    }
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
@@ -134,7 +151,7 @@ pub async fn run(config: Config) -> Result<()> {
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
     let workload = std::sync::Arc::new(roster::Workload::default());
-    let registration = roster::register(&js, &config, workload.clone()).await?;
+    let registration = roster::register(&js, entry, workload.clone()).await?;
     tracing::info!(
         persona = %config.persona,
         harness = %config.harness,

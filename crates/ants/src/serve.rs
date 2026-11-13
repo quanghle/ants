@@ -136,7 +136,7 @@ impl DaemonArgs {
         }
         p.env.extend(self.env.iter().cloned());
         if let Some(harness) = self.harness {
-            p.harness = harness;
+            p.harness = Some(harness);
         }
         if let Some(model) = &self.model {
             p.model = Some(model.clone());
