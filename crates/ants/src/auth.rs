@@ -391,7 +391,13 @@ pub(crate) mod tests {
         // Personas read the roster, to route requests by capability.
         let (_b, b_js) = server.connect(&p("dev-b")).await;
         let b_kv = bus::ensure_roster(&b_js, ttl).await.unwrap();
-        assert_eq!(ants_daemon::roster::list_entries(&b_kv).await.unwrap(), std::slice::from_ref(&entry));
+        // dev-b may write its own key only, and an entry there naming dev-a is skipped.
+        let forged = RosterEntry { capabilities: vec!["deploy".to_owned()], ..entry.clone() };
+        b_kv.put("dev-b", serde_json::to_vec(&forged).unwrap().into()).await.unwrap();
+        for kv in [&b_kv, &h_kv] {
+            assert_eq!(ants_daemon::roster::list_entries(kv).await.unwrap(), std::slice::from_ref(&entry));
+        }
+        b_kv.delete("dev-b").await.unwrap();
 
         let listed: RosterEntry = serde_json::from_slice(&h_kv.get("dev-a").await.unwrap().unwrap()).unwrap();
         assert_eq!(listed, entry);

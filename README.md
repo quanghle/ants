@@ -105,8 +105,9 @@ capabilities, start and last heartbeat time (`RosterEntry` in `ants-proto`). It 
 deletes it on a clean stop. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; every persona's and the
-human's read the roster, so agents can pick whom to ask (see Messenger). Persona credentials issued before personas
-could read it need `ants auth user` again.
+human's read the roster, so agents can pick whom to ask (see Messenger). Readers take the persona from the key and
+skip, with a warning, an entry that names another. Persona credentials issued before personas could read it need
+`ants auth user` again.
 
 `ants roster` lists the entries: persona, state, harness, machine, time since the last heartbeat, uptime,
 capabilities and workdir. An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s

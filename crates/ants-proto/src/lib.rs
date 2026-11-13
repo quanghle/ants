@@ -36,6 +36,9 @@ pub enum Error {
     BudgetExhausted(ThreadId),
     #[error("envelope from {from} to {to} arrived on {subject}")]
     WrongSubject { subject: String, from: PersonaId, to: PersonaId },
+    /// A body naming another persona than the key or subject it was stored under, which credentials pin.
+    #[error("{kind} of {persona} found at {at}")]
+    ForeignPersona { kind: &'static str, persona: PersonaId, at: String },
 }
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -352,6 +355,15 @@ impl RosterEntry {
     /// The KV key of the entry.
     pub fn key(&self) -> &str {
         self.persona.as_str()
+    }
+
+    /// Check that the entry was read from its own key. Credentials pin each persona to its own key, while the body is
+    /// whatever the writer put there, so an entry naming another persona is forged.
+    pub fn check_key(&self, key: &str) -> Result<(), Error> {
+        if key == self.key() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona { kind: "roster entry", persona: self.persona.clone(), at: format!("key {key}") })
     }
 }
 
@@ -752,6 +764,8 @@ mod tests {
         assert!(!json.contains("workdir"));
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.key(), "dev-a");
+        assert_eq!(entry.check_key("dev-a"), Ok(()));
+        assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
         assert_eq!(subject::roster(&entry.persona), "$KV.ants_roster.dev-a");
 
         let minimal = r#"{"persona":"dev-b","machine":"m","harness":"copilot","state":"idle",

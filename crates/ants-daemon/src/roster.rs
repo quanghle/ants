@@ -74,15 +74,18 @@ impl Drop for Registration {
 }
 
 /// The entries in the roster, by persona. An entry removed while listing is left out, and a malformed one is skipped
-/// with a warning.
+/// with a warning. So is one naming another persona than its key: credentials vouch only for the key.
 pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
     let mut keys: Vec<String> = kv.keys().await.context("listing the roster")?.try_collect().await?;
     keys.sort();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
         let Some(value) = kv.get(&key).await.with_context(|| format!("reading {key} in the roster"))? else { continue };
-        match serde_json::from_slice(&value) {
-            Ok(entry) => entries.push(entry),
+        match serde_json::from_slice::<RosterEntry>(&value) {
+            Ok(entry) => match entry.check_key(&key) {
+                Ok(()) => entries.push(entry),
+                Err(e) => tracing::warn!(key, error = %e, "skipping a roster entry for another persona"),
+            },
             Err(e) => tracing::warn!(key, error = %e, "skipping a malformed roster entry"),
         }
     }
