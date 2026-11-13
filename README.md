@@ -6,7 +6,7 @@ Headless agent teams on several machines, talking to each other and to a human a
 - **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
   bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio. Copilot CLI (`copilot --acp`) comes first.
-- **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and (later) the MCP server.
+- **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and its MCP server.
 
 ## Build
 
@@ -125,6 +125,7 @@ run of characters:
 | `edit:/home/me/notes/*` | edits matching the absolute path |
 | `fetch:https://docs.rs/*` | fetches of matching URLs |
 | `other:bd-*` | other tools, such as MCP tools, by title |
+| `other:send_message` | the daemon's own messaging tool (see MCP tools) |
 
 Allowed requests are answered "allow once". Every other request goes to the human: the daemon publishes an
 `ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting-approval`, and
@@ -132,6 +133,36 @@ waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants
 Only the human's credentials may publish decisions. The verdict is `allow_once`, `allow_always` (the harness remembers
 it for the session) or `reject`; no decision in time rejects the request. `--allow-tools` is `--allow '*'`, for
 trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
+
+## MCP tools
+
+Every harness session gets the daemon's MCP server, named `ants`, in ACP `session/new` and `session/load`. Its tools
+speak as the persona, on the thread the session serves:
+
+| Tool | Does |
+|---|---|
+| `send_message(to, text, thread?)` | Sends to another persona or `human` and returns once JetStream has stored it. `thread` omitted: the current thread; `new`: a fresh one; else that thread id. |
+| `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
+| `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
+
+Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a
+message from the human, one turn after a message from an agent, refused when none is left (a new thread inherits the
+same budget). `ask_agent` also needs a turn left for the reply, and a session may not message its own persona. The
+tools work only while a message is in progress on the thread.
+
+A reply to `ask_agent` reaches the waiting call through a live subscription to the persona's inbox, while the inbox
+consumer still holds it back behind the prompt that asked. When the consumer delivers it later, the daemon acks it
+without prompting, or keeps it for `check_inbox` when the call gave up (also across restarts: asks waiting for a reply
+and late replies are kept in `<home>/mcp.json`). Only a reply from the persona asked counts; any other message is a
+prompt as usual.
+
+The server listens on `127.0.0.1` on a free port (streamable HTTP, stateless) and on the Unix socket
+`<home>/mcp.sock` (mode 0600). The sessions of each thread get their own bearer token, which tells the daemon the
+calling thread; requests without a known token get 401. Harnesses whose ACP `mcpCapabilities` lack `http` get a stdio
+server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
+socket: one small process per session, only for those harnesses. Tool requests go through the persona's allowlist like
+any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, or `other`). Persona credentials issued
+before the MCP tools existed lack the subscription to the persona's own inbox; issue them again with `ants auth user`.
 
 ## Persona memory
 
@@ -174,6 +205,7 @@ Measured with ants 0.1.0 (release build), nats-server 2.15.3:
 | | Linux x86_64 | macOS arm64 |
 |---|---|---|
 | Idle daemon | 5.9 MB | 8.5 MB |
+| Idle daemon with the MCP server | not measured | 10.5 MB (+0.8 MB over 9.7 MB in the same run) |
 | Daemon with one Copilot session | not measured | 10.5 MB (+2.0 MB) |
 | Copilot CLI harness processes | not measured | 255 MB |
 
