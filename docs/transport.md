@@ -243,8 +243,13 @@ up to the daemon's ack wait. The daemon sends progress acks every 20 s for each 
 whose daemon crashed or never received it waits out the ack wait; one whose progress acks were lost on the silent
 link comes back while still in hand, and the daemon ignores that copy.
 
-`ants daemon` fails a persona whose server is unreachable at start (async-nats `retry_on_initial_connect` is off).
-With a local leaf node that server is the local one, which is up.
+`ants daemon` waits for a persona's server that is unreachable at start, as the local leaf node when launchd starts
+both services at once (ants-lz9): a refused, timed-out or unresolved connection is retried after 1 s, then twice as
+long each time up to 30 s, with a warning naming the URL (user and password masked), until it connects or the daemon
+is stopped. Rejected credentials, an unreadable credentials file, a malformed URL and TLS errors fail the persona at
+once. The loop is explicit rather than async-nats `retry_on_initial_connect`, which returns a client before it has
+connected, so the JetStream calls that follow would wait out their timeouts, and which keeps retrying rejected
+credentials as well. The other `ants` commands still fail at once.
 
 ## Dev Tunnels
 

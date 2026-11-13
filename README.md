@@ -86,8 +86,10 @@ creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
 `~` expands to the home directory; other relative paths are relative to the file. Names must be unique and unknown
-keys are errors. A persona that fails to start (bad credentials, unreachable server) is logged and the others keep
-running; the daemon exits with an error only when none could start. Ctrl-C stops them all.
+keys are errors. A persona that fails to start (a missing credentials file, credentials the server rejects) is logged and
+the others keep running; the daemon exits with an error only when none could start. A persona whose server cannot be
+reached yet waits for it: the connection is retried after 1 s, then twice as long each time up to 30 s, with a warning
+naming the URL. Ctrl-C stops them all, waiting or not.
 
 How flags and the file combine:
 
@@ -105,8 +107,8 @@ Each machine runs two user services: its nats-server (the leaf node, or the hub 
 daemon, `ants daemon --config ~/.ants/config.toml`. Templates are in `contrib/`: launchd agents on macOS
 (`contrib/launchd/ants.nats.plist`, `ants.daemon.plist`), systemd user units on Linux and WSL
 (`contrib/systemd/ants-nats.service`, `ants-daemon.service`). Both restart on failure; the daemon starts after
-nats-server under systemd, and under launchd, which has no start order, it exits until nats-server listens and is
-started again. The units name files only: credentials stay in the files the config names.
+nats-server under systemd, and under launchd, which has no start order, it waits until nats-server listens (see Config
+file). The units name files only: credentials stay in the files the config names.
 
 Setting up a machine (`macbook`, personas `dev-a` and `dev-b`, hub `wss://hub.example.com/nats` with
 `jetstream { domain: hub }`):

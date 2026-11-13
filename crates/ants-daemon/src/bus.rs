@@ -7,9 +7,9 @@ use ants_proto::{
     Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
-use async_nats::Event;
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::{self, kv, stream};
+use async_nats::{ConnectErrorKind, Event};
 
 /// How long the stream keeps messages, and the sessions bucket a thread's session.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -29,7 +29,58 @@ pub async fn connect(
     persona: &PersonaId,
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
-    let mut options = async_nats::ConnectOptions::new()
+    let client = options(creds, persona, name)
+        .await?
+        .connect(url)
+        .await
+        .with_context(|| format!("connecting to NATS at {}", redacted(url)))?;
+    Ok((client.clone(), jetstream(client, js_domain)))
+}
+
+/// Delay before the second attempt of [`connect_retrying`], doubled after each failed one up to [`RETRY_MAX`].
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// Like [`connect`], but waits for a server that cannot be reached yet, as the local nats-server when a service manager
+/// starts the daemon first: a refused, timed-out or unresolved connection is retried for as long as it takes, after
+/// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. What another attempt
+/// cannot cure fails at once: an unreadable credentials file, a malformed URL, credentials the server rejects, a TLS
+/// error. None when `stop` completes first.
+pub async fn connect_retrying(
+    url: &str,
+    creds: Option<&Path>,
+    js_domain: Option<&JsDomain>,
+    persona: &PersonaId,
+    name: &str,
+    stop: impl Future<Output = ()>,
+) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
+    let options = options(creds, persona, name).await?;
+    let shown = redacted(url);
+    let attempts = async {
+        let mut delay = RETRY_FIRST;
+        loop {
+            match options.clone().connect(url).await {
+                Ok(client) => return Ok(client),
+                Err(e) if worth_retrying(&e) => {
+                    tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "NATS server not reachable yet");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_MAX);
+                }
+                Err(e) => return Err(e).with_context(|| format!("connecting to NATS at {shown}")),
+            }
+        }
+    };
+    tokio::select! {
+        client = attempts => {
+            let client = client?;
+            Ok(Some((client.clone(), jetstream(client, js_domain))))
+        }
+        () = stop => Ok(None),
+    }
+}
+
+async fn options(creds: Option<&Path>, persona: &PersonaId, name: &str) -> Result<async_nats::ConnectOptions> {
+    let options = async_nats::ConnectOptions::new()
         .name(name)
         .ping_interval(PING_INTERVAL)
         .custom_inbox_prefix(inbox_prefix(persona))
@@ -40,13 +91,32 @@ pub async fn connect(
                 event => tracing::debug!("{event}"),
             }
         });
-    if let Some(path) = creds {
-        options =
-            options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))?;
+    match creds {
+        Some(path) => {
+            options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))
+        }
+        None => Ok(options),
     }
-    let client = options.connect(url).await.with_context(|| format!("connecting to NATS at {url}"))?;
-    let js = jetstream(client.clone(), js_domain);
-    Ok((client, js))
+}
+
+/// Whether the server may answer a later attempt: it is not listening yet, or not reachable.
+fn worth_retrying(e: &async_nats::ConnectError) -> bool {
+    matches!(e.kind(), ConnectErrorKind::Io | ConnectErrorKind::TimedOut | ConnectErrorKind::Dns)
+}
+
+/// `url`, a comma-separated list of server URLs too, with any user and password masked, for logs and errors.
+fn redacted(url: &str) -> String {
+    url.split(',')
+        .map(|one| {
+            let start = one.find("://").map_or(0, |i| i + 3);
+            let end = one[start..].find(['/', '?', '#']).map_or(one.len(), |i| start + i);
+            match one[start..end].rfind('@') {
+                Some(at) => format!("{}***{}", &one[..start], &one[start + at..]),
+                None => one.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The JetStream context every ants process uses. With a domain, requests go to `$JS.<domain>.API`, which reaches the
@@ -215,4 +285,73 @@ pub async fn publish_json<T: serde::Serialize>(
         .await
         .context("waiting for JetStream to store the message")?;
     Ok(ack.sequence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ants_test_support::{NatsServer, free_port, have};
+
+    fn dev() -> PersonaId {
+        "dev-a".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_server_that_starts_later() {
+        if !have("nats-server") {
+            return;
+        }
+        let port = free_port();
+        let url = format!("nats://127.0.0.1:{port}");
+        let later = async {
+            // After the first attempt has failed.
+            tokio::time::sleep(RETRY_FIRST / 2).await;
+            tokio::task::spawn_blocking(move || NatsServer::start_on(port).unwrap()).await.unwrap()
+        };
+        let dev = dev();
+        let connecting = connect_retrying(&url, None, None, &dev, "test", std::future::pending());
+        let (connected, _server) = tokio::join!(tokio::time::timeout(Duration::from_secs(20), connecting), later);
+        let (_client, js) = connected.expect("still waiting for the server").unwrap().unwrap();
+        ensure_stream(&js).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stops_waiting_on_the_stop_signal() {
+        let url = format!("nats://127.0.0.1:{}", free_port());
+        let stop = tokio::time::sleep(Duration::from_millis(100));
+        let stopped = tokio::time::timeout(RETRY_MAX, connect_retrying(&url, None, None, &dev(), "test", stop)).await;
+        assert!(stopped.expect("ignored the stop signal").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn fails_at_once_on_what_retrying_cannot_cure() {
+        let Some(server) = NatsServer::start_with(|_| "authorization { user: dev, password: right }".to_owned()) else {
+            return;
+        };
+        // async-nats sends no credentials from the URL, so the server rejects the connection; the URL's are masked.
+        let wrong = server.url.replacen("nats://", "nats://dev:wrong@", 1);
+        let missing = Path::new("no-such.creds");
+        let cases = [
+            (wrong.as_str(), None, "authorization violation"),
+            (server.url.as_str(), Some(missing), "reading credentials"),
+            ("nats://[::1", None, "NATS server URL is invalid"),
+        ];
+        for (url, creds, why) in cases {
+            let failed = tokio::time::timeout(
+                RETRY_FIRST * 3,
+                connect_retrying(url, creds, None, &dev(), "test", std::future::pending()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("retried {url} with {creds:?}"));
+            let err = format!("{:#}", failed.err().unwrap());
+            assert!(err.contains(why) && !err.contains("wrong"), "{err}");
+        }
+    }
+
+    #[test]
+    fn masks_users_and_passwords() {
+        assert_eq!(redacted("nats://127.0.0.1:4222"), "nats://127.0.0.1:4222");
+        assert_eq!(redacted("wss://dev:secret@hub.example.com/nats?x=a@b"), "wss://***@hub.example.com/nats?x=a@b");
+        assert_eq!(redacted("nats://t0ken@a:4222,tls://u:p@b"), "nats://***@a:4222,tls://***@b");
+    }
 }
