@@ -15,6 +15,10 @@ cargo build --release   # target/release/ants
 cargo test
 ```
 
+Tests that need `nats-server` or `bd` on PATH skip without them; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
+instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
+test binary itself as a stub ACP harness.
+
 ## Try it
 
 ```sh
@@ -41,6 +45,11 @@ the rest of its thread. A thread's harness stops after `--idle-timeout-secs` (de
 session resumes with ACP `session/load` on the next one. A harness with a prompt in flight is never stopped: when all
 are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
 at once, and their messages are redelivered later).
+
+Every message in hand, waiting for its thread or a harness or being prompted (a tool request waiting for the human
+included), gets a progress ack every 20 s. A message held by a daemon that crashed or lost its link is redelivered
+after the 60 s ack wait; a copy redelivered to a daemon still holding the message is ignored. The daemon updates its
+inbox consumer to these settings when it starts.
 
 Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
 daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires

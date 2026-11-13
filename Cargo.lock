@@ -13,6 +13,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "async-process",
+ "blocking",
  "futures",
  "futures-concurrency",
  "rustc-hash",
@@ -121,8 +122,10 @@ dependencies = [
 name = "ants"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "ants-daemon",
  "ants-proto",
+ "ants-test-support",
  "anyhow",
  "async-nats",
  "chrono",
@@ -143,6 +146,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "ants-proto",
+ "ants-test-support",
  "anyhow",
  "async-nats",
  "chrono",
@@ -169,6 +173,13 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "ants-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

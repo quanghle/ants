@@ -1,55 +1,12 @@
 //! The roster against a real nats-server: entries appear, refresh, leave on a clean stop and expire after a crash.
 
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
 use ants_daemon::roster::{self, Registration};
 use ants_proto::{PersonaId, RosterEntry};
+use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::kv;
-
-struct Server {
-    child: Child,
-    store: PathBuf,
-    url: String,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.store);
-    }
-}
-
-impl Server {
-    /// None when nats-server is not installed.
-    fn start() -> Option<Self> {
-        if Command::new("nats-server").arg("--version").output().is_err() {
-            eprintln!("nats-server not on PATH; skipping");
-            return None;
-        }
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let store = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("roster-js-{port}"));
-        let child = Command::new("nats-server")
-            .args(["-js", "-a", "127.0.0.1", "-p", &port.to_string(), "-sd"])
-            .arg(&store)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let server = Self { child, store, url: format!("nats://127.0.0.1:{port}") };
-        for _ in 0..50 {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Some(server);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("nats-server did not start");
-    }
-}
 
 fn entry(persona: &str) -> RosterEntry {
     let now = chrono::Utc::now();

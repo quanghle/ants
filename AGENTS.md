@@ -15,7 +15,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 ## Code
 
-- Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-daemon` (NATS + ACP), `ants` (binary).
+- Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-daemon` (NATS + ACP), `ants` (binary),
+  `ants-test-support` (dev-only test helpers: tools on PATH, a throwaway nats-server).
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
 - TLS stays on rustls.
 - Before finishing: `cargo fmt`, `cargo clippy --all-targets`, `cargo test`.
