@@ -73,6 +73,15 @@ enum Command {
     Dead(DeadCommand),
     /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
     Daemon(serve::DaemonArgs),
+    /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
+    Mcp {
+        /// The daemon's MCP socket.
+        #[arg(long)]
+        socket: PathBuf,
+        /// The session's token.
+        #[arg(long, env = ants_daemon::mcp::TOKEN_ENV, hide_env_values = true)]
+        token: String,
+    },
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
@@ -159,6 +168,7 @@ async fn main() -> Result<()> {
             let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
             serve::run(serve::configs(personas, &cli.nats, cli.creds)?).await
         }
+        Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { harness }) => {
             println!("{harness}: {}", harness::check(harness).await?);
             Ok(())

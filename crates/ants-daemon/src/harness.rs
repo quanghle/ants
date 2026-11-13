@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionRequest,
-    SessionId, SessionNotification, SessionUpdate, TextContent,
+    ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest,
+    RequestPermissionRequest, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::ThreadId;
@@ -77,6 +77,9 @@ pub async fn check(kind: HarnessKind) -> Result<String> {
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
 type Connector = Arc<dyn Fn() -> DynConnectTo<Client> + Send + Sync>;
 
+/// The MCP servers a session of a thread gets; the flag tells whether the harness takes HTTP ones.
+pub type McpServers = Arc<dyn Fn(&ThreadId, bool) -> Vec<McpServer> + Send + Sync>;
+
 /// How to start a harness and open sessions in it.
 #[derive(Clone)]
 pub struct Launch {
@@ -86,13 +89,14 @@ pub struct Launch {
     policy: PermissionPolicy,
     /// The thread the sessions serve, so a permission request can be escalated on it.
     thread: Option<ThreadId>,
+    mcp: Option<McpServers>,
 }
 
 impl Launch {
     /// `kind` working in `cwd`, with `env` added to the daemon's environment.
     pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
         let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
-        Self { name: kind.name().to_owned(), connect, cwd, policy, thread: None }
+        Self { name: kind.name().to_owned(), connect, cwd, policy, thread: None, mcp: None }
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -100,9 +104,21 @@ impl Launch {
         Self { thread: Some(thread.clone()), ..self.clone() }
     }
 
+    /// The same launch, offering `mcp` to the sessions of each thread.
+    pub fn with_mcp(self, mcp: McpServers) -> Self {
+        Self { mcp: Some(mcp), ..self }
+    }
+
+    fn mcp_servers(&self, http: bool) -> Vec<McpServer> {
+        match (&self.mcp, &self.thread) {
+            (Some(mcp), Some(thread)) => mcp(thread, http),
+            _ => Vec::new(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
-        Self { name: "test".to_owned(), connect, cwd, policy, thread: None }
+        Self { name: "test".to_owned(), connect, cwd, policy, thread: None, mcp: None }
     }
 }
 
@@ -210,7 +226,9 @@ async fn serve(
         )
         .connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            let id = open(&cx, &launch, resume, init.agent_capabilities.load_session).await?;
+            let caps = &init.agent_capabilities;
+            let mcp = launch.mcp_servers(caps.mcp_capabilities.http);
+            let id = open(&cx, &launch, resume, caps.load_session, mcp).await?;
             if let Some(tx) = opened.take() {
                 let _ = tx.send(Ok(id.clone()));
             }
@@ -250,16 +268,18 @@ async fn open(
     launch: &Launch,
     resume: Option<SessionId>,
     can_load: bool,
+    mcp: Vec<McpServer>,
 ) -> Result<SessionId, agent_client_protocol::Error> {
     if let Some(id) = resume {
         if !can_load {
             tracing::warn!(session = %id, "{} cannot load sessions; starting a new one", launch.name);
         } else {
-            match cx.send_request(LoadSessionRequest::new(id.clone(), launch.cwd.clone())).block_task().await {
+            let load = LoadSessionRequest::new(id.clone(), launch.cwd.clone()).mcp_servers(mcp.clone());
+            match cx.send_request(load).block_task().await {
                 Ok(_) => return Ok(id),
                 Err(e) => tracing::warn!(session = %id, error = %e, "session/load failed; starting a new session"),
             }
         }
     }
-    Ok(cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?.session_id)
+    Ok(cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?.session_id)
 }

@@ -197,7 +197,7 @@ impl Permissions {
     /// What the credentials of `persona` allow.
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status, approvals and dead
-    /// letters, reads only its own inbox consumer, its own replies and the decisions on its own approval requests,
+    /// letters, reads only its own inbox (consumer and live), its own replies and the decisions on its own approval requests,
     /// writes only its own roster entry, and reads and writes only its own keys in the sessions bucket. The human (the
     /// CLI user) also watches all ants traffic, reads the roster, decides approval requests, may create and upgrade the
     /// stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
@@ -250,7 +250,12 @@ impl Permissions {
                 // Put and delete of its own roster entry.
                 subject::roster(persona),
             ]);
-            subscribe.extend(["ants.plan.>".to_owned(), format!("{}.*", subject::approvals(persona))]);
+            subscribe.extend([
+                "ants.plan.>".to_owned(),
+                format!("{}.*", subject::approvals(persona)),
+                // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
+                subject::inbox(persona),
+            ]);
         }
         Self { publish, subscribe }
     }

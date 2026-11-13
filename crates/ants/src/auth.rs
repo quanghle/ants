@@ -337,6 +337,8 @@ pub(crate) mod tests {
         h_client.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
         let got = timeout(WAIT, decisions.next()).await.unwrap().unwrap();
         assert_eq!(&got.payload[..], b"allow");
+        // Its own inbox it may watch live; a denial would be the next violation below.
+        let _own = a_raw.subscribe(subject::inbox(&dev_a)).await.unwrap();
         for denied in [subject::inbox(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()] {
             let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;

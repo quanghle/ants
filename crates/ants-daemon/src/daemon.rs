@@ -17,6 +17,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 use crate::approvals::NatsApprover;
 use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch};
+use crate::mcp::Mcp;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::{bus, roster, workspace};
@@ -68,7 +69,10 @@ pub async fn run(config: Config) -> Result<()> {
             .await?;
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
-    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy);
+    let mut mcp = Mcp::start(config.persona.clone(), &config.home, crate::mcp::jetstream_outbox(js.clone())).await?;
+    mcp.listen(client.subscribe(subject::inbox(&config.persona)).await?);
+    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy)
+        .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
     let sessions = SessionStore::kv(bus::ensure_sessions(&js).await?, config.persona.clone());
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
@@ -88,7 +92,14 @@ pub async fn run(config: Config) -> Result<()> {
         "serving inbox"
     );
 
-    let inbox = Inbox { client: &client, js: &js, persona: &config.persona, pool: &pool, retry_delay: RETRY_DELAY };
+    let inbox = Inbox {
+        client: &client,
+        js: &js,
+        persona: &config.persona,
+        pool: &pool,
+        mcp: Some(&mcp),
+        retry_delay: RETRY_DELAY,
+    };
     let ctrl_c = || async {
         if let Err(e) = tokio::signal::ctrl_c().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C");
@@ -125,6 +136,7 @@ struct Inbox<'a> {
     js: &'a jetstream::Context,
     persona: &'a PersonaId,
     pool: &'a Pool,
+    mcp: Option<&'a Mcp>,
     retry_delay: Duration,
 }
 
@@ -185,6 +197,9 @@ impl Inbox<'_> {
                                 continue;
                             }
                         };
+                        if self.claim(&envelope, &msg).await {
+                            continue;
+                        }
                         let thread = envelope.thread_id.clone();
                         let t = threads.entry(thread.clone()).or_default();
                         if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
@@ -217,6 +232,26 @@ impl Inbox<'_> {
             tokio::select! {
                 () = drain => {}
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
+            }
+        }
+    }
+
+    /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
+    /// thread's queue: the prompt that asked is in flight on that thread.
+    async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
+        let Some(mcp) = self.mcp else { return false };
+        match mcp.claim(envelope).await {
+            Ok(false) => false,
+            Ok(true) => {
+                if let Err(e) = msg.double_ack().await {
+                    tracing::warn!(error = %e, "acking a reply to ask_agent");
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_agent");
+                nak(msg, Some(self.retry_delay)).await;
+                true
             }
         }
     }
@@ -283,6 +318,7 @@ impl Inbox<'_> {
         tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "prompting");
         self.client.publish(status.clone(), "working".into()).await?;
 
+        let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let prompt = self.pool.prompt(&envelope.thread_id, &envelope.text);
         tokio::pin!(prompt);
         let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY);
@@ -446,6 +482,7 @@ mod tests {
                 js: &self.js,
                 persona: &self.dev,
                 pool,
+                mcp: None,
                 retry_delay: Duration::from_millis(300),
             };
             let stop = || {
