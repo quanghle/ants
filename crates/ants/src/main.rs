@@ -84,13 +84,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Post to a channel as the human. An @persona in the text wakes only that member; a post that @mentions nobody
-    /// goes to the channel's messenger, which wakes the members the post concerns.
+    /// Post to a channel as the CLI's human. An @persona in the text wakes only that member; a post that @mentions
+    /// nobody goes to the channel's messenger, which wakes the members the post concerns. A new thread belongs to the
+    /// human who posts it, and the turn budget it runs out of comes back to that human.
     Post {
         /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Post on an existing thread of the channel instead of starting one.
+        /// Post on an existing thread of the channel instead of starting one; the thread keeps its owner.
         #[arg(long)]
         thread: Option<ThreadId>,
         /// Print the posts on the thread as each arrives, until the timeout or Ctrl-C.
@@ -103,7 +104,7 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
-    /// Channels: named groups of personas that the human posts to with `ants post`.
+    /// Channels: named groups of personas that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Show the plan room of a thread, or post to it as the CLI's human, which gives the room a fresh turn budget.
@@ -177,7 +178,7 @@ enum ChannelCommand {
         /// Member persona (repeatable, or comma-separated).
         #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
         members: Vec<PersonaId>,
-        /// Persona that triages the posts of the human that @mention nobody (default: `messenger`).
+        /// Persona that triages the posts of humans that @mention nobody (default: `messenger`).
         #[arg(long, value_parser = channel::parse_persona)]
         messenger: Option<PersonaId>,
     },
@@ -189,7 +190,7 @@ enum ChannelCommand {
         /// Member persona (repeatable, or comma-separated): together, the new members.
         #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
         members: Option<Vec<PersonaId>>,
-        /// Persona that triages the posts of the human that @mention nobody.
+        /// Persona that triages the posts of humans that @mention nobody.
         #[arg(long, value_parser = channel::parse_persona, conflicts_with = "no_messenger")]
         messenger: Option<PersonaId>,
         /// Go back to the default messenger, `messenger`.
@@ -670,13 +671,14 @@ async fn post(
     if text.trim().is_empty() {
         bail!("nothing to post");
     }
-    let post = channel::human_post(channel, thread, text);
     let (client, js) = nats.connect("ants-cli").await?;
+    let humans = humans::load(&js, &nats.me).await;
+    let post = channel::compose(&js, &nats.me, &humans, channel, thread, text).await;
     let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
     if entry.is_none() {
         tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
     }
-    for persona in channel::idle_mentions(&post, entry.as_ref()) {
+    for persona in channel::idle_mentions(&post, entry.as_ref(), &humans) {
         tracing::warn!("@{persona} is no member of #{}: the post does not wake {persona}", post.channel);
     }
     // Subscribe first so a fast reply is not missed.
@@ -703,9 +705,10 @@ async fn post(
 async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
     let kv = channel::open(&js).await?;
+    let humans = humans::load(&js, &nats.me).await;
     match command {
         ChannelCommand::Create { channel, members, messenger } => {
-            channel::check_not_human(members.iter().chain(&messenger))?;
+            channel::check_not_human(members.iter().chain(&messenger), &humans)?;
             let mut entry = ants_proto::ChannelEntry::new(channel);
             for member in members {
                 entry.add_member(member);
@@ -719,7 +722,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             if members.is_none() && messenger.is_none() && !no_messenger {
                 bail!("nothing to change: give --member, --messenger or --no-messenger");
             }
-            channel::check_not_human(members.iter().flatten().chain(&messenger))?;
+            channel::check_not_human(members.iter().flatten().chain(&messenger), &humans)?;
             let (entry, ()) = channel::update(&kv, &channel, |entry| {
                 if let Some(members) = &members {
                     entry.members.clear();
@@ -736,7 +739,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             println!("{}", channel::describe(&entry));
         }
         ChannelCommand::Add { channel, personas } => {
-            channel::check_not_human(&personas)?;
+            channel::check_not_human(&personas, &humans)?;
             let (entry, added) = channel::update(&kv, &channel, |entry| {
                 personas.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
             })

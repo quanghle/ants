@@ -74,8 +74,9 @@ ants plan <thread>          # the thread's plan room
 ## Channels
 
 A channel is a named group of personas. A post @mentioning members wakes only them; a post mentioning nobody goes to
-the channel's messenger, which @mentions the members it concerns. Replies land in the channel on the post's thread,
-not in the inbox.
+the channel's messenger, which @mentions the members it concerns. Posts go out as the CLI's human, who owns the
+threads it starts: when the agents' turns on a thread run out, the notice goes to that owner. Replies land in the
+channel on the post's thread, not in the inbox.
 
 ```sh
 ants channel list                                   # channels, members and messenger

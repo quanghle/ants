@@ -6,15 +6,16 @@
 //! stream sequence of the last post shown is kept per thread in the sessions bucket, so a restarted daemon goes on from
 //! there. The reply is posted on the same thread, spending one of its turns.
 //!
-//! A post of the human that @mentions nobody goes to the channel's messenger instead, to triage: its answer
-//! @mentions the members the post is relevant to, which wakes them ([`triage_prompt`]).
+//! A post of a human that @mentions nobody goes to the channel's messenger instead, to triage: its answer @mentions
+//! the members the post is relevant to, which wakes them ([`triage_prompt`]). Who is a human is the daemon's
+//! [`crate::humans::Registry`]'s to say.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, PersonaId, RosterEntry, STREAM, ThreadId, Uuid, chan_reader,
-    channel_seen_key, subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, PersonaId, RosterEntry, STREAM, ThreadId, Uuid,
+    chan_reader, channel_seen_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -123,16 +124,16 @@ pub enum Wake {
     Skip,
     /// An answer: the post @mentions the persona, a member.
     Mentioned,
-    /// A triage: the post is the human's, mentions nobody, and the persona is the channel's messenger.
+    /// A triage: the post is a human's, mentions nobody, and the persona is the channel's messenger.
     Triage,
 }
 
-/// What `post` asks of `persona`, given the entry of its channel: a prompt only when it @mentions the persona, a
-/// member, or when the persona is the channel's messenger and it is a post of the human that mentions nobody; never
-/// for the persona's own.
-pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost) -> Wake {
+/// What `post` asks of `persona`, given the entry of its channel and the `humans`: a prompt only when it @mentions the
+/// persona, a member, or when the persona is the channel's messenger and it is a post of a human that mentions nobody;
+/// never for the persona's own.
+pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost, humans: &Humans) -> Wake {
     let Some(entry) = entry else { return Wake::Skip };
-    if post.from == *persona || !entry.woken(post).contains(persona) {
+    if post.from == *persona || !entry.woken(post, humans).contains(persona) {
         Wake::Skip
     } else if post.mentions.is_empty() {
         Wake::Triage
@@ -141,8 +142,8 @@ pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPos
     }
 }
 
-/// `post` as an inbox message from its author to `persona`: what the attempt markers, caps and tools of the thread
-/// go by.
+/// `post` as an inbox message from its author to `persona`, owned by the thread's owner the post carries: what the
+/// attempt markers, caps, escalations and tools of the thread go by.
 pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
     Envelope {
         id: post.id,
@@ -152,7 +153,7 @@ pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
         text: post.text.clone(),
         turn_budget: post.turn_budget,
         in_reply_to: None,
-        owner: None,
+        owner: post.owner.clone(),
         sent_at: post.sent_at,
     }
 }
@@ -163,7 +164,7 @@ pub struct Context {
     pub posts: Vec<ChannelPost>,
     /// Unseen posts left out, the oldest ones.
     pub skipped: usize,
-    /// The posts stored on the thread after the one being answered, from the human's last one on: what
+    /// The posts stored on the thread after the one being answered, from a human's last one on: what
     /// [`ChannelPost::turns_left`] goes by.
     pub later: Vec<ChannelPost>,
 }
@@ -171,6 +172,7 @@ pub struct Context {
 /// Picks the context of a prompt from the posts of a channel, read in stream order.
 struct Collect<'a> {
     persona: &'a PersonaId,
+    humans: &'a Humans,
     thread: &'a ThreadId,
     /// Stream sequence of the post being answered: the context ends before it, and the later posts start after it.
     at: u64,
@@ -180,8 +182,8 @@ struct Collect<'a> {
 }
 
 impl<'a> Collect<'a> {
-    fn new(persona: &'a PersonaId, thread: &'a ThreadId, at: u64) -> Self {
-        Self { persona, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
+    fn new(persona: &'a PersonaId, humans: &'a Humans, thread: &'a ThreadId, at: u64) -> Self {
+        Self { persona, humans, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
     }
 
     /// Take the post at stream sequence `seq`.
@@ -190,8 +192,8 @@ impl<'a> Collect<'a> {
             return;
         }
         if seq > self.at {
-            // The human's post gives the thread a fresh budget: the ones before it no longer count.
-            if post.from.is_human() {
+            // A human's post gives the thread a fresh budget: the ones before it no longer count.
+            if self.humans.contains(&post.from) {
                 self.later.clear();
             }
             self.later.push(post);
@@ -227,7 +229,7 @@ pub fn prompt(persona: &PersonaId, post: &ChannelPost, context: &Context, left: 
     text
 }
 
-/// The prompt of the channel's messenger for `post`, a post of the human that mentions nobody, after the `context` of
+/// The prompt of the channel's messenger for `post`, a post of a human that mentions nobody, after the `context` of
 /// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `roster` shows them. `left` is the turns the thread
 /// keeps after the answer.
 pub fn triage_prompt(
@@ -304,9 +306,9 @@ impl Threads {
 
     /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with `earlier`, also those before
     /// it that the persona has not been shown: after the last one shown, or since the thread started, without its own.
-    /// The read ends at the last post stored as it starts.
-    pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: bool) -> Result<Context> {
-        let mut collect = Collect::new(&self.persona, &post.thread_id, seq);
+    /// The posts of `humans` renew the thread's turns. The read ends at the last post stored as it starts.
+    pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: bool, humans: &Humans) -> Result<Context> {
+        let mut collect = Collect::new(&self.persona, humans, &post.thread_id, seq);
         let after = consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 };
         let seen = if earlier && !post.starts_thread() { Some(self.last_seen(&post.thread_id).await?) } else { None };
         let start = match seen {
@@ -388,7 +390,7 @@ async fn read(consumer: &consumer::PullConsumer, collect: &mut Collect<'_>) -> R
 }
 
 /// When `thread` started, a little early, if its id is a time-ordered UUID as a top-level post's is.
-fn thread_start(thread: &ThreadId) -> Option<SystemTime> {
+pub fn thread_start(thread: &ThreadId) -> Option<SystemTime> {
     let (secs, nanos) = Uuid::parse_str(thread.as_str()).ok()?.get_timestamp()?.to_unix();
     (SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)).checked_sub(CLOCK_SLACK)
 }
@@ -408,6 +410,15 @@ mod tests {
         entry
     }
 
+    /// The humans: `human`, and alice, from the humans bucket.
+    fn humans() -> Humans {
+        Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))])
+    }
+
+    fn wakes(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost) -> Wake {
+        wake(persona, entry, post, &humans())
+    }
+
     fn post(from: &str, text: &str) -> ChannelPost {
         ChannelPost::new("ops".parse().unwrap(), p(from), text)
     }
@@ -415,30 +426,33 @@ mod tests {
     #[test]
     fn only_a_post_mentioning_a_member_wakes_it() {
         let (entry, a) = (ops(), p("dev-a"));
-        assert_eq!(wake(&a, Some(&entry), &post("human", "@dev-a deploy")), Wake::Mentioned);
-        assert_eq!(wake(&a, Some(&entry), &post("dev-b", "@dev-b @dev-a check")), Wake::Mentioned, "agents too");
-        assert_eq!(wake(&a, Some(&entry), &post("human", "@dev-b deploy")), Wake::Skip, "another member");
-        assert_eq!(wake(&a, Some(&entry), &post("human", "deploy")), Wake::Skip, "nobody mentioned");
-        assert_eq!(wake(&a, Some(&entry), &post("dev-a", "@dev-a note to self")), Wake::Skip, "its own post");
-        assert_eq!(wake(&a, None, &post("human", "@dev-a deploy")), Wake::Skip, "no such channel");
-        assert_eq!(wake(&p("dev-c"), Some(&entry), &post("human", "@dev-c deploy")), Wake::Skip, "no member");
+        assert_eq!(wakes(&a, Some(&entry), &post("human", "@dev-a deploy")), Wake::Mentioned);
+        assert_eq!(wakes(&a, Some(&entry), &post("dev-b", "@dev-b @dev-a check")), Wake::Mentioned, "agents too");
+        assert_eq!(wakes(&a, Some(&entry), &post("human", "@dev-b deploy")), Wake::Skip, "another member");
+        assert_eq!(wakes(&a, Some(&entry), &post("human", "deploy")), Wake::Skip, "nobody mentioned");
+        assert_eq!(wakes(&a, Some(&entry), &post("dev-a", "@dev-a note to self")), Wake::Skip, "its own post");
+        assert_eq!(wakes(&a, None, &post("human", "@dev-a deploy")), Wake::Skip, "no such channel");
+        assert_eq!(wakes(&p("dev-c"), Some(&entry), &post("human", "@dev-c deploy")), Wake::Skip, "no member");
         let other = ChannelPost::new("dev".parse().unwrap(), PersonaId::human(), "@dev-a deploy");
-        assert_eq!(wake(&a, Some(&entry), &other), Wake::Skip, "another channel's entry");
+        assert_eq!(wakes(&a, Some(&entry), &other), Wake::Skip, "another channel's entry");
     }
 
     #[test]
     fn the_messenger_triages_the_human_posts_that_mention_nobody() {
         let (mut entry, messenger) = (ops(), PersonaId::messenger());
         let untagged = post("human", "the build is red");
-        assert_eq!(wake(&messenger, Some(&entry), &untagged), Wake::Triage, "the default messenger, no member");
-        assert_eq!(wake(&p("dev-a"), Some(&entry), &untagged), Wake::Skip, "members wait for its mentions");
-        assert_eq!(wake(&messenger, Some(&entry), &post("dev-a", "the build is red")), Wake::Skip, "agents' posts");
-        assert_eq!(wake(&messenger, Some(&entry), &post("human", "@dev-a the build")), Wake::Skip, "mentions");
-        assert_eq!(wake(&messenger, Some(&entry), &post("human", "@human the build")), Wake::Skip, "mentions");
+        assert_eq!(wakes(&messenger, Some(&entry), &untagged), Wake::Triage, "the default messenger, no member");
+        assert_eq!(wakes(&p("dev-a"), Some(&entry), &untagged), Wake::Skip, "members wait for its mentions");
+        assert_eq!(wakes(&messenger, Some(&entry), &post("dev-a", "the build is red")), Wake::Skip, "agents' posts");
+        assert_eq!(wakes(&messenger, Some(&entry), &post("human", "@dev-a the build")), Wake::Skip, "mentions");
+        assert_eq!(wakes(&messenger, Some(&entry), &post("human", "@human the build")), Wake::Skip, "mentions");
         entry.messenger = Some(p("dev-b"));
-        assert_eq!(wake(&p("dev-b"), Some(&entry), &untagged), Wake::Triage, "the assigned one");
-        assert_eq!(wake(&messenger, Some(&entry), &untagged), Wake::Skip, "not the default then");
-        assert_eq!(wake(&p("dev-b"), Some(&entry), &post("human", "@dev-b look")), Wake::Mentioned);
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &untagged), Wake::Triage, "the assigned one");
+        assert_eq!(wakes(&messenger, Some(&entry), &untagged), Wake::Skip, "not the default then");
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("human", "@dev-b look")), Wake::Mentioned);
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("alice", "the build")), Wake::Triage, "any human's");
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("bob", "the build")), Wake::Skip, "bob is no human");
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("dev-a", "@alice the build")), Wake::Skip, "a human");
     }
 
     #[test]
@@ -481,16 +495,19 @@ mod tests {
         ask.turn_budget = 3;
         let envelope = as_envelope(&ask, &p("dev-a"));
         assert_eq!((envelope.id, &envelope.thread_id, envelope.turn_budget), (ask.id, &ask.thread_id, 3));
-        assert_eq!((envelope.from, envelope.to, envelope.text), (p("dev-b"), p("dev-a"), ask.text));
+        assert_eq!((envelope.from, envelope.to, envelope.owner), (p("dev-b"), p("dev-a"), None));
+        assert_eq!(envelope.text, ask.text);
+        let owned = ask.with_owner(Some(p("alice")));
+        assert_eq!(as_envelope(&owned, &p("dev-a")).owner, Some(p("alice")), "the thread's owner gets its escalations");
     }
 
     #[test]
     fn the_context_is_the_latest_posts_of_the_thread_by_others_before_the_post() {
-        let (a, root) = (p("dev-a"), post("human", "deploy"));
+        let (a, root, humans) = (p("dev-a"), post("human", "deploy"), humans());
         let on = |from: &str, text: &str| {
             ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
         };
-        let mut collect = Collect::new(&a, &root.thread_id, 1000);
+        let mut collect = Collect::new(&a, &humans, &root.thread_id, 1000);
         collect.push(1, root.clone());
         collect.push(2, post("human", "another thread"));
         collect.push(3, on("dev-a", "its own"));
@@ -508,11 +525,11 @@ mod tests {
 
     #[test]
     fn the_later_posts_are_the_thread_s_since_the_post_or_the_human_s_last() {
-        let (a, root) = (p("dev-a"), post("human", "deploy"));
+        let (a, root, humans) = (p("dev-a"), post("human", "deploy"), humans());
         let on = |from: &str, text: &str| {
             ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p(from), text)
         };
-        let mut collect = Collect::new(&a, &root.thread_id, 5);
+        let mut collect = Collect::new(&a, &humans, &root.thread_id, 5);
         collect.push(5, root.clone());
         collect.push(6, on("dev-b", "first"));
         collect.push(7, post("human", "another thread"));
@@ -522,6 +539,8 @@ mod tests {
         collect.push(9, on("human", "go on"));
         collect.push(10, on("dev-c", "then"));
         assert_eq!(later(&collect), ["go on", "then"], "the human's post resets the budget");
+        collect.push(11, on("alice", "and on"));
+        assert_eq!(later(&collect), ["and on"], "any human's does");
         assert!(collect.done().posts.is_empty());
     }
 

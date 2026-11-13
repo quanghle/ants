@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject,
+    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, Humans, JsDomain, PersonaId, State, ThreadId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -426,12 +426,13 @@ impl Inbox<'_> {
 
     /// The channel post `msg` to answer, if it wakes the persona ([`channel::wake`]). Any other is acked at once: the
     /// persona's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
-    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it.
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. The post kept names
+    /// its thread's owner ([`ChannelPost::thread_owner`]).
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
             .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
-        let post = match post {
+        let mut post = match post {
             Ok(post) => post,
             Err(error) => {
                 tracing::warn!(subject = %msg.subject, error, "dropping a channel post");
@@ -441,12 +442,13 @@ impl Inbox<'_> {
                 return None;
             }
         };
-        let mut wake = channel::wake(self.persona, channels.get(&post.channel), &post);
-        let unseen = channels.get(&post.channel).is_none() && post.mentions.is_empty() && post.from.is_human();
+        let humans = self.humans.humans();
+        let mut wake = channel::wake(self.persona, channels.get(&post.channel), &post, &humans);
+        let unseen = channels.get(&post.channel).is_none() && post.mentions.is_empty() && humans.contains(&post.from);
         if wake == Wake::Skip && (post.mentions(self.persona) && post.from != *self.persona || unseen) {
             // The post may have overtaken the change that made the persona a member, or created the channel.
             channels.refresh(&post.channel).await;
-            wake = channel::wake(self.persona, channels.get(&post.channel), &post);
+            wake = channel::wake(self.persona, channels.get(&post.channel), &post, &humans);
         }
         if wake == Wake::Skip {
             if let Err(e) = msg.ack().await {
@@ -455,6 +457,7 @@ impl Inbox<'_> {
             return None;
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
+        post.owner = post.thread_owner(&humans);
         let envelope = channel::as_envelope(&post, self.persona);
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })) })
     }
@@ -553,7 +556,8 @@ impl Inbox<'_> {
         (thread, retry)
     }
 
-    /// Store `msg` as a dead letter, telling the thread's owner, else the default human, and terminate it.
+    /// Store `msg` as a dead letter, telling the thread's owner, else the default human, and terminate it. A channel
+    /// post names its thread's owner ([`Inbox::admit_post`]), and its envelope does too.
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<u64> {
         let human = self.humans.default_human();
         match &incoming.post {
@@ -583,12 +587,13 @@ impl Inbox<'_> {
             None => false,
         };
         // A post's thread has the turns its posts since left, which other members' replies may have spent.
+        let humans = self.humans.humans();
         let read = match &incoming.post {
-            Some(posted) => Some(self.threads.context(&posted.post, seq, true).await?),
+            Some(posted) => Some(self.threads.context(&posted.post, seq, true, &humans).await?),
             None => None,
         };
         let spent = match (&incoming.post, &read) {
-            (Some(posted), Some(read)) => posted.post.reply(self.persona.clone(), "", &read.later).err(),
+            (Some(posted), Some(read)) => posted.post.reply(self.persona.clone(), "", &read.later, &humans).err(),
             _ => envelope.reply(self.persona.clone(), "", self.humans.role(&envelope.from)).err(),
         };
         if let Some(ProtoError::BudgetExhausted(_)) = spent {
@@ -636,7 +641,7 @@ impl Inbox<'_> {
             None => 0,
         };
         let text = match (&incoming.post, &read) {
-            (Some(posted), Some(read)) => self.channel_prompt(posted, read).await,
+            (Some(posted), Some(read)) => self.channel_prompt(posted, read, &humans).await,
             _ => envelope.text.clone(),
         };
         let text = prompt_text(&text, cut_off, late);
@@ -689,14 +694,15 @@ impl Inbox<'_> {
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
-                let later = match self.threads.context(&posted.post, seq, false).await {
+                let humans = self.humans.humans();
+                let later = match self.threads.context(&posted.post, seq, false, &humans).await {
                     Ok(now) => now.later,
                     Err(e) => {
                         tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
                         read.later
                     }
                 };
-                match posted.post.reply(self.persona.clone(), text.as_str(), &later) {
+                match posted.post.reply(self.persona.clone(), text.as_str(), &later, &humans) {
                     Ok(post) => Reply::Post(post),
                     Err(ProtoError::BudgetExhausted(_)) => {
                         // The answer is not posted: the thread's owner gets it with the thread.
@@ -728,9 +734,9 @@ impl Inbox<'_> {
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
-    async fn channel_prompt(&self, posted: &Posted, read: &Context) -> String {
+    async fn channel_prompt(&self, posted: &Posted, read: &Context, humans: &Humans) -> String {
         let post = &posted.post;
-        let left = post.turns_left(&read.later).saturating_sub(1);
+        let left = post.turns_left(&read.later, humans).saturating_sub(1);
         let Some(entry) = &posted.triage else { return channel::prompt(self.persona, post, read, left) };
         let roster = (self.roster)().await.unwrap_or_else(|e| {
             tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
@@ -1668,7 +1674,7 @@ mod tests {
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
         let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
         bus.post(&root).await;
-        let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?", &[]).unwrap();
+        let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?", &[], &Humans::default()).unwrap();
         let ask_seq = bus.post(&ask).await;
 
         let ctrl_c = Arc::new(Semaphore::new(0));
@@ -1686,9 +1692,9 @@ mod tests {
         assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
 
         // After a restart, only what was posted since shows, without the persona's own reply.
-        let more = root.reply(PersonaId::human(), "rollback plan is ready", &[]).unwrap();
+        let more = root.reply(PersonaId::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
         bus.post(&more).await;
-        let again = root.reply(PersonaId::human(), "@dev-a and now?", &[]).unwrap();
+        let again = root.reply(PersonaId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
         let again_seq = bus.post(&again).await;
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
@@ -1753,14 +1759,15 @@ mod tests {
         review.turn_budget = 3;
         bus.post(&review).await;
         // The other members answered first, each spending one of the thread's turns.
-        let b = review.reply("dev-b".parse().unwrap(), "fine", &[]).unwrap();
+        let b = review.reply("dev-b".parse().unwrap(), "fine", &[], &Humans::default()).unwrap();
         bus.post(&b).await;
-        let c = review.reply("dev-c".parse().unwrap(), "fine", std::slice::from_ref(&b)).unwrap();
+        let c = review.reply("dev-c".parse().unwrap(), "fine", std::slice::from_ref(&b), &Humans::default()).unwrap();
         let reviewed = bus.post(&c).await;
         let mut ship = ChannelPost::new(ops.clone(), human_id, "@dev-a @dev-b ship it");
         ship.turn_budget = 1;
         bus.post(&ship).await;
-        let shipped = bus.post(&ship.reply("dev-b".parse().unwrap(), "shipped", &[]).unwrap()).await;
+        let shipped =
+            bus.post(&ship.reply("dev-b".parse().unwrap(), "shipped", &[], &Humans::default()).unwrap()).await;
 
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
@@ -1823,5 +1830,51 @@ mod tests {
         assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
         let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
         assert!(prompt.contains(members), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns() {
+        let Some((mut bus, _)) = Bus::start().await else { return };
+        bus.humans = Registry::with(PersonaId::human(), &["alice"]);
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        // dev-a is the channel's messenger and a member.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member(bus.dev.clone());
+        entry.add_member("dev-b".parse().unwrap());
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
+        let alice: PersonaId = "alice".parse().unwrap();
+        let mut alice_inbox = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        // No owner on it, as from before posts carried one: alice, a human, started the thread.
+        let root = ChannelPost::new(entry.channel.clone(), alice.clone(), "the build is red");
+        bus.post(&root).await;
+        let bob = ChannelPost::new(entry.channel.clone(), "bob".parse().unwrap(), "no human, no triage");
+        bus.post(&bob).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let answer = next_post(&mut replies).await;
+            assert_eq!((&answer.thread_id, answer.in_reply_to), (&root.thread_id, Some(root.id)));
+            assert_eq!((answer.owner.as_ref(), answer.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET - 1));
+            let mut spent =
+                answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &Humans::default()).unwrap();
+            spent.turn_budget = 0;
+            assert_eq!(spent.owner.as_ref(), Some(&alice), "agents' posts keep the owner");
+            let seq = bus.post(&spent).await;
+            let escalation = next_envelope(&mut alice_inbox).await;
+            assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&root.thread_id, Some(spent.id)));
+            assert_eq!((&escalation.to, escalation.owner.as_ref()), (&alice, Some(&alice)));
+            assert!(escalation.text.starts_with("Turn budget spent; needs a decision."), "{}", escalation.text);
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 1, "alice's post only: {answered:?}");
+        assert!(answered[0].contains(channel::TRIAGE_RULES), "{}", answered[0]);
+        assert!(answered[0].contains("Post from alice mentioning nobody:\nthe build is red"), "{}", answered[0]);
     }
 }

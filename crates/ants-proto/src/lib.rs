@@ -37,8 +37,8 @@ pub const SESSIONS_BUCKET: &str = "ants_sessions";
 /// KV bucket where a daemon marks each attempt at an inbox message it started, and the reply it stored, so a
 /// redelivery knows what an earlier attempt may already have done.
 pub const ATTEMPTS_BUCKET: &str = "ants_attempts";
-/// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Only the human writes it;
-/// personas read it.
+/// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Only humans write it; personas
+/// read it.
 pub const CHANNELS_BUCKET: &str = "ants_channels";
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its persona id. Only humans write it; personas read
 /// it. [`PersonaId::human`] is a human without an entry.
@@ -1031,7 +1031,7 @@ pub fn parse_mentions(text: &str) -> Vec<PersonaId> {
     found
 }
 
-/// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Only the human writes it.
+/// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Only humans write it.
 ///
 /// Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1040,7 +1040,7 @@ pub struct ChannelEntry {
     /// The personas in the channel, in the order they were added.
     #[serde(default)]
     pub members: Vec<PersonaId>,
-    /// The persona that triages the human's posts that @mention nobody, when not the default `messenger`
+    /// The persona that triages humans' posts that @mention nobody, when not the default `messenger`
     /// ([`ChannelEntry::messenger`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messenger: Option<PersonaId>,
@@ -1069,7 +1069,7 @@ impl ChannelEntry {
         self.members.contains(persona)
     }
 
-    /// The persona that triages the human's posts that @mention nobody: the one assigned, or else the default
+    /// The persona that triages humans' posts that @mention nobody: the one assigned, or else the default
     /// [`PersonaId::messenger`]. It need not be a member.
     pub fn messenger(&self) -> PersonaId {
         self.messenger.clone().unwrap_or_else(PersonaId::messenger)
@@ -1091,17 +1091,18 @@ impl ChannelEntry {
         self.members.len() != before
     }
 
-    /// The personas `post` wakes: the members it @mentions, except its author and the human; mentions of anyone else
-    /// wake nobody. A post of the human that mentions nobody wakes the channel's [`ChannelEntry::messenger`] instead,
-    /// to triage it; an agent's post that mentions nobody wakes nobody. A post to another channel wakes nobody here.
-    pub fn woken(&self, post: &ChannelPost) -> Vec<PersonaId> {
+    /// The personas `post` wakes: the members it @mentions, except its author and the `humans`; mentions of anyone
+    /// else wake nobody. A post of a human that mentions nobody wakes the channel's [`ChannelEntry::messenger`]
+    /// instead, to triage it; an agent's post that mentions nobody wakes nobody. A post to another channel wakes nobody
+    /// here.
+    pub fn woken(&self, post: &ChannelPost, humans: &Humans) -> Vec<PersonaId> {
         if post.channel != self.channel {
             return Vec::new();
         }
         if post.mentions.is_empty() {
-            return if post.from.is_human() { vec![self.messenger()] } else { Vec::new() };
+            return if humans.contains(&post.from) { vec![self.messenger()] } else { Vec::new() };
         }
-        post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !m.is_human()).cloned().collect()
+        post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !humans.contains(m)).cloned().collect()
     }
 }
 
@@ -1109,8 +1110,11 @@ impl ChannelEntry {
 /// post on an existing thread.
 ///
 /// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn of what the
-/// thread has left ([`ChannelPost::turns_left`]), and at zero the thread goes to the human; the human's posts give the
-/// thread a fresh budget. Each post carries the turns the thread has left after it.
+/// thread has left ([`ChannelPost::turns_left`]), and at zero the thread goes to its owner, the human whose post started
+/// it, else the default human; any human's post gives the thread a fresh budget. Each post carries the turns the thread
+/// has left after it, and the thread's owner when known.
+///
+/// Who is a human is the caller's to say, from the [`HUMANS_BUCKET`], as [`Humans`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelPost {
     pub id: Uuid,
@@ -1126,17 +1130,20 @@ pub struct ChannelPost {
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
+    /// The human who started the thread. Replies keep it ([`ChannelPost::reply`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<PersonaId>,
     pub sent_at: DateTime<Utc>,
 }
 
 impl ChannelPost {
-    /// A top-level post with a fresh budget: it starts a new thread, whose id is the post's own.
+    /// A top-level post with a fresh budget and no owner: it starts a new thread, whose id is the post's own.
     pub fn new(channel: ChannelId, from: PersonaId, text: impl Into<String>) -> Self {
         let id = Uuid::now_v7();
         Self::build(id, channel, ThreadId(id.to_string()), from, text.into())
     }
 
-    /// A post on an existing thread, with a fresh budget, as the human posts.
+    /// A post on an existing thread, with a fresh budget and no owner, as a human posts.
     pub fn on_thread(channel: ChannelId, thread_id: ThreadId, from: PersonaId, text: impl Into<String>) -> Self {
         Self::build(Uuid::now_v7(), channel, thread_id, from, text.into())
     }
@@ -1151,8 +1158,20 @@ impl ChannelPost {
             text,
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
+            owner: None,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The post with `owner` as the human who started its thread.
+    pub fn with_owner(self, owner: Option<PersonaId>) -> Self {
+        Self { owner, ..self }
+    }
+
+    /// The owner of the post's thread: the one it carries, else its author when one of the `humans`, as for a post
+    /// stored before posts carried owners.
+    pub fn thread_owner(&self, humans: &Humans) -> Option<PersonaId> {
+        self.owner.clone().or_else(|| humans.contains(&self.from).then(|| self.from.clone()))
     }
 
     /// The post as an agent's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
@@ -1163,21 +1182,29 @@ impl ChannelPost {
     }
 
     /// The turns the thread has left for an answer to this post, given the posts stored on the thread `later` than it,
-    /// in order: a post of the human gives the thread a fresh budget, and any other leaves the lower of what was left
-    /// and what it carries. So the agents answering one post spend from the thread's turns together, not each from
-    /// the post's.
-    pub fn turns_left(&self, later: &[ChannelPost]) -> u32 {
+    /// in order: a post of one of the `humans` gives the thread a fresh budget, and any other leaves the lower of what
+    /// was left and what it carries. So the agents answering one post spend from the thread's turns together, not each
+    /// from the post's.
+    pub fn turns_left(&self, later: &[ChannelPost], humans: &Humans) -> u32 {
         later.iter().filter(|post| post.thread_id == self.thread_id).fold(self.turn_budget, |left, post| {
-            if post.from.is_human() { post.turn_budget } else { left.min(post.turn_budget) }
+            if humans.contains(&post.from) { post.turn_budget } else { left.min(post.turn_budget) }
         })
     }
 
-    /// A reply on the same channel and thread, after the posts stored on it `later` than this one. The human's has a
-    /// fresh budget; an agent's spends one of the [`ChannelPost::turns_left`].
-    pub fn reply(&self, from: PersonaId, text: impl Into<String>, later: &[ChannelPost]) -> Result<Self, Error> {
+    /// A reply on the same channel and thread, after the posts stored on it `later` than this one, keeping the
+    /// thread's owner ([`ChannelPost::thread_owner`]); a human's reply on a thread with no known owner takes it. A
+    /// human's reply has a fresh budget; an agent's spends one of the [`ChannelPost::turns_left`].
+    pub fn reply(
+        &self,
+        from: PersonaId,
+        text: impl Into<String>,
+        later: &[ChannelPost],
+        humans: &Humans,
+    ) -> Result<Self, Error> {
         let mut reply = Self::on_thread(self.channel.clone(), self.thread_id.clone(), from, text);
         reply.in_reply_to = Some(self.id);
-        if reply.from.is_human() { Ok(reply) } else { reply.spend(self.turns_left(later)) }
+        reply.owner = self.thread_owner(humans).or_else(|| reply.thread_owner(humans));
+        if humans.contains(&reply.from) { Ok(reply) } else { reply.spend(self.turns_left(later, humans)) }
     }
 
     /// Whether the post is a top-level one, which started its thread.
@@ -1190,9 +1217,9 @@ impl ChannelPost {
         self.mentions.contains(persona)
     }
 
-    /// Whether the post @mentions a persona other than its author and the human: an agent it would wake.
-    pub fn wakes_agents(&self) -> bool {
-        self.mentions.iter().any(|m| *m != self.from && !m.is_human())
+    /// Whether the post @mentions a persona other than its author and the `humans`: an agent it would wake.
+    pub fn wakes_agents(&self, humans: &Humans) -> bool {
+        self.mentions.iter().any(|m| *m != self.from && !humans.contains(m))
     }
 
     pub fn subject(&self) -> String {
@@ -1794,24 +1821,33 @@ mod tests {
 
     #[test]
     fn every_agent_channel_post_spends_a_turn() {
+        let humans = Humans::default();
         let c: ChannelId = "ops".parse().unwrap();
         let ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a deploy?");
-        let answer = ask.reply(p("dev-a"), "done, @human", &[]).unwrap();
+        let answer = ask.reply(p("dev-a"), "done, @human", &[], &humans).unwrap();
         assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
         assert_eq!(answer.in_reply_to, Some(ask.id));
         assert_eq!(answer.turn_budget, DEFAULT_TURN_BUDGET - 1, "waking nobody spends a turn too");
-        let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait", &[]).unwrap();
+        let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait", &[], &humans).unwrap();
         assert_eq!(handoff.turn_budget, DEFAULT_TURN_BUDGET - 1);
         handoff.turn_budget = 1;
-        let back = handoff.reply(p("dev-b"), "@dev-a fine", &[]).unwrap();
+        let back = handoff.reply(p("dev-b"), "@dev-a fine", &[], &humans).unwrap();
         assert_eq!(back.turn_budget, 0);
         let spent = Err(Error::BudgetExhausted(ask.thread_id.clone()));
-        assert_eq!(back.reply(p("dev-a"), "@dev-b again", &[]), spent);
-        assert_eq!(back.reply(p("dev-a"), "@human over to you", &[]), spent);
-        let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on", &[]).unwrap();
+        assert_eq!(back.reply(p("dev-a"), "@dev-b again", &[], &humans), spent);
+        assert_eq!(back.reply(p("dev-a"), "@human over to you", &[], &humans), spent);
+        let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on", &[], &humans).unwrap();
         assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
-        assert_eq!(handoff.reply(p("dev-c"), "late", &[back.clone(), human]).unwrap().turn_budget, 7, "reset since");
-        assert_eq!(handoff.reply(p("dev-c"), "late", &[back]), spent, "an older post spends the thread's turns");
+        assert_eq!(
+            handoff.reply(p("dev-c"), "late", &[back.clone(), human], &humans).unwrap().turn_budget,
+            7,
+            "reset since"
+        );
+        assert_eq!(
+            handoff.reply(p("dev-c"), "late", &[back], &humans),
+            spent,
+            "an older post spends the thread's turns"
+        );
         let own = ChannelPost::new(c, p("dev-a"), "@dev-b status?").spend(3).unwrap();
         assert!(own.starts_thread());
         assert_eq!(own.turn_budget, 2);
@@ -1819,21 +1855,22 @@ mod tests {
 
     #[test]
     fn agents_woken_by_one_post_spend_the_thread_s_turns_together() {
+        let humans = Humans::default();
         let c: ChannelId = "ops".parse().unwrap();
         let mut ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a @dev-b @dev-c review");
         ask.turn_budget = 4;
-        let a = ask.reply(p("dev-a"), "@dev-b @dev-c fine", &[]).unwrap();
-        let b = ask.reply(p("dev-b"), "@dev-a @dev-c fine", std::slice::from_ref(&a)).unwrap();
+        let a = ask.reply(p("dev-a"), "@dev-b @dev-c fine", &[], &humans).unwrap();
+        let b = ask.reply(p("dev-b"), "@dev-a @dev-c fine", std::slice::from_ref(&a), &humans).unwrap();
         let other = ChannelPost::on_thread(c, "other".parse().unwrap(), p("dev-z"), "elsewhere");
-        let c_ = ask.reply(p("dev-c"), "@dev-a @dev-b fine", &[a.clone(), other, b.clone()]).unwrap();
+        let c_ = ask.reply(p("dev-c"), "@dev-a @dev-b fine", &[a.clone(), other, b.clone()], &humans).unwrap();
         assert_eq!([a.turn_budget, b.turn_budget, c_.turn_budget], [3, 2, 1], "one budget, run down across branches");
-        let a2 = a.reply(p("dev-a"), "@dev-b again", &[b.clone(), c_.clone()]).unwrap();
+        let a2 = a.reply(p("dev-a"), "@dev-b again", &[b.clone(), c_.clone()], &humans).unwrap();
         assert_eq!(a2.turn_budget, 0);
         // Every post of the thread is spent out: no branch gets another turn.
         let thread = [ask, a, b, c_, a2];
         for (i, post) in thread.iter().enumerate() {
             let spent = Err(Error::BudgetExhausted(post.thread_id.clone()));
-            assert_eq!(post.reply(p("dev-b"), "more", &thread[i + 1..]), spent, "after {}", post.text);
+            assert_eq!(post.reply(p("dev-b"), "more", &thread[i + 1..], &humans), spent, "after {}", post.text);
         }
     }
 
@@ -1855,6 +1892,7 @@ mod tests {
 
     #[test]
     fn channel_entries_list_members_and_wake_those_mentioned() {
+        let humans = Humans::default();
         let c: ChannelId = "ops".parse().unwrap();
         let mut entry = ChannelEntry::new(c.clone());
         assert!(entry.add_member(p("dev-a")) && entry.add_member(p("dev-b")) && entry.add_member(p("dev-c")));
@@ -1874,17 +1912,56 @@ mod tests {
 
         let human = PersonaId::human();
         let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
-        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()], "the default messenger triages");
+        assert_eq!(entry.woken(&untagged, &humans), [PersonaId::messenger()], "the default messenger triages");
         entry.messenger = Some(p("dev-c"));
-        assert_eq!(entry.woken(&untagged), [p("dev-c")], "the assigned one, member or not");
-        assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?")).is_empty(), "agents never fan out");
+        assert_eq!(entry.woken(&untagged, &humans), [p("dev-c")], "the assigned one, member or not");
+        assert!(
+            entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?"), &humans).is_empty(),
+            "agents never fan out"
+        );
         let tagged = ChannelPost::new(c.clone(), p("dev-a"), "@dev-b @dev-c @dev-a @human look");
-        assert_eq!(entry.woken(&tagged), [p("dev-b")], "members only, not the author or the human");
-        assert!(entry.woken(&ChannelPost::new("dev".parse().unwrap(), human, "@dev-a")).is_empty());
+        assert_eq!(entry.woken(&tagged, &humans), [p("dev-b")], "members only, not the author or the human");
+        assert!(entry.woken(&ChannelPost::new("dev".parse().unwrap(), human, "@dev-a"), &humans).is_empty());
     }
 
     #[test]
-    fn channels_are_readable_by_personas_and_written_by_the_human_only() {
+    fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them() {
+        let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
+        let mut humans = Humans::default();
+        for h in [&alice, &bob] {
+            humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
+        }
+        let mut entry = ChannelEntry::new(c.clone());
+        entry.add_member(p("dev-a"));
+        let top = ChannelPost::new(c.clone(), alice.clone(), "the build is red").with_owner(Some(alice.clone()));
+        assert_eq!(entry.woken(&top, &humans), [PersonaId::messenger()], "alice's post goes to the messenger");
+        assert!(entry.woken(&top, &Humans::default()).is_empty(), "unless alice is no human");
+        let at_alice = ChannelPost::new(c.clone(), p("dev-a"), "@alice @dev-a look");
+        assert!(entry.woken(&at_alice, &humans).is_empty() && !at_alice.wakes_agents(&humans));
+
+        let answer = top.reply(p("dev-a"), "@dev-a on it", &[], &humans).unwrap();
+        assert_eq!((answer.owner.as_ref(), answer.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET - 1));
+        let mut spent = answer.reply(p("dev-b"), "@dev-a done", &[], &humans).unwrap();
+        spent.turn_budget = 1;
+        let by_bob = spent.reply(bob.clone(), "@dev-a again", &[], &humans).unwrap();
+        assert_eq!((by_bob.owner.as_ref(), by_bob.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET), "fresh, alice's");
+        assert_eq!(spent.turns_left(std::slice::from_ref(&by_bob), &humans), DEFAULT_TURN_BUDGET);
+
+        // A thread from before owners: its human author owns it, else the first human to answer on it.
+        let old = ChannelPost::new(c.clone(), alice.clone(), "old");
+        assert_eq!(old.reply(p("dev-a"), "a", &[], &humans).unwrap().owner, Some(alice.clone()));
+        let agents = ChannelPost::new(c, p("dev-a"), "@dev-b status?");
+        assert_eq!(agents.reply(p("dev-b"), "b", &[], &humans).unwrap().owner, None);
+        assert_eq!(agents.reply(bob.clone(), "b", &[], &humans).unwrap().owner, Some(bob));
+
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("owner"), "{json}");
+        assert!(serde_json::to_string(&top).unwrap().contains(r#""owner":"alice""#));
+        assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), old, "posts without an owner still read");
+    }
+
+    #[test]
+    fn channels_are_readable_by_personas_and_written_by_humans_only() {
         let a = Permissions::for_persona(&p("dev-a"), Role::Persona);
         for s in [
             "ants.chan.*.dev-a",
@@ -1908,6 +1985,10 @@ mod tests {
         let domain: JsDomain = "hub".parse().unwrap();
         let in_domain = human.with_js_domain(Some(&domain));
         assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_channels.>"));
+        let alice = Permissions::for_persona(&p("alice"), Role::Human);
+        for s in ["ants.chan.*.alice", "$KV.ants_channels.>"] {
+            assert!(alice.publish.iter().any(|have| have == s), "any human: {s} missing from {:?}", alice.publish);
+        }
     }
 
     #[test]

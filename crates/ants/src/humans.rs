@@ -3,11 +3,12 @@
 
 use std::path::Path;
 
-use ants_proto::{HUMANS_BUCKET, HumanEntry, PersonaId, Role, subject};
+use ants_proto::{HUMANS_BUCKET, HumanEntry, Humans, PersonaId, Role, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv, stream};
 use data_encoding::BASE64URL_NOPAD;
+use futures::TryStreamExt as _;
 use serde_json::Value;
 
 /// The humans bucket, created when missing and the credentials allow it (a human's). Entries never expire: a human
@@ -100,6 +101,36 @@ pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
     Ok(true)
 }
 
+/// The humans of the team: those the humans bucket lists, `human`, and `me` when a human. Without the bucket, or when
+/// it cannot be read (with a warning), only `human` and `me`.
+pub async fn load(js: &jetstream::Context, me: &Me) -> Humans {
+    let mut humans = match read(js).await {
+        Ok(humans) => humans,
+        Err(e) => {
+            tracing::warn!("reading {HUMANS_BUCKET}; only {} and human count as humans: {e:#}", me.id);
+            Humans::default()
+        }
+    };
+    if me.role.is_human() {
+        let _ = humans.add(me.id.as_str(), HumanEntry::new(me.id.clone()));
+    }
+    humans
+}
+
+async fn read(js: &jetstream::Context) -> Result<Humans> {
+    let Ok(kv) = js.get_key_value(HUMANS_BUCKET).await else { return Ok(Humans::default()) };
+    let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(value) = kv.get(&key).await.with_context(|| format!("reading human {key}"))? else { continue };
+        match serde_json::from_slice::<HumanEntry>(&value) {
+            Ok(entry) => entries.push((key, entry)),
+            Err(e) => tracing::warn!(key, error = %e, "skipping a malformed human entry"),
+        }
+    }
+    Ok(Humans::from_entries(entries.iter().map(|(key, entry)| (key.as_str(), entry.clone()))))
+}
+
 /// [`register`], reporting the outcome rather than failing: the CLI works without the entry, though daemons then take
 /// the human for an agent.
 pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
@@ -124,7 +155,6 @@ pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
 #[cfg(test)]
 mod tests {
     use ants_daemon::bus;
-    use futures::TryStreamExt as _;
     use serde_json::json;
 
     use super::*;

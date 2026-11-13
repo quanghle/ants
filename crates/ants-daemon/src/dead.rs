@@ -77,7 +77,7 @@ pub async fn bury_to(
 }
 
 /// Store channel post `msg` (`post`, checked against its subject) as a dead letter of `persona`, keeping its payload,
-/// tell `human`, the default human, on the post's thread, then terminate it. Returns the stream sequence of the dead
+/// tell the owner of the post's thread, else `human`, the default human, on that thread, then terminate it. Returns the stream sequence of the dead
 /// letter.
 pub async fn bury_post(
     js: &jetstream::Context,
@@ -293,17 +293,19 @@ fn notice(persona: &PersonaId, envelope: &Envelope, dead: &DeadLetter, dead_seq:
     notice
 }
 
-/// The message on a channel post's thread that tells `human`, the default human, the persona gave up on the post.
+/// The message on a channel post's thread that tells the thread's owner, else `human`, the default human, the persona
+/// gave up on the post.
 fn post_notice(persona: &PersonaId, post: &ChannelPost, dead: &DeadLetter, human: &PersonaId) -> Envelope {
     Envelope::on_thread(
         post.thread_id.clone(),
         persona.clone(),
-        human.clone(),
+        post.owner.clone().unwrap_or_else(|| human.clone()),
         format!(
             "Gave up on the post from {} in #{} after {} deliveries: {}\nPosting on the thread again retries it.",
             post.from, post.channel, dead.deliveries, dead.error
         ),
     )
+    .with_owner(post.owner.clone())
 }
 
 /// Every dead letter in the stream, oldest first, with its stream sequence. Needs the human's credentials.
@@ -414,5 +416,17 @@ mod tests {
         let owned = ask.with_owner(Some("bob".parse().unwrap()));
         let told = notice(&persona, &owned, &dead, 9, &alice);
         assert_eq!((told.to.as_str(), told.owner), ("bob", owned.owner));
+    }
+
+    #[test]
+    fn the_notice_of_a_channel_post_goes_to_the_thread_s_owner_else_the_default_human() {
+        let (persona, human) = ("dev-a".parse::<PersonaId>().unwrap(), PersonaId::human());
+        let post = ChannelPost::new("ops".parse().unwrap(), "dev-b".parse().unwrap(), "@dev-a check");
+        let dead = DeadLetter::of_payload(persona.clone(), 3, 5, "harness crashed", b"{}");
+        let told = post_notice(&persona, &post, &dead, &human);
+        assert_eq!((&told.to, &told.thread_id, &told.owner), (&human, &post.thread_id, &None));
+        let owned = post.with_owner(Some("alice".parse().unwrap()));
+        let told = post_notice(&persona, &owned, &dead, &human);
+        assert_eq!((told.to.as_str(), told.owner), ("alice", owned.owner));
     }
 }

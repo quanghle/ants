@@ -657,12 +657,16 @@ pub(crate) mod tests {
         let channels = Channels::watch(a_kv).await.unwrap();
         assert_eq!(channels.get(&ops), Some(&entry));
         bus::ensure_sessions(&h_js).await.unwrap();
-        let note = post.reply(human.clone(), "noted", &[]).unwrap();
+        let note = post.reply(human.clone(), "noted", &[], &ants_proto::Humans::default()).unwrap();
         bus::publish_json(&h_js, note.subject(), &note, None).await.unwrap();
-        let ask = post.reply(human.clone(), "@dev-a go", &[]).unwrap();
+        let ask = post.reply(human.clone(), "@dev-a go", &[], &ants_proto::Humans::default()).unwrap();
         let seq = bus::publish_json(&h_js, ask.subject(), &ask, None).await.unwrap();
         let threads = Threads::new(a_js.clone(), dev_a.clone(), bus::ensure_sessions(&a_js).await.unwrap());
-        assert_eq!(threads.context(&ask, seq, true).await.unwrap().posts, [note], "without dev-a's own post");
+        assert_eq!(
+            threads.context(&ask, seq, true, &ants_proto::Humans::default()).await.unwrap().posts,
+            [note],
+            "without dev-a's own post"
+        );
         threads.seen(&ask.thread_id, seq).await.unwrap();
     }
 

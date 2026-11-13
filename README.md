@@ -100,7 +100,7 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the CLI's human. |
-| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
+| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
@@ -571,7 +571,7 @@ This agent is the messenger of an ants team. It routes each request instead of d
 4. When no persona has the capability, say so and name the capabilities there are.
 ```
 
-In channels the messenger triages the human's posts that @mention nobody (see Channel delivery).
+In channels the messenger triages humans' posts that @mention nobody (see Channel delivery).
 
 `route` picks deterministically: the first persona by name with the tag, so the same roster always routes the same
 way; `list_personas` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
@@ -603,8 +603,8 @@ plan rooms need `ants auth user` again.
 
 ## Channels
 
-A channel is a named group of personas, like a Slack channel: the human posts to it, and the members a post concerns
-wake up and answer in the channel, on the post's thread.
+A channel is a named group of personas, like a Slack channel: humans post to it, each as the CLI's human (see
+[CLI](#cli)), and the members a post concerns wake up and answer in the channel, on the post's thread.
 
 ```sh
 ants channel create ops --member dev-a,dev-b --messenger triage   # fails if #ops exists
@@ -628,41 +628,45 @@ ants watch 'ants.chan.>'                       # every channel, live
 warns about a mention of a persona that is not a member, which wakes nobody. An agent's post that @mentions nobody wakes
 nobody.
 
-**Messenger triage.** A post of the human that @mentions nobody goes to the channel's messenger: the persona
+**Messenger triage.** A post of any human that @mentions nobody goes to the channel's messenger: the persona
 `--messenger` names, else the default persona `messenger` (`ants channel list` shows `messenger (default)`). The
 messenger decides which members the post concerns and wakes them by @mentioning them in a post on the thread. The
 messenger need not be a member.
 
-**Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which
-`ants post` prints. The personas a post wakes reply in the channel on that thread, and `--thread` lets the human answer
-there too. `ants post --wait` prints each post on the thread as it arrives, until `--timeout` (seconds, default 600)
-or Ctrl-C. `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
+**Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which `ants
+post` prints. The personas a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
+too. A thread's owner is the human whose post started it: each post carries it as `owner`, every later post on the
+thread keeps it, whoever writes it, and `ants post --thread` reads it back from the thread's first posts kept. Only when
+no post kept names one, the posting human takes the thread. `ants post --wait` prints each post on the thread as it
+arrives, until `--timeout` (seconds, default 600) or Ctrl-C. `ants channel read` prints each thread under its id: the
+post that started it, then the replies, indented.
 
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
-turn of the thread's budget, whichever post it answers, and the thread goes back to the human when none are left. So
-the agents one post wakes spend from the same turns, and agents mentioning each other cannot multiply them. The
-human's posts give the thread a fresh budget (8 turns). `ants watch` shows the turns the thread has left after each
-post.
+turn of the thread's budget, whichever post it answers, and the thread goes back to its owner, else the daemon's default
+human (see Escalations), when none are left. So the agents one post wakes spend from the same turns, and agents
+mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns). `ants watch`
+shows the turns the thread has left after each post.
 
 **Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
 post there wakes nobody, and a persona reads the room only when asked to. A channel is the other way round: a post
 wakes the members it @mentions, or the messenger, and replies come back to the channel.
 
 **Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
-them back through the human's consumer `chanread-human`, created for the read and deleted after it, and drops a post
-whose sender or channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and
-messenger are an entry in the KV bucket `ants_channels` under the channel id, which only the human's credentials
-write: `create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else
-changed it since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a
-warning (`set`, `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning
-rather than a refusal, as their daemon may start later; the human cannot be a member or the messenger.
+them back through the CLI's human's consumer `chanread-<human>`, created for the read and deleted after it, and drops a
+post whose sender or channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and
+messenger are an entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials write:
+`create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else changed it
+since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a warning (`set`,
+`add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning rather than a
+refusal, as their daemon may start later; a human cannot be a member or the messenger.
 
 ### Channel delivery
 
 A daemon takes every channel post through its persona's durable consumer `chan-<persona>` (filter `ants.chan.>`),
 with the same guarantees as its inbox: the posts of one thread are answered in order and different threads
 concurrently, an attempt is marked in `ants_attempts`, a post is acked only once its reply is stored, and a post whose
-last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice to the human on the post's thread. The
+last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice to the thread's owner, else the
+default human, on the post's thread. The
 consumer starts at the posts stored from its creation on, so a persona's first start does not answer the channels'
 history. The daemon watches `ants_channels` for the members of each channel, skipping an entry whose channel disagrees
 with its key.
@@ -678,20 +682,20 @@ older ones left out. The stream sequence of the last post answered is kept per t
 The final answer is posted to the same channel and thread on `ants.chan.<channel>.<persona>`, replying to the post. An
 @mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget: each post
 carries the turns the thread has left after it, and the daemon reads the posts stored on the thread after the one it
-answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's,
-which gives a fresh budget. A post that reaches a persona with no turns left is not prompted, and an answer whose
-thread ran out of turns during the prompt is not posted: either way the human gets a notice in the inbox
-(`ants.inbox.human.<persona>`) on the thread with the post, and the unposted answer if any, as in the inbox. Replies
-racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it.
-Spending caps apply as to inbox messages.
+answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's, which
+gives a fresh budget. A post that reaches a persona with no turns left is not prompted, and an answer whose thread ran
+out of turns during the prompt is not posted: either way the thread's owner, else the default human, gets a notice in
+the inbox (`ants.inbox.<human>.<persona>`) on the thread with the post, and the unposted answer if any, as in the inbox.
+Replies racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it. Spending
+caps apply as to inbox messages.
 
-A post of the human that @mentions nobody prompts the channel's messenger instead: the persona its entry assigns, or
-else `messenger` (built in or configured), a member or not. Its prompt adds the triage rules of ants and lists the
-channel's members with their capabilities and `whoami` from the roster, members missing from the roster as offline;
-the messenger's own instructions add to the rules. It answers on the post's thread with a short post that @mentions
-the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it does not answer the
-request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any agent's post. Its
-mentions wake members only: a mention of a non-member stays in the post's `mentions` but wakes nobody.
+A post of any human (`human` or one `ants_humans` lists) that @mentions nobody prompts the channel's messenger instead:
+the persona its entry assigns, or else `messenger` (built in or configured), a member or not. Its prompt adds the triage
+rules of ants and lists the channel's members with their capabilities and `whoami` from the roster, members missing from
+the roster as offline; the messenger's own instructions add to the rules. It answers on the post's thread with a short
+post that @mentions the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it
+does not answer the request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any
+agent's post. Its mentions wake members only: a mention of a non-member stays in the post's `mentions` but wakes nobody.
 
 ## Persona memory
 
@@ -758,13 +762,14 @@ drop a post whose `from` or thread disagrees with its subject (`ants watch` mark
 
 Channels work the same way too. A channel is a named group of personas; its id follows persona id syntax. A post by
 `<from>` to channel `<channel>` goes on `ants.chan.<channel>.<from>` (kept in the stream), every credential posts only
-on `ants.chan.*.<persona>` (and `ants.out.chan.*.<persona>` in a leaf's outbox), and readers drop a post whose `from`
-or channel disagrees with its subject. A post carries its thread id and the personas it @mentions; a top-level post
-starts a new thread, named after the post's own id. A channel's members and optional messenger are a `ChannelEntry` in
-the KV bucket `ants_channels`, under the channel id: only the human writes it, personas read it, and readers skip an
-entry whose channel disagrees with its key. A persona takes channel posts through its own consumer `chan-<persona>`
-and reads channels back through `chanread-<persona>`; credentials pin the filter of both under `ants.chan.>`, so
-neither reaches an inbox. Credentials and streams set up before channels need `ants auth user` and `ants init` again.
+on `ants.chan.*.<persona>` (and `ants.out.chan.*.<persona>` in a leaf's outbox), and readers drop a post whose `from` or
+channel disagrees with its subject. A post carries its thread id and the personas it @mentions; a top-level post starts
+a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it. A
+channel's members and optional messenger are a `ChannelEntry` in the KV bucket `ants_channels`, under the channel id:
+only humans write it, personas read it, and readers skip an entry whose channel disagrees with its key. A persona takes
+channel posts through its own consumer `chan-<persona>` and reads channels back through `chanread-<persona>`;
+credentials pin the filter of both under `ants.chan.>`, so neither reaches an inbox. Credentials and streams set up
+before channels need `ants auth user` and `ants init` again.
 
 Humans: a team may have several, each with its own name, credentials and inbox, and all with the same rights. A
 human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a `HumanEntry` naming

@@ -56,6 +56,11 @@ impl Registry {
         self.role(persona).is_human()
     }
 
+    /// The humans known now.
+    pub fn humans(&self) -> Humans {
+        self.read().clone()
+    }
+
     /// Keep the registry current with the bucket, until the returned handle drops: the bucket is opened (never
     /// created), read and watched; when it is missing or its watch ends, it is looked for again after `retry`.
     pub fn watch(&self, js: jetstream::Context, retry: Duration) -> Watching {
