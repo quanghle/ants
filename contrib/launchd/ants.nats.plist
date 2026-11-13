@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- ants: the machine's nats-server, its leaf node (`ants leaf config`) or, on the hub machine, the hub.
      scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.nats.plist.
-     Reload a new uplink: launchctl kill SIGHUP gui/$(id -u)/ants.nats -->
+     Reload a new uplink: launchctl kill SIGHUP gui/$(id -u)/ants.nats
+     launchd has no start order: with an uplink through ants.devtunnel, the leaf retries it until the tunnel is up. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

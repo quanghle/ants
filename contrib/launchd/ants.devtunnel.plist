@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: `devtunnel connect` to the hub's private Dev Tunnel, for a leaf whose uplink is nats-leaf://127.0.0.1:7422.
+     scripts/install-units.sh, given a tunnel id, fills in the @...@ placeholders and installs it as
+     ~/Library/LaunchAgents/ants.devtunnel.plist. Lines marked IF_TOKEN stay only when it is given a token file.
+     Without a token file the CLI login of the user authorizes the connection (devtunnel user login).
+     With one, devtunnel reads the connect token from the file on stdin at each start, so a renewed token takes
+     effect at the next restart: launchctl kickstart -k gui/$(id -u)/ants.devtunnel
+     The leaf node retries its uplink until the tunnel is up. KeepAlive restarts devtunnel whenever it exits, also after
+     an expired login or token, throttled by ThrottleInterval. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.devtunnel</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@DEVTUNNEL@</string>
+		<string>connect</string>
+		<string>@TUNNEL@</string>
+		<string>--access-token</string><!-- @IF_TOKEN@ -->
+		<string>-</string><!-- @IF_TOKEN@ -->
+	</array>
+	<key>StandardInPath</key><!-- @IF_TOKEN@ -->
+	<string>@TOKEN_FILE@</string><!-- @IF_TOKEN@ -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/devtunnel.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/devtunnel.log</string>
+</dict>
+</plist>

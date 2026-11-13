@@ -1,0 +1,22 @@
+# ants: `devtunnel connect` to the hub's private Dev Tunnel, for a leaf whose uplink is nats-leaf://127.0.0.1:7422.
+# User unit: scripts/install-units.sh --devtunnel TUNNEL fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user. Lines marked IF_TOKEN stay only with --devtunnel-token FILE, those marked IF_NO_TOKEN only
+# without.
+# Without a token file the CLI login of the user authorizes the connection (devtunnel user login). With one, devtunnel
+# reads the connect token from the file on stdin at each start, so a renewed token takes effect at the next restart:
+# systemctl --user restart ants-devtunnel
+# The leaf node retries its uplink until the tunnel is up; Restart covers an exit for any reason, also an expired login
+# or token.
+
+[Unit]
+Description=ants: devtunnel connect to the hub
+
+[Service]
+@IF_NO_TOKEN@ExecStart="@DEVTUNNEL@" connect "@TUNNEL@"
+@IF_TOKEN@ExecStart="@DEVTUNNEL@" connect "@TUNNEL@" --access-token -
+@IF_TOKEN@StandardInput=file:@TOKEN_FILE@
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

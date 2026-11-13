@@ -224,12 +224,16 @@ binary or changing `PATH`.
 | Logs | `~/Library/Logs/ants/nats.log`, `daemon.log` | `journalctl --user -u ants-nats -u ants-daemon` |
 | Switch the uplink | `ants leaf config ...`, then `launchctl kill SIGHUP gui/$(id -u)/ants.nats` | `ants leaf config ...`, then `systemctl --user reload ants-nats` |
 | Restart the daemon | `launchctl kickstart -k gui/$(id -u)/ants.daemon` | `systemctl --user restart ants-daemon` |
-| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats`, delete the units |
+| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`, `ants.devtunnel`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats` (and `ants-devtunnel`), delete the units |
 
 On stop the daemon gets SIGTERM and lets prompts in flight finish for up to 120 s; messages cut off are redelivered.
 launchd agents run while the user is logged in. systemd user units outlive the login session only with
 `loginctl enable-linger $USER`; on WSL, systemd must be enabled (`[boot] systemd=true` in `/etc/wsl.conf`).
-A tunnel the uplink depends on, such as `devtunnel connect`, needs a service of its own.
+An uplink through a private Dev Tunnel (`--uplink nats-leaf://127.0.0.1:7422`) also needs `devtunnel connect`:
+`--devtunnel ants-hub.<region>` adds a service keeping it running (`ants.devtunnel`, `ants-devtunnel`; log
+`devtunnel.log` on macOS), authorized by the CLI login of the user (`devtunnel user login -g -d`) or, with
+`--devtunnel-token FILE`, by a connect token read from FILE at each start. Both expire; renewal is in
+docs/transport.md, "`devtunnel connect` as a service". Other tunnels need a service of their own.
 
 ## Roster
 

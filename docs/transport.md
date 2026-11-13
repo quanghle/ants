@@ -373,6 +373,37 @@ to run its NATS clients too. A worker without a leaf node points `ants` at `nats
 node gives it the remote `nats-leaf://127.0.0.1:7422`, and then must not have the hub's 4222 forwarded where its own
 leaf listens (leave port 4222 off the tunnel, or run the leaf's client port elsewhere).
 
+### `devtunnel connect` as a service
+
+A leaf whose uplink is `nats-leaf://127.0.0.1:7422` needs `devtunnel connect` running next to it.
+`scripts/install-units.sh --devtunnel ants-hub.<region>` installs it as a service beside nats-server and the daemon
+(`contrib/launchd/ants.devtunnel.plist`, `contrib/systemd/ants-devtunnel.service`), with `--devtunnel-bin PATH` if
+`devtunnel` is not on `PATH`. The service restarts `devtunnel connect` whenever it exits, every 30 s at most; the CLI
+exits with status 3 on a missing login or a rejected token. The systemd nats-server unit starts after it; launchd has
+no start order, and the leaf retries its uplink until the tunnel is up either way. Logs:
+`~/Library/Logs/ants/devtunnel.log`, `journalctl --user -u ants-devtunnel`.
+
+The connection is authorized in one of two ways, each needing renewal:
+
+- CLI login (the default). Log in once on the worker, as the user the service runs as, with the account that created
+  the tunnel or one it grants access (`devtunnel access create ants-hub --org ORG` for a GitHub organization,
+  `--tenant` for the Entra tenant): `devtunnel user login -g -d`. The CLI caches the login in the system key chain for
+  several days. `devtunnel user show` reports the login, or `Not logged in.` once it has expired; the service log then
+  shows `Login required.` on every retry. Logging in again the same way is all it takes: the next retry, at most
+  30 s later, connects without a restart. A GitHub login needs the device code entered in a browser each time, so a
+  headless worker needs someone to do that every few days. An Entra service principal
+  (`devtunnel user login --sp-tenant-id T --sp-client-id C --sp-certificate-file F`) or managed identity
+  (`--mi-client-id`) logs in without a person and can run from a daily timer; not tried here.
+- Access token (`--devtunnel-token FILE`). The service runs `devtunnel connect TUNNEL --access-token -` with FILE on
+  standard input, read afresh at each start. On a machine logged in to the tunnel's account, such as the hub, issue
+  one with `devtunnel token ants-hub --scopes connect` and write the token alone into FILE (mode 600) on the worker.
+  It expires after 24 hours and only a logged-in user can issue the next one, so something has to carry a fresh token
+  to the worker at least daily: replace FILE before the old token expires, then restart the service
+  (`launchctl kickstart -k gui/$(id -u)/ants.devtunnel`, `systemctl --user restart ants-devtunnel`), since a running
+  `devtunnel connect` does not reread it. Whether a running connection outlives its token is untested; the restart
+  costs a few seconds of uplink, which the outbox covers. Suited to a trial; an always-on worker is better served by
+  a login.
+
 Measured, hub default `ping_interval` (2 minutes), daemon on the worker through tunnelled 4222, leaf node through
 tunnelled 7422:
 
@@ -399,8 +430,8 @@ The HTTPS port URL `https://<tunnel-id>-8080.<region>.devtunnels.ms` serves as
 - Anonymous access (`devtunnel access create ants-hub -p 8080 --anonymous`) opens the port to anyone who learns the
   URL; the NATS JWT credentials remain the access control. The monitoring port must never be tunnelled.
 - `devtunnel token ants-hub --scopes connect` tokens expire after 24 hours and only a logged-in user can renew them;
-  a CLI login lasts several days. A headless worker on a private tunnel therefore needs a periodic re-login, or the
-  anonymous HTTPS port with NATS JWTs.
+  a CLI login lasts several days. A headless worker on a private tunnel therefore needs a periodic re-login (see
+  "`devtunnel connect` as a service"), or the anonymous HTTPS port with NATS JWTs.
 - The anti-phishing page is skipped for requests without `Accept: text/html`, which covers WebSocket upgrades.
 - `devtunnel port create --request-timeout` exists ("timeout seconds for web requests, 0 = disabled"); whether it
   cuts long-lived WebSockets is untested.

@@ -1,17 +1,22 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
-# machine) and the persona daemon (`ants daemon --config`). launchd agents on macOS, systemd user units on Linux and
-# WSL; templates in contrib/.
+# machine), the persona daemon (`ants daemon --config`) and, for an uplink through a private Dev Tunnel,
+# `devtunnel connect`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
 #
-#   scripts/install-units.sh                     # install both and (re)start them
-#   scripts/install-units.sh --out DIR           # only write the filled-in units into DIR, for review
+#   scripts/install-units.sh                         # install nats-server and the daemon and (re)start them
+#   scripts/install-units.sh --devtunnel ants-hub    # and `devtunnel connect ants-hub` for nats-leaf://127.0.0.1:7422
+#   scripts/install-units.sh --out DIR               # only write the filled-in units into DIR, for review
 #
-# Options:  --ants PATH          ants binary (default: ants on PATH)
-#           --nats-server PATH   nats-server binary (default: nats-server on PATH)
-#           --nats-conf FILE     nats-server configuration (default: ~/.config/ants/leaf.conf)
-#           --config FILE        daemon config file (default: ~/.ants/config.toml)
-#           --no-daemon          only the nats-server service, on a machine without personas
-#           --out DIR            write the units into DIR; install and start nothing
+# Options:  --ants PATH              ants binary (default: ants on PATH)
+#           --nats-server PATH       nats-server binary (default: nats-server on PATH)
+#           --nats-conf FILE         nats-server configuration (default: ~/.config/ants/leaf.conf)
+#           --config FILE            daemon config file (default: ~/.ants/config.toml)
+#           --no-daemon              only the nats-server service, on a machine without personas
+#           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
+#           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
+#           --devtunnel-token FILE   connect with the access token in FILE, read at each start, instead of the CLI
+#                                    login (see docs/transport.md, Dev Tunnels)
+#           --out DIR                write the units into DIR; install and start nothing
 #
 # The daemon gets the PATH of this shell, so it finds the harness and configured tools. Logs: ~/Library/Logs/ants on
 # macOS, the journal on Linux (journalctl --user -u ants-daemon).
@@ -36,6 +41,9 @@ nats_server=
 nats_conf=$HOME/.config/ants/leaf.conf
 config=$HOME/.ants/config.toml
 daemon=1
+devtunnel=
+tunnel=
+token_file=
 out=
 
 while [ $# -gt 0 ]; do
@@ -45,8 +53,11 @@ while [ $# -gt 0 ]; do
     --nats-conf) nats_conf=$2; shift 2 ;;
     --config) config=$2; shift 2 ;;
     --no-daemon) daemon=; shift ;;
+    --devtunnel) tunnel=$2; shift 2 ;;
+    --devtunnel-bin) devtunnel=$2; shift 2 ;;
+    --devtunnel-token) token_file=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -61,21 +72,34 @@ if [ -n "$daemon" ]; then
     [ -x "$ants" ] || die "no ants binary at $ants"
     config=$(absolute "$config")
 fi
+if [ -n "$tunnel" ]; then
+    [ -n "$devtunnel" ] || devtunnel=$(command -v devtunnel) || die "devtunnel not found (give --devtunnel-bin)"
+    devtunnel=$(absolute "$devtunnel")
+    [ -x "$devtunnel" ] || die "no devtunnel binary at $devtunnel"
+    [ -z "$token_file" ] || token_file=$(absolute "$token_file")
+else
+    [ -z "$devtunnel$token_file" ] || die "--devtunnel-bin and --devtunnel-token need --devtunnel TUNNEL"
+fi
 if [ -z "$out" ]; then
     [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
     [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see README.md, Config file)"
+    [ -z "$token_file" ] || [ -r "$token_file" ] || die "no devtunnel token file at $token_file"
+fi
+if [ -z "$tunnel" ] && [ -f "$nats_conf" ] && grep -Eq 'nats-leaf://(127\.0\.0\.1|localhost|\[::1\]):' "$nats_conf"; then
+    printf 'install-units: the uplink in %s is on this machine; for one through a Dev Tunnel, add %s\n' \
+        "$nats_conf" '--devtunnel TUNNEL' >&2
 fi
 
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="ants.nats.plist${daemon:+ ants.daemon.plist}"
+    units="${tunnel:+ants.devtunnel.plist }ants.nats.plist${daemon:+ ants.daemon.plist}"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
 Linux)
     kind=systemd
-    units="ants-nats.service${daemon:+ ants-daemon.service}"
+    units="${tunnel:+ants-devtunnel.service }ants-nats.service${daemon:+ ants-daemon.service}"
     dest=${out:-$HOME/.config/systemd/user}
     logs=
     ;;
@@ -93,12 +117,21 @@ escape() {
     printf '%s' "$v" | sed -e 's/[\\|&]/\\&/g'
 }
 
+# Lines marked @IF_TOKEN@ stay only with a token file, those marked @IF_NO_TOKEN@ only without; the marker goes.
+if [ -n "$token_file" ]; then drop=@IF_NO_TOKEN@; else drop=@IF_TOKEN@; fi
+
 mkdir -p "$dest"
 for unit in $units; do
-    sed -e "s|@ANTS@|$(escape "$ants")|g" \
+    sed -e "/$drop/d" \
+        -e 's/[[:space:]]*<!-- @IF_TOKEN@ -->//' \
+        -e 's/^@IF_\(NO_\)\{0,1\}TOKEN@//' \
+        -e "s|@ANTS@|$(escape "$ants")|g" \
         -e "s|@NATS_SERVER@|$(escape "$nats_server")|g" \
         -e "s|@NATS_CONF@|$(escape "$nats_conf")|g" \
         -e "s|@CONFIG@|$(escape "$config")|g" \
+        -e "s|@DEVTUNNEL@|$(escape "$devtunnel")|g" \
+        -e "s|@TUNNEL@|$(escape "$tunnel")|g" \
+        -e "s|@TOKEN_FILE@|$(escape "$token_file")|g" \
         -e "s|@PATH@|$(escape "$PATH")|g" \
         -e "s|@LOGS@|$(escape "$logs")|g" \
         "$root/contrib/$kind/$unit" >"$dest/$unit"
@@ -131,7 +164,7 @@ else
     systemctl --user enable $names
     # shellcheck disable=SC2086
     systemctl --user restart $names
-    printf 'started; logs: journalctl --user -u ants-nats -u ants-daemon\n'
+    printf 'started; logs: journalctl --user%s -u ants-nats -u ants-daemon\n' "${tunnel:+ -u ants-devtunnel}"
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         printf 'to keep them running without a login session: loginctl enable-linger %s\n' "$(id -un)"
     fi
