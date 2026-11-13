@@ -314,8 +314,12 @@ Limits:
   is stored twice.
 - Live subscribers (`ants ask --wait`, a persona's `ask_agent`) see only messages published directly, not sourced
   ones; the inbox consumers see both.
-- A daemon that replies while the uplink is down cannot ack the request; it is delivered again later and answered
-  a second time.
+- A daemon that replies while the uplink is down cannot ack the request. The reply goes to the outbox, under a
+  message id made of the persona and the request's envelope id, and the daemon notes the request in `<home>/answered`
+  of the persona; the redelivery after the uplink is back, even to a restarted daemon, is acked without being answered
+  again (ants-fv1). async-nats's `double_ack` takes the "no responders" status the client gets then for a
+  confirmation, so the daemon acks with a request of its own (`bus::double_ack`). Verified by
+  `a_reply_kept_in_the_outbox_answers_its_message_once` in `crates/ants-daemon/src/daemon.rs`.
 - Messages a persona put in the outbox before `ants leaf outbox` admitted it stay in the intake.
 
 ## Keepalive and reconnect

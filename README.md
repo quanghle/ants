@@ -66,8 +66,11 @@ may show what ran:
 
 Once the harness has answered, the reply is recorded with the mark before it goes to the stream, so an attempt cut off
 after that sends the recorded reply without prompting again. Replies carry a message id made of the persona and the
-stream sequence, so JetStream keeps one copy of a reply sent twice within its duplicate window (2 min). A mark is
-removed when the message is acked or dead-lettered; one left behind expires after 30 days. A daemon needs the bucket: `ants init`
+message's envelope id, so JetStream keeps one copy of a reply sent twice within its duplicate window (2 min). A mark is
+removed when the message is acked or dead-lettered; one left behind expires after 30 days. Once its reply is stored, a
+message is also noted in `<home>/answered` until its ack is confirmed: while a leaf node's uplink is down the reply
+waits in the machine's outbox and the ack fails, so the redelivery, even to a restarted daemon, is acked without being
+answered again. A note left behind is removed after 30 days. A daemon needs the bucket: `ants init`
 as the human creates it, and persona and leaf credentials issued before it existed must be issued again.
 
 Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
