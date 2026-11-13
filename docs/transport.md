@@ -2,7 +2,7 @@
 
 Findings of the spikes ants-qjf.9 (hub over `wss://` through a reverse proxy and a Dev Tunnels HTTPS port) and
 ants-qjf.8 (hub over a Dev Tunnel TCP port), and what they mean for ants-32g.2 (leaf node per machine) and ants-32g.3
-(HTTPS fallback bridge).
+(HTTPS fallback bridge, built: see "HTTPS fallback bridge").
 
 Each finding is marked **verified** (run with nats-server 2.15.3, async-nats 0.52, Caddy 2.11.9 on macOS arm64, every
 hop on loopback; the Dev Tunnels runs used two Linux arm64 Apple `container` VMs, hub and worker, through the real
@@ -27,11 +27,13 @@ service) or **researched** (documentation or source reading only).
 | Dev Tunnels: drop of either end, and a 3-minute freeze of the worker (stand-in for laptop sleep) | verified: nothing lost; see "Dev Tunnels" for the delays |
 | Dev Tunnels HTTPS port as `wss://` with anonymous access | researched |
 | Private Dev Tunnels HTTPS port from a `wss://` NATS client or leaf node | not possible: no way to send `X-Tunnel-Authorization` |
+| Leaf node → `ants bridge connect` → HTTP `CONNECT` proxy → TLS terminator → `ants bridge serve` → hub leafnode port | verified (ants-32g.3) |
+| Bridge session through a 8 s outage of the proxy in front of `ants bridge serve` | verified: the leaf connection stays up |
 
 Recommendation: every machine runs a local leaf node and `ants` connects only to it (ants-32g.2). The uplink is either
 a `wss://` endpoint (a reverse proxy, or an anonymous Dev Tunnels HTTPS port with NATS JWTs as the real access
-control) or `devtunnel connect` to the hub's leafnode port for a private tunnel. The HTTPS fallback bridge (ants-32g.3)
-stays deferred: nothing tested blocked WebSocket.
+control) or `devtunnel connect` to the hub's leafnode port for a private tunnel. Where a proxy blocks WebSocket, the
+HTTPS fallback bridge (`ants bridge`, ants-32g.3) carries the leafnode connection in plain HTTPS requests instead.
 
 ## Hub
 
@@ -78,6 +80,9 @@ hub.example.com {
   # tls /etc/ants/hub.pem /etc/ants/hub.key   # a private CA; omit for an ACME certificate
   handle /nats* {
     reverse_proxy 127.0.0.1:8080
+  }
+  handle /bridge* {                            # only with the HTTPS fallback bridge
+    reverse_proxy 127.0.0.1:8423
   }
   respond 404
 }
@@ -313,6 +318,61 @@ Limits:
   a second time.
 - Messages a persona put in the outbox before `ants leaf outbox` admitted it stay in the intake.
 
+## HTTPS fallback bridge
+
+ants-32g.3. For networks whose proxies drop the WebSocket upgrade (a TLS-inspecting proxy, say), `ants bridge` carries
+the leaf node's TCP connection to the hub's leafnode port in ordinary HTTP/1.1 requests. Neither async-nats nor a
+nats-server leaf remote speaks anything but NATS over TCP or WebSocket, so the bridge is a byte pipe with a process at
+each end and NATS itself unchanged inside it:
+
+```
+leaf node --nats-leaf://127.0.0.1:7422--> ants bridge connect ==HTTPS==> reverse proxy --> ants bridge serve --> hub :7422
+```
+
+```sh
+# hub, next to nats-server; the reverse proxy routes /bridge* to it (see "Reverse proxy")
+ANTS_BRIDGE_TOKEN=... ants bridge serve                # listens on 127.0.0.1:8423, connects to 127.0.0.1:7422
+
+# worker
+ANTS_BRIDGE_TOKEN=... ants bridge connect https://hub.example.com/bridge   # listens on 127.0.0.1:7422
+ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
+```
+
+Protocol, under the URL's path: `POST /open` opens a session (a TCP connection to the upstream) and answers its random
+128-bit id; `POST /s/<id>?off=N` carries upstream bytes starting at byte offset N; `GET /s/<id>?off=N` acknowledges
+everything before N and answers the downstream bytes from N, waiting up to 20 s for some (an empty answer otherwise, so
+proxies with 60 s idle timeouts never see a quiet request), or 410 once the upstream closed and all was taken;
+`DELETE /s/<id>` closes it. One request in flight per direction, each body at most 128 KiB; the hub holds at most
+1 MiB of downstream bytes per session and stops reading the upstream beyond that.
+
+- **Reliability.** Every request names its offset, so a request or answer lost on the way is sent again: the hub skips
+  upstream bytes it already wrote and sends downstream bytes again until they are acknowledged. The worker retries
+  connection failures and 5xx answers with back-off up to 4 s for 60 s; the hub closes a session after 60 s without
+  requests. After that the worker closes the local connection, and the leaf node reconnects through a new session.
+- **Authentication.** NATS authentication runs inside the stream as on any uplink: the leaf's `ants auth leaf`
+  credentials, with `LEAFNODE` as the connection type. `--token` (or `ANTS_BRIDGE_TOKEN`) on both ends adds a bearer
+  token every request must carry, so strangers cannot open sessions (the hub compares it in constant time); session ids
+  are unguessable. `ants bridge serve` connects only to its one `--upstream`, never where a request asks.
+- **TLS** ends at the reverse proxy; `ants bridge serve` speaks plain HTTP on loopback. The worker uses rustls with the
+  platform's CAs (`SSL_CERT_FILE` replaces them, as for `wss://`), TLS 1.2 or 1.3.
+- **Forward proxy.** `--proxy http://[user:password@]host:port` tunnels through an HTTP `CONNECT` proxy, with basic
+  proxy authentication.
+- **Gateways.** `--header 'Name: value'` (repeatable) goes with every request, for a gateway in front of the hub, such
+  as `X-Tunnel-Authorization: tunnel <token>` for a private Dev Tunnels HTTPS port.
+- **Cost.** One round trip per chunk in each direction, so throughput is at most 128 KiB per round trip and each
+  message pays a round trip's latency; ample for agent traffic, not for bulk transfers. Use it only where WebSocket
+  fails.
+
+Verified: `a_leaf_node_reaches_its_hub_through_the_bridge` (`crates/ants/src/bridge.rs`) runs a hub, a leaf node and
+both ends of the bridge over plain HTTP on loopback and sends a message each way, one of them three requests long;
+`repeated_requests_neither_lose_nor_double_bytes` repeats requests as retries would. By hand, with nats-server 2.15.3
+on loopback: a leaf through `ants bridge connect`, a Python HTTP `CONNECT` proxy with basic authentication, a Python
+TLS terminator (self-signed certificate, `SSL_CERT_FILE`) and `ants bridge serve` reached the hub and a message
+crossed; stopping the proxy and terminator for 8 s left the leaf connection up; restarting `ants bridge serve` dropped
+the session, and the leaf reconnected through a new one once the worker's pending poll had timed out (50 s; a
+reverse proxy that answers 502 when its backend drops ends it sooner). A real WebSocket-blocking proxy was not
+available.
+
 ## Keepalive and reconnect
 
 async-nats reconnects forever by default, with a back-off capped at 4 s, and `ants` relies on that. Measured:
@@ -416,9 +476,9 @@ ants-32g.2, leaf node per machine with pluggable uplink (done: `ants leaf config
   it (`--js-domain`); see "JetStream domain" and "Leaf uplink credentials".
 - The hub sets `leafnodes { no_advertise: true }` and a `ping_interval` of 30 s or less.
 
-ants-32g.3, HTTPS fallback bridge:
+ants-32g.3, HTTPS fallback bridge (done: `ants bridge`, see "HTTPS fallback bridge"):
 
-- WebSocket passed through Caddy and through an HTTP `CONNECT` proxy, so a bridge is needed only behind proxies that
-  inspect TLS and drop the `Upgrade`, which the spike could not reproduce. Keep it deferred until such a network shows
-  up. If built, it needs its own NATS client on the hub side and a local stand-in for a NATS server on the worker side,
-  since neither async-nats nor a leaf node speaks long-polling.
+- WebSocket passed through Caddy and through an HTTP `CONNECT` proxy, so the bridge is needed only behind proxies that
+  inspect TLS and drop the `Upgrade`, which the spike could not reproduce. Since neither async-nats nor a leaf node
+  speaks long-polling, it carries the leaf's TCP connection itself, between a local listener on the worker and the
+  hub's leafnode port, rather than talking NATS.
