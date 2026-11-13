@@ -236,8 +236,7 @@ mod tests {
         bus::init_stream(&h_js).await.unwrap();
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        // The CLI runs on m1 too. Its `ants.inbox.>` lets the hub's stream interest cross the uplink: nats-server
-        // matches a narrower allowance such as dev-a's `ants.inbox.*.dev-a` against it only for literal tokens.
+        // The CLI runs on m1 too.
         let on_m1 = [dev_a.clone(), human.clone()];
         auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);

@@ -288,11 +288,16 @@ Found while building it (nats-server 2.15.3, source reading and verified):
     the flag the hub never gets an answer from the leaf and the source stalls.
   - The source's deliveries and flow control use `$JS.S.<machine>.>` (leaf to hub) and `$JS.FC.ANTS_OUT.>` (hub to
     leaf); the uplink credentials allow those and the outbox's stream and consumer API under `$JS.<machine>.API`.
-- **Stream interest crosses only literal allowances.** The hub's stream listens on `ants.inbox.>` and `ants.plan.>`.
-  nats-server matches such a wildcard against the leaf's publish allowances with `ReverseMatch`, which misses an
-  allowance with `*` before its last token, such as dev-a's `ants.inbox.*.dev-a`. Without `human` (`ants.inbox.>`) in
-  the uplink credentials, a persona's inbox messages and replies from the leaf therefore find no stream across the
-  uplink and go through the outbox even while it is up; they still land in `ANTS` once, a moment later.
+- **Stream interest crosses only allowances `ReverseMatch` finds.** The hub's stream listens on `ants.inbox.>` and
+  `ants.plan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
+  allowance of the uplink under it (`canSubscribeInternal`), and `ReverseMatch` (`sublist.go`, `getAllNodes`) skips an
+  allowance with `*` before its last token, such as dev-a's `ants.inbox.*.dev-a`. Only the human's `ants.inbox.>`
+  would match, and no persona's plan subjects. So the uplink credentials also carry one literal subject of each
+  persona's inbox and plan pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`), which the pattern allows
+  anyway (uplink credentials issued without them need `ants auth leaf` again). With that, a persona's messages,
+  replies and plan posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; a
+  persona not on the uplink still gets "no stream" at once, since the leaf forwards only what the uplink may publish
+  (`a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload` in `crates/ants/src/leaf.rs`).
 - **The leaf's domain must differ from the hub's**, or the leaf would answer the hub's API itself.
 
 Verified (`the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down` in `crates/ants/src/outbox.rs`): a hub and a
