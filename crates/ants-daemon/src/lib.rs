@@ -4,6 +4,7 @@ pub mod approvals;
 pub mod attempts;
 pub mod bus;
 pub mod caps;
+pub mod chains;
 pub mod channel;
 pub mod config;
 pub mod daemon;

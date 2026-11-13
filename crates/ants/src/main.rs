@@ -435,16 +435,18 @@ async fn main() -> Result<()> {
             bus::ensure_sessions(&js).await?;
             bus::ensure_attempts(&js).await?;
             bus::ensure_channels(&js).await?;
+            bus::ensure_chains(&js).await?;
             humans::ensure(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
                 ants_proto::ATTEMPTS_BUCKET,
                 ants_proto::CHANNELS_BUCKET,
-                ants_proto::HUMANS_BUCKET
+                ants_proto::HUMANS_BUCKET,
+                ants_proto::CHAINS_BUCKET
             );
             Ok(())
         }

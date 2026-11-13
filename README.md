@@ -22,14 +22,15 @@ Headless agent teams on several machines, talking to each other and to a human a
 |   MCP server for the sessions |      |   KV ants_roster,        |      |            |             |
 |            |                  |      |      ants_sessions,      |      |            |             |
 |            |                  |      |      ants_attempts,      |      |            |             |
-| nats-server (leaf, outbox)  --+----->|      ants_channels       |<-----+-- nats-server (leaf)     |
+|            |                  |      |      ants_channels,      |      |            |             |
+| nats-server (leaf, outbox)  --+----->|      ants_chains         |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
                           uplink: wss://, tls:// or a Dev Tunnel
 ```
 
 - **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, plan rooms,
-  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers and
-  channels. In operator
+  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
+  channels and escalation chains. In operator
   mode (`ants auth`), every persona and the human connect with their own NKey/JWT credentials, limited to the subjects
   of their role.
 - **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
@@ -260,18 +261,20 @@ started the thread), else to the daemon's default human, the config file key `hu
 persona). Without a chain it goes to the owner at once.
 
 The chain is the persona's `escalate_to` key, a list of other personas whose first one leads; the roster publishes it,
-so any daemon can follow a chain past a persona that is offline. Every member gets the escalation in its inbox, on the
-stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level and the leader, followed by the
-notice the owner would have got. The members coordinate in the thread's plan room; only the leader resolves it, by
-answering the escalating persona on the thread (a reply to the notice does), or escalates it further. The leader's
-answer gives the thread a fresh turn budget and allowance, once per level: the next time the persona is stuck on the
-thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster) not visited
-yet. A chain member stuck while working on an escalation sends it one level higher the same way. A level past
-`max_escalation_hops` (default 3), a chain leading back to a persona already visited, or a leader without a chain hands
-the thread to the owner, with the escalation and the reason. Until the leader answers, a persona stuck again on the
-thread sends the same members the new notice. Members offline are not skipped: their inboxes keep the escalation. When
-the leader does not answer within `escalate_after_secs` (default 1800, as long as a prompt may run; 0 waits
-indefinitely), the persona that escalated sends it one level higher. Only a human's message on the thread ends its
+and the daemon also keeps it on start in the KV bucket `ants_chains` under the persona id, whose entries never expire,
+so any daemon can follow a chain past a persona that is offline, even after its roster entry expired. Every member gets
+the escalation in its inbox, on the stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level
+and the leader, followed by the notice the owner would have got. The members coordinate in the thread's plan room; only
+the leader resolves it, by answering the escalating persona on the thread (a reply to the notice does), or escalates it
+further. The leader's answer gives the thread a fresh turn budget and allowance, once per level (on a channel thread,
+the persona's answer to it is posted back to the channel with that budget; see Channels): the next time the persona is
+stuck on the thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster,
+else `ants_chains`) not visited yet. A chain member stuck while working on an escalation sends it one level higher the
+same way. A level past `max_escalation_hops` (default 3), a chain leading back to a persona already visited, or a leader
+without a chain hands the thread to the owner, with the escalation and the reason. Until the leader answers, a persona
+stuck again on the thread sends the same members the new notice. Members offline are not skipped: their inboxes keep the
+escalation. When the leader does not answer within `escalate_after_secs` (default 1800, as long as a prompt may run; 0
+waits indefinitely), the persona that escalated sends it one level higher. Only a human's message on the thread ends its
 escalation, and the next one starts at the persona's own chain again. The thread's escalation, its level, whether the
 leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
 keep them.
@@ -454,7 +457,9 @@ existed lacks `ants.dead.>`; `ants init` adds it.
 If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
 only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
 --follow` while it runs, turn each such advisory of a persona's inbox consumer into a dead letter in the same format,
-with the same notice, unless that message is a dead letter already. Fetching a message by sequence
+with the same notice, unless that message is a dead letter already. That notice goes to the thread's owner, else the
+default human, directly and not up the persona's escalation chain: the persona's daemon is failing, which no chain member
+can fix, and human credentials cannot follow the escalation the persona keeps in `ants_sessions`. Fetching a message by sequence
 (`STREAM.MSG.GET`) would let a persona read every inbox, so only human credentials hear the advisories; those
 issued before must be issued again with `ants auth user human`. Advisories are core NATS and not stored: one published
 while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
@@ -684,8 +689,9 @@ post that started it, then the replies, indented.
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
 turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the persona's chain,
 else to its owner) when none are left. So the agents one post wakes spend from the same turns, and agents
-mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns). `ants watch`
-shows the turns the thread has left after each post.
+mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns), and so does the
+answer of the escalation's leader, once per level: the persona that got stuck posts its answer to it back on the thread,
+carrying the fresh budget. `ants watch` shows the turns the thread has left after each post.
 
 **Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
 post there wakes nobody, and a persona reads the room only when asked to. A channel is the other way round: a post
@@ -726,7 +732,10 @@ answers, before prompting and again before posting, taking the lowest of their t
 gives a fresh budget. A post that reaches a persona with no turns left is not prompted, and an answer whose thread ran
 out of turns during the prompt is not posted: either way a notice on the thread with the post, and the unposted answer if
 any, escalates as in the inbox: up the persona's chain, else to the thread's owner, else the default human
-(`ants.inbox.<human>.<persona>`).
+(`ants.inbox.<human>.<persona>`). The leader's reply to such an escalation gives the thread its fresh budget in the
+channel: the persona's answer to it is posted to the thread (not sent to the leader's inbox) with 7 turns left after it,
+so the members it @mentions, and later posts, go on from there. The channel is kept with the thread's escalation in
+`ants_sessions`; a message the leader sends with `ask_agent` or `send_message` is answered in its inbox as before.
 Replies racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it. Spending
 caps apply as to inbox messages.
 
@@ -834,7 +843,11 @@ thread: replies, messages an agent sends on or from the thread, escalations and 
 without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
 Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
-persona's chain in order, whose first persona leads. An envelope may carry `escalation`
+persona's chain in order, whose first persona leads. The KV bucket `ants_chains` keeps it past the roster entry, as a
+`ChainEntry` under the persona id that only the persona's credentials write and every credential reads by key; readers
+skip an entry whose persona disagrees with its key. Credentials issued before `ants_chains` need `ants auth user` (and
+`ants auth leaf`) again, and `ants init` creates the bucket; until then daemons follow chains through the roster only.
+An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the
 level's leader and the personas visited. One level up goes to every persona of the leader's chain not visited yet; an

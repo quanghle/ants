@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, PersonaId, State,
-    ThreadId, subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, PersonaId,
+    State, ThreadId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -144,14 +144,18 @@ pub async fn run(config: Config) -> Result<()> {
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js).await?;
     let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps));
-    let escalator = std::sync::Arc::new(Escalator::new(
+    let escalator = Escalator::new(
         config.persona.clone(),
         config.escalation.clone(),
         roster.clone(),
         humans.clone(),
         ledger.clone(),
         escalation::jetstream_sender(js.clone()),
-    ));
+    );
+    let escalator = std::sync::Arc::new(escalator.with_chains(crate::chains::jetstream_chains(js.clone())));
+    if let Err(e) = crate::chains::publish(&js, &config.persona, &config.escalation.escalate_to).await {
+        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
+    }
     let mut mcp = Mcp::start(
         config.persona.clone(),
         &config.home,
@@ -277,6 +281,9 @@ type InHand = (Incoming, jetstream::Message);
 struct Incoming {
     envelope: Envelope,
     post: Option<Box<Posted>>,
+    /// The channel the answer goes to instead of the sender's inbox: that of the thread, when the message is the
+    /// escalation leader's reply that renewed it ([`Inbox::arrived`]).
+    resume: Option<ChannelId>,
 }
 
 struct Posted {
@@ -464,7 +471,7 @@ impl Inbox<'_> {
         if self.claim(&envelope, msg).await {
             return None;
         }
-        Some(Incoming { envelope, post: None })
+        Some(Incoming { envelope, post: None, resume: None })
     }
 
     /// The channel post `msg` to answer, if it wakes the persona ([`channel::wake`]). Any other is acked at once: the
@@ -502,7 +509,7 @@ impl Inbox<'_> {
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         post.owner = post.thread_owner(&humans);
         let envelope = channel::as_envelope(&post, self.persona);
-        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })) })
+        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })), resume: None })
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -618,10 +625,16 @@ impl Inbox<'_> {
 
     /// Note the message the persona is about to answer with its escalator: a human's ends the thread's escalation and
     /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
-    /// allowance once per level ([`Escalator::arrived`]).
+    /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the persona got
+    /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
     async fn arrived(&self, incoming: &mut Incoming) -> Result<()> {
         let human = self.humans.is_human(&incoming.envelope.from);
-        self.escalator.arrived(&mut incoming.envelope, human).await?;
+        let renewed = self.escalator.arrived(&mut incoming.envelope, human).await?;
+        // Not a message from ask_agent or send_message: an ask_agent call waits for the answer in the leader's inbox.
+        if renewed && incoming.post.is_none() && incoming.envelope.in_reply_to.is_some() {
+            let pending = self.escalator.ledger().pending(&incoming.envelope.thread_id).await?;
+            incoming.resume = pending.and_then(|p| p.channel);
+        }
         Ok(())
     }
 
@@ -698,6 +711,13 @@ impl Inbox<'_> {
             (Some(posted), Some(read)) => self.channel_prompt(posted, read, &humans).await,
             _ => envelope.text.clone(),
         };
+        let text = match &incoming.resume {
+            Some(channel) => {
+                let left = envelope.turn_budget.saturating_sub(1);
+                format!("{text}\n\n{}", channel::resume_note(channel, thread, left))
+            }
+            None => text,
+        };
         let text = prompt_text(&text, cut_off, late);
         let prompt =
             Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
@@ -768,6 +788,10 @@ impl Inbox<'_> {
                     }
                     Err(e) => return Err(e.into()),
                 }
+            }
+            _ if let Some(channel) = &incoming.resume => {
+                let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.persona.clone(), text);
+                Reply::Post(post.with_owner(envelope.owner.clone()).spend(envelope.turn_budget)?)
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
@@ -868,7 +892,9 @@ impl Inbox<'_> {
         let mut notice = envelope.follow_up(self.persona.clone(), human, text);
         notice.in_reply_to = Some(envelope.id);
         let id = format!("escalation-{}-{seq}", self.persona);
-        let escalated = self.escalator.escalate(Stuck::new(reason, notice, id, Some(envelope))).await?;
+        let stuck = Stuck::new(reason, notice, id, Some(envelope));
+        let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone());
+        let escalated = self.escalator.escalate(Stuck { channel, ..stuck }).await?;
         tracing::info!(thread = %envelope.thread_id, why, %escalated, "escalated");
         Ok(())
     }
@@ -1674,6 +1700,55 @@ mod tests {
         assert!(timeout(Duration::from_millis(50), to_dev_b.next()).await.is_err(), "dev-b got level 1 only");
         let pending = bus.ledger.pending(&t1).await.unwrap().expect("the escalation is kept");
         assert_eq!((pending.escalation.level, pending.to, pending.renewed_by.is_some()), (2, vec![boss], true));
+    }
+
+    #[tokio::test]
+    async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_with_fresh_turns() {
+        let Some((mut bus, _)) = Bus::start().await else { return };
+        let [lead, dev_b] = personas(["lead", "dev-b"]);
+        bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
+        let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (ops, mut posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+        let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
+        bus.post(&root).await;
+        let mut spent = root.reply(dev_b.clone(), "@dev-a agree?", &[], &Humans::default()).unwrap();
+        spent.turn_budget = 0;
+        bus.post(&spent).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let notice = next_envelope(&mut to_lead).await;
+            let one = notice.escalation.as_deref().expect("the escalation").clone();
+            assert_eq!(notice.thread_id, root.thread_id);
+            let mut answer = notice.reply(lead.clone(), "go on", Role::Persona).unwrap();
+            answer = answer.with_escalation(Some(one));
+            answer.turn_budget = 0;
+            bus::publish_json(&bus.js, answer.subject(), &answer, None).await.unwrap();
+
+            // Posted back to the thread with the leader's fresh budget, not sent to the leader.
+            let resumed = next_post(&mut posts).await;
+            assert_eq!((&resumed.channel, &resumed.thread_id), (&ops, &root.thread_id));
+            assert_eq!((resumed.turn_budget, resumed.owner.as_ref()), (DEFAULT_TURN_BUDGET - 1, Some(&root.from)));
+
+            // Later posts on the thread go by the fresh budget: no escalation again.
+            let more = resumed.reply(dev_b.clone(), "@dev-a and then?", &[], &Humans::default()).unwrap();
+            bus.post(&more).await;
+            let reply = next_post(&mut posts).await;
+            assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(more.id), DEFAULT_TURN_BUDGET - 3));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        assert!(timeout(Duration::from_millis(200), to_lead.next()).await.is_err(), "the leader gets no reply");
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 2, "{answered:?}");
+        let note = format!("on that thread and spends one of its turns ({} left after it)", DEFAULT_TURN_BUDGET - 1);
+        assert!(answered[0].starts_with("go on\n\n[ants] The escalation's leader answered"), "{}", answered[0]);
+        assert!(answered[0].contains(&note), "{}", answered[0]);
+        let pending = bus.ledger.pending(&root.thread_id).await.unwrap().expect("the escalation is kept");
+        assert_eq!((pending.channel.as_ref(), pending.renewed_by.is_some()), (Some(&ops), true));
     }
 
     #[tokio::test]
