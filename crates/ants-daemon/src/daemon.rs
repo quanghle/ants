@@ -411,11 +411,9 @@ async fn nak(msg: &jetstream::Message, delay: Option<Duration>) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use ants_test_support::NatsServer as Server;
     use async_nats::jetstream::consumer::PullConsumer;
     use tokio::sync::Semaphore;
     use tokio::time::timeout;
@@ -425,60 +423,6 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
     const IDLE: Duration = Duration::from_secs(60);
-
-    /// A nats-server with JetStream on a port of its choosing, its files under `target/`, removed on drop.
-    struct Server {
-        child: Child,
-        dir: PathBuf,
-        url: String,
-    }
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    impl Server {
-        /// None when nats-server is not installed.
-        fn start() -> Option<Self> {
-            if Command::new("nats-server").arg("--version").output().is_err() {
-                eprintln!("nats-server not on PATH; skipping");
-                return None;
-            }
-            static SERVERS: AtomicUsize = AtomicUsize::new(0);
-            let n = SERVERS.fetch_add(1, Ordering::Relaxed);
-            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("../../target/test-nats-daemon-{}-{n}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let child = Command::new("nats-server")
-                .args(["-js", "-a", "127.0.0.1", "-p", "-1", "-sd"])
-                .arg(dir.join("js"))
-                .arg("--ports_file_dir")
-                .arg(&dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let ports = dir.join(format!("nats-server_{}.ports", child.id()));
-            let mut server = Self { child, dir, url: String::new() };
-            for _ in 0..50 {
-                let url = std::fs::read_to_string(&ports).ok().and_then(|json| {
-                    let ports: serde_json::Value = serde_json::from_str(&json).ok()?;
-                    Some(ports["nats"][0].as_str()?.to_owned())
-                });
-                if let Some(url) = url {
-                    server.url = url;
-                    return Some(server);
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            panic!("nats-server did not start");
-        }
-    }
 
     /// dev-a's side of a server: it serves its inbox, and the human sends to it.
     struct Bus {

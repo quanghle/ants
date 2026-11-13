@@ -150,14 +150,13 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::process::{Child, Command, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use ants_daemon::bus;
     use ants_daemon::dead::{self, Attempt};
     use ants_daemon::roster::Registration;
     use ants_proto::{Envelope, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, session_key, subject};
+    use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
     use async_nats::{Client, Event, jetstream};
     use futures::{StreamExt as _, TryStreamExt as _};
@@ -168,70 +167,29 @@ pub(crate) mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// A nats-server trusting a fresh team, in a temporary directory removed on drop.
-    pub(crate) struct Server {
-        child: Child,
-        dir: PathBuf,
-        url: String,
-    }
+    /// A nats-server trusting a fresh team, whose keys are in its directory.
+    pub(crate) struct Server(NatsServer);
 
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            let _ = fs::remove_dir_all(&self.dir);
+    impl std::ops::Deref for Server {
+        type Target = NatsServer;
+        fn deref(&self) -> &NatsServer {
+            &self.0
         }
     }
 
     impl Server {
         /// None when nats-server is not installed.
         pub(crate) fn start() -> Option<Self> {
-            if Command::new("nats-server").arg("--version").output().is_err() {
-                eprintln!("nats-server not on PATH; skipping");
-                return None;
-            }
-            static SERVERS: AtomicUsize = AtomicUsize::new(0);
-            let n = SERVERS.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("ants-auth-{}-{n}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            init(&dir.join("auth")).unwrap();
-            let conf = dir.join("nats.conf");
-            let store = dir.join("js");
-            // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
-            fs::write(
-                &conf,
-                format!(
-                    "listen: 127.0.0.1:-1\nports_file_dir: {dir:?}\njetstream {{ store_dir: {store:?} }}\n\
-                     include \"auth/{SERVER_CONF}\"\n"
-                ),
-            )
-            .unwrap();
-            let child = Command::new("nats-server")
-                .arg("-c")
-                .arg(&conf)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let ports = dir.join(format!("nats-server_{}.ports", child.id()));
-            let mut server = Self { child, dir, url: String::new() };
-            for _ in 0..50 {
-                let url = fs::read_to_string(&ports).ok().and_then(|json| {
-                    let ports: Value = serde_json::from_str(&json).ok()?;
-                    Some(ports["nats"][0].as_str()?.to_owned())
-                });
-                if let Some(url) = url {
-                    server.url = url;
-                    return Some(server);
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            panic!("nats-server did not start");
+            NatsServer::start_with(|dir| {
+                init(&dir.join("auth")).unwrap();
+                format!("include \"auth/{SERVER_CONF}\"\n")
+            })
+            .map(Self)
         }
 
         fn creds(&self, persona: &PersonaId) -> PathBuf {
-            let out = self.dir.join(format!("{persona}.creds"));
-            issue(&self.dir.join("auth"), persona, &out).unwrap();
+            let out = self.dir().join(format!("{persona}.creds"));
+            issue(&self.dir().join("auth"), persona, &out).unwrap();
             out
         }
 

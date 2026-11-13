@@ -15,6 +15,10 @@ cargo build --release   # target/release/ants
 cargo test
 ```
 
+Tests that need `nats-server` or `bd` on PATH skip without them; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
+instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
+test binary itself as a stub ACP harness.
+
 ## Try it
 
 ```sh

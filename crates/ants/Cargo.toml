@@ -24,5 +24,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "signal", "time"] }
 
 [dev-dependencies]
+agent-client-protocol = { version = "5.2.0", features = ["stdio"] }
+ants-test-support = { path = "../ants-test-support" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "sync", "time"] }
+
+# Its own main: run as `copilot`, the test binary is the stub harness the daemon under test starts.
+[[test]]
+name = "e2e"
+harness = false

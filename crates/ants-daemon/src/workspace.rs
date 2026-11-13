@@ -84,8 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_persona_remembers_in_its_own_workspace() {
-        if Command::new("bd").arg("--version").output().is_err() {
-            eprintln!("skipped: bd is not on PATH");
+        if !ants_test_support::have("bd") {
             return;
         }
         let root = std::env::temp_dir().join(format!("ants-workspace-{}", std::process::id()));
