@@ -319,6 +319,15 @@ pub(crate) mod tests {
         a_raw.publish(subject::dead(&dev_b), "spoof".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains("Publish to \"ants.dead.dev-b\""), "{v}");
+        // dev-a hears the human's decisions on its approval requests, but cannot decide them itself.
+        let request = ants_proto::Uuid::now_v7();
+        let mut decisions = a_raw.subscribe(subject::approval_decision(&dev_a, &request)).await.unwrap();
+        a_raw.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"ants.approvals.dev-a.{request}\"")), "{v}");
+        h_client.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
+        let got = timeout(WAIT, decisions.next()).await.unwrap().unwrap();
+        assert_eq!(&got.payload[..], b"allow");
         for denied in [subject::inbox(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()] {
             let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;

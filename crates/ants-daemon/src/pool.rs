@@ -35,7 +35,7 @@ impl Pool {
             self.live.remove(thread);
             self.make_room();
             let resume = self.sessions.get(thread).cloned();
-            let session = Session::start(&self.launch, resume.clone()).await?;
+            let session = Session::start(&self.launch.for_thread(thread), resume.clone()).await?;
             match &resume {
                 Some(old) if old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
                 _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
@@ -157,7 +157,14 @@ mod tests {
                     ),
             )
         });
-        (Pool::new(Launch::with_transport(connect, PathBuf::from("/")), max_live, Duration::from_secs(60)), log)
+        (
+            Pool::new(
+                Launch::with_transport(connect, PathBuf::from("/"), Default::default()),
+                max_live,
+                Duration::from_secs(60),
+            ),
+            log,
+        )
     }
 
     fn chunk(session: &SessionId, text: &str) -> SessionNotification {

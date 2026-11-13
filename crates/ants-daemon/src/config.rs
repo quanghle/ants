@@ -20,12 +20,13 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer};
 
 use crate::daemon::Config;
-use crate::harness::{HarnessKind, PermissionPolicy};
+use crate::harness::HarnessKind;
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
 pub const DEFAULT_MAX_HARNESSES: usize = 4;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = crate::approvals::DEFAULT_TIMEOUT.as_secs();
 
 /// `~/.ants/config.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -58,10 +59,15 @@ pub struct Persona {
     pub home: Option<PathBuf>,
     #[serde(default, deserialize_with = "harness")]
     pub harness: HarnessKind,
+    /// Same as `allow = ["*"]`.
     #[serde(default)]
     pub allow_tools: bool,
+    /// Tool allowlist; see [`crate::permission`].
     #[serde(default)]
     pub allow: Vec<String>,
+    /// Seconds a tool request outside the allowlist waits for the human.
+    #[serde(default = "default_approval_timeout_secs")]
+    pub approval_timeout_secs: u64,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_harnesses")]
@@ -76,6 +82,10 @@ fn default_max_harnesses() -> usize {
 
 fn default_idle_timeout_secs() -> u64 {
     DEFAULT_IDLE_TIMEOUT_SECS
+}
+
+fn default_approval_timeout_secs() -> u64 {
+    DEFAULT_APPROVAL_TIMEOUT_SECS
 }
 
 fn harness<'de, D: Deserializer<'de>>(d: D) -> Result<HarnessKind, D::Error> {
@@ -94,6 +104,7 @@ impl Persona {
             harness: HarnessKind::default(),
             allow_tools: false,
             allow: Vec::new(),
+            approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
@@ -116,10 +127,10 @@ impl Persona {
             workdir,
             home,
             harness: self.harness,
-            permissions: if self.allow_tools { PermissionPolicy::AllowOnce } else { PermissionPolicy::Reject },
             max_harnesses: self.max_harnesses,
             idle_timeout: Duration::from_secs(self.idle_timeout_secs),
-            allow: self.allow,
+            allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
+            approval_timeout: Duration::from_secs(self.approval_timeout_secs),
             capabilities: self.capabilities,
             persona: self.name,
         })
@@ -223,7 +234,8 @@ mod tests {
 
         let config = b.into_config("nats://unused").unwrap();
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
-        assert_eq!(config.permissions, PermissionPolicy::Reject);
+        assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
+        assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
         assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
         assert!(config.home.ends_with(".ants/dev-b"));
     }

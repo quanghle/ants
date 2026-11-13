@@ -8,13 +8,15 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionRequest,
     SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
+use ants_proto::ThreadId;
 use anyhow::{Result, anyhow};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::permission::PermissionPolicy;
 
 /// An agent harness ants can drive over ACP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,33 +61,6 @@ impl FromStr for HarnessKind {
     }
 }
 
-/// What to answer when a harness asks permission to use a tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PermissionPolicy {
-    /// Reject every request. Safe default until approvals reach the human.
-    #[default]
-    Reject,
-    /// Allow each request once. Only for trusted, sandboxed workdirs.
-    AllowOnce,
-}
-
-impl PermissionPolicy {
-    fn answer(self, request: &RequestPermissionRequest) -> RequestPermissionResponse {
-        let preferred: &[PermissionOptionKind] = match self {
-            PermissionPolicy::Reject => &[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways],
-            PermissionPolicy::AllowOnce => &[PermissionOptionKind::AllowOnce],
-        };
-        // Pick by option kind, never by position or label.
-        let chosen = preferred
-            .iter()
-            .find_map(|kind| request.options.iter().find(|o| o.kind == *kind).map(|o| o.option_id.clone()));
-        RequestPermissionResponse::new(match chosen {
-            Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-            None => RequestPermissionOutcome::Cancelled,
-        })
-    }
-}
-
 /// Start the harness, complete the ACP handshake and describe the agent.
 pub async fn check(kind: HarnessKind) -> Result<String> {
     Client
@@ -109,18 +84,25 @@ pub struct Launch {
     connect: Connector,
     cwd: PathBuf,
     policy: PermissionPolicy,
+    /// The thread the sessions serve, so a permission request can be escalated on it.
+    thread: Option<ThreadId>,
 }
 
 impl Launch {
     /// `kind` working in `cwd`, with `env` added to the daemon's environment.
     pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
         let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
-        Self { name: kind.name().to_owned(), connect, cwd, policy }
+        Self { name: kind.name().to_owned(), connect, cwd, policy, thread: None }
+    }
+
+    /// The same launch, for sessions serving `thread`.
+    pub fn for_thread(&self, thread: &ThreadId) -> Self {
+        Self { thread: Some(thread.clone()), ..self.clone() }
     }
 
     #[cfg(test)]
-    pub(crate) fn with_transport(connect: Connector, cwd: PathBuf) -> Self {
-        Self { name: "test".to_owned(), connect, cwd, policy: PermissionPolicy::Reject }
+    pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
+        Self { name: "test".to_owned(), connect, cwd, policy, thread: None }
     }
 }
 
@@ -130,6 +112,7 @@ impl fmt::Debug for Launch {
             .field("name", &self.name)
             .field("cwd", &self.cwd)
             .field("policy", &self.policy)
+            .field("thread", &self.thread)
             .finish()
     }
 }
@@ -199,7 +182,7 @@ async fn serve(
     // Some while a prompt runs. session/load replays the history as chunks; those land in None and are dropped.
     let reply: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = reply.clone();
-    let policy = launch.policy;
+    let (policy, thread, workdir) = (launch.policy.clone(), launch.thread.clone(), launch.cwd.clone());
     let mut opened = Some(opened);
     let result = Client
         .v1()
@@ -217,9 +200,11 @@ async fn serve(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _cx| {
-                tracing::info!(?policy, tool = ?request.tool_call, "harness asked for permission");
-                responder.respond(policy.answer(&request))
+            async move |request: RequestPermissionRequest, responder, cx| {
+                tracing::info!(tool = ?request.tool_call, "harness asked for permission");
+                let (policy, thread, workdir) = (policy.clone(), thread.clone(), workdir.clone());
+                // The human may take minutes; answer off the dispatch loop so the connection keeps flowing.
+                cx.spawn(async move { responder.respond(policy.answer(&request, thread.as_ref(), &workdir).await) })
             },
             agent_client_protocol::on_receive_request!(),
         )

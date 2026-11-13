@@ -25,9 +25,18 @@ pub struct DaemonArgs {
     /// Agent harness (default: copilot).
     #[arg(long)]
     harness: Option<HarnessKind>,
-    /// Allow every tool request once instead of rejecting it. Only for trusted, sandboxed workdirs.
+    /// Let the harness run tool requests matching RULE without asking: `*`, a tool kind such as `read`, or
+    /// `<kind>:<pattern>` such as `execute:cargo test*` or `edit:src/*`. Repeatable, added to the file's `allow`.
+    /// Other requests go to the human.
+    #[arg(long = "allow", value_name = "RULE")]
+    allow: Vec<String>,
+    /// Allow every tool request (same as `--allow '*'`). Only for trusted, sandboxed workdirs.
     #[arg(long)]
     allow_tools: bool,
+    /// Seconds a tool request outside the allowlist waits for the human's decision before it is rejected (default:
+    /// 300).
+    #[arg(long)]
+    approval_timeout_secs: Option<u64>,
     /// Most harness processes alive at once, one per active thread (default: 4).
     #[arg(long)]
     max_harnesses: Option<usize>,
@@ -46,7 +55,9 @@ impl DaemonArgs {
         self.workdir.is_some()
             || self.home.is_some()
             || self.harness.is_some()
+            || !self.allow.is_empty()
             || self.allow_tools
+            || self.approval_timeout_secs.is_some()
             || self.max_harnesses.is_some()
             || self.idle_timeout_secs.is_some()
             || !self.capabilities.is_empty()
@@ -63,7 +74,11 @@ impl DaemonArgs {
         if let Some(harness) = self.harness {
             p.harness = harness;
         }
+        p.allow.extend(self.allow.iter().cloned());
         p.allow_tools |= self.allow_tools;
+        if let Some(secs) = self.approval_timeout_secs {
+            p.approval_timeout_secs = secs;
+        }
         if let Some(n) = self.max_harnesses {
             p.max_harnesses = n;
         }
@@ -207,13 +222,16 @@ mod tests {
         let path = Path::new("config.toml");
         let picked = pick(
             all.clone(),
-            &args("--persona dev-b --max-harnesses 1 --allow-tools --capability rust,nats --capability acp"),
+            &args(
+                "--persona dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp",
+            ),
             path,
         )
         .unwrap();
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].name.as_str(), "dev-b");
         assert_eq!((picked[0].max_harnesses, picked[0].allow_tools), (1, true));
+        assert_eq!(picked[0].allow, ["read"]);
         assert_eq!(picked[0].capabilities, ["rust", "nats", "acp"]);
         assert_eq!(picked[0].idle_timeout_secs, config::DEFAULT_IDLE_TIMEOUT_SECS);
 

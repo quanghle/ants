@@ -8,8 +8,10 @@ use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 
+use crate::approvals::NatsApprover;
 use crate::dead::{self, Attempt};
-use crate::harness::{HarnessKind, Launch, PermissionPolicy};
+use crate::harness::{HarnessKind, Launch};
+use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::Pool;
 use crate::{bus, roster, workspace};
 
@@ -35,25 +37,30 @@ pub struct Config {
     /// The persona's own files, its bd workspace among them (usually `~/.ants/<persona>`).
     pub home: PathBuf,
     pub harness: HarnessKind,
-    pub permissions: PermissionPolicy,
+    /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
+    /// goes to the human on `ants.approvals.<persona>`.
+    pub allow: Vec<String>,
+    /// How long a tool request waits for the human before it is rejected.
+    pub approval_timeout: Duration,
     /// Most harness processes alive at once; the least recently used stops to make room.
     pub max_harnesses: usize,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
-    /// Tool allowlist for the harness's permission requests.
-    pub allow: Vec<String>,
     /// Capabilities the persona advertises in the roster.
     pub capabilities: Vec<String>,
 }
 
 /// Serve the persona's inbox until Ctrl-C. A message in hand is finished first.
 pub async fn run(config: Config) -> Result<()> {
+    let allow = Allowlist::parse(&config.allow)?;
     let db = workspace::ensure(&config.home, &config.persona).await?;
-    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, config.permissions);
-    let mut pool = Pool::new(launch, config.max_harnesses, config.idle_timeout);
     let (client, js) =
         bus::connect(&config.nats_url, config.creds.as_deref(), &config.persona, &format!("antsd-{}", config.persona))
             .await?;
+    let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
+    let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
+    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy);
+    let mut pool = Pool::new(launch, config.max_harnesses, config.idle_timeout);
     let stream = bus::ensure_stream(&js).await?;
     let mut messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER).await?;
     let registration = roster::register(&js, &config).await?;
@@ -65,6 +72,8 @@ pub async fn run(config: Config) -> Result<()> {
         max_harnesses = config.max_harnesses,
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,
+        allow = ?config.allow,
+        approval_timeout = ?config.approval_timeout,
         "serving inbox"
     );
 

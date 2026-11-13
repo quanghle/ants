@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Harness(HarnessCommand::Prompt { harness, words }) => {
-            let launch = Launch::new(harness, std::env::current_dir()?, Vec::new(), PermissionPolicy::Reject);
+            let launch = Launch::new(harness, std::env::current_dir()?, Vec::new(), PermissionPolicy::reject_all());
             let reply = harness::prompt_once(&launch, &words.join(" ")).await?;
             println!("{reply}");
             Ok(())

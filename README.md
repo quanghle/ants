@@ -50,7 +50,8 @@ workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
 harness = "copilot"                        # default
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
-allow = ["read", "search"]                 # tool allowlist
+allow = ["read", "search"]                 # tool allowlist, see Tool permissions
+approval_timeout_secs = 300                # default
 capabilities = ["rust", "review"]          # advertised in the roster
 max_harnesses = 4                          # default
 idle_timeout_secs = 600                    # default
@@ -100,6 +101,29 @@ ants dead drop 42       # remove it without replaying
 
 Reading and removing dead letters by sequence needs the human's credentials. A stream created before dead letters
 existed lacks `ants.dead.>`; `ants init` adds it.
+
+## Tool permissions
+
+When a harness asks to run a tool, the daemon answers from the persona's allowlist (`--allow RULE`, repeatable, or
+`allow = [...]` in the config file). A rule is `*`, an ACP tool kind (`read`, `edit`, `delete`, `move`, `search`,
+`execute`, `think`, `fetch`, `switch_mode`, `other`), or `<kind>:<pattern>`, where `*` in the pattern stands for any
+run of characters:
+
+| Rule | Allows |
+|---|---|
+| `read` | every read |
+| `execute:cargo test*` | commands starting with `cargo test`; a command with `;`, `&`, `\|`, `<`, `>`, a backtick or `$(` never matches |
+| `edit:src/*` | edits under `<workdir>/src`; relative patterns never match outside the workdir |
+| `edit:/home/me/notes/*` | edits matching the absolute path |
+| `fetch:https://docs.rs/*` | fetches of matching URLs |
+| `other:bd-*` | other tools, such as MCP tools, by title |
+
+Allowed requests are answered "allow once". Every other request goes to the human: the daemon publishes an
+`ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting-approval`, and
+waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<persona>.<request id>`.
+Only the human's credentials may publish decisions. The verdict is `allow_once`, `allow_always` (the harness remembers
+it for the session) or `reject`; no decision in time rejects the request. `--allow-tools` is `--allow '*'`, for
+trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ## Persona memory
 

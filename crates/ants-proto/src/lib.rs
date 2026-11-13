@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
@@ -127,7 +127,7 @@ pub mod subject {
         format!("ants.plan.{thread}")
     }
 
-    /// Permission requests a persona escalates to the human.
+    /// Permission requests a persona escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
     pub fn approvals(persona: &PersonaId) -> String {
         format!("ants.approvals.{persona}")
     }
@@ -139,6 +139,17 @@ pub mod subject {
 
     /// Every persona's dead letters.
     pub const DEAD_ALL: &str = "ants.dead.>";
+
+    /// The human's answer to one approval request ([`ApprovalDecision`](super::ApprovalDecision)). Only the human may
+    /// publish here; the persona that asked subscribes before it publishes the request.
+    pub fn approval_decision(persona: &PersonaId, request: &super::Uuid) -> String {
+        format!("ants.approvals.{persona}.{request}")
+    }
+
+    /// Every approval request, of all personas.
+    pub const ALL_APPROVAL_REQUESTS: &str = "ants.approvals.*";
+    /// Every approval decision, of all personas.
+    pub const ALL_APPROVAL_DECISIONS: &str = "ants.approvals.*.*";
 
     /// Live progress of a persona on a thread (core NATS, not stored).
     pub fn status(persona: &PersonaId, thread: &ThreadId) -> String {
@@ -175,10 +186,11 @@ impl Permissions {
     /// What the credentials of `persona` allow.
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status, approvals and dead
-    /// letters, reads only its own inbox consumer and its own replies, and writes only its own roster entry. The human
-    /// (the CLI user) also watches all ants traffic, reads the roster, may create and upgrade the stream and create the
-    /// roster bucket, and reads and removes dead letters by sequence; its inbox consumer keeps the replies `ants inbox`
-    /// has not shown yet. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
+    /// letters, reads only its own inbox consumer, its own replies and the decisions on its own approval requests, and
+    /// writes only its own roster entry. The human (the CLI user) also watches all ants traffic, reads the roster,
+    /// decides approval requests, may create and upgrade the stream and create the roster bucket, and reads and removes
+    /// dead letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A persona gets no
+    /// `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
         let roster_stream = format!("KV_{ROSTER_BUCKET}");
@@ -207,17 +219,19 @@ impl Permissions {
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
+                subject::ALL_APPROVAL_DECISIONS.to_owned(),
             ]);
             subscribe.push(subject::ALL.to_owned());
         } else {
             publish.extend([
+                // Exactly its requests subject: a persona cannot answer its own requests one level below.
                 subject::approvals(persona),
                 subject::dead(persona),
                 format!("ants.status.{persona}.*"),
                 // Put and delete of its own roster entry.
                 subject::roster(persona),
             ]);
-            subscribe.push("ants.plan.>".to_owned());
+            subscribe.extend(["ants.plan.>".to_owned(), format!("{}.*", subject::approvals(persona))]);
         }
         Self { publish, subscribe }
     }
@@ -389,8 +403,108 @@ impl DeadLetter {
     }
 }
 
+/// What the human may answer to an approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Let the tool run this once.
+    AllowOnce,
+    /// Let the tool run, and let the harness remember that for the rest of its session.
+    AllowAlways,
+    /// Refuse the tool. Also the outcome when no decision arrives before the request expires.
+    Reject,
+}
+
+/// The tool call a harness asks permission for, as the human gets to see it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// ACP tool kind: read, edit, delete, move, search, execute, think, fetch, switch_mode or other.
+    pub kind: String,
+    pub title: String,
+    /// Files the call touches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
+    /// The harness's raw input for the tool (JSON), shortened if long.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+}
+
+/// A tool request outside a persona's allowlist, published to `ants.approvals.<persona>`. It is pending until a
+/// [`ApprovalDecision`] arrives on [`ApprovalRequest::decision_subject`] or `expires_at` passes; then the persona
+/// rejects it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub id: Uuid,
+    pub persona: PersonaId,
+    pub thread_id: ThreadId,
+    pub tool: ToolCall,
+    /// The verdicts the harness offers. [`Verdict::Reject`] is always among them.
+    pub options: Vec<Verdict>,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl ApprovalRequest {
+    pub fn new(
+        persona: PersonaId,
+        thread_id: ThreadId,
+        tool: ToolCall,
+        mut options: Vec<Verdict>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        if !options.contains(&Verdict::Reject) {
+            options.push(Verdict::Reject);
+        }
+        let requested_at = Utc::now();
+        let expires_at = chrono::TimeDelta::from_std(timeout)
+            .ok()
+            .and_then(|t| requested_at.checked_add_signed(t))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        Self { id: Uuid::now_v7(), persona, thread_id, tool, options, requested_at, expires_at }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::approvals(&self.persona)
+    }
+
+    pub fn decision_subject(&self) -> String {
+        subject::approval_decision(&self.persona, &self.id)
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        now >= self.expires_at
+    }
+
+    /// The human's answer. A verdict the harness did not offer counts as [`Verdict::Reject`].
+    pub fn decide(&self, verdict: Verdict) -> ApprovalDecision {
+        ApprovalDecision {
+            request_id: self.id,
+            persona: self.persona.clone(),
+            verdict: if self.options.contains(&verdict) { verdict } else { Verdict::Reject },
+            decided_at: Utc::now(),
+        }
+    }
+}
+
+/// The human's answer to an [`ApprovalRequest`], published to `ants.approvals.<persona>.<request id>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalDecision {
+    pub request_id: Uuid,
+    pub persona: PersonaId,
+    pub verdict: Verdict,
+    pub decided_at: DateTime<Utc>,
+}
+
+impl ApprovalDecision {
+    pub fn subject(&self) -> String {
+        subject::approval_decision(&self.persona, &self.request_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn p(s: &str) -> PersonaId {
@@ -422,6 +536,29 @@ mod tests {
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
         assert!(STREAM_SUBJECTS.contains(&subject::DEAD_ALL), "dead letters are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
+        let id = Uuid::now_v7();
+        assert_eq!(subject::approval_decision(&p("dev-a"), &id), format!("ants.approvals.dev-a.{id}"));
+    }
+
+    #[test]
+    fn only_offered_verdicts_are_decided() {
+        let tool = ToolCall { kind: "execute".into(), title: "rm -rf build".into(), ..Default::default() };
+        let ask = ApprovalRequest::new(
+            p("dev-a"),
+            "t1".parse().unwrap(),
+            tool,
+            vec![Verdict::AllowOnce],
+            Duration::from_secs(60),
+        );
+        assert_eq!(ask.options, [Verdict::AllowOnce, Verdict::Reject]);
+        assert!(!ask.is_expired(ask.requested_at) && ask.is_expired(ask.expires_at));
+        assert_eq!(ask.decide(Verdict::AllowOnce).verdict, Verdict::AllowOnce);
+        let always = ask.decide(Verdict::AllowAlways);
+        assert_eq!(always.verdict, Verdict::Reject, "allow_always was not offered");
+        assert_eq!(always.subject(), ask.decision_subject());
+        let json = serde_json::to_string(&ask).unwrap();
+        assert!(json.contains(r#""options":["allow_once","reject"]"#), "{json}");
+        assert_eq!(serde_json::from_str::<ApprovalRequest>(&json).unwrap(), ask);
     }
 
     #[test]
