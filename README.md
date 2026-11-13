@@ -30,6 +30,46 @@ The daemon keeps one harness process per active thread, at most `--max-harnesses
 stops after `--idle-timeout-secs` (default 600) without a message, and its session resumes with ACP `session/load` on
 the next one.
 
+## Config file
+
+One daemon process can serve several personas, each over its own NATS connection with its own credentials. List them
+in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`:
+
+```toml
+nats = "wss://hub.example/nats"            # server for every persona that sets none
+
+[[persona]]
+name = "dev-a"
+workdir = "~/src/repo-a"                   # must exist
+creds = "~/.config/ants/auth/dev-a.creds"
+harness = "copilot"                        # default
+home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
+allow = ["read", "search"]                 # tool allowlist
+capabilities = ["rust", "review"]          # advertised in the roster
+max_harnesses = 4                          # default
+idle_timeout_secs = 600                    # default
+allow_tools = false                        # default
+
+[[persona]]
+name = "dev-b"
+nats = "nats://127.0.0.1:4222"             # this persona's own server
+workdir = "~/src/repo-b"
+creds = "~/.config/ants/auth/dev-b.creds"
+```
+
+`~` expands to the home directory; other relative paths are relative to the file. Names must be unique and unknown
+keys are errors. A persona that fails to start (bad credentials, unreachable server) is logged and the others keep
+running; the daemon exits with an error only when none could start. Ctrl-C stops them all.
+
+How flags and the file combine:
+
+- `ants daemon` serves every persona in `~/.ants/config.toml`.
+- `ants daemon --persona dev-a` ignores that default file and takes the persona from the flags (`--workdir`, `--home`,
+  `--harness`, `--max-harnesses`, ...), as before.
+- `ants daemon --config FILE --persona dev-a` serves only `dev-a` from `FILE`; persona flags given override its entries.
+- In the file, `nats` and `creds` win over `--nats` / `ANTS_NATS_URL` and `--creds` / `ANTS_CREDS`, which fill in what
+  the file leaves out. `--creds` applies only when one persona is served.
+
 ## Persona memory
 
 Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine

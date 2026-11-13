@@ -1,0 +1,231 @@
+//! `ants daemon`: which personas to serve, from the config file and the command line, and serving them together.
+
+use std::path::{Path, PathBuf};
+
+use ants_daemon::config::{self, Persona};
+use ants_daemon::{Config, HarnessKind};
+use ants_proto::PersonaId;
+use anyhow::{Context as _, Result, bail};
+use tracing::Instrument as _;
+
+#[derive(clap::Args, Debug)]
+pub struct DaemonArgs {
+    /// Serve only this persona: picked from the config file when one is given, described by the flags below otherwise.
+    #[arg(long, env = "ANTS_PERSONA")]
+    persona: Option<PersonaId>,
+    /// Config file listing the personas to serve (default without --persona: ~/.ants/config.toml, if it exists).
+    #[arg(long, env = "ANTS_CONFIG")]
+    config: Option<PathBuf>,
+    /// Directory the harness works in (default: the current directory).
+    #[arg(long)]
+    workdir: Option<PathBuf>,
+    /// The persona's own files, its bd workspace of to-dos and memories among them (default: ~/.ants/<persona>).
+    #[arg(long)]
+    home: Option<PathBuf>,
+    /// Agent harness (default: copilot).
+    #[arg(long)]
+    harness: Option<HarnessKind>,
+    /// Allow every tool request once instead of rejecting it. Only for trusted, sandboxed workdirs.
+    #[arg(long)]
+    allow_tools: bool,
+    /// Most harness processes alive at once, one per active thread (default: 4).
+    #[arg(long)]
+    max_harnesses: Option<usize>,
+    /// Seconds without a message before a thread's harness stops; its session resumes on the next message (default:
+    /// 600).
+    #[arg(long)]
+    idle_timeout_secs: Option<u64>,
+}
+
+impl DaemonArgs {
+    fn sets_persona_options(&self) -> bool {
+        self.workdir.is_some()
+            || self.home.is_some()
+            || self.harness.is_some()
+            || self.allow_tools
+            || self.max_harnesses.is_some()
+            || self.idle_timeout_secs.is_some()
+    }
+
+    /// The persona with the flags given on the command line in place of its own settings.
+    fn apply(&self, mut p: Persona) -> Persona {
+        if let Some(dir) = &self.workdir {
+            p.workdir.clone_from(dir);
+        }
+        if let Some(home) = &self.home {
+            p.home = Some(home.clone());
+        }
+        if let Some(harness) = self.harness {
+            p.harness = harness;
+        }
+        p.allow_tools |= self.allow_tools;
+        if let Some(n) = self.max_harnesses {
+            p.max_harnesses = n;
+        }
+        if let Some(secs) = self.idle_timeout_secs {
+            p.idle_timeout_secs = secs;
+        }
+        p
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Source {
+    Flags(PersonaId),
+    File(PathBuf),
+}
+
+/// `--config` (or `ANTS_CONFIG`) names the file; otherwise `--persona` alone means the flags describe it, and with
+/// neither the file at `default_path` is used.
+fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
+    Ok(match (&args.config, &args.persona) {
+        (Some(path), _) => Source::File(path.clone()),
+        (None, Some(persona)) => Source::Flags(persona.clone()),
+        (None, None) if default_path.exists() => Source::File(default_path.to_owned()),
+        (None, None) => bail!("no --persona given and no config file at {}", default_path.display()),
+    })
+}
+
+/// The personas to serve.
+pub fn personas(args: &DaemonArgs, default_path: &Path) -> Result<Vec<Persona>> {
+    match source(args, default_path)? {
+        Source::Flags(name) => Ok(vec![args.apply(Persona::new(name, std::env::current_dir()?))]),
+        Source::File(path) => pick(config::load(&path)?, args, &path),
+    }
+}
+
+fn pick(all: Vec<Persona>, args: &DaemonArgs, path: &Path) -> Result<Vec<Persona>> {
+    match &args.persona {
+        Some(name) => {
+            let p = all
+                .into_iter()
+                .find(|p| &p.name == name)
+                .with_context(|| format!("persona {name} is not in {}", path.display()))?;
+            Ok(vec![args.apply(p)])
+        }
+        None if args.sets_persona_options() => {
+            bail!(
+                "persona flags such as --workdir apply to one persona; add --persona to pick it from {}",
+                path.display()
+            )
+        }
+        None => Ok(all),
+    }
+}
+
+/// Daemon configs, with `nats` as the server and, for a lone persona, `creds` as the credentials where the persona
+/// sets none. Several personas cannot share one set of credentials, so `creds` is ignored for them.
+pub fn configs(personas: Vec<Persona>, nats: &str, creds: Option<PathBuf>) -> Result<Vec<Config>> {
+    let lone = personas.len() == 1;
+    if !lone && creds.is_some() {
+        tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several personas; set creds per persona instead");
+    }
+    personas
+        .into_iter()
+        .map(|mut p| {
+            if lone && p.creds.is_none() {
+                p.creds.clone_from(&creds);
+            }
+            p.into_config(nats)
+        })
+        .collect()
+}
+
+/// Serve every persona until Ctrl-C, each over its own NATS connection. A persona that fails is reported and the
+/// others keep running; it is an error only when none is left.
+pub async fn run(mut configs: Vec<Config>) -> Result<()> {
+    if configs.len() == 1 {
+        return ants_daemon::run(configs.remove(0)).await;
+    }
+    let total = configs.len();
+    let runs = configs.into_iter().map(|config| {
+        let span = tracing::info_span!("persona", name = %config.persona);
+        async move {
+            let result = ants_daemon::run(config).await;
+            if let Err(e) = &result {
+                tracing::error!(error = format!("{e:#}"), "persona stopped");
+            }
+            result.is_ok()
+        }
+        .instrument(span)
+    });
+    let served = futures::future::join_all(runs).await.into_iter().filter(|ok| *ok).count();
+    if served == 0 {
+        bail!("none of the {total} personas could be served");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cmd {
+        #[command(flatten)]
+        args: DaemonArgs,
+    }
+
+    fn args(line: &str) -> DaemonArgs {
+        Cmd::try_parse_from(std::iter::once("daemon").chain(line.split_whitespace())).unwrap().args
+    }
+
+    fn here() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn persona(name: &str) -> Persona {
+        let mut p = Persona::new(name.parse().unwrap(), here());
+        p.nats = Some(format!("nats://{name}:4222"));
+        p.creds = Some(PathBuf::from(format!("{name}.creds")));
+        p
+    }
+
+    #[test]
+    fn picks_the_source() {
+        let existing = here().join("Cargo.toml");
+        let missing = here().join("no-such-config.toml");
+        assert_eq!(source(&args("--persona dev-a"), &existing).unwrap(), Source::Flags("dev-a".parse().unwrap()));
+        assert_eq!(source(&args(""), &existing).unwrap(), Source::File(existing.clone()));
+        assert_eq!(source(&args("--config c.toml --persona dev-a"), &missing).unwrap(), Source::File("c.toml".into()));
+        let err = source(&args(""), &missing).unwrap_err().to_string();
+        assert!(err.contains("no --persona given") && err.contains("no-such-config.toml"), "{err}");
+    }
+
+    #[test]
+    fn flags_override_the_picked_persona() {
+        let all = vec![persona("dev-a"), persona("dev-b")];
+        let path = Path::new("config.toml");
+        let picked = pick(all.clone(), &args("--persona dev-b --max-harnesses 1 --allow-tools"), path).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name.as_str(), "dev-b");
+        assert_eq!((picked[0].max_harnesses, picked[0].allow_tools), (1, true));
+        assert_eq!(picked[0].idle_timeout_secs, config::DEFAULT_IDLE_TIMEOUT_SECS);
+
+        assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
+        let err = pick(all.clone(), &args("--persona dev-c"), path).unwrap_err().to_string();
+        assert!(err.contains("persona dev-c is not in config.toml"), "{err}");
+        let err = pick(all, &args("--workdir ."), path).unwrap_err().to_string();
+        assert!(err.contains("add --persona"), "{err}");
+    }
+
+    #[test]
+    fn the_file_wins_over_global_flags() {
+        let mut bare = persona("dev-a");
+        bare.nats = None;
+        bare.creds = None;
+        let cli_creds = Some(PathBuf::from("cli.creds"));
+
+        let one = configs(vec![bare.clone()], "nats://cli:4222", cli_creds.clone()).unwrap();
+        assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
+
+        let one = configs(vec![persona("dev-a")], "nats://cli:4222", cli_creds.clone()).unwrap();
+        assert_eq!(one[0].nats_url, "nats://dev-a:4222");
+        assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
+
+        let two = configs(vec![bare, persona("dev-b")], "nats://cli:4222", cli_creds).unwrap();
+        assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
+        assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
+    }
+}

@@ -1,12 +1,13 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the persona daemon.
 
 mod auth;
+mod serve;
 
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, harness};
 use ants_proto::{Envelope, PersonaId, ThreadId, subject};
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
 
@@ -47,28 +48,8 @@ enum Command {
     },
     /// Create the ANTS stream on the server (the daemon also does this on start).
     Init,
-    /// Serve one persona's inbox through an agent harness.
-    Daemon {
-        #[arg(long, env = "ANTS_PERSONA")]
-        persona: PersonaId,
-        /// Directory the harness works in (default: the current directory).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-        /// The persona's own files, its bd workspace of to-dos and memories among them (default: ~/.ants/<persona>).
-        #[arg(long)]
-        home: Option<PathBuf>,
-        #[arg(long, default_value_t = HarnessKind::Copilot)]
-        harness: HarnessKind,
-        /// Allow every tool request once instead of rejecting it. Only for trusted, sandboxed workdirs.
-        #[arg(long)]
-        allow_tools: bool,
-        /// Most harness processes alive at once, one per active thread.
-        #[arg(long, default_value_t = 4)]
-        max_harnesses: usize,
-        /// Seconds without a message before a thread's harness stops; its session resumes on the next message.
-        #[arg(long, default_value_t = 600)]
-        idle_timeout_secs: u64,
-    },
+    /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
+    Daemon(serve::DaemonArgs),
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
@@ -129,27 +110,9 @@ async fn main() -> Result<()> {
             println!("stream {} ready", ants_proto::STREAM);
             Ok(())
         }
-        Command::Daemon { persona, workdir, home, harness, allow_tools, max_harnesses, idle_timeout_secs } => {
-            let workdir = match workdir {
-                Some(dir) => dir,
-                None => std::env::current_dir()?,
-            };
-            let home = match home {
-                Some(dir) => dir,
-                None => ants_daemon::workspace::default_home(&persona)?,
-            };
-            ants_daemon::run(ants_daemon::Config {
-                persona,
-                nats_url: cli.nats,
-                creds: cli.creds,
-                workdir: workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?,
-                home,
-                harness,
-                permissions: if allow_tools { PermissionPolicy::AllowOnce } else { PermissionPolicy::Reject },
-                max_harnesses,
-                idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
-            })
-            .await
+        Command::Daemon(args) => {
+            let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
+            serve::run(serve::configs(personas, &cli.nats, cli.creds)?).await
         }
         Command::Harness(HarnessCommand::Check { harness }) => {
             println!("{harness}: {}", harness::check(harness).await?);

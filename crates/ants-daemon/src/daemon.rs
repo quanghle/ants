@@ -37,6 +37,10 @@ pub struct Config {
     pub max_harnesses: usize,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
+    /// Tool allowlist for the harness's permission requests.
+    pub allow: Vec<String>,
+    /// Capabilities the persona advertises in the roster.
+    pub capabilities: Vec<String>,
 }
 
 /// Serve the persona's inbox until Ctrl-C. A message in hand is finished first.
