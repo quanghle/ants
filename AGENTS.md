@@ -19,5 +19,21 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
   `ants-test-support` (dev-only test helpers: tools on PATH, a throwaway nats-server).
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
 - TLS stays on rustls.
-- Before finishing: `cargo fmt`, `cargo clippy --all-targets`, `cargo test`.
 - A daemon acks a JetStream message only after its effects are stored.
+- Also in the repo: `contrib/` (launchd and systemd units), `scripts/` (`install-units.sh`, `footprint.sh`),
+  `docs/transport.md` (hub, proxy, leaf and tunnel findings), `deny.toml` (dependency policy).
+- Comment only code that needs clarification.
+
+## Checks
+
+Before finishing, as CI (`.github/workflows/ci.yml`) does:
+
+- `cargo fmt`, `cargo clippy --all-targets` (no warnings), `cargo test`.
+- Tests needing `nats-server` skip when it is not on PATH; `ANTS_REQUIRE_TOOLS=1` makes them fail instead.
+- `cargo deny check` after changing dependencies. A new license goes into `deny.toml`'s allow-list only if
+  permissive.
+
+## Docs
+
+- README.md documents what exists on main: update it with any change to the CLI, config file, wire or services.
+- User-facing text (docs, CLI messages) avoids pronouns: impersonal or imperative phrasing.

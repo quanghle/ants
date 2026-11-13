@@ -4,25 +4,67 @@ Headless agent teams on several machines, talking to each other and to a human a
 
 - **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster, sessions and
   attempt markers.
-- **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
-  bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
-- **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default)
+- **Transport:** any uplink that carries NATS: `wss://`/`ws://` through a reverse proxy, `tls://`, or a Dev Tunnel to
+  the hub's ports, optionally through an HTTP `CONNECT` proxy. See [Transport options](#transport-options).
+- **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default),
   Claude Code through its ACP adapter (`claude-agent-acp`), or Google Antigravity CLI (`agy acp`). See
   [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and its MCP server.
 
-## Build
+## Architecture
 
-```sh
-cargo build --release   # target/release/ants
-cargo test
+```text
+ machine "macbook"                      hub machine                       machine "desk"
++-------------------------------+      +--------------------------+      +--------------------------+
+| ants daemon                   |      | nats-server (hub)        |      | ants CLI (the human)     |
+|   dev-a -> harness per thread |      |   JetStream domain "hub" |      |   ask, inbox, approve    |
+|   dev-b -> harness per thread |      |   stream ANTS            |      |            |             |
+|   MCP server for the sessions |      |   KV ants_roster,        |      |            |             |
+|            |                  |      |      ants_sessions,      |      |            |             |
+| nats-server (leaf, outbox)  --+----->|      ants_attempts       |<-----+-- nats-server (leaf)     |
++-------------------------------+      +--------------------------+      +--------------------------+
+                          uplink: wss://, tls:// or a Dev Tunnel
 ```
 
-Tests that need `nats-server` on PATH skip without it; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
-instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
-test binary itself as a stub ACP harness.
+- **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, plan rooms,
+  approvals, dead letters) and the KV buckets for the roster, the thread sessions and attempt markers. In operator
+  mode (`ants auth`), every persona and the human connect with their own NKey/JWT credentials, limited to the subjects
+  of their role.
+- **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
+  on the machine connects to it on `127.0.0.1:4222`; only the leaf's uplink crosses the network, and switching the
+  uplink touches nothing else. While the uplink is down, what the machine's personas send waits in its outbox.
+  A single machine can skip the leaf and point `ants` at the hub directly.
+- **Daemon:** `ants daemon` serves the personas of a machine, each over its own NATS connection with its own durable
+  inbox consumer. It runs one harness process per active thread, answers tool permission requests from an allowlist
+  or the human, enforces limits and spending caps, keeps the persona's roster entry fresh, and gives every harness
+  session an MCP server for messaging other personas.
+- **Personas:** named agents (`dev-a`, `reviewer`, ...), each with a workdir, a harness, capabilities and a `whoami`
+  role. `human` is the CLI user. The persona `messenger` gets every `ants ask` without `@persona` and routes it by
+  capability. Messages go on `ants.inbox.<to>.<from>`, grouped into threads with a turn budget for agent-to-agent
+  traffic.
+- **Harnesses:** the agent CLIs the daemon drives over ACP on stdio: `copilot`, `claude` or `antigravity`.
 
-## Try it
+## Install
+
+Requirements:
+
+- Rust 1.100 or later, to build `ants`.
+- [nats-server](https://github.com/nats-io/nats-server/releases) 2.11 or later (tested with 2.15.3), for the hub and
+  each leaf.
+- On machines that serve personas, a harness CLI signed in (see [Harnesses](#harnesses)), for example
+  `copilot login`.
+
+```sh
+cargo install --path crates/ants        # ~/.cargo/bin/ants
+ants --help
+```
+
+The same binary runs everywhere: the CLI, `ants daemon`, and the stdio MCP bridge `ants mcp`. To run the hub, the
+leaf and the daemon as user services, see [Services](#services).
+
+## Quick start
+
+On one machine, with no credentials:
 
 ```sh
 nats-server -js &                                   # local hub
@@ -36,7 +78,32 @@ ants plan <thread>                                  # a thread's plan room
 ants watch                                          # live traffic
 ```
 
-`ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`.
+`ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`. A team across machines adds
+credentials ([Credentials](#credentials)), a leaf node per machine ([Leaf nodes](#leaf-nodes)), a config file listing
+the personas ([Config file](#config-file)) and services ([Services](#services)).
+
+## CLI
+
+| Command | Does |
+|---|---|
+| `ants ask [@persona] TEXT` | Sends a message as the human; without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
+| `ants inbox` | Prints unread replies and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
+| `ants roster` | Lists the personas being served, live or stale (`--json`). |
+| `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the human. |
+| `ants watch [SUBJECT]` | Prints traffic as it happens (default `ants.>`). |
+| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`). |
+| `ants dead list` / `replay SEQ` / `drop SEQ` | Inspects, replays or drops dead letters. |
+| `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. |
+| `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
+| `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
+| `ants auth init` / `user NAME` / `leaf MACHINE` | Issues the team's operator and account, persona credentials, and leaf uplink credentials. |
+| `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
+| `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
+
+Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
+`--js-domain` (`ANTS_JS_DOMAIN`). `ants <command> --help` lists the rest.
+
+## Delivery
 
 Replies to the human wait in the durable JetStream consumer `inbox-human` until read, so those that arrive while no
 CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--peek` leaves them unread, `--thread`
@@ -572,6 +639,23 @@ is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead le
 message sent while the uplink is down lands after what reached the hub meanwhile; a reply whose request could not be
 acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
+## Transport options
+
+Every `ants` process speaks NATS (`nats://`, `tls://`, `ws://`, `wss://`), with TLS on rustls; a private CA comes in
+through `SSL_CERT_FILE`. With a leaf node per machine, `ants` always uses `nats://127.0.0.1:4222` and only the leaf's
+uplink varies:
+
+| Uplink | When |
+|---|---|
+| `wss://host/path` to the hub's websocket behind a reverse proxy (such as Caddy) | The usual choice; works through an HTTP `CONNECT` forward proxy (`ants leaf config --proxy`). |
+| `wss://` to an anonymous Dev Tunnels HTTPS port | No proxy of its own; NATS credentials are the access control (researched, not verified). A private tunnel cannot be used this way. |
+| `nats-leaf://127.0.0.1:7422` through `devtunnel connect` to the hub's leafnode port | A private tunnel; the tunnel provides the encryption. |
+| `tls://host:7422` | The hub's leafnode port exposed directly with TLS. |
+
+`ants` itself cannot use an HTTP forward proxy (async-nats has no proxy support); a leaf node can. An HTTPS
+long-polling bridge for networks that block WebSocket is not built: every network tested passed WebSocket. Hub and
+leaf configuration, reconnect behaviour and the tested paths: [docs/transport.md](docs/transport.md).
+
 ## Footprint
 
 An idle daemon serving one persona stays under 20 MB resident memory. `scripts/footprint.sh` checks it: it starts a
@@ -593,12 +677,34 @@ Measured with ants 0.1.0 (release build), nats-server 2.15.3:
 | Daemon with one Copilot session | not measured | 10.5 MB (+2.0 MB) |
 | Copilot CLI harness processes | not measured | 255 MB |
 
+## Development
+
+```sh
+cargo build --release   # target/release/ants
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo deny check        # licenses, advisories, bans, sources; see deny.toml
+```
+
+Tests that need `nats-server` on PATH skip without it; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
+instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
+test binary itself as a stub ACP harness.
+
+CI (`.github/workflows/ci.yml`) runs formatting, clippy, the tests with nats-server installed, a release build and
+the footprint check on Linux and macOS, and `cargo deny check` on Linux. A dependency with a license outside the
+allow-list in `deny.toml`, a security advisory, a yanked crate or a source other than crates.io fails it.
+
 ## Layout
 
-| Crate | Role |
+| Path | Role |
 |---|---|
-| `crates/ants-proto` | Wire contract: ids, subjects, envelope, turn budget |
-| `crates/ants-daemon` | NATS/JetStream bus, ACP harness client, inbox loop |
-| `crates/ants` | The `ants` binary |
+| `crates/ants-proto` | Wire contract: ids, subjects, envelope, turn budget, permissions; no I/O |
+| `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, inbox loop, tool permissions, MCP server |
+| `crates/ants` | The `ants` binary: CLI, `ants daemon`, `ants auth`, `ants leaf` |
+| `crates/ants-test-support` | Test helpers (dev-only): tools on PATH, a throwaway nats-server |
+| `contrib/` | launchd and systemd unit templates |
+| `scripts/` | `install-units.sh` (services), `footprint.sh` (memory check) |
+| `docs/transport.md` | Transport spikes: hub, reverse proxy, leaf nodes, Dev Tunnels |
 
 Work and specs are tracked in bd (`.bd/`): `bd ready`, `bd spec list`, `bd spec show <area>`.
