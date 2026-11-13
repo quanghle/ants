@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "bd hook session-start --harness copilot",
+        "type": "command"
+      },
+      {
+        "command": "bd prime --hook copilot",
+        "type": "command"
+      }
+    ]
+  },
+  "version": 1
+}

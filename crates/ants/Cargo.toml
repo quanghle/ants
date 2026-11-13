@@ -1,0 +1,20 @@
+[package]
+name = "ants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "ants: agent teams messaging over NATS, from the terminal"
+
+[dependencies]
+ants-proto = { path = "../ants-proto" }
+ants-daemon = { path = "../ants-daemon" }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+anyhow = "1.0.104"
+async-nats = { version = "0.52.0", default-features = false, features = ["ring", "jetstream", "websockets", "nuid"] }
+futures = "0.3.34"
+tracing = "0.1.44"
+serde_json = "1.0.154"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "signal"] }

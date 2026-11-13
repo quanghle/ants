@@ -1,0 +1,11 @@
+# SQLite database and WAL files are local state.
+# Share issues with `bd export -o .bd/issues.jsonl`.
+bd.db
+bd.db-wal
+bd.db-shm
+# What `bd agents pull` placed in this checkout is local state.
+agents.lock*
+# What `bd publish` keeps next to a local workspace is local state.
+/publish.lock
+/publish.prev/
+/.publish-*/
