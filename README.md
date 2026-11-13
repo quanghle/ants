@@ -5,7 +5,7 @@ Headless agent teams on several machines, talking to each other and to a human a
 - **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster, sessions and
   attempt markers.
 - **Transport:** any uplink that carries NATS: `wss://`/`ws://` through a reverse proxy, `tls://`, or a Dev Tunnel to
-  the hub's ports, optionally through an HTTP `CONNECT` proxy. See [Transport options](#transport-options).
+  the hub's ports, optionally through an HTTP `CONNECT` proxy, or the HTTPS fallback bridge (`ants bridge`). See [Transport options](#transport-options).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default),
   Claude Code through its ACP adapter (`claude-agent-acp`), or Google Antigravity CLI (`agy acp`). See
   [Harnesses](#harnesses).
@@ -89,16 +89,17 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 |---|---|
 | `ants ask [@persona] TEXT` | Sends a message as the human; without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
 | `ants inbox` | Prints unread replies and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
-| `ants roster` | Lists the personas being served, live or stale (`--json`). |
+| `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the human. |
-| `ants watch [SUBJECT]` | Prints traffic as it happens (default `ants.>`). |
+| `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
 | `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`). |
-| `ants dead list` / `replay SEQ` / `drop SEQ` | Inspects, replays or drops dead letters. |
+| `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
 | `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
 | `ants auth init` / `user NAME` / `leaf MACHINE` | Issues the team's operator and account, persona credentials, and leaf uplink credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
+| `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
 | `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
 
 Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
