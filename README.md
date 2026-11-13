@@ -53,6 +53,7 @@ in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and r
 
 ```toml
 nats = "wss://hub.example/nats"            # server for every persona that sets none
+js_domain = "hub"                          # the hub's JetStream domain, if it has one (see Leaf nodes)
 
 [[persona]]
 name = "dev-a"
@@ -84,8 +85,9 @@ How flags and the file combine:
 - `ants daemon --persona dev-a` ignores that default file and takes the persona from the flags (`--workdir`, `--home`,
   `--harness`, `--max-harnesses`, ...), as before.
 - `ants daemon --config FILE --persona dev-a` serves only `dev-a` from `FILE`; persona flags given override its entries.
-- In the file, `nats` and `creds` win over `--nats` / `ANTS_NATS_URL` and `--creds` / `ANTS_CREDS`, which fill in what
-  the file leaves out. `--creds` applies only when one persona is served.
+- In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
+  `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one persona is served.
+  `nats` and `js_domain` may also be set per persona.
 
 ## Roster
 
@@ -245,6 +247,25 @@ with the human's credentials to create the stream and the roster and sessions bu
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
 `server.conf` next to the server configuration (or include it by a relative path).
+
+### Leaf nodes
+
+A machine can run its own nats-server as a leaf node of the hub, and point every `ants` process at it. A leaf without
+JetStream reaches the hub's JetStream only through a JetStream domain: give the hub `jetstream { domain: hub }`, set
+`--js-domain hub` (or `ANTS_JS_DOMAIN=hub`, or `js_domain` in the config file) for every `ants` process, on the hub
+as well, and issue every credential with it:
+
+```sh
+ants auth user dev-a --js-domain hub
+ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub   # leaf-macbook.creds
+```
+
+Credentials issued with `--js-domain` allow the JetStream API both as `$JS.<domain>.API` and as the plain `$JS.API`
+the hub maps it to (the hub checks both); without it they allow only the plain form, which a leaf does not forward.
+`ants auth leaf` issues the credentials of the leaf's uplink (`leafnodes.remotes[].credentials`): they allow what the
+listed personas may do together, and only for a leaf node connection, never a client. List `human` when the
+machine runs the CLI. The leaf still checks each local client against its own credentials; the uplink credentials
+bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
 
 ## Footprint
 

@@ -146,9 +146,9 @@ mod tests {
         let Some(server) = Server::start() else { return };
         let persona: PersonaId = "dev-a".parse().unwrap();
         let thread: ThreadId = "t1".parse().unwrap();
-        let (client, js) = bus::connect(&server.url, None, &persona, "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &persona, "test").await.unwrap();
         bus::ensure_stream(&js).await.unwrap();
-        let (human, human_js) = bus::connect(&server.url, None, &PersonaId::human(), "human").await.unwrap();
+        let (human, human_js) = bus::connect(&server.url, None, None, &PersonaId::human(), "human").await.unwrap();
         let mut requests = human.subscribe(subject::approvals(&persona)).await.unwrap();
         let mut statuses = human.subscribe(subject::status(&persona, &thread)).await.unwrap();
         human.flush().await.unwrap();

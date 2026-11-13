@@ -18,7 +18,8 @@ service) or **researched** (documentation or source reading only).
 | Leaf node → HTTP `CONNECT` forward proxy → `wss://` reverse proxy → hub | verified |
 | Leaf node → TCP port forward (stand-in for `devtunnel connect`) → hub leafnode port | verified |
 | `ants` itself behind an HTTP forward proxy | not possible: async-nats has no proxy support; a leaf node has |
-| JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain (or a deprecated option) |
+| JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain: `--js-domain` (ants-v6w), verified |
+| Leaf uplink credentials bounding what a machine's personas may do | `ants auth leaf` (ants-hmf), verified |
 | Reconnect after proxy restart, forwarder drop and silent link loss; durable consumer resumes | verified |
 | Dev Tunnels: `devtunnel connect` to the hub's client port (4222) for `ants` and a daemon, and to its leafnode port (7422) for a leaf | verified |
 | Dev Tunnels: drop of either end, and a 3-minute freeze of the worker (stand-in for laptop sleep) | verified: nothing lost; see "Dev Tunnels" for the delays |
@@ -105,7 +106,7 @@ leafnodes {
   remotes: [{
     urls: ["wss://hub.example.com/nats"]     # or ["nats-leaf://127.0.0.1:7422"] through `devtunnel connect`
     account: <ants account public key>       # the account in server.conf
-    credentials: "leaf-macbook.creds"
+    credentials: "leaf-macbook.creds"        # from `ants auth leaf macbook --persona ... --js-domain hub`
     # tls { ca_file: "ca.pem" }              # private CA only
     # proxy { url: "http://proxy.corp:3128" }  # HTTP CONNECT forward proxy; optional username and password
   }]
@@ -121,20 +122,92 @@ Constraints found:
 
 - **Leaf credentials.** The remote needs a user in the team account. Its permissions bound everything the machine can
   do on the hub; the per-persona permissions are enforced by the leaf, which authenticates local clients against the
-  same `server.conf`. `ants auth` cannot issue a leaf user yet (the spike signed one by hand).
+  same `server.conf`. `ants auth leaf` issues it (ants-hmf, see "Leaf uplink credentials" below).
 - **JetStream across a leaf node.** A leaf without JetStream denies the non-domain JetStream API `$JS.API.>` on its
   leaf connection (source: `leafnode.go`; verified: `ants init` on the leaf fails with "jetstream unavailable").
   Publishing into the stream still works, since its acks are plain replies. Two ways out, both verified:
   - Give the hub `jetstream { domain: hub }` and make clients use it, so they publish to `$JS.hub.API.>`: a consumer
     on the leaf using `jetstream::with_domain(client, "hub")` created its consumer and received messages. Persona
-    permissions must then allow `$JS.hub.API.…` instead of `$JS.API.…`; ack subjects stay `$JS.ACK.ANTS.…`. Mapping
+    permissions must then allow `$JS.hub.API.…` as well as `$JS.API.…`; ack subjects stay `$JS.ACK.ANTS.…`. Mapping
     the domain on the leaf with `default_js_domain: { <account>: hub }` does not work for a JetStream-enabled account.
+    This is what ants does (ants-v6w, see "JetStream domain" below).
   - Leave the hub without a domain and set `default_js_domain: { <account>: "" }` on the leaf. `ants init` then works
     unchanged, but nats-server warns that the option is a temporary compatibility measure and will be removed.
 - **No store and forward.** While the uplink is down, publishing on the leaf fails at once ("no stream found for given
   subject"); nothing is queued locally.
 - **No custom headers or query on leaf upgrades.** A leaf builds its upgrade URL from host and path only and sends no
   extra headers (source: `leafnode.go`), so a private Dev Tunnels HTTPS port is out of reach for leaf nodes too.
+
+## JetStream domain
+
+The hub's `jetstream { domain: hub }` is the one setting. Every ants process takes it as `--js-domain hub`,
+`ANTS_JS_DOMAIN=hub` or `js_domain = "hub"` in the daemon config file (top level or per persona), and then sends all
+JetStream API requests, KV puts and deletes included, to `$JS.hub.API.…` (`bus::jetstream`). Without it nothing
+changes: `$JS.API.…` as before, which works only on the hub itself.
+
+Credentials are issued for the domain: `ants auth user dev-a --js-domain hub` (the global flag, or `ANTS_JS_DOMAIN`).
+Verified with nats-server 2.15.3:
+
+- The hub maps `$JS.hub.API.>` to `$JS.API.>` (and `$JS.hub.API.$KV.>` to `$KV.>`), and checks a client's publish
+  permissions on the subject it sent **and** on the mapped one: a human with only `$JS.hub.API.STREAM.INFO.ANTS` got
+  `Permissions Violation for Publish to "$JS.API.STREAM.INFO.ANTS"`. So credentials for a domain allow both forms
+  (`Permissions::with_js_domain`); those without one allow only the plain form. Both forms reach the same stream, so
+  this grants nothing more; a client on the hub may use either, a client on a leaf only the domain form.
+- A leaf node runs without JetStream and needs no domain of its own.
+
+## Leaf uplink credentials
+
+```sh
+ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub
+# -> ~/.config/ants/auth/leaf-macbook.creds, for leafnodes.remotes[].credentials on macbook
+```
+
+The leaf user may do what the listed personas may do together (`Permissions::for_leaf`, the union of
+`Permissions::for_persona`), with the domain forms of `--js-domain`; list `human` when the machine runs the CLI. Its
+JWT sets `allowed_connection_types: [LEAFNODE, LEAFNODE_WS]`, so it works only as a leaf uplink (over TCP or
+`wss://`), never as a client that could act as all those personas at once. Issue it again when the machine's
+personas change.
+
+How nats-server applies a leaf user's permissions (source: `leafnode.go`, `processLeafNodeConnect`, and verified):
+they read from the leaf's side, as for a client. `pub` bounds what the leaf may send to the hub, `sub` what the hub
+sends to the leaf; the hub swaps them internally because, from its side, messages flow the other way. The hub also
+tells the leaf its permissions, and the leaf filters what it forwards itself. That matters: the hub closes a leaf
+connection that sends a subscription or message outside them, but a local client beyond the bound never makes the
+leaf send one.
+
+Verified (`clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain` in `crates/ants/src/auth.rs`): a hub with
+`jetstream { domain: hub }` and `leafnodes { no_advertise: true }`, a leaf without JetStream including the same
+`server.conf`, uplink credentials for dev-a only.
+
+- dev-a on the leaf, with the domain, creates its inbox consumer, gets the human's message, keeps its session in KV
+  and replies; without the domain, `ensure_stream` on the leaf fails.
+- dev-b, whose credentials the leaf accepts, gets no JetStream across, its status does not reach the hub, and the
+  hub's message to `ants.inbox.dev-b` does not reach it; the uplink stays up and dev-a's traffic keeps flowing.
+- The leaf credentials are refused as a client connection to the hub.
+
+Configuration for ants-32g.2 (per-machine leaf templates), adding to "Hub" and "Leaf node per machine" above:
+
+```hcl
+# hub: as in "Hub"; the parts this relies on
+jetstream { store_dir: "/var/lib/ants/js", domain: hub }
+leafnodes { listen: 127.0.0.1:7422, no_advertise: true }
+include "server.conf"
+
+# leaf on macbook: no jetstream block
+listen: 127.0.0.1:4222
+include "server.conf"
+leafnodes {
+  remotes: [{
+    urls: ["wss://hub.example.com/nats"]
+    account: <ants account public key>
+    credentials: "leaf-macbook.creds"
+  }]
+}
+```
+
+```sh
+export ANTS_NATS_URL=nats://127.0.0.1:4222 ANTS_JS_DOMAIN=hub   # on every machine, hub included
+```
 
 ## Keepalive and reconnect
 
@@ -227,8 +300,8 @@ ants-32g.2, leaf node per machine with pluggable uplink:
 
 - `ants` processes always use `nats://127.0.0.1:4222`; the uplink is only the leaf's `remotes` entry: a `wss://` URL
   or `nats-leaf://127.0.0.1:7422` through `devtunnel connect`, plus optional `proxy { url }` and `tls { ca_file }`.
-- Needs a leaf user from `ants auth`, and a JetStream domain on the hub with persona permissions for
-  `$JS.<domain>.API.…` (or the deprecated `default_js_domain` workaround).
+- Needs a leaf user from `ants auth leaf` and a JetStream domain on the hub, with every process and credential using
+  it (`--js-domain`); see "JetStream domain" and "Leaf uplink credentials".
 - The hub sets `leafnodes { no_advertise: true }` and a `ping_interval` of 30 s or less.
 
 ants-32g.3, HTTPS fallback bridge:

@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{Envelope, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject};
+use ants_proto::{
+    Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
+};
 use anyhow::{Context as _, Result};
 use async_nats::Event;
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -18,10 +20,12 @@ const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Connect to NATS as `persona`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
-/// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`.
+/// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`, and
+/// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]).
 pub async fn connect(
     url: &str,
     creds: Option<&Path>,
+    js_domain: Option<&JsDomain>,
     persona: &PersonaId,
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
@@ -41,8 +45,18 @@ pub async fn connect(
             options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))?;
     }
     let client = options.connect(url).await.with_context(|| format!("connecting to NATS at {url}"))?;
-    let js = jetstream::new(client.clone());
+    let js = jetstream(client.clone(), js_domain);
     Ok((client, js))
+}
+
+/// The JetStream context every ants process uses. With a domain, requests go to `$JS.<domain>.API`, which reaches the
+/// hub's JetStream from a leaf node without JetStream as well as on the hub itself; the credentials must have been
+/// issued for the same domain ([`ants_proto::Permissions::with_js_domain`]).
+pub fn jetstream(client: async_nats::Client, js_domain: Option<&JsDomain>) -> jetstream::Context {
+    match js_domain {
+        Some(domain) => jetstream::with_domain(client, domain.as_str()),
+        None => jetstream::new(client),
+    }
 }
 
 fn stream_config() -> stream::Config {

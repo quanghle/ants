@@ -98,8 +98,13 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<RosterEntry>> {
 }
 
 /// Print the roster: a table, or with `json` one entry per line.
-pub async fn show(url: &str, creds: Option<&std::path::Path>, json: bool) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, &PersonaId::human(), "ants-roster").await?;
+pub async fn show(
+    url: &str,
+    creds: Option<&std::path::Path>,
+    domain: Option<&ants_proto::JsDomain>,
+    json: bool,
+) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-roster").await?;
     let entries = list(&js).await?;
     let now = Utc::now();
     if json {

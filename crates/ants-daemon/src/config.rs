@@ -2,6 +2,7 @@
 //!
 //! ```toml
 //! nats = "wss://hub.example/nats"   # default server for every persona
+//! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per persona
 //!
 //! [[persona]]
 //! name = "dev-a"
@@ -15,7 +16,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::PersonaId;
+use ants_proto::{JsDomain, PersonaId};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer};
 
@@ -42,6 +43,7 @@ fn home_dir() -> Result<PathBuf> {
 #[serde(deny_unknown_fields)]
 struct File {
     nats: Option<String>,
+    js_domain: Option<JsDomain>,
     #[serde(default, rename = "persona")]
     personas: Vec<Persona>,
 }
@@ -54,6 +56,8 @@ pub struct Persona {
     /// NATS server; the file's top-level `nats`, then `--nats`, when absent.
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
+    /// JetStream domain of the hub; the file's top-level `js_domain`, then `--js-domain`, when absent.
+    pub js_domain: Option<JsDomain>,
     pub workdir: PathBuf,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
@@ -99,6 +103,7 @@ impl Persona {
             name,
             nats: None,
             creds: None,
+            js_domain: None,
             workdir,
             home: None,
             harness: HarnessKind::default(),
@@ -124,6 +129,7 @@ impl Persona {
         Ok(Config {
             nats_url: self.nats.unwrap_or_else(|| default_nats.to_owned()),
             creds: self.creds,
+            js_domain: self.js_domain,
             workdir,
             home,
             harness: self.harness,
@@ -144,7 +150,7 @@ pub fn load(path: &Path) -> Result<Vec<Persona>> {
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `nats`, and check that names are unique and workdirs exist.
+/// directory, apply the top-level `nats` and `js_domain`, and check that names are unique and workdirs exist.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
     let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     if file.personas.is_empty() {
@@ -165,6 +171,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
         p.creds = p.creds.as_deref().map(abs);
         if p.nats.is_none() {
             p.nats.clone_from(&file.nats);
+        }
+        if p.js_domain.is_none() {
+            p.js_domain.clone_from(&file.js_domain);
         }
         personas.push(p);
     }
@@ -197,6 +206,7 @@ mod tests {
         let personas = parse_here(
             r#"
             nats = "wss://hub.example/nats"
+            js_domain = "hub"
 
             [[persona]]
             name = "dev-a"
@@ -220,6 +230,7 @@ mod tests {
         let a = &personas[0];
         assert_eq!(a.name.as_str(), "dev-a");
         assert_eq!(a.nats.as_deref(), Some("wss://hub.example/nats"));
+        assert_eq!(a.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
         assert_eq!(a.workdir, root.join("crates/ants").canonicalize().unwrap());
         assert_eq!(a.creds, Some(root.join("auth/dev-a.creds")));
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
@@ -230,7 +241,7 @@ mod tests {
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
         assert_eq!(b.workdir, manifest_dir().join("src").canonicalize().unwrap());
         let defaults = Persona::new(b.name.clone(), b.workdir.clone());
-        assert_eq!(b, Persona { nats: b.nats.clone(), ..defaults });
+        assert_eq!(b, Persona { nats: b.nats.clone(), js_domain: b.js_domain.clone(), ..defaults });
 
         let config = b.into_config("nats://unused").unwrap();
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");

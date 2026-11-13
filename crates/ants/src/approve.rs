@@ -224,8 +224,8 @@ pub struct Args {
     pub json: bool,
 }
 
-pub async fn run(url: &str, creds: Option<&Path>, args: Args) -> Result<()> {
-    let (client, js) = bus::connect(url, creds, &PersonaId::human(), "ants-approve").await?;
+pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::JsDomain>, args: Args) -> Result<()> {
+    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-approve").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let show = |request: &ApprovalRequest| -> Result<()> {
         if args.json {
