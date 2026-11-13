@@ -2,6 +2,7 @@
 
 pub mod approvals;
 pub mod bus;
+pub mod caps;
 pub mod config;
 pub mod daemon;
 pub mod dead;

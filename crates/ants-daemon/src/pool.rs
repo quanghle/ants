@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use tokio::sync::Notify;
 
-use crate::harness::{Launch, Session};
+use crate::harness::{Launch, Prompt, Reply, Session};
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
@@ -99,8 +99,13 @@ impl Pool {
     /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap
     /// is reached and every live harness is busy.
     pub async fn prompt(&self, thread: &ThreadId, text: &str) -> Result<String> {
+        Ok(self.run(thread, Prompt::new(text)).await?.text)
+    }
+
+    /// [`Pool::prompt`] with the prompt's own limits, spend reports and stop.
+    pub async fn run(&self, thread: &ThreadId, prompt: Prompt) -> Result<Reply> {
         let lease = self.checkout(thread).await?;
-        lease.session.prompt(text).await
+        lease.session.run(prompt).await
     }
 
     /// Stop harnesses idle since before `now - idle_after`. Returns how many stopped.
@@ -257,9 +262,9 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, LoadSessionRequest,
-        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-        SessionNotification, SessionUpdate, StopReason, TextContent,
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, InitializeRequest, InitializeResponse,
+        LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        SessionId, SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, Usage, UsageUpdate,
     };
     use agent_client_protocol::{Agent, DynConnectTo};
     use tokio::sync::Semaphore;
@@ -274,11 +279,15 @@ pub(crate) mod fake {
         pub loaded: Vec<String>,
         /// Prompts in the order they were answered.
         pub answered: Vec<String>,
+        /// Prompts ended by session/cancel.
+        pub cancelled: usize,
         flaky_failed: Vec<String>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
-    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time.
+    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time. Words in
+    /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
+    /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -287,10 +296,19 @@ pub(crate) mod fake {
             let log = shared.clone();
             log.lock().unwrap().starts += 1;
             let (on_new, on_load, on_prompt, gate) = (log.clone(), log.clone(), log, held.clone());
+            let cancels = Arc::new(Semaphore::new(0));
+            let on_cancel = cancels.clone();
             DynConnectTo::new(
                 Agent
                     .v1()
                     .name("fake")
+                    .on_receive_notification(
+                        async move |_: CancelNotification, _cx| {
+                            on_cancel.add_permits(1);
+                            Ok(())
+                        },
+                        agent_client_protocol::on_receive_notification!(),
+                    )
                     .on_receive_request(
                         async move |init: InitializeRequest, responder, _cx| {
                             responder.respond(
@@ -320,8 +338,8 @@ pub(crate) mod fake {
                     .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| {
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
-                            let (text, gate, sender, log) =
-                                (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone());
+                            let (text, gate, sender, log, cancels) =
+                                (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
                             // Answer from a task, so a held prompt does not stall the connection.
                             cx.spawn(async move {
                                 if text.starts_with("hold") {
@@ -334,10 +352,32 @@ pub(crate) mod fake {
                                         return responder.respond_with_internal_error("flaky");
                                     }
                                 }
+                                let session = &prompt.session_id;
+                                let words: Vec<&str> = text.split_whitespace().collect();
+                                let arg = |word: &str| {
+                                    words.iter().position(|w| *w == word).and_then(|i| words.get(i + 1).copied())
+                                };
+                                for i in 0..arg("tools").map_or(0, |n| n.parse().unwrap()) {
+                                    let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
+                                    sender.send_notification(SessionNotification::new(session.clone(), call))?;
+                                }
+                                if let Some(total) = arg("cost") {
+                                    let cost = Cost::new(total.parse().unwrap(), "USD");
+                                    let usage = SessionUpdate::UsageUpdate(UsageUpdate::new(1, 100).cost(cost));
+                                    sender.send_notification(SessionNotification::new(session.clone(), usage))?;
+                                }
+                                if words.contains(&"stall") {
+                                    sender.send_notification(chunk(session, "partial"))?;
+                                    cancels.acquire().await.unwrap().forget();
+                                    log.lock().unwrap().cancelled += 1;
+                                    return responder.respond(PromptResponse::new(StopReason::Cancelled));
+                                }
                                 log.lock().unwrap().answered.push(text.clone());
-                                let reply = format!("{}: {text}", prompt.session_id);
-                                sender.send_notification(chunk(&prompt.session_id, &reply))?;
-                                responder.respond(PromptResponse::new(StopReason::EndTurn))
+                                let reply = format!("{session}: {text}");
+                                sender.send_notification(chunk(session, &reply))?;
+                                let tokens = arg("tokens").map(|n| n.parse().unwrap());
+                                let usage = tokens.map(|n| Usage::new(n, n, 0));
+                                responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))
                             })
                         },
                         agent_client_protocol::on_receive_request!(),
@@ -359,9 +399,10 @@ pub(crate) mod fake {
 mod tests {
     use std::sync::Mutex;
 
-    use tokio::sync::Semaphore;
+    use tokio::sync::{Semaphore, mpsc, oneshot};
 
     use super::*;
+    use crate::harness::{PromptLimits, Spend};
 
     const IDLE: Duration = Duration::from_secs(60);
 
@@ -469,5 +510,50 @@ mod tests {
         assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
         let log = log.lock().unwrap();
         assert_eq!((log.new_sessions, log.loaded.as_slice()), (1, &["s1".to_owned()][..]));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
+        let (pool, log, _) = fake_pool(1, true);
+        let limits = PromptLimits { timeout: Some(Duration::from_millis(50)), max_tool_calls: None };
+        let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("stall") }).await.unwrap();
+        let cut = "Prompt time limit reached (50ms)".to_owned();
+        assert_eq!(reply, Reply { text: "partial".to_owned(), cut: Some(cut) });
+        assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
+        let log = log.lock().unwrap();
+        assert_eq!((log.starts, log.cancelled), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_past_its_tool_call_limit_is_cancelled() {
+        let (pool, log, _) = fake_pool(1, true);
+        let limits = PromptLimits { timeout: None, max_tool_calls: Some(2) };
+        let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("tools 2") }).await.unwrap();
+        assert_eq!(reply.cut, None, "up to the limit is fine");
+        let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("tools 3 stall") }).await.unwrap();
+        assert_eq!(reply.cut.as_deref(), Some("Tool call limit reached (2 tool calls in one prompt)"));
+        assert_eq!(log.lock().unwrap().cancelled, 1);
+    }
+
+    #[tokio::test]
+    async fn spend_is_reported_and_a_stop_cancels_the_prompt() {
+        let (pool, log, _) = fake_pool(1, true);
+        let (spend, mut spent) = mpsc::unbounded_channel();
+        let (stop, stopped) = oneshot::channel();
+        let prompt = Prompt { spend: Some(spend), stop: Some(stopped), ..Prompt::new("cost 0.5 stall") };
+        let watch = async {
+            assert_eq!(spent.recv().await, Some(Spend::Cost { session: SessionId::new("s1"), total: 0.5 }));
+            stop.send("Enough".to_owned()).unwrap();
+        };
+        let t1 = thread(1);
+        let (reply, ()) = tokio::join!(pool.run(&t1, prompt), watch);
+        assert_eq!(reply.unwrap().cut.as_deref(), Some("Enough"));
+        assert_eq!(log.lock().unwrap().cancelled, 1);
+
+        let (spend, mut spent) = mpsc::unbounded_channel();
+        pool.run(&thread(1), Prompt { spend: Some(spend), ..Prompt::new("tokens 42") }).await.unwrap();
+        let cost = Spend::Cost { session: SessionId::new("s1"), total: 0.5 };
+        assert_eq!(spent.try_recv(), Ok(cost), "the last cost comes again as the next prompt starts");
+        assert_eq!(spent.try_recv(), Ok(Spend::Tokens(42)));
     }
 }

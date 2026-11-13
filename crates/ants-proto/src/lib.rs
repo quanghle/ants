@@ -228,6 +228,16 @@ pub fn session_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}")
 }
 
+/// Key of what a thread has spent since the human's last message on it, in [`SESSIONS_BUCKET`] beside its session.
+pub fn thread_spend_key(persona: &PersonaId, thread: &ThreadId) -> String {
+    format!("{persona}.{thread}.spend")
+}
+
+/// Key of what a persona has spent on `day` (`YYYY-MM-DD`, UTC), in [`SESSIONS_BUCKET`].
+pub fn daily_spend_key(persona: &PersonaId, day: &str) -> String {
+    format!("{persona}.day.{day}")
+}
+
 /// JetStream consumer a persona reads plan rooms through, one room at a time. Its name is fixed, so its credentials
 /// need not let it pull from other consumers.
 pub fn plan_consumer(persona: &PersonaId) -> String {

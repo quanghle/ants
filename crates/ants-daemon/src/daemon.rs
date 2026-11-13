@@ -15,8 +15,9 @@ use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
+use crate::caps::{Caps, Ledger};
 use crate::dead::{self, Attempt};
-use crate::harness::{HarnessKind, Launch};
+use crate::harness::{HarnessKind, Launch, Prompt, PromptLimits, Spend};
 use crate::mcp::Mcp;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
@@ -67,6 +68,10 @@ pub struct Config {
     pub idle_timeout: Duration,
     /// Capabilities the persona advertises in the roster.
     pub capabilities: Vec<String>,
+    /// Limits on every prompt.
+    pub limits: PromptLimits,
+    /// Token and cost caps of each thread and of the persona.
+    pub caps: Caps,
 }
 
 /// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once.
@@ -90,7 +95,9 @@ pub async fn run(config: Config) -> Result<()> {
     let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy)
         .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
-    let sessions = SessionStore::kv(bus::ensure_sessions(&js).await?, config.persona.clone());
+    let sessions_kv = bus::ensure_sessions(&js).await?;
+    let ledger = Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps);
+    let sessions = SessionStore::kv(sessions_kv, config.persona.clone());
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
@@ -105,6 +112,8 @@ pub async fn run(config: Config) -> Result<()> {
         capabilities = ?config.capabilities,
         allow = ?config.allow,
         approval_timeout = ?config.approval_timeout,
+        limits = ?config.limits,
+        caps = ?config.caps,
         "serving inbox"
     );
 
@@ -114,6 +123,8 @@ pub async fn run(config: Config) -> Result<()> {
         persona: &config.persona,
         pool: &pool,
         mcp: Some(&mcp),
+        limits: config.limits,
+        ledger: &ledger,
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
     };
@@ -171,6 +182,8 @@ struct Inbox<'a> {
     persona: &'a PersonaId,
     pool: &'a Pool,
     mcp: Option<&'a Mcp>,
+    limits: PromptLimits,
+    ledger: &'a Ledger,
     retry_delay: Duration,
     progress_every: Duration,
 }
@@ -348,30 +361,52 @@ impl Inbox<'_> {
     }
 
     async fn answer(&self, envelope: &Envelope, msg: &jetstream::Message) -> Result<()> {
+        let thread = &envelope.thread_id;
         if let Err(ProtoError::BudgetExhausted(_)) = envelope.reply(self.persona.clone(), "") {
             // Out of turns: hand the thread to the human instead of spending another prompt.
-            let mut escalation = Envelope::on_thread(
-                envelope.thread_id.clone(),
-                self.persona.clone(),
-                PersonaId::human(),
-                format!("Turn budget spent; needs a decision. Last message from {}:\n{}", envelope.from, envelope.text),
-            );
-            escalation.in_reply_to = Some(envelope.id);
-            bus::publish(self.js, &escalation).await?;
+            self.escalate(envelope, "Turn budget spent").await?;
             return msg.double_ack().await.map_err(|e| anyhow!(e));
         }
+        if envelope.from.is_human()
+            && let Err(e) = self.ledger.fresh_allowance(thread).await
+        {
+            tracing::warn!(%thread, error = format!("{e:#}"), "renewing the thread's allowance");
+        }
+        match self.ledger.reached(thread).await {
+            Ok(Some(cap)) => {
+                // Out of allowance: the same, until the human answers or the day ends.
+                self.escalate(envelope, &cap).await?;
+                return msg.double_ack().await.map_err(|e| anyhow!(e));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "reading what the thread spent"),
+        }
 
-        let status = subject::status(self.persona, &envelope.thread_id);
-        tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "prompting");
+        let status = subject::status(self.persona, thread);
+        tracing::info!(%thread, from = %envelope.from, "prompting");
         self.client.publish(status.clone(), "working".into()).await?;
 
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
-        let prompt = self.pool.prompt(&envelope.thread_id, &envelope.text);
+        let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, stop) = tokio::sync::oneshot::channel();
+        let mut stop_tx = Some(stop_tx);
+        let mut reached = None;
+        let prompt =
+            Prompt { text: envelope.text.clone(), limits: self.limits, spend: Some(spend_tx), stop: Some(stop) };
+        let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
-        let text = loop {
+        let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r?,
+                Some(spent) = spend.recv() => {
+                    if let Some(cap) = self.record(thread, &spent).await {
+                        if let Some(stop) = stop_tx.take() {
+                            let _ = stop.send(cap.clone());
+                        }
+                        reached = Some(cap);
+                    }
+                }
                 _ = progress.tick() => {
                     if let Err(e) = msg.ack_with(AckKind::Progress).await {
                         tracing::warn!(error = %e, "progress ack");
@@ -379,13 +414,54 @@ impl Inbox<'_> {
                 }
             }
         };
+        // Spend reported as the prompt ended, such as its tokens.
+        while let Ok(spent) = spend.try_recv() {
+            if let Some(cap) = self.record(thread, &spent).await {
+                reached.get_or_insert(cap);
+            }
+        }
 
+        let cut = reply.cut.is_some();
+        let limit = reply.cut.or(reached);
+        let text = match &limit {
+            None => reply.text,
+            Some(limit) => {
+                let notice = format!("[ants] {limit}{}", if cut { "; the prompt was cancelled." } else { "." });
+                [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
+            }
+        };
         let reply = envelope.reply(self.persona.clone(), text)?;
         // Store the reply before acking: a crash in between redelivers rather than loses the message.
         bus::publish(self.js, &reply).await?;
+        if let Some(limit) = limit
+            && !envelope.from.is_human()
+        {
+            self.escalate(envelope, &limit).await?;
+        }
         msg.double_ack().await.map_err(|e| anyhow!(e))?;
         self.client.publish(status, "idle".into()).await?;
         Ok(())
+    }
+
+    /// Count what the harness spent on the thread. Returns the cap reached, if any.
+    async fn record(&self, thread: &ThreadId, spent: &Spend) -> Option<String> {
+        self.ledger.record(thread, spent).await.unwrap_or_else(|e| {
+            tracing::warn!(%thread, error = format!("{e:#}"), "storing what the thread spent");
+            None
+        })
+    }
+
+    /// Hand the thread to the human: `why` it needs a decision, and the message it was on.
+    async fn escalate(&self, envelope: &Envelope, why: &str) -> Result<()> {
+        tracing::info!(thread = %envelope.thread_id, why, "escalating to the human");
+        let mut escalation = Envelope::on_thread(
+            envelope.thread_id.clone(),
+            self.persona.clone(),
+            PersonaId::human(),
+            format!("{why}; needs a decision. Last message from {}:\n{}", envelope.from, envelope.text),
+        );
+        escalation.in_reply_to = Some(envelope.id);
+        bus::publish(self.js, &escalation).await
     }
 
     fn progress(&self) -> tokio::time::Interval {
@@ -461,6 +537,8 @@ mod tests {
         js: jetstream::Context,
         stream: jetstream::stream::Stream,
         dev: PersonaId,
+        limits: PromptLimits,
+        ledger: Ledger,
     }
 
     impl Bus {
@@ -472,11 +550,17 @@ mod tests {
             let stream = bus::ensure_stream(&js).await.unwrap();
             let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
-            Some((Self { _server: server, client, js, stream, dev }, replies))
+            let ledger = Ledger::memory(dev.clone(), Caps::default());
+            let limits = PromptLimits::default();
+            Some((Self { _server: server, client, js, stream, dev, limits, ledger }, replies))
         }
 
         async fn send(&self, thread: &ThreadId, text: &str) {
-            let envelope = Envelope::on_thread(thread.clone(), PersonaId::human(), self.dev.clone(), text);
+            self.send_from(PersonaId::human(), thread, text).await;
+        }
+
+        async fn send_from(&self, from: PersonaId, thread: &ThreadId, text: &str) {
+            let envelope = Envelope::on_thread(thread.clone(), from, self.dev.clone(), text);
             bus::publish(&self.js, &envelope).await.unwrap();
         }
 
@@ -499,6 +583,8 @@ mod tests {
                 persona: &self.dev,
                 pool,
                 mcp: None,
+                limits: self.limits,
+                ledger: &self.ledger,
                 retry_delay: Duration::from_millis(300),
                 progress_every,
             };
@@ -525,6 +611,11 @@ mod tests {
         let envelope: Envelope = serde_json::from_slice(&msg.payload).unwrap();
         let text = envelope.text.split_once(": ").expect("fake reply").1.to_owned();
         (envelope.thread_id, text)
+    }
+
+    async fn next_envelope(subscriber: &mut async_nats::Subscriber) -> Envelope {
+        let msg = timeout(WAIT, subscriber.next()).await.expect("no message").unwrap();
+        serde_json::from_slice(&msg.payload).unwrap()
     }
 
     async fn until(what: &str, done: impl Fn() -> bool) {
@@ -717,5 +808,60 @@ mod tests {
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, Duration::from_secs(3600), ack_wait), check);
         assert_eq!(log.lock().unwrap().answered, ["hold a", "b"]);
         assert_eq!(bus.unacked().await, 0, "acks of the first delivery count");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_past_its_limit_is_cancelled_and_the_human_told() {
+        let Some((mut bus, mut replies)) = Bus::start().await else { return };
+        bus.limits.timeout = Some(Duration::from_millis(100));
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "stall").await;
+        bus.send(&t1, "after").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let notice = next_envelope(&mut replies).await;
+            let text = "partial\n\n[ants] Prompt time limit reached (100ms); the prompt was cancelled.";
+            assert_eq!(notice.text, text);
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "after".to_owned()), "and nothing else");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().cancelled, 1);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_spent_cap_hands_the_thread_to_the_human_until_the_human_answers() {
+        let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+        bus.ledger = Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() });
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let t1 = ThreadId::generate();
+        bus.send_from(dev_b.clone(), &t1, "cost 2 stall").await;
+        bus.send_from(dev_b.clone(), &t1, "more").await;
+        bus.send(&t1, "go on").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let cap = "Thread cost cap reached (2.00 of 1.00 since the human's last message)";
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!(reply.text, format!("partial\n\n[ants] {cap}; the prompt was cancelled."));
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!(escalation.text, format!("{cap}; needs a decision. Last message from dev-b:\ncost 2 stall"));
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!(escalation.text, format!("{cap}; needs a decision. Last message from dev-b:\nmore"));
+            assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "go on".to_owned()), "a fresh allowance");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        let log = log.lock().unwrap();
+        assert_eq!((log.cancelled, log.answered.as_slice()), (1, &["go on".to_owned()][..]));
     }
 }
