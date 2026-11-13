@@ -99,4 +99,9 @@ impl NatsServer {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+
+    /// The server's process id, to signal it (SIGHUP reloads its configuration).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
 }

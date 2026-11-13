@@ -20,6 +20,7 @@ service) or **researched** (documentation or source reading only).
 | `ants` itself behind an HTTP forward proxy | not possible: async-nats has no proxy support; a leaf node has |
 | JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain: `--js-domain` (ants-v6w), verified |
 | Leaf uplink credentials bounding what a machine's personas may do | `ants auth leaf` (ants-hmf), verified |
+| Leaf configuration from `ants leaf config`, uplink switched by rewriting it and `SIGHUP` | verified (ants-32g.2) |
 | Reconnect after proxy restart, forwarder drop and silent link loss; durable consumer resumes | verified |
 | Dev Tunnels: `devtunnel connect` to the hub's client port (4222) for `ants` and a daemon, and to its leafnode port (7422) for a leaf | verified |
 | Dev Tunnels: drop of either end, and a 3-minute freeze of the worker (stand-in for laptop sleep) | verified: nothing lost; see "Dev Tunnels" for the delays |
@@ -98,6 +99,9 @@ Verified through Caddy: `ants init`, `ants watch` and `ants ask` without credent
 
 ## Leaf node per machine
 
+`ants leaf config <machine> --uplink <url>` writes this file (ants-32g.2; options in the README, "Leaf nodes"). By
+hand it looks like:
+
 ```hcl
 server_name: macbook
 listen: 127.0.0.1:4222                       # every ants process on the machine connects here
@@ -137,6 +141,16 @@ Constraints found:
   subject"); nothing is queued locally.
 - **No custom headers or query on leaf upgrades.** A leaf builds its upgrade URL from host and path only and sends no
   extra headers (source: `leafnode.go`), so a private Dev Tunnels HTTPS port is out of reach for leaf nodes too.
+- **Remote URLs without a port get 7422, websocket ones too** (source: `opts.go`, `setBaselineOptions`), so
+  `wss://hub.example.com/nats` would dial port 7422. `ants leaf config` spells out 443 / 80 / 7422.
+- **Websocket and TCP URLs do not mix** in one remote (config error). A `wss://` remote behind `proxy { url }` needs a
+  `tls` block, even an empty one (config error otherwise); `ants leaf config` always writes one for `tls://` and
+  `wss://`, so the uplink never falls back to plain text.
+- **Switching the uplink on a running leaf.** nats-server 2.15 reloads added and removed remotes on `SIGHUP`. Verified
+  (`a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload` in `crates/ants/src/leaf.rs`): a leaf generated
+  with a `nats-leaf://` uplink, switched to a dead port and then to `ws://`, each by rewriting the file and `SIGHUP`;
+  a client connected to the leaf throughout lost the hub's JetStream after the first switch and had it back after
+  the second.
 
 ## JetStream domain
 
@@ -298,7 +312,8 @@ The HTTPS port URL `https://<tunnel-id>-8080.<region>.devtunnels.ms` serves as
 
 ## Recommendations
 
-ants-32g.2, leaf node per machine with pluggable uplink:
+ants-32g.2, leaf node per machine with pluggable uplink (done: `ants leaf config`, and the services of ants-tlp.1 in
+`contrib/`, see the README, "Services"):
 
 - `ants` processes always use `nats://127.0.0.1:4222`; the uplink is only the leaf's `remotes` entry: a `wss://` URL
   or `nats-leaf://127.0.0.1:7422` through `devtunnel connect`, plus optional `proxy { url }` and `tls { ca_file }`.

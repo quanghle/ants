@@ -1,0 +1,20 @@
+# ants: the persona daemon (antsd), serving the personas of its config file through the local nats-server.
+# User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
+# Until ants-nats listens, the daemon exits with an error and is started again.
+
+[Unit]
+Description=ants: persona daemon
+Wants=ants-nats.service
+After=ants-nats.service
+
+[Service]
+ExecStart="@ANTS@" daemon --config "@CONFIG@"
+# The harness (copilot) and bd are looked up on this PATH.
+Environment="PATH=@PATH@" NO_COLOR=1
+Restart=on-failure
+RestartSec=10
+# SIGTERM lets prompts in flight finish; messages cut off by the timeout are redelivered.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

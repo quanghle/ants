@@ -45,7 +45,7 @@ prompted concurrently; messages on one thread are handled one at a time, in orde
 the rest of its thread. A thread's harness stops after `--idle-timeout-secs` (default 600) without a message, and its
 session resumes with ACP `session/load` on the next one. A harness with a prompt in flight is never stopped: when all
 are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
-at once, and their messages are redelivered later).
+at once, and their messages are redelivered later). SIGTERM, as service managers send, stops it like Ctrl-C.
 
 Every message in hand, waiting for its thread or a harness or being prompted (a tool request waiting for the human
 included), gets a progress ack every 20 s. A message held by a daemon that crashed or lost its link is redelivered
@@ -98,6 +98,52 @@ How flags and the file combine:
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
   `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one persona is served.
   `nats` and `js_domain` may also be set per persona.
+
+## Services
+
+Each machine runs two user services: its nats-server (the leaf node, or the hub on the hub machine) and the persona
+daemon, `ants daemon --config ~/.ants/config.toml`. Templates are in `contrib/`: launchd agents on macOS
+(`contrib/launchd/ants.nats.plist`, `ants.daemon.plist`), systemd user units on Linux and WSL
+(`contrib/systemd/ants-nats.service`, `ants-daemon.service`). Both restart on failure; the daemon starts after
+nats-server under systemd, and under launchd, which has no start order, it exits until nats-server listens and is
+started again. The units name files only: credentials stay in the files the config names.
+
+Setting up a machine (`macbook`, personas `dev-a` and `dev-b`, hub `wss://hub.example.com/nats` with
+`jetstream { domain: hub }`):
+
+```sh
+# on the machine holding the team directory
+ants auth user dev-a --js-domain hub && ants auth user dev-b --js-domain hub && ants auth user human --js-domain hub
+ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub
+# copy server.conf, leaf-macbook.creds and the persona and human .creds to ~/.config/ants/auth on macbook (not the .nk seeds)
+
+# on macbook
+cargo install --path crates/ants                                          # ~/.cargo/bin/ants
+ants leaf config macbook --uplink wss://hub.example.com/nats             # ~/.config/ants/leaf.conf
+$EDITOR ~/.ants/config.toml                                               # js_domain = "hub" and the personas, see Config file
+scripts/install-units.sh                                                  # installs and starts both services
+export ANTS_JS_DOMAIN=hub ANTS_CREDS=~/.config/ants/auth/human.creds      # for the CLI, in the shell profile
+ants roster
+```
+
+`scripts/install-units.sh` fills in the absolute paths of `ants` and `nats-server` (found on `PATH`, or `--ants`,
+`--nats-server`), the nats-server configuration (`--nats-conf`, default `~/.config/ants/leaf.conf`; the hub machine
+gives its hub configuration), the daemon config file (`--config`) and the current `PATH`, on which the daemon finds the
+harness and `bd`. It installs them in `~/Library/LaunchAgents` or `~/.config/systemd/user` and (re)starts them.
+`--out DIR` only writes the filled-in units; `--no-daemon` installs nats-server alone. Run it again after moving a
+binary or changing `PATH`.
+
+| | macOS (launchd) | Linux, WSL (systemd) |
+|---|---|---|
+| Logs | `~/Library/Logs/ants/nats.log`, `daemon.log` | `journalctl --user -u ants-nats -u ants-daemon` |
+| Switch the uplink | `ants leaf config ...`, then `launchctl kill SIGHUP gui/$(id -u)/ants.nats` | `ants leaf config ...`, then `systemctl --user reload ants-nats` |
+| Restart the daemon | `launchctl kickstart -k gui/$(id -u)/ants.daemon` | `systemctl --user restart ants-daemon` |
+| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats`, delete the units |
+
+On stop the daemon gets SIGTERM and lets prompts in flight finish for up to 120 s; messages cut off are redelivered.
+launchd agents run while the user is logged in. systemd user units outlive the login session only with
+`loginctl enable-linger $USER`; on WSL, systemd must be enabled (`[boot] systemd=true` in `/etc/wsl.conf`).
+A tunnel the uplink depends on, such as `devtunnel connect`, needs a service of its own.
 
 ## Roster
 
@@ -309,6 +355,31 @@ the hub maps it to (the hub checks both); without it they allow only the plain f
 listed personas may do together, and only for a leaf node connection, never a client. List `human` when the
 machine runs the CLI. The leaf still checks each local client against its own credentials; the uplink credentials
 bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
+
+`ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on
+`127.0.0.1:4222` only (the default server of every `ants` process), runs without JetStream, includes the team's
+`server.conf` and has one uplink to the hub:
+
+```sh
+# on macbook, with server.conf and leaf-macbook.creds copied into ~/.config/ants/auth
+ants leaf config macbook --uplink wss://hub.example.com/nats             # the hub's websocket, behind a proxy
+ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422             # its leafnode port, via devtunnel connect
+nats-server -c ~/.config/ants/leaf.conf                                  # or as a service, see Services
+```
+
+| Uplink | Reaches |
+|---|---|
+| `nats-leaf://host[:port]` (or `nats://`) | the hub's leafnode port, default 7422, in plain text (a tunnel provides the encryption) |
+| `tls://host[:port]` | the same port with TLS |
+| `ws://host[:port]/path`, `wss://host[:port]/path` | the hub's websocket listener, directly or through a reverse proxy; the leaf asks for `<path>/leafnode` |
+
+`--ca-file ca.pem` trusts a private CA (`tls://` and `wss://`), `--proxy http://proxy:3128` goes through an HTTP
+`CONNECT` forward proxy. `--uplink-creds` and `--server-conf` default to `leaf-<machine>.creds` and `server.conf` in
+the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the credentials by absolute path and includes
+`server.conf` by a relative one, as nats-server requires. Switching the uplink changes nothing else on the machine:
+run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
+(`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
+While the uplink is down, publishing fails at once: the leaf does not store and forward.
 
 ## Footprint
 

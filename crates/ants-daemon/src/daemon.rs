@@ -118,8 +118,8 @@ pub async fn run(config: Config) -> Result<()> {
         progress_every: PROGRESS_EVERY,
     };
     let ctrl_c = || async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %e, "waiting for Ctrl-C");
+        if let Err(e) = stop_signal().await {
+            tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
             std::future::pending::<()>().await;
         }
     };
@@ -128,6 +128,21 @@ pub async fn run(config: Config) -> Result<()> {
     pool.shutdown().await;
     tracing::info!("stopped");
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM, which launchd and systemd send to stop a service.
+async fn stop_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 type InHand = (Envelope, jetstream::Message);

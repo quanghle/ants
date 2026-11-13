@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: the persona daemon (antsd), serving the personas of its config file through the local nats-server.
+     scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.daemon.plist.
+     launchd has no start order: until ants.nats listens, the daemon exits with an error and launchd starts it again.
+     SIGTERM lets prompts in flight finish for up to ExitTimeOut seconds; messages cut off are redelivered. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@ANTS@</string>
+		<string>daemon</string>
+		<string>--config</string>
+		<string>@CONFIG@</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- The harness (copilot) and bd are looked up on this PATH. -->
+		<key>PATH</key>
+		<string>@PATH@</string>
+		<key>NO_COLOR</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>120</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/daemon.log</string>
+</dict>
+</plist>
