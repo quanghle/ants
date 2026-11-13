@@ -2,6 +2,7 @@
 
 mod approve;
 mod auth;
+mod bridge;
 mod inbox;
 mod leaf;
 mod outbox;
@@ -132,6 +133,45 @@ enum Command {
     /// The machine's local NATS leaf node, which every ants process on it connects to.
     #[command(subcommand)]
     Leaf(LeafCommand),
+    /// Carry a leaf node's uplink over plain HTTPS requests, for networks whose proxies block WebSocket.
+    #[command(subcommand)]
+    Bridge(BridgeCommand),
+}
+
+#[derive(Subcommand)]
+enum BridgeCommand {
+    /// On the hub, behind the TLS-terminating reverse proxy: open a connection to the upstream (the hub's leafnode
+    /// port) for each session `ants bridge connect` starts.
+    Serve {
+        /// Address for the reverse proxy.
+        #[arg(long, default_value = bridge::DEFAULT_SERVE_LISTEN)]
+        listen: String,
+        /// Where sessions connect to: the hub's leafnode port.
+        #[arg(long, default_value = bridge::DEFAULT_UPSTREAM)]
+        upstream: String,
+        /// Bearer token every request must carry. Without it, anyone reaching the bridge may open sessions, which
+        /// NATS authentication then checks as for any leaf node.
+        #[arg(long, env = bridge::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
+    },
+    /// On a worker: listen locally and carry each connection to the hub's `ants bridge serve`. The machine's leaf
+    /// node then uses the uplink nats-leaf://127.0.0.1:7422.
+    Connect {
+        /// The bridge's URL, https://host[:port]/path, as the hub's reverse proxy mounts it.
+        url: String,
+        /// Local address for the leaf node's uplink; loopback only.
+        #[arg(long, default_value = bridge::DEFAULT_CONNECT_LISTEN)]
+        listen: String,
+        /// Bearer token, as given to `ants bridge serve`.
+        #[arg(long, env = bridge::TOKEN_ENV, hide_env_values = true)]
+        token: Option<String>,
+        /// Extra request header, `Name: value` (repeatable), for a gateway in front of the hub.
+        #[arg(long = "header", value_name = "HEADER")]
+        headers: Vec<String>,
+        /// HTTP CONNECT forward proxy, http://[user:password@]host:port.
+        #[arg(long, value_name = "URL")]
+        proxy: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -374,6 +414,19 @@ async fn main() -> Result<()> {
                 out.display()
             );
             Ok(())
+        }
+        Command::Bridge(BridgeCommand::Serve { listen, upstream, token }) => {
+            let addr = bridge::listen_addr(&listen, false)?;
+            let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
+            bridge::Server::new(upstream, token).run(listener).await
+        }
+        Command::Bridge(BridgeCommand::Connect { url, listen, token, headers, proxy }) => {
+            let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;
+            let addr = bridge::listen_addr(&listen, true)?;
+            let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
+            remote.run(listener).await
         }
         Command::Leaf(LeafCommand::Outbox { machine, personas, remove }) => {
             let (_, js) =

@@ -244,7 +244,7 @@ An uplink through a private Dev Tunnel (`--uplink nats-leaf://127.0.0.1:7422`) a
 `--devtunnel ants-hub.<region>` adds a service keeping it running (`ants.devtunnel`, `ants-devtunnel`; log
 `devtunnel.log` on macOS), authorized by the CLI login of the user (`devtunnel user login -g -d`) or, with
 `--devtunnel-token FILE`, by a connect token read from FILE at each start. Both expire; renewal is in
-docs/transport.md, "`devtunnel connect` as a service". Other tunnels need a service of their own.
+docs/transport.md, "`devtunnel connect` as a service". Other tunnels, such as `ants bridge connect`, need a service of their own.
 
 ## Roster
 
@@ -568,6 +568,7 @@ uplink to the hub:
 # on macbook, with server.conf and leaf-macbook.creds copied into ~/.config/ants/auth
 ants leaf config macbook --uplink wss://hub.example.com/nats             # the hub's websocket, behind a proxy
 ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422             # its leafnode port, via devtunnel connect
+                                                                         # or ants bridge connect (below)
 nats-server -c ~/.config/ants/leaf.conf                                  # or as a service, see Services
 ```
 
@@ -598,6 +599,31 @@ uplink credentials for the same personas. Whatever needs an answer from the hub 
 is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters, approvals and replays. A
 message sent while the uplink is down lands after what reached the hub meanwhile; a reply whose request could not be
 acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
+
+### HTTPS fallback bridge
+
+Where a proxy blocks WebSocket, `ants bridge` carries the leaf node's uplink in plain HTTPS requests: `POST` for what
+the leaf sends, long-polled `GET` for what it receives, each tagged with its byte offset so that retried requests
+neither lose nor repeat bytes. On the hub, `ants bridge serve` listens on `127.0.0.1:8423` behind the TLS-terminating
+reverse proxy (Caddy: `handle /bridge* { reverse_proxy 127.0.0.1:8423 }`) and connects each session to the hub's
+leafnode port (`--upstream`, default `127.0.0.1:7422`). On the worker, `ants bridge connect` listens on
+`127.0.0.1:7422`, so the leaf's uplink is the same as through `devtunnel connect`:
+
+```sh
+# hub
+export ANTS_BRIDGE_TOKEN=$(openssl rand -hex 32)                     # optional; the same on every worker
+ants bridge serve
+
+# macbook
+ants bridge connect https://hub.example.com/bridge                  # with the same ANTS_BRIDGE_TOKEN
+ants bridge connect https://hub.example.com/bridge --proxy http://user:pw@proxy.corp:3128   # through a forward proxy
+ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
+```
+
+NATS credentials still authenticate the leaf inside the bridged stream; the token (`--token` or `ANTS_BRIDGE_TOKEN`)
+only keeps strangers from opening sessions. `--header 'Name: value'` adds a request header for a gateway in front of
+the hub. `SSL_CERT_FILE` trusts a private CA. Each message costs a round trip, so prefer `wss://` where it works.
+Details: [docs/transport.md](docs/transport.md), "HTTPS fallback bridge".
 
 ## Footprint
 
