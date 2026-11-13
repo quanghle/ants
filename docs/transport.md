@@ -5,7 +5,8 @@ ants-qjf.8 (hub over a Dev Tunnel TCP port), and what they mean for ants-32g.2 (
 (HTTPS fallback bridge).
 
 Each finding is marked **verified** (run with nats-server 2.15.3, async-nats 0.52, Caddy 2.11.9 on macOS arm64, every
-hop on loopback) or **researched** (documentation or source reading only).
+hop on loopback; the Dev Tunnels runs used two Linux arm64 Apple `container` VMs, hub and worker, through the real
+service) or **researched** (documentation or source reading only).
 
 ## Summary
 
@@ -19,7 +20,9 @@ hop on loopback) or **researched** (documentation or source reading only).
 | `ants` itself behind an HTTP forward proxy | not possible: async-nats has no proxy support; a leaf node has |
 | JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain (or a deprecated option) |
 | Reconnect after proxy restart, forwarder drop and silent link loss; durable consumer resumes | verified |
-| Dev Tunnels: `devtunnel host` / `connect` for TCP, HTTPS port as `wss://` | researched: blocked on `devtunnel user login` |
+| Dev Tunnels: `devtunnel connect` to the hub's client port (4222) for `ants` and a daemon, and to its leafnode port (7422) for a leaf | verified |
+| Dev Tunnels: drop of either end, and a 3-minute freeze of the worker (stand-in for laptop sleep) | verified: nothing lost; see "Dev Tunnels" for the delays |
+| Dev Tunnels HTTPS port as `wss://` with anonymous access | researched |
 | Private Dev Tunnels HTTPS port from a `wss://` NATS client or leaf node | not possible: no way to send `X-Tunnel-Authorization` |
 
 Recommendation: every machine runs a local leaf node and `ants` connects only to it (ants-32g.2). The uplink is either
@@ -156,15 +159,19 @@ With a local leaf node that server is the local one, which is up.
 
 ## Dev Tunnels
 
-Researched only. `devtunnel` 1.0.2115 (official build, signed by Microsoft, from
-`https://tunnelsassetsprod.blob.core.windows.net/cli/osx-arm64-devtunnel` as in `https://aka.ms/DevTunnelCliInstall`)
-refuses to host without a login ("Anonymous does not have 'create' access scope"). Neither the CLI help nor the
-documentation lists a telemetry opt-out.
+`devtunnel` 1.0.2115 (official build, from `https://tunnelsassetsprod.blob.core.windows.net/cli/<os>-<arch>-devtunnel`
+as in `https://aka.ms/DevTunnelCliInstall`) refuses to host without a login ("Anonymous does not have 'create' access
+scope"). Neither the CLI help nor the documentation lists a telemetry opt-out. In the verified runs the CLI looked up
+only `global.rel.tunnels.api.visualstudio.com`, `<region>.rel.tunnels.api.visualstudio.com`,
+`<region>-data.rel.tunnels.api.visualstudio.com`, `tunnelsassetsprod.blob.core.windows.net` (update check) and, for
+the login, `github.com` / `api.github.com`; the known Microsoft telemetry hosts were pinned to `0.0.0.0` in
+`/etc/hosts` beforehand, so attempts to reach those would not show up as lookups.
 
 Hub machine, once logged in (`devtunnel user login -g -d`: GitHub account, device code):
 
 ```sh
 devtunnel create ants-hub                                # persistent tunnel, private to the creating account
+devtunnel port create ants-hub -p 4222                   # client port, raw TCP, for workers without a leaf node
 devtunnel port create ants-hub -p 7422                   # leafnode port, raw TCP (protocol auto)
 devtunnel port create ants-hub -p 8080 --protocol http   # websocket listener; the public URL is https/wss
 devtunnel host ants-hub                                  # keep running under launchd or systemd
@@ -173,13 +180,32 @@ devtunnel host ants-hub                                  # keep running under la
 Worker machine, private tunnel:
 
 ```sh
-devtunnel user login -g -d               # or pass --access-token to connect
-devtunnel connect ants-hub               # forwards 127.0.0.1:7422 and :8080 to the hub
+devtunnel connect ants-hub.<region> -t "$(cat connect.token)"   # from `devtunnel token ants-hub --scopes connect`
 ```
 
-The worker's leaf remote is then `nats-leaf://127.0.0.1:7422`. `devtunnel connect` forwards each tunnel port to the
-same local port number, which is why the hub tunnels its leafnode port (7422) and not 4222, where the worker's own leaf
-node listens.
+The worker needs no login of its own: a connect token issued on the hub sufficed (verified). `devtunnel connect`
+forwards each tunnel port to the same port number on `127.0.0.1` and `::1` only, so a container or VM running it has
+to run its NATS clients too. A worker without a leaf node points `ants` at `nats://127.0.0.1:4222`; one with a leaf
+node gives it the remote `nats-leaf://127.0.0.1:7422`, and then must not have the hub's 4222 forwarded where its own
+leaf listens (leave port 4222 off the tunnel, or run the leaf's client port elsewhere).
+
+Measured, hub default `ping_interval` (2 minutes), daemon on the worker through tunnelled 4222, leaf node through
+tunnelled 7422:
+
+| Event | Result |
+|---|---|
+| `ants ask` on the hub → daemon on the worker → reply in `ants inbox` on the hub | works; the daemon got the prompt about 0.3 s after the ask |
+| `ants watch` on the worker's leaf node | sees the hub's traffic |
+| `devtunnel connect` killed for 30 s, a message sent meanwhile, then restarted | the daemon reconnected at once, but the message came only 5 minutes later (`ack_wait`) |
+| `devtunnel host` killed for 20 s, a message sent meanwhile, then restarted | `devtunnel connect` stayed up and rejoined by itself; the daemon had the message 0.2 s after reconnecting; the leaf reconnected within 1 s |
+| Every worker process frozen (`SIGSTOP`) for 3 minutes, a message sent meanwhile | the relay logged the client SSH session as disconnected, yet on resume the session carried on: the daemon handled the message within 1 s, and the leaf never dropped |
+
+Killing the worker's `devtunnel connect` does not close the hub-side socket that `devtunnel host` opened to
+nats-server; it stayed open for more than 5 minutes, until `devtunnel host` itself was stopped. The server meanwhile
+delivered the new message to the dead connection's pull request, the stale-pull case from "Keepalive and reconnect",
+so the hub's own `ping_interval` (30 s or less) is what bounds it, together with the daemon's ack wait (ants-vh4). A
+real laptop sleep, with the Wi-Fi going down and the host clock jumping, was not reproduced; the freeze covers only
+processes that stop running.
 
 The HTTPS port URL `https://<tunnel-id>-8080.<region>.devtunnels.ms` serves as
 `wss://<tunnel-id>-8080.<region>.devtunnels.ms` for `ants` or a leaf node only if the port allows anonymous access:
@@ -194,9 +220,6 @@ The HTTPS port URL `https://<tunnel-id>-8080.<region>.devtunnels.ms` serves as
 - The anti-phishing page is skipped for requests without `Accept: text/html`, which covers WebSocket upgrades.
 - `devtunnel port create --request-timeout` exists ("timeout seconds for web requests, 0 = disabled"); whether it
   cuts long-lived WebSockets is untested.
-
-Still to run by hand for ants-qjf.8: host on one machine, `devtunnel connect` from another, then laptop sleep and a
-tunnel drop with `ants watch` and a daemon running.
 
 ## Recommendations
 
