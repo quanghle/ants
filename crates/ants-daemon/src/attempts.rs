@@ -1,4 +1,4 @@
-//! Markers of attempts at inbox messages, in the KV bucket [`ants_proto::ATTEMPTS_BUCKET`].
+//! Markers of attempts at inbox messages and channel posts, in the KV bucket [`ants_proto::ATTEMPTS_BUCKET`].
 //!
 //! Delivery is at least once: a daemon that stops after its harness ran tools but before the ack gets the message
 //! again. Before prompting, the daemon marks the attempt as started under the message's stream sequence, and once the
@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{Envelope, PersonaId, Uuid, attempt_key};
+use ants_proto::{ChannelPost, Envelope, PersonaId, ThreadId, Uuid, attempt_key};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,31 @@ pub enum Marker {
     /// It started prompting and stored no reply.
     Started,
     /// It had its reply, which may not have reached the stream.
-    Replied(Envelope),
+    Replied(Reply),
+}
+
+/// The reply to a message: an envelope to its sender, or a post on the thread of a channel post.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Reply {
+    Message(Envelope),
+    Post(ChannelPost),
+}
+
+impl Reply {
+    pub fn subject(&self) -> String {
+        match self {
+            Self::Message(envelope) => envelope.subject(),
+            Self::Post(post) => post.subject(),
+        }
+    }
+
+    pub fn thread_id(&self) -> &ThreadId {
+        match self {
+            Self::Message(envelope) => &envelope.thread_id,
+            Self::Post(post) => &post.thread_id,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,7 +58,7 @@ struct Record {
     /// The message attempted. A recreated stream reuses sequences, so a marker naming another message is stale.
     message: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reply: Option<Envelope>,
+    reply: Option<Reply>,
 }
 
 /// The attempt markers of one persona, under its own keys.
@@ -74,7 +98,7 @@ impl Attempts {
     }
 
     /// Record the reply of an attempt at `envelope`.
-    pub async fn replied(&self, seq: u64, envelope: &Envelope, reply: &Envelope) -> Result<()> {
+    pub async fn replied(&self, seq: u64, envelope: &Envelope, reply: &Reply) -> Result<()> {
         let record = Record { message: envelope.id, reply: Some(reply.clone()) };
         self.put(seq, &record).await.context("recording the reply with the attempt marker")
     }
@@ -113,7 +137,7 @@ impl Answered {
     }
 
     /// Note that `reply` to `request` is stored, durably, before the request is acked.
-    pub async fn add(&self, request: &Envelope, reply: &Envelope) -> Result<()> {
+    pub async fn add(&self, request: &Envelope, reply: &Reply) -> Result<()> {
         let path = self.path(request);
         let tmp = path.with_extension("tmp");
         let write = async {

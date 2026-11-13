@@ -562,6 +562,30 @@ Personas and the human read a room back through their own consumer, `plan-<perso
 deleted after it; their credentials allow it to filter plan subjects only. Persona and human credentials issued before
 plan rooms need `ants auth user` again.
 
+## Channel delivery
+
+A daemon takes every channel post through its persona's durable consumer `chan-<persona>` (filter `ants.chan.>`),
+with the same guarantees as its inbox: the posts of one thread are answered in order and different threads
+concurrently, an attempt is marked in `ants_attempts`, a post is acked only once its reply is stored, and a post whose
+last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice to the human on the post's thread. The
+consumer starts at the posts stored from its creation on, so a persona's first start does not answer the channels'
+history. The daemon watches `ants_channels` for the members of each channel, skipping an entry whose channel disagrees
+with its key.
+
+A post prompts a persona only when it @mentions it and the persona is a member of the channel. The rest are acked
+without a prompt: posts in other channels, the persona's own, posts that mention only others or nobody. A malformed
+post, or one whose `from` or channel disagrees with its subject, is dropped (terminated, no dead letter). A prompt
+starts with the posts on its thread that the persona has not been shown yet, oldest first, without its own: those
+since the last post it answered on the thread, or since the thread started. At most 50 are shown, with a count of the
+older ones left out. The stream sequence of the last post answered is kept per thread under
+`<persona>.<thread>.seen` in `ants_sessions`, so a restarted daemon goes on from there.
+
+The final answer is posted to the same channel and thread on `ants.chan.<channel>.<persona>`, replying to the post. An
+@mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget, counted
+from the post it answers (each branch of a thread spends its own); a post from the human gives a fresh budget. A post
+that reaches a persona with no turns left is not prompted: the human gets a notice in the inbox (`ants.inbox.human.<persona>`) on the thread
+with the post, as in the inbox. Spending caps apply as to inbox messages.
+
 ## Persona memory
 
 Memory and task tracking are optional and tool-agnostic. ants does not initialize a tool workspace, run setup or

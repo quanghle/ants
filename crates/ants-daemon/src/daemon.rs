@@ -9,14 +9,15 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ants_proto::{Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject};
+use ants_proto::{ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject};
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
-use crate::attempts::{Answered, Attempts, Marker};
+use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::caps::{Caps, Ledger};
+use crate::channel::{self, Channels, Threads, Wake};
 use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::mcp::Mcp;
@@ -143,6 +144,7 @@ pub async fn run(config: Config) -> Result<()> {
     let stream = bus::ensure_stream(&js).await?;
     let sessions_kv = bus::ensure_sessions(&js).await?;
     let ledger = Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps);
+    let threads = Threads::new(js.clone(), config.persona.clone(), sessions_kv.clone());
     let sessions = SessionStore::kv(sessions_kv, config.persona.clone());
     let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.persona.clone());
     let answered = Answered::new(&config.home);
@@ -150,6 +152,14 @@ pub async fn run(config: Config) -> Result<()> {
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let (channels, posts) = match channels(&js, &stream, &config.persona, in_hand).await {
+        Ok((channels, posts)) => (channels, Some(posts)),
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
+            (Channels::default(), None)
+        }
+    };
+    let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
     let workload = std::sync::Arc::new(roster::Workload::default());
     let registration = roster::register(&js, entry, workload.clone()).await?;
     tracing::info!(
@@ -178,6 +188,7 @@ pub async fn run(config: Config) -> Result<()> {
         workload: &workload,
         limits: config.limits,
         ledger: &ledger,
+        threads: &threads,
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
     };
@@ -187,11 +198,23 @@ pub async fn run(config: Config) -> Result<()> {
             std::future::pending::<()>().await;
         }
     };
-    inbox.serve(messages, config.idle_timeout, ctrl_c).await;
+    inbox.serve(messages, channels, config.idle_timeout, ctrl_c).await;
     registration.deregister().await;
     pool.shutdown().await;
     tracing::info!("stopped");
     Ok(())
+}
+
+/// The channels, and the posts to them through the persona's channel consumer.
+async fn channels(
+    js: &jetstream::Context,
+    stream: &jetstream::stream::Stream,
+    persona: &PersonaId,
+    in_hand: i64,
+) -> Result<(Channels, jetstream::consumer::pull::Stream)> {
+    let channels = Channels::watch(bus::ensure_channels(js).await?).await?;
+    let posts = bus::chan_consumer(stream, persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    Ok((channels, posts))
 }
 
 /// Ctrl-C, or SIGTERM, which launchd and systemd send to stop a service.
@@ -209,7 +232,18 @@ async fn stop_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-type InHand = (Envelope, jetstream::Message);
+type InHand = (Incoming, jetstream::Message);
+
+/// A message to answer: one in the inbox, or a channel post that wakes the persona, read as a message from its author
+/// ([`channel::as_envelope`]).
+struct Incoming {
+    envelope: Envelope,
+    post: Option<Box<Posted>>,
+}
+
+struct Posted {
+    post: ChannelPost,
+}
 
 /// The messages of one thread in hand: one in flight at most, the rest waiting their turn.
 #[derive(Default)]
@@ -241,14 +275,21 @@ struct Inbox<'a> {
     workload: &'a roster::Workload,
     limits: PromptLimits,
     ledger: &'a Ledger,
+    threads: &'a Threads,
     retry_delay: Duration,
     progress_every: Duration,
 }
 
 impl Inbox<'_> {
-    /// Handle messages until they end or `stop` resolves, then finish the prompts in flight unless it resolves again.
-    async fn serve<S, E, F>(&self, mut messages: S, idle_timeout: Duration, mut stop: impl FnMut() -> F)
-    where
+    /// Handle messages, from the inbox and channel posts, until they end or `stop` resolves, then finish the prompts in
+    /// flight unless it resolves again. `channels` says which posts are meant for the persona.
+    async fn serve<S, E, F>(
+        &self,
+        mut messages: S,
+        mut channels: Channels,
+        idle_timeout: Duration,
+        mut stop: impl FnMut() -> F,
+    ) where
         S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
         E: Display,
         F: Future<Output = ()>,
@@ -264,6 +305,7 @@ impl Inbox<'_> {
             let mut ready = None;
             tokio::select! {
                 () = &mut shutdown => break,
+                () = channels.changed() => {}
                 _ = evict.tick() => {
                     self.pool.evict_idle(Instant::now());
                 }
@@ -296,22 +338,13 @@ impl Inbox<'_> {
                     None => break,
                     Some(Err(e)) => tracing::warn!(error = %e, "inbox stream"),
                     Some(Ok(msg)) => {
-                        let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
-                            Ok(e) => e,
-                            Err(e) => {
-                                self.bury_unanswerable(&msg, &format!("not an envelope: {e}")).await;
-                                continue;
-                            }
+                        let incoming = if is_post(&msg) {
+                            self.admit_post(&msg, &mut channels).await
+                        } else {
+                            self.admit(&msg).await
                         };
-                        // A forged sender is buried without its envelope, so a replay cannot pass it on as genuine.
-                        if let Err(e) = envelope.check_subject(&msg.subject) {
-                            self.bury_unanswerable(&msg, &format!("sender mismatch: {e}")).await;
-                            continue;
-                        }
-                        if self.claim(&envelope, &msg).await {
-                            continue;
-                        }
-                        let thread = envelope.thread_id.clone();
+                        let Some(incoming) = incoming else { continue };
+                        let thread = incoming.envelope.thread_id.clone();
                         let t = threads.entry(thread.clone()).or_default();
                         if t.holds(stream_seq(&msg)) {
                             // The copy in hand gets the ack: the server tracks a message by its stream sequence.
@@ -320,17 +353,17 @@ impl Inbox<'_> {
                         }
                         if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
                             t.retry = None;
-                            t.waiting.push_front((envelope, msg));
+                            t.waiting.push_front((incoming, msg));
                         } else {
-                            t.waiting.push_back((envelope, msg));
+                            t.waiting.push_back((incoming, msg));
                         }
                         ready = Some(vec![thread]);
                     }
                 }
             }
             for thread in ready.into_iter().flatten() {
-                if let Some((envelope, msg)) = next_turn(&mut threads, thread) {
-                    running.push(self.handle(envelope, msg));
+                if let Some((incoming, msg)) = next_turn(&mut threads, thread) {
+                    running.push(self.handle(incoming, msg));
                 }
             }
             self.workload.set_harnesses(self.pool.live());
@@ -351,6 +384,60 @@ impl Inbox<'_> {
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
             }
         }
+    }
+
+    /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, and a reply to an
+    /// `ask_agent` call is handed over.
+    async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
+        let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
+            Ok(e) => e,
+            Err(e) => {
+                self.bury_unanswerable(msg, &format!("not an envelope: {e}")).await;
+                return None;
+            }
+        };
+        // A forged sender is buried without its envelope, so a replay cannot pass it on as genuine.
+        if let Err(e) = envelope.check_subject(&msg.subject) {
+            self.bury_unanswerable(msg, &format!("sender mismatch: {e}")).await;
+            return None;
+        }
+        if self.claim(&envelope, msg).await {
+            return None;
+        }
+        Some(Incoming { envelope, post: None })
+    }
+
+    /// The channel post `msg` to answer, if it wakes the persona. Any other is acked at once: the persona's own, one
+    /// in a channel it is not a member of, one that does not @mention it. A malformed or forged one is dropped, with
+    /// no dead letter: every member's daemon sees it.
+    async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
+        let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
+            .map_err(|e| e.to_string())
+            .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
+        let post = match post {
+            Ok(post) => post,
+            Err(error) => {
+                tracing::warn!(subject = %msg.subject, error, "dropping a channel post");
+                if let Err(e) = msg.ack_with(AckKind::Term).await {
+                    tracing::warn!(error = %e, "terminating the channel post");
+                }
+                return None;
+            }
+        };
+        let mut wake = channel::wake(self.persona, channels.get(&post.channel), &post);
+        if wake == Wake::Skip && post.mentions(self.persona) && post.from != *self.persona {
+            // The post may have overtaken the change that made the persona a member.
+            channels.refresh(&post.channel).await;
+            wake = channel::wake(self.persona, channels.get(&post.channel), &post);
+        }
+        if wake == Wake::Skip {
+            if let Err(e) = msg.ack().await {
+                tracing::warn!(error = %e, "acking a channel post");
+            }
+            return None;
+        }
+        let envelope = channel::as_envelope(&post, self.persona);
+        Some(Incoming { envelope, post: Some(Box::new(Posted { post })) })
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -387,8 +474,9 @@ impl Inbox<'_> {
 
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter.
     /// Returns its thread, and the redelivery to wait for when there is one.
-    async fn handle(&self, envelope: Envelope, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
+    async fn handle(&self, incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
         let _working = self.workload.working();
+        let envelope = &incoming.envelope;
         let thread = envelope.thread_id.clone();
         let (delivered, seq) = match msg.info() {
             Ok(info) => (info.delivered, info.stream_sequence),
@@ -397,30 +485,30 @@ impl Inbox<'_> {
                 return (thread, None);
             }
         };
-        if self.answered.has(&envelope).await {
+        if self.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
             tracing::info!(%thread, "acking a message whose reply is stored already");
             match bus::double_ack(self.client, &msg).await {
                 Ok(()) => {
                     self.attempts.forget(seq).await;
-                    self.answered.forget(&envelope).await;
+                    self.answered.forget(envelope).await;
                 }
                 Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
             }
             return (thread, None);
         }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
-        let marker = self.attempts.get(seq, &envelope).await;
+        let marker = self.attempts.get(seq, envelope).await;
         if attempt == Attempt::Overdue && !matches!(marker, Ok(Some(Marker::Replied(_)))) {
             let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
-            match dead::bury(self.js, self.persona, &msg, Some(&envelope), &error).await {
+            match self.bury(&incoming, &msg, &error).await {
                 Ok(_) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
             return (thread, None);
         }
         let result = match marker {
-            Ok(marker) => self.answer(&envelope, &msg, seq, marker).await,
+            Ok(marker) => self.answer(&incoming, &msg, seq, marker).await,
             Err(e) => Err(e),
         };
         let Err(e) = result else { return (thread, None) };
@@ -428,7 +516,7 @@ impl Inbox<'_> {
         status::state(self.client, self.persona, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
         if attempt != Attempt::Early {
-            match dead::bury(self.js, self.persona, &msg, Some(&envelope), &format!("{e:#}")).await {
+            match self.bury(&incoming, &msg, &format!("{e:#}")).await {
                 Ok(_) => {
                     self.attempts.forget(seq).await;
                     return (thread, None);
@@ -446,26 +534,39 @@ impl Inbox<'_> {
         (thread, retry)
     }
 
+    /// Store `msg` as a dead letter, telling the human, and terminate it.
+    async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<u64> {
+        match &incoming.post {
+            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error).await,
+            None => dead::bury(self.js, self.persona, msg, Some(&incoming.envelope), error).await,
+        }
+    }
+
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
     /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
     /// recorded is not prompted again.
     async fn answer(
         &self,
-        envelope: &Envelope,
+        incoming: &Incoming,
         msg: &jetstream::Message,
         seq: u64,
         marker: Option<Marker>,
     ) -> Result<()> {
+        let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        if let Err(ProtoError::BudgetExhausted(_)) = envelope.reply(self.persona.clone(), "") {
+        let spent = match &incoming.post {
+            Some(posted) => posted.post.reply(self.persona.clone(), "").err(),
+            None => envelope.reply(self.persona.clone(), "").err(),
+        };
+        if let Some(ProtoError::BudgetExhausted(_)) = spent {
             // Out of turns: hand the thread to the human instead of spending another prompt.
-            self.escalate(envelope, "Turn budget spent", seq).await?;
+            self.escalate(incoming, "Turn budget spent", seq).await?;
             return bus::double_ack(self.client, msg).await;
         }
         let cut_off = match marker {
             Some(Marker::Replied(reply)) => {
                 tracing::info!(%thread, "sending the reply an earlier attempt recorded");
-                return self.deliver(envelope, &reply, msg, seq).await;
+                return self.deliver(incoming, &reply, msg, seq).await;
             }
             Some(Marker::Started) => true,
             None => false,
@@ -478,7 +579,7 @@ impl Inbox<'_> {
         match self.ledger.reached(thread).await {
             Ok(Some(cap)) => {
                 // Out of allowance: the same, until the human answers or the day ends.
-                self.escalate(envelope, &cap, seq).await?;
+                self.escalate(incoming, &cap, seq).await?;
                 bus::double_ack(self.client, msg).await?;
                 self.attempts.forget(seq).await;
                 return Ok(());
@@ -507,7 +608,11 @@ impl Inbox<'_> {
             Some(mcp) => mcp.late_on(thread).await,
             None => 0,
         };
-        let text = prompt_text(&envelope.text, cut_off, late);
+        let text = match &incoming.post {
+            Some(posted) => self.channel_prompt(&posted.post, seq).await?,
+            None => envelope.text.clone(),
+        };
+        let text = prompt_text(&text, cut_off, late);
         let prompt =
             Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
         let prompt = self.pool.run(thread, prompt);
@@ -554,13 +659,16 @@ impl Inbox<'_> {
                 [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
             }
         };
-        let reply = envelope.reply(self.persona.clone(), text)?;
+        let reply = match &incoming.post {
+            Some(posted) => Reply::Post(posted.post.reply(self.persona.clone(), text)?),
+            None => Reply::Message(envelope.reply(self.persona.clone(), text)?),
+        };
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
             && !envelope.from.is_human()
         {
-            self.escalate(envelope, &limit, seq).await?;
+            self.escalate(incoming, &limit, seq).await?;
         }
         // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
         // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
@@ -568,16 +676,29 @@ impl Inbox<'_> {
         if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
         }
-        self.deliver(envelope, &reply, msg, seq).await
+        self.deliver(incoming, &reply, msg, seq).await
+    }
+
+    /// The prompt for channel post `post`, at stream sequence `seq`, with the posts on its thread not shown before.
+    async fn channel_prompt(&self, post: &ChannelPost, seq: u64) -> Result<String> {
+        let context = self.threads.context(post, seq).await?;
+        Ok(channel::prompt(self.persona, post, &context, post.turn_budget.saturating_sub(1)))
     }
 
     /// Store `reply` to `request`, the message at stream sequence `seq`, in the hub's stream or, out of its reach, in
     /// the machine's outbox, then ack the message and forget its marker. The message id, from the request's, makes
     /// JetStream drop a copy an earlier attempt stored within the stream's duplicate window. When the ack fails, the
-    /// note in `answered` has the redelivery acked without answering again, even by a restarted daemon.
-    async fn deliver(&self, request: &Envelope, reply: &Envelope, msg: &jetstream::Message, seq: u64) -> Result<()> {
+    /// note in `answered` has the redelivery acked without answering again, even by a restarted daemon. Of a channel
+    /// post it also notes that the posts on its thread up to it were shown.
+    async fn deliver(&self, incoming: &Incoming, reply: &Reply, msg: &jetstream::Message, seq: u64) -> Result<()> {
+        let request = &incoming.envelope;
         // Store the reply before acking: a crash in between redelivers rather than loses the message.
         bus::store(self.js, reply.subject(), reply, &reply_id(self.persona, request)).await?;
+        if incoming.post.is_some()
+            && let Err(e) = self.threads.seen(&request.thread_id, seq).await
+        {
+            tracing::warn!(thread = %request.thread_id, error = format!("{e:#}"), "noting the posts shown");
+        }
         let noted = self
             .answered
             .add(request, reply)
@@ -589,11 +710,11 @@ impl Inbox<'_> {
                 self.answered.forget(request).await;
             }
             Err(e) if noted.is_ok() => {
-                tracing::warn!(thread = %reply.thread_id, error = %e, "acking; the redelivery is acked unanswered");
+                tracing::warn!(thread = %request.thread_id, error = %e, "acking; the redelivery is acked unanswered");
             }
             Err(e) => return Err(e),
         }
-        status::state(self.client, self.persona, &reply.thread_id, State::Idle);
+        status::state(self.client, self.persona, reply.thread_id(), State::Idle);
         Ok(())
     }
 
@@ -605,15 +726,20 @@ impl Inbox<'_> {
         })
     }
 
-    /// Hand the thread to the human: `why` it needs a decision, and the message it was on.
-    /// Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
-    async fn escalate(&self, envelope: &Envelope, why: &str, seq: u64) -> Result<()> {
+    /// Hand the thread to the human, in the human's inbox: `why` it needs a decision, and the message or post it was
+    /// on. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
+    async fn escalate(&self, incoming: &Incoming, why: &str, seq: u64) -> Result<()> {
+        let envelope = &incoming.envelope;
         tracing::info!(thread = %envelope.thread_id, why, "escalating to the human");
+        let last = match &incoming.post {
+            Some(posted) => format!("Last post from {} in #{}", envelope.from, posted.post.channel),
+            None => format!("Last message from {}", envelope.from),
+        };
         let mut escalation = Envelope::on_thread(
             envelope.thread_id.clone(),
             self.persona.clone(),
             PersonaId::human(),
-            format!("{why}; needs a decision. Last message from {}:\n{}", envelope.from, envelope.text),
+            format!("{why}; needs a decision. {last}:\n{}", envelope.text),
         );
         escalation.in_reply_to = Some(envelope.id);
         let id = format!("escalation-{}-{seq}", self.persona);
@@ -676,6 +802,12 @@ fn reply_id(persona: &PersonaId, request: &Envelope) -> String {
     format!("reply-{persona}-{}", request.id)
 }
 
+/// Whether `msg` came through the channel consumer.
+fn is_post(msg: &jetstream::Message) -> bool {
+    let prefix = subject::ALL_CHANNELS.trim_end_matches('>');
+    msg.subject.starts_with(prefix)
+}
+
 fn stream_seq(msg: &jetstream::Message) -> Option<u64> {
     msg.info().ok().map(|info| info.stream_sequence)
 }
@@ -697,7 +829,7 @@ async fn nak(msg: &jetstream::Message, delay: Option<Duration>) {
 mod tests {
     use std::sync::Arc;
 
-    use ants_proto::{StatusEvent, StatusUpdate};
+    use ants_proto::{ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, StatusEvent, StatusUpdate};
     use ants_test_support::{NatsServer as Server, free_port};
     use async_nats::jetstream::consumer::PullConsumer;
     use tokio::sync::Semaphore;
@@ -723,6 +855,8 @@ mod tests {
         ledger: Ledger,
         workload: roster::Workload,
         mcp: Option<Mcp>,
+        channels: jetstream::kv::Store,
+        threads: Threads,
     }
 
     impl Bus {
@@ -746,6 +880,10 @@ mod tests {
             let ledger = Ledger::memory(dev.clone(), Caps::default());
             let limits = PromptLimits::default();
             let workload = roster::Workload::default();
+            let channels = bus::ensure_channels(&js).await.unwrap();
+            // Before any post: a new channel consumer starts at the posts stored from then on.
+            bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
+            let threads = Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js).await.unwrap());
             let bus = Self {
                 _server: server,
                 client,
@@ -759,6 +897,8 @@ mod tests {
                 ledger,
                 workload,
                 mcp: None,
+                channels,
+                threads,
             };
             (bus, replies)
         }
@@ -791,6 +931,9 @@ mod tests {
             ack_wait: Duration,
         ) {
             let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
+            let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
+            let messages = futures::stream::select(messages, posts);
+            let channels = Channels::watch(self.channels.clone()).await.unwrap();
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
@@ -802,6 +945,7 @@ mod tests {
                 workload: &self.workload,
                 limits: self.limits,
                 ledger: &self.ledger,
+                threads: &self.threads,
                 retry_delay: Duration::from_millis(300),
                 progress_every,
             };
@@ -809,15 +953,23 @@ mod tests {
                 let ctrl_c = ctrl_c.clone();
                 async move { ctrl_c.acquire().await.unwrap().forget() }
             };
-            inbox.serve(messages, IDLE, stop).await;
+            inbox.serve(messages, channels, IDLE, stop).await;
         }
 
         async fn until_acked(&self, seq: u64) {
+            self.until_acked_by(&ants_proto::inbox_consumer(&self.dev), seq).await;
+        }
+
+        /// Until the channel posts up to stream sequence `seq` are acked.
+        async fn until_posts_acked(&self, seq: u64) {
+            self.until_acked_by(&ants_proto::chan_consumer(&self.dev), seq).await;
+        }
+
+        async fn until_acked_by(&self, name: &str, seq: u64) {
             timeout(WAIT, async {
-                let name = ants_proto::inbox_consumer(&self.dev);
                 loop {
                     // The consumer may not be there yet.
-                    if let Ok(mut consumer) = self.stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await
+                    if let Ok(mut consumer) = self.stream.get_consumer::<jetstream::consumer::pull::Config>(name).await
                         && consumer.info().await.unwrap().ack_floor.stream_sequence >= seq
                     {
                         break;
@@ -831,6 +983,27 @@ mod tests {
 
         async fn unacked(&self) -> usize {
             self.consumer().await.num_ack_pending
+        }
+
+        /// Channel `name` with `members`, and its posts by dev-a.
+        async fn channel(&self, name: &str, members: &[&str]) -> (ChannelId, async_nats::Subscriber) {
+            let mut entry = ChannelEntry::new(name.parse().unwrap());
+            for member in members {
+                entry.add_member(member.parse().unwrap());
+            }
+            self.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+            let posts = self.client.subscribe(subject::chan(&entry.channel, &self.dev)).await.unwrap();
+            self.client.flush().await.unwrap();
+            (entry.channel, posts)
+        }
+
+        /// Store `post` on `subject`, returning its stream sequence.
+        async fn post_on(&self, subject: String, post: &ChannelPost) -> u64 {
+            bus::publish_json(&self.js, subject, post, None).await.unwrap()
+        }
+
+        async fn post(&self, post: &ChannelPost) -> u64 {
+            self.post_on(post.subject(), post).await
         }
 
         async fn consumer(&self) -> jetstream::consumer::Info {
@@ -849,6 +1022,13 @@ mod tests {
         let envelope: Envelope = serde_json::from_slice(&msg.payload).unwrap();
         let text = envelope.text.split_once(": ").expect("fake reply").1.to_owned();
         (envelope.thread_id, text)
+    }
+
+    async fn next_post(subscriber: &mut async_nats::Subscriber) -> ChannelPost {
+        let msg = timeout(WAIT, subscriber.next()).await.expect("no post").unwrap();
+        let post: ChannelPost = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!(post.check_subject(&msg.subject), Ok(()));
+        post
     }
 
     async fn next_envelope(subscriber: &mut async_nats::Subscriber) -> Envelope {
@@ -1221,7 +1401,7 @@ mod tests {
         // The crashed attempt recorded its reply and stored it, but never acked.
         let reply = ask.reply(bus.dev.clone(), "s1: done before").unwrap();
         bus.attempts.start(seq, &ask).await.unwrap();
-        bus.attempts.replied(seq, &ask, &reply).await.unwrap();
+        bus.attempts.replied(seq, &ask, &Reply::Message(reply.clone())).await.unwrap();
         bus::publish_json(&bus.js, reply.subject(), &reply, Some(&reply_id(&bus.dev, &ask))).await.unwrap();
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "done before".to_owned()));
 
@@ -1367,5 +1547,87 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().answered.len(), 2, "the late replies are no prompts");
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+        let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
+        bus.post(&root).await;
+        let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?").unwrap();
+        let ask_seq = bus.post(&ask).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_post(&mut replies).await;
+            assert_eq!((&reply.channel, &reply.thread_id, reply.in_reply_to), (&ops, &root.thread_id, Some(ask.id)));
+            assert_eq!(reply.turn_budget, DEFAULT_TURN_BUDGET - 2, "the ask spent one turn, the reply another");
+            bus.until_posts_acked(ask_seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let first = log.lock().unwrap().answered.clone();
+        assert_eq!(first.len(), 1, "the post that mentions nobody is not prompted: {first:?}");
+        assert!(first[0].contains("human: deploy friday?\n") && first[0].ends_with("nobody."), "{}", first[0]);
+        assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
+
+        // After a restart, only what was posted since shows, without the persona's own reply.
+        let more = root.reply(PersonaId::human(), "rollback plan is ready").unwrap();
+        bus.post(&more).await;
+        let again = root.reply(PersonaId::human(), "@dev-a and now?").unwrap();
+        let again_seq = bus.post(&again).await;
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_post(&mut replies).await;
+            assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(again.id), DEFAULT_TURN_BUDGET - 1));
+            bus.until_posts_acked(again_seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let second = log.lock().unwrap().answered[1].clone();
+        let shown = "Earlier posts on the thread not shown before, oldest first:\nhuman: rollback plan is ready\n\n";
+        assert!(second.contains(shown), "{second}");
+        assert!(!second.contains("deploy friday") && !second.contains("dev-a: "), "{second}");
+    }
+
+    #[tokio::test]
+    async fn posts_that_do_not_wake_the_persona_are_acked_without_a_prompt() {
+        let Some((bus, mut human)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
+        let (dev_b, human_id) = ("dev-b".parse::<PersonaId>().unwrap(), PersonaId::human());
+        bus.channel("lab", &["dev-b"]).await;
+        bus.post(&ChannelPost::new("lab".parse().unwrap(), human_id.clone(), "@dev-a not a member")).await;
+        bus.post(&ChannelPost::new(ops.clone(), human_id.clone(), "@dev-b another member")).await;
+        bus.post(&ChannelPost::new(ops.clone(), bus.dev.clone(), "@dev-a its own")).await;
+        let forged = ChannelPost::new(ops.clone(), human_id.clone(), "@dev-a forged");
+        bus.post_on(subject::chan(&ops, &dev_b), &forged).await;
+        let mut spent = ChannelPost::new(ops.clone(), dev_b.clone(), "@dev-a no turns left");
+        spent.turn_budget = 0;
+        bus.post(&spent).await;
+        let ask = ChannelPost::new(ops.clone(), human_id, "@dev-a go");
+        let seq = bus.post(&ask).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let escalation = next_envelope(&mut human).await;
+            assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&spent.thread_id, Some(spent.id)));
+            assert_eq!(
+                escalation.text,
+                "Turn budget spent; needs a decision. Last post from dev-b in #ops:\n@dev-a no turns left"
+            );
+            assert_eq!(next_post(&mut replies).await.text, "@dev-a its own");
+            assert_eq!(next_post(&mut replies).await.in_reply_to, Some(ask.id));
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 1, "{answered:?}");
+        assert!(answered[0].contains("Post from human mentioning dev-a:\n@dev-a go"), "{}", answered[0]);
     }
 }

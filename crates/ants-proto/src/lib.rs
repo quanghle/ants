@@ -412,6 +412,12 @@ pub fn thread_spend_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}.spend")
 }
 
+/// Key of the stream sequence of the last post on a channel thread the persona was shown, in [`SESSIONS_BUCKET`] beside
+/// the thread's session: its next prompt on the thread shows the posts after it.
+pub fn channel_seen_key(persona: &PersonaId, thread: &ThreadId) -> String {
+    format!("{persona}.{thread}.seen")
+}
+
 /// Key of what a persona has spent on `day` (`YYYY-MM-DD`, UTC), in [`SESSIONS_BUCKET`].
 pub fn daily_spend_key(persona: &PersonaId, day: &str) -> String {
     format!("{persona}.day.{day}")
@@ -961,8 +967,8 @@ impl ChannelEntry {
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
 /// post on an existing thread.
 ///
-/// Posts spend the thread's turn budget like messages between agents do: an agent's post that @mentions another agent
-/// wakes it and spends a turn ([`ChannelPost::spend`]); the human's posts carry a fresh budget.
+/// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn
+/// ([`ChannelPost::spend`]), and at zero the thread goes to the human; the human's posts carry a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelPost {
     pub id: Uuid,
@@ -1007,14 +1013,10 @@ impl ChannelPost {
         }
     }
 
-    /// The post as an agent's, with what is left of `budget` (the turns of the message the agent is handling): one
-    /// turn less when the post wakes another agent ([`ChannelPost::wakes_agents`]), which fails when none are left.
+    /// The post as an agent's, with what is left of `budget` (the turns of the post the agent is answering): one turn
+    /// less, whoever it wakes, which fails when none are left.
     pub fn spend(self, budget: u32) -> Result<Self, Error> {
-        let turn_budget = if self.wakes_agents() {
-            budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?
-        } else {
-            budget
-        };
+        let turn_budget = budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?;
         Ok(Self { turn_budget, ..self })
     }
 
@@ -1635,20 +1637,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_channel_posts_spend_a_turn_only_to_wake_another_agent() {
+    fn every_agent_channel_post_spends_a_turn() {
         let c: ChannelId = "ops".parse().unwrap();
         let ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a deploy?");
         let answer = ask.reply(p("dev-a"), "done, @human").unwrap();
         assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
         assert_eq!(answer.in_reply_to, Some(ask.id));
-        assert_eq!(answer.turn_budget, ask.turn_budget, "waking nobody spends nothing");
+        assert_eq!(answer.turn_budget, DEFAULT_TURN_BUDGET - 1, "waking nobody spends a turn too");
         let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait").unwrap();
         assert_eq!(handoff.turn_budget, DEFAULT_TURN_BUDGET - 1);
         handoff.turn_budget = 1;
         let back = handoff.reply(p("dev-b"), "@dev-a fine").unwrap();
         assert_eq!(back.turn_budget, 0);
         assert_eq!(back.reply(p("dev-a"), "@dev-b again"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
-        assert_eq!(back.reply(p("dev-a"), "@human over to you").unwrap().turn_budget, 0);
+        assert_eq!(back.reply(p("dev-a"), "@human over to you"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
         let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on").unwrap();
         assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
         let own = ChannelPost::new(c, p("dev-a"), "@dev-b status?").spend(3).unwrap();

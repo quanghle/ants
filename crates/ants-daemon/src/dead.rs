@@ -1,5 +1,5 @@
-//! Dead letters: inbox messages a persona gave up on, kept on `ants.dead.<persona>` until the human replays or drops
-//! them.
+//! Dead letters: inbox messages and channel posts a persona gave up on, kept on `ants.dead.<persona>` until the human
+//! replays or drops them. A channel post is kept as a payload, which is not replayed: the human posts again instead.
 //!
 //! The daemon writes a dead letter itself, with the message in hand: after its last attempt fails, or on the one
 //! extra delivery the consumer allows when the last attempt never finished (the daemon stopped, or the ack wait ran
@@ -11,7 +11,7 @@
 //! letters. Advisories are core NATS: one published while no watcher runs is lost, and its message stays in the
 //! stream unnoticed until it expires.
 
-use ants_proto::{DeadLetter, Envelope, PersonaId, STREAM, inbox_consumer, subject};
+use ants_proto::{ChannelPost, DeadLetter, Envelope, PersonaId, STREAM, chan_consumer, inbox_consumer, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::stream::{self, RawMessageErrorKind};
@@ -55,10 +55,28 @@ pub async fn bury(
     let info = msg.info().map_err(|e| anyhow!(e))?;
     let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
     let dead = letter_of(persona, seq, deliveries, error, &msg.payload, envelope);
-    let (dead_seq, _) = store(js, &dead).await?;
+    let (dead_seq, _) = store(js, &dead, None).await?;
     // Only now: a crash before this redelivers the message, and the message ids in `store` keep the copies single.
     msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
     tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered");
+    Ok(dead_seq)
+}
+
+/// Store channel post `msg` (`post`, checked against its subject) as a dead letter of `persona`, keeping its payload,
+/// tell the human on the post's thread, then terminate it. Returns the stream sequence of the dead letter.
+pub async fn bury_post(
+    js: &jetstream::Context,
+    persona: &PersonaId,
+    msg: &jetstream::Message,
+    post: &ChannelPost,
+    error: &str,
+) -> Result<u64> {
+    let info = msg.info().map_err(|e| anyhow!(e))?;
+    let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
+    let dead = DeadLetter::of_payload(persona.clone(), seq, deliveries, error, &msg.payload);
+    let (dead_seq, _) = store(js, &dead, Some(post)).await?;
+    msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
+    tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered a channel post");
     Ok(dead_seq)
 }
 
@@ -76,9 +94,10 @@ fn letter_of(
     }
 }
 
-/// Store `dead`, then tell the human when it holds an envelope. Returns the stream sequence of the dead letter, and
-/// whether it was stored already: the message ids make a second store within the duplicate window store nothing.
-async fn store(js: &jetstream::Context, dead: &DeadLetter) -> Result<(u64, bool)> {
+/// Store `dead`, then tell the human when it holds an envelope or is of channel post `post`. Returns the stream sequence
+/// of the dead letter, and whether it was stored already: the message ids make a second store within the duplicate
+/// window store nothing.
+async fn store(js: &jetstream::Context, dead: &DeadLetter, post: Option<&ChannelPost>) -> Result<(u64, bool)> {
     let message = PublishMessage::build().payload(serde_json::to_vec(dead)?.into()).message_id(dead.msg_id());
     let ack = js
         .send_publish(dead.subject(), message)
@@ -88,6 +107,10 @@ async fn store(js: &jetstream::Context, dead: &DeadLetter) -> Result<(u64, bool)
         .context("waiting for JetStream to store the message")?;
     if let Some(e) = &dead.envelope {
         let notice = notice(&dead.persona, e, dead, ack.sequence);
+        let id = format!("dead-notice-{}", dead.stream_seq);
+        bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
+    } else if let Some(post) = post {
+        let notice = post_notice(&dead.persona, post, dead);
         let id = format!("dead-notice-{}", dead.stream_seq);
         bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
     }
@@ -103,19 +126,35 @@ pub struct MaxDeliveries {
     pub deliveries: u64,
 }
 
+/// The consumers of a persona that dead-letter what they give up on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Consumer {
+    Inbox,
+    Channels,
+}
+
 impl MaxDeliveries {
-    /// The persona whose inbox consumer gave up, or `None` for any other consumer.
-    fn persona(&self) -> Option<PersonaId> {
+    /// The persona whose inbox or channel consumer gave up, and which one, or `None` for any other consumer.
+    fn persona(&self) -> Option<(PersonaId, Consumer)> {
         if self.stream != STREAM {
             return None;
         }
-        let persona: PersonaId = self.consumer.strip_prefix("inbox-")?.parse().ok()?;
-        (!persona.is_human() && inbox_consumer(&persona) == self.consumer).then_some(persona)
+        let (kind, name) = match (self.consumer.strip_prefix("inbox-"), self.consumer.strip_prefix("chan-")) {
+            (Some(name), _) => (Consumer::Inbox, name),
+            (_, Some(name)) => (Consumer::Channels, name),
+            _ => return None,
+        };
+        let persona: PersonaId = name.parse().ok()?;
+        let own = match kind {
+            Consumer::Inbox => inbox_consumer(&persona),
+            Consumer::Channels => chan_consumer(&persona),
+        };
+        (!persona.is_human() && own == self.consumer).then_some((persona, kind))
     }
 }
 
-/// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message a persona's inbox
-/// consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
+/// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message a persona's inbox or
+/// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
 /// Runs until the connection closes. Needs the human's credentials.
 pub async fn watch(
     client: &async_nats::Client,
@@ -144,14 +183,14 @@ pub async fn watch(
     Ok(())
 }
 
-/// Dead-letter the message `advisory` names, unless it is not a persona's inbox message, is gone, or already is a dead
-/// letter. Returns the new dead letter and its stream sequence.
+/// Dead-letter the message `advisory` names, unless it is not a persona's inbox message or channel post, is gone, or
+/// already is a dead letter. Returns the new dead letter and its stream sequence.
 pub async fn bury_undelivered(
     js: &jetstream::Context,
     stream: &stream::Stream,
     advisory: &MaxDeliveries,
 ) -> Result<Option<(u64, DeadLetter)>> {
-    let Some(persona) = advisory.persona() else {
+    let Some((persona, consumer)) = advisory.persona() else {
         tracing::debug!(consumer = advisory.consumer, "ignoring an advisory of a consumer that is no persona's inbox");
         return Ok(None);
     };
@@ -168,19 +207,32 @@ pub async fn bury_undelivered(
         }
         Err(e) => return Err(e).with_context(|| format!("reading message {seq}")),
     };
-    if subject::parse_inbox(&msg.subject).is_none_or(|(to, _)| to != persona) {
-        bail!("message {seq} is on {}, not in the inbox of {persona}", msg.subject);
-    }
-    // As the daemon does: an envelope whose sender is forged is kept only as a payload.
-    let envelope =
-        serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
     let error = format!(
         "no outcome after {} deliveries, and the daemon could not dead-letter it; kept from JetStream's \
          max-deliveries advisory",
         advisory.deliveries
     );
-    let dead = letter_of(&persona, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref());
-    let (dead_seq, duplicate) = store(js, &dead).await?;
+    let (dead, post) = match consumer {
+        Consumer::Inbox => {
+            if subject::parse_inbox(&msg.subject).is_none_or(|(to, _)| to != persona) {
+                bail!("message {seq} is on {}, not in the inbox of {persona}", msg.subject);
+            }
+            // As the daemon does: an envelope whose sender is forged is kept only as a payload.
+            let envelope =
+                serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
+            (letter_of(&persona, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
+        }
+        Consumer::Channels => {
+            if subject::parse_chan(&msg.subject).is_none() {
+                bail!("message {seq} is on {}, not a channel post", msg.subject);
+            }
+            let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
+                .ok()
+                .filter(|p| p.check_subject(&msg.subject).is_ok());
+            (DeadLetter::of_payload(persona.clone(), seq, advisory.deliveries, &error, &msg.payload), post)
+        }
+    };
+    let (dead_seq, duplicate) = store(js, &dead, post.as_ref()).await?;
     if duplicate {
         return Ok(None);
     }
@@ -218,6 +270,19 @@ fn notice(persona: &PersonaId, envelope: &Envelope, dead: &DeadLetter, dead_seq:
     );
     notice.in_reply_to = Some(envelope.id);
     notice
+}
+
+/// The message on a channel post's thread that tells the human the persona gave up on the post.
+fn post_notice(persona: &PersonaId, post: &ChannelPost, dead: &DeadLetter) -> Envelope {
+    Envelope::on_thread(
+        post.thread_id.clone(),
+        persona.clone(),
+        PersonaId::human(),
+        format!(
+            "Gave up on the post from {} in #{} after {} deliveries: {}\nPosting on the thread again retries it.",
+            post.from, post.channel, dead.deliveries, dead.error
+        ),
+    )
 }
 
 /// Every dead letter in the stream, oldest first, with its stream sequence. Needs the human's credentials.
@@ -298,13 +363,17 @@ mod tests {
     }
 
     #[test]
-    fn only_advisories_of_persona_inbox_consumers_name_a_persona() {
+    fn only_advisories_of_persona_inbox_and_channel_consumers_name_a_persona() {
         let json = r#"{"type":"io.nats.jetstream.advisory.v1.max_deliver","id":"x","timestamp":"2026-11-13T00:00:00Z",
             "stream":"ANTS","consumer":"inbox-dev-a","stream_seq":7,"deliveries":6}"#;
         let advisory: MaxDeliveries = serde_json::from_str(json).unwrap();
         assert_eq!((advisory.stream_seq, advisory.deliveries), (7, 6));
-        assert_eq!(advisory.persona(), Some("dev-a".parse().unwrap()));
-        for (stream, consumer) in [("ANTS", "inbox-human"), ("ANTS", "plan-dev-a"), ("OTHER", "inbox-dev-a")] {
+        assert_eq!(advisory.persona(), Some(("dev-a".parse().unwrap(), Consumer::Inbox)));
+        let chan = MaxDeliveries { consumer: "chan-dev-a".into(), ..advisory.clone() };
+        assert_eq!(chan.persona(), Some(("dev-a".parse().unwrap(), Consumer::Channels)));
+        for (stream, consumer) in
+            [("ANTS", "inbox-human"), ("ANTS", "plan-dev-a"), ("ANTS", "chanread-dev-a"), ("OTHER", "inbox-dev-a")]
+        {
             let other = MaxDeliveries { stream: stream.into(), consumer: consumer.into(), ..advisory.clone() };
             assert_eq!(other.persona(), None, "{stream} {consumer}");
         }
