@@ -1,4 +1,5 @@
-//! Answers to a harness's permission requests: the persona's allowlist first, then the human, else reject.
+//! Answers to a harness's permission requests: the persona's allowlist first, then the humans and the persona's
+//! chain, else reject.
 //!
 //! # Allowlist rules
 //!
@@ -113,7 +114,7 @@ impl Allowlist {
     }
 }
 
-/// The human, or whoever stands in: decides tool requests outside the allowlist.
+/// The humans and the persona's chain, or whoever stands in: decide tool requests outside the allowlist.
 pub trait Approver: Send + Sync {
     /// The decision on `tool`, requested on `thread`, among the `options` the harness offers. Never fails: anything
     /// that goes wrong, a timeout included, is [`Verdict::Reject`].

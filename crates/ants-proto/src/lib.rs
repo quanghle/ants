@@ -43,6 +43,10 @@ pub const CHANNELS_BUCKET: &str = "ants_channels";
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its persona id. Only humans write it; personas read
 /// it. [`PersonaId::human`] is a human without an entry.
 pub const HUMANS_BUCKET: &str = "ants_humans";
+/// KV bucket of the escalation chains: one [`ChainEntry`] per persona, keyed by the persona id, put by its daemon on
+/// start. Unlike the roster's, entries never expire, so a chain can be followed past a persona that is offline. Each
+/// persona writes only its own; every persona and human reads them.
+pub const CHAINS_BUCKET: &str = "ants_chains";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
@@ -409,6 +413,11 @@ pub mod subject {
         format!("$KV.{}.{persona}", super::ROSTER_BUCKET)
     }
 
+    /// The chain of a persona in [`super::CHAINS_BUCKET`]: the subject its daemon puts [`super::ChainEntry`] on.
+    pub fn chain(persona: &PersonaId) -> String {
+        format!("$KV.{}.{persona}", super::CHAINS_BUCKET)
+    }
+
     /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
     pub fn human_entry(persona: &PersonaId) -> String {
         format!("$KV.{}.{persona}", super::HUMANS_BUCKET)
@@ -506,12 +515,13 @@ impl Permissions {
     /// reads only its own inbox (consumer and live), every plan room (live, and from the stream through its own plan
     /// consumer), every channel (live, and from the stream through its own channel consumer and reader), its own
     /// replies and the decisions on its own approval requests (live, and as stored), reads the roster to find personas
-    /// by capability but writes only its own entry, reads the channels and humans buckets but never writes them, and
+    /// by capability but writes only its own entry, reads every escalation chain by key but writes only its own, reads
+    /// the channels and humans buckets but never writes them, and
     /// reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no persona may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
-    /// attempts, channels and humans buckets, writes the channels and humans buckets, and reads and removes dead
+    /// attempts, channels, humans and chains buckets, writes the channels and humans buckets, and reads and removes dead
     /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
     /// any sender, to replay a dead letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -528,6 +538,7 @@ impl Permissions {
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
         let humans = kv_stream(HUMANS_BUCKET);
+        let chains = kv_stream(CHAINS_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         let sendable = subject::sendable(persona, role);
@@ -569,6 +580,9 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{humans}.>"),
             format!("$JS.API.CONSUMER.CREATE.{humans}"),
             format!("$JS.FC.{humans}.>"),
+            // And single escalation chains.
+            format!("$JS.API.STREAM.INFO.{chains}"),
+            format!("$JS.API.DIRECT.GET.{chains}.>"),
         ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if role.is_human() {
@@ -581,6 +595,7 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{attempts}"),
                 format!("$JS.API.STREAM.CREATE.{channels}"),
                 format!("$JS.API.STREAM.CREATE.{humans}"),
+                format!("$JS.API.STREAM.CREATE.{chains}"),
                 // Put and delete of every channel's and every human's entry.
                 format!("$KV.{CHANNELS_BUCKET}.>"),
                 format!("$KV.{HUMANS_BUCKET}.>"),
@@ -617,8 +632,9 @@ impl Permissions {
                 format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(persona)),
                 subject::dead(persona),
                 subject::status_of(persona),
-                // Put and delete of its own roster entry.
+                // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(persona),
+                subject::chain(persona),
             ]);
             subscribe.extend([
                 subject::ALL_PLANS.to_owned(),
@@ -789,6 +805,40 @@ impl RosterEntry {
     /// The leader of the persona's escalation chain, if it has one.
     pub fn leader(&self) -> Option<&PersonaId> {
         self.escalate_to.first()
+    }
+}
+
+/// A persona's escalation chain in the [`CHAINS_BUCKET`], under the key of its persona id: its `escalate_to`, as the
+/// roster entry publishes it, kept after the entry expires. Its daemon puts it on start; readers skip an entry naming
+/// another persona than its key ([`ChainEntry::check_key`]) and treat unknown fields as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainEntry {
+    pub persona: PersonaId,
+    /// The persona's escalation chain, in order, the first leading; empty for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalate_to: Vec<PersonaId>,
+    /// When the daemon put it.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ChainEntry {
+    /// The chain `escalate_to` of `persona`, put now.
+    pub fn new(persona: PersonaId, escalate_to: Vec<PersonaId>) -> Self {
+        Self { persona, escalate_to, updated_at: Utc::now() }
+    }
+
+    /// The KV key of the entry.
+    pub fn key(&self) -> &str {
+        self.persona.as_str()
+    }
+
+    /// Check that the entry was read from its own key: credentials pin each persona to its own key, while the body is
+    /// whatever the writer put there, so an entry naming another persona is forged.
+    pub fn check_key(&self, key: &str) -> Result<(), Error> {
+        if key == self.key() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona { kind: "chain entry", persona: self.persona.clone(), at: format!("key {key}") })
     }
 }
 
@@ -1773,6 +1823,8 @@ mod tests {
             "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.inbox-dev-a",
             "$JS.hub.API.DIRECT.GET.KV_ants_sessions.$KV.ants_sessions.dev-a.>",
             "$JS.hub.API.$KV.ants_sessions.dev-a.>",
+            "$JS.hub.API.$KV.ants_chains.dev-a",
+            "$JS.hub.API.DIRECT.GET.KV_ants_chains.>",
             "$JS.hub.API.$KV.ants_roster.dev-a",
             "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.plan-dev-a",
             "$JS.ACK.ANTS.inbox-dev-a.>",
@@ -2348,6 +2400,29 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("in_reply_to"));
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn personas_write_only_their_own_chain_and_read_every_one() {
+        let a = Permissions::for_persona(&p("dev-a"), Role::Persona);
+        for s in ["$KV.ants_chains.dev-a", "$JS.API.DIRECT.GET.KV_ants_chains.>", "$JS.API.STREAM.INFO.KV_ants_chains"]
+        {
+            assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
+        }
+        assert!(!a.publish.iter().any(|s| s.starts_with("$KV.ants_chains.") && s != "$KV.ants_chains.dev-a"));
+        assert!(!a.publish.iter().any(|s| s.contains("CREATE.KV_ants_chains")), "only humans create the bucket");
+        let human = Permissions::for_persona(&PersonaId::human(), Role::Human);
+        assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_chains"));
+        assert!(!human.publish.iter().any(|s| s.starts_with("$KV.ants_chains.")), "only the persona writes its chain");
+
+        let entry = ChainEntry::new(p("dev-a"), vec![p("lead"), p("dev-b")]);
+        assert_eq!(subject::chain(&entry.persona), "$KV.ants_chains.dev-a");
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(serde_json::from_str::<ChainEntry>(&json).unwrap(), entry);
+        let none = ChainEntry::new(p("dev-a"), Vec::new());
+        assert!(!serde_json::to_string(&none).unwrap().contains("escalate_to"));
+        assert!(entry.check_key("dev-a").is_ok());
+        assert!(entry.check_key("dev-b").is_err(), "credentials vouch for the key only");
     }
 
     #[test]

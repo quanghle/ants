@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::SessionId;
-use ants_proto::{Escalation, PersonaId, ThreadId, daily_spend_key, escalation_deadlines_key, thread_spend_key};
+use ants_proto::{
+    ChannelId, Escalation, PersonaId, ThreadId, daily_spend_key, escalation_deadlines_key, thread_spend_key,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
@@ -79,6 +81,9 @@ pub struct Pending {
     /// What the escalation is about, for the escalations that follow it up.
     #[serde(default)]
     pub summary: String,
+    /// The channel of the thread, when the persona got stuck on a post there: the leader's answer is posted back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChannelId>,
 }
 
 impl Pending {
@@ -433,7 +438,7 @@ mod tests {
         let chain: Vec<PersonaId> = ["lead", "dev-b"].iter().map(|p| p.parse().unwrap()).collect();
         let ants_proto::Hop::Chain { escalation, .. } = start.up(&chain, 3) else { unreachable!() };
         let to = to.iter().map(|p| p.parse().unwrap()).collect();
-        Pending { escalation, to, renewed_by: None, deadline, owner: None, summary: "stuck".to_owned() }
+        Pending { escalation, to, renewed_by: None, deadline, owner: None, summary: "stuck".to_owned(), channel: None }
     }
 
     #[tokio::test]

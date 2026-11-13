@@ -1,14 +1,14 @@
 //! Escalations against a real nats-server: kept in `ants_sessions` across a restart, up the chains the roster
-//! publishes, and to the human once the chains loop.
+//! publishes or the chains bucket keeps, and to the human once the chains loop.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_daemon::bus;
 use ants_daemon::caps::{Caps, Ledger};
 use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
 use ants_daemon::mcp::Roster;
+use ants_daemon::{bus, chains};
 use ants_proto::{Envelope, EscalationReason, PersonaId, RosterEntry, ThreadId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::{self, kv};
@@ -122,4 +122,49 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
         () = escalator.deadlines() => unreachable!(),
     }
     assert!(timeout(Duration::from_millis(500), to_lead.next()).await.is_err(), "lead got level 1 only");
+}
+
+#[tokio::test]
+async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_chain_kept_for_it() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = bus::connect(&server.url, None, None, &persona("dev-a"), "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js).await.unwrap();
+    let kept = bus::ensure_chains(&js).await.unwrap();
+    chains::publish(&js, &persona("lead"), &[persona("boss")]).await.unwrap();
+    let revision = kept.entry("lead").await.unwrap().unwrap().revision;
+    chains::publish(&js, &persona("lead"), &[persona("boss")]).await.unwrap();
+    assert_eq!(kept.entry("lead").await.unwrap().unwrap().revision, revision, "kept already");
+    chains::publish(&js, &persona("dev-b"), &[]).await.unwrap();
+    assert!(kept.get("dev-b").await.unwrap().is_none(), "no chain, no entry");
+
+    let mut to_lead = client.subscribe(subject::inbox_of(&persona("lead"))).await.unwrap();
+    let mut to_boss = client.subscribe(subject::inbox_of(&persona("boss"))).await.unwrap();
+    client.flush().await.unwrap();
+    let chain =
+        Chain { escalate_to: vec![persona("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
+    let ledger = Arc::new(Ledger::kv(sessions, persona("dev-a"), Caps::default()));
+    let offline: Roster = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+    let escalator = Escalator::new(
+        persona("dev-a"),
+        chain,
+        offline,
+        Registry::default(),
+        ledger,
+        escalation::jetstream_sender(js.clone()),
+    )
+    .with_chains(chains::jetstream_chains(js.clone()));
+    let thread = ThreadId::generate();
+    let notice = Envelope::on_thread(thread, persona("dev-a"), PersonaId::human(), "Turn budget spent.");
+    let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
+    escalator.escalate(stuck).await.unwrap();
+    assert_eq!(next(&mut to_lead).await.escalation.as_deref().map(|e| e.level), Some(1));
+
+    // lead never answers and is not in the roster: its kept chain takes the escalation to boss.
+    let climbed = tokio::select! {
+        two = next(&mut to_boss) => two,
+        () = escalator.deadlines() => unreachable!(),
+    };
+    let level = climbed.escalation.as_deref().expect("the escalation");
+    assert_eq!((level.level, &level.leader), (2, &persona("boss")));
 }

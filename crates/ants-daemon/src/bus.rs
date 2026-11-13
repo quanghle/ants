@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM,
-    STREAM_SUBJECTS, inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET,
+    STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -226,6 +226,23 @@ pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
     })
     .await
     .context("creating the channels bucket (with credentials, `ants init` as the human creates it)")
+}
+
+/// The KV bucket of the escalation chains ([`CHAINS_BUCKET`]), created when missing and the credentials allow it (the
+/// human's). Entries never expire: a chain outlives its persona's roster entry.
+pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(CHAINS_BUCKET).await {
+        return Ok(store);
+    }
+    js.create_key_value(kv::Config {
+        bucket: CHAINS_BUCKET.to_owned(),
+        description: "Escalation chains of the personas, each written by its daemon".to_owned(),
+        history: 1,
+        storage: stream::StorageType::File,
+        ..Default::default()
+    })
+    .await
+    .context("creating the chains bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.
