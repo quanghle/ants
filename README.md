@@ -41,9 +41,9 @@ Headless agent teams on several machines, talking to each other and to a human a
   or the human, enforces limits and spending caps, keeps the persona's roster entry fresh, and gives every harness
   session an MCP server for messaging other personas.
 - **Personas:** named agents (`dev-a`, `reviewer`, ...), each with a workdir, a harness, capabilities and a `whoami`
-  role. `human` is the CLI user. The persona `messenger` gets every `ants ask` without `@persona` and routes it by
-  capability. Messages go on `ants.inbox.<to>.<from>`, grouped into threads with a turn budget for agent-to-agent
-  traffic.
+  role. The CLI acts as a human: the one its credentials name, or `human` without credentials. The persona
+  `messenger` gets every `ants ask` without `@persona` and routes it by capability. Messages go on
+  `ants.inbox.<to>.<from>`, grouped into threads with a turn budget for agent-to-agent traffic.
 - **Harnesses:** the agent CLIs the daemon drives over ACP on stdio: `copilot`, `claude` or `antigravity`.
 
 ## Install
@@ -96,15 +96,15 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 
 | Command | Does |
 |---|---|
-| `ants ask [@persona] TEXT` | Sends a message as the human; without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
-| `ants inbox` | Prints unread replies and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
+| `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner; without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
+| `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
-| `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the human. |
+| `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the CLI's human. |
 | `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
-| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`). |
+| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
 | `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
@@ -117,19 +117,29 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
 `--js-domain` (`ANTS_JS_DOMAIN`). `ants <command> --help` lists the rest.
 
+The CLI acts as the human its credentials name (the `name` of their user JWT, as `ants auth user NAME --human` sets
+it), or as `human` without credentials: it sends and posts under that name, reads that human's inbox and plan room
+consumers, and connects with that human's reply prefix. On connecting, it registers that human in the KV bucket
+`ants_humans`, creating the bucket when missing: one direct get when the entry is there already, a put otherwise
+(again after the entry was removed). `human` needs no entry. When registering fails, the command warns and goes on;
+until a later connection registers the human, daemons take its messages for an agent's. Credentials issued without
+`--human` are a persona's: the CLI then acts as that persona, registers nothing and warns, `ants inbox` refuses (the
+persona's daemon reads its inbox), and `ants ask --wait` marks nothing read.
+
 ### Agent skill
 
 `contrib/skills/ants/SKILL.md` teaches a coding agent outside ants (an interactive Copilot CLI session, say) to
-message personas as the human through this CLI: `ants roster`, `ants ask`, `ants inbox --thread`, `ants watch`. Install
-it as a personal skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the directory into another
-agent's skills directory.
+message personas as the CLI's human through this CLI: `ants roster`, `ants ask`, `ants inbox --thread`,
+`ants watch`. Install it as a personal skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the
+directory into another agent's skills directory.
 
 ## Delivery
 
-Replies to the human wait in the durable JetStream consumer `inbox-human` until read, so those that arrive while no
-CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--peek` leaves them unread, `--thread`
-and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new ones (and dead-letters what
-JetStream stops delivering, see [Dead letters](#dead-letters)) and `--json` prints one envelope per line.
+Replies to a human wait in its own durable JetStream consumer, `inbox-<name>` (`inbox-human` for `human`), until read,
+so those that arrive while no CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--peek`
+leaves them unread, `--thread` and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new
+ones (and dead-letters what JetStream stops delivering, see [Dead letters](#dead-letters)) and `--json` prints one
+envelope per line.
 `ants ask --wait` marks only the reply it prints read.
 
 The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
@@ -412,14 +422,14 @@ ants dead drop 42       # remove it without replaying
 ants dead watch         # until Ctrl-C, dead-letter what JetStream stops delivering, and print it
 ```
 
-Reading and removing dead letters by sequence needs the human's credentials. A stream created before dead letters
+Reading and removing dead letters by sequence needs a human's credentials. A stream created before dead letters
 existed lacks `ants.dead.>`; `ants init` adds it.
 
 If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
 only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
 --follow` while it runs, turn each such advisory of a persona's inbox consumer into a dead letter in the same format,
 with the same notice, unless that message is a dead letter already. Fetching a message by sequence
-(`STREAM.MSG.GET`) would let a persona read every inbox, so only the human's credentials hear the advisories; those
+(`STREAM.MSG.GET`) would let a persona read every inbox, so only human credentials hear the advisories; those
 issued before must be issued again with `ants auth user human`. Advisories are core NATS and not stored: one published
 while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
 
@@ -481,8 +491,11 @@ another's id, so the persona picks among requests sharing an id. A bare id (or s
 matches a single request; when it matches several, the command lists their `<persona>/<id>` names and answers none.
 
 A request is pending until it has a decision or expires; both requests and decisions are read back from the stream,
-so requests made while no CLI was running show up too. Answering stores the decision in the stream before returning,
-and refuses a request already answered, an expired one, or a verdict the harness did not offer. A request belongs to
+without consuming anything, so every human sees every request, including those made while no CLI was running.
+Answering stores the decision in the stream before returning, and refuses a request already answered, an expired one,
+or a verdict the harness did not offer. The decision is stored only while the request's decision subject holds none
+(`Nats-Expected-Last-Subject-Sequence`), so when two humans answer at once, the first decision wins, as the persona
+takes the first it hears, and the second human is told the request was already answered. A request belongs to
 the persona its subject names; one whose body names another persona is skipped with a warning, so it is neither
 listed nor answerable.
 
@@ -580,11 +593,11 @@ nats-server 2.11 or later), and the loser reads the room again.
 
 ```sh
 ants plan <thread>                      # the room's posts: time, author, turns left, text
-ants plan <thread> "ship friday"        # post as the human, which gives the room a fresh budget (8 turns)
+ants plan <thread> "ship friday"        # post as the CLI's human, which gives the room a fresh budget (8 turns)
 ants watch 'ants.plan.>'                # every room, live
 ```
 
-Personas and the human read a room back through their own consumer, `plan-<persona>`, created for the read and
+Personas and humans read a room back through their own consumer, `plan-<persona>`, created for the read and
 deleted after it; their credentials allow it to filter plan subjects only. Persona and human credentials issued before
 plan rooms need `ants auth user` again.
 
@@ -763,8 +776,8 @@ any sender to replay them, deciding approvals, setting up leaf outboxes and the 
 writing `ants_humans`. Each human reads its replies only through its own inbox consumer, `inbox-<name>`. Persona
 credentials only read `ants_humans`. The holder of the team directory (`ants auth init`) is the first human and
 issues its own credentials with `ants auth user NAME --human`. A human joins `ants_humans` on its first CLI connection, not when its
-credentials are issued: until then daemons take its messages for an agent's. For now the CLI acts as `human` whatever
-its credentials; daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
+credentials are issued: until then daemons take its messages for an agent's. The CLI acts as the human its credentials
+name (see CLI); daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid. Credentials issued before `ants_humans` need `ants auth user` again.
 

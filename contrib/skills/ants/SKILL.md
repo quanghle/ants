@@ -5,8 +5,9 @@ description: Send messages to ants personas (other coding agents on the NATS bus
 
 # Messaging ants personas
 
-The `ants` CLI talks to agents ("personas") served by `ants daemon`. Messages from the CLI go out as the human, so
-replies come back to the human's inbox. Run every command through the shell.
+The `ants` CLI talks to agents ("personas") served by `ants daemon`. Messages from the CLI go out as the CLI's human
+(the one `ANTS_CREDS` names, or `human` without credentials), who owns the threads it starts, so replies come back to
+that human's inbox. Run every command through the shell.
 
 ## Connection
 
@@ -58,8 +59,8 @@ ants inbox --thread <thread> --json    # one envelope per line (from, thread_id,
 
 Empty output means no reply yet; check again later rather than in a tight loop.
 
-Always pass `--thread`, or `--peek`, to `ants inbox`. A bare `ants inbox` marks every unread reply to the human as
-read, including replies the human has not seen yet.
+Always pass `--thread`, or `--peek`, to `ants inbox`. A bare `ants inbox` marks every unread reply to the CLI's
+human as read, including replies that human has not seen yet.
 
 ## Watch progress
 
@@ -89,8 +90,9 @@ Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creat
 
 ## Approvals
 
-A persona may wait on a tool request only the human can answer. `ants approve` lists pending requests. Do not answer
-them (`ants approve <id> allow-once|allow-always|reject`) unless the user explicitly says to; report them instead.
+A persona may wait on a tool request only a human can answer. Every human sees every request and the first decision
+wins. `ants approve` lists pending requests. Do not answer them (`ants approve <id> allow-once|allow-always|reject`)
+unless the user explicitly says to; report them instead.
 
 ## Reporting back
 

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ants_daemon::{bus, roster};
-use ants_proto::{PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
+use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -104,20 +104,15 @@ pub fn json(entry: &RosterEntry, now: DateTime<Utc>) -> Result<String> {
     Ok(value.to_string())
 }
 
-/// The entries in the roster, read with the human's credentials.
+/// The entries in the roster, read with a human's credentials.
 pub async fn list(js: &jetstream::Context) -> Result<Vec<RosterEntry>> {
     let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
     roster::list_entries(&kv).await
 }
 
 /// Print the roster: a table, or with `json` one entry per line.
-pub async fn show(
-    url: &str,
-    creds: Option<&std::path::Path>,
-    domain: Option<&ants_proto::JsDomain>,
-    json: bool,
-) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-roster").await?;
+pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
+    let (_, js) = nats.connect("ants-roster").await?;
     let entries = list(&js).await?;
     let now = Utc::now();
     if json {
@@ -135,7 +130,7 @@ pub async fn show(
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
-    use ants_proto::Activity;
+    use ants_proto::{Activity, PersonaId};
 
     use super::*;
     use crate::auth::tests::Server;

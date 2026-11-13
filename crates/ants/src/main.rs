@@ -30,6 +30,7 @@ struct Cli {
     nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-persona permissions.
+    /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
 
@@ -44,7 +45,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Send a message. Starts with @persona to pick the recipient; the messenger gets it otherwise.
+    /// Send a message as the CLI's human, who owns the thread. Starts with @persona to pick the recipient; the
+    /// messenger gets it otherwise.
     Ask {
         /// Continue an existing thread.
         #[arg(long)]
@@ -56,7 +58,8 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
-    /// Print the replies not read yet, including those that arrived while no CLI was running, and mark them read.
+    /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
+    /// mark them read.
     Inbox {
         /// Show without marking read.
         #[arg(long)]
@@ -103,7 +106,7 @@ enum Command {
     /// Channels: named groups of personas that the human posts to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
-    /// Show the plan room of a thread, or post to it as the human, which gives the room a fresh turn budget.
+    /// Show the plan room of a thread, or post to it as the CLI's human, which gives the room a fresh turn budget.
     Plan {
         thread: ThreadId,
         /// The post. Without it, show the room.
@@ -120,7 +123,8 @@ enum Command {
     /// Create the ANTS stream and the roster, sessions, attempts, channels and humans buckets on the server, or add the
     /// stream subjects an older version lacks. Needs a human's credentials.
     Init,
-    /// Tool requests personas escalate: list the pending ones, show one, or answer it.
+    /// Tool requests personas escalate: list the pending ones, show one, or answer it. Every human sees every
+    /// request; the first decision wins.
     Approve {
         /// Request as `<persona>/<id>`, or a bare id when only one persona has it; a unique start of the id will do.
         /// Without it, list the pending requests.
@@ -404,32 +408,34 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let domain = cli.js_domain.as_ref();
+    let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
-        Command::Ask { thread, wait, words } => ask(&cli.nats, cli.creds.as_deref(), domain, thread, wait, words).await,
+        Command::Ask { thread, wait, words } => ask(&nats()?, thread, wait, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread, limit, peek };
-            show_inbox(&cli.nats, cli.creds.as_deref(), domain, &select, follow, json).await
+            show_inbox(&nats()?, &select, follow, json).await
         }
-        Command::Roster { json } => roster::show(&cli.nats, cli.creds.as_deref(), domain, json).await,
+        Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Post { channel, thread, wait, timeout, words } => {
             let wait = wait.then(|| std::time::Duration::from_secs(timeout));
-            post(&cli.nats, cli.creds.as_deref(), domain, channel, thread, wait, words).await
+            post(&nats()?, channel, thread, wait, words).await
         }
-        Command::Channel(command) => channels(&cli.nats, cli.creds.as_deref(), domain, command).await,
-        Command::Plan { thread, words } => plan_room(&cli.nats, cli.creds.as_deref(), domain, thread, words).await,
+        Command::Channel(command) => channels(&nats()?, command).await,
+        Command::Plan { thread, words } => plan_room(&nats()?, thread, words).await,
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
-            watch(&cli.nats, cli.creds.as_deref(), domain, filter).await
+            watch(&nats()?, filter).await
         }
         Command::Init => {
-            let (_, js) =
-                bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
+            let nats = nats()?;
+            let (_, js) = nats.connect_only("ants-cli").await?;
             bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
             bus::ensure_sessions(&js).await?;
             bus::ensure_attempts(&js).await?;
             bus::ensure_channels(&js).await?;
             humans::ensure(&js).await?;
+            humans::register_or_warn(&js, &nats.me).await;
             println!(
                 "stream {} and buckets {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
@@ -443,9 +449,9 @@ async fn main() -> Result<()> {
         }
         Command::Approve { id, verdict, follow, json } => {
             let args = approve::Args { id, answer: verdict, follow, json };
-            approve::run(&cli.nats, cli.creds.as_deref(), domain, args).await
+            approve::run(&nats()?, args).await
         }
-        Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), domain, command).await,
+        Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
             let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
             serve::run(serve::configs(personas, &cli.nats, cli.creds, domain.cloned())?).await
@@ -543,18 +549,44 @@ async fn main() -> Result<()> {
             remote.run(listener).await
         }
         Command::Leaf(LeafCommand::Outbox { machine, personas, humans, remove }) => {
-            let (_, js) =
-                bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
+            let nats = nats()?;
+            let (_, js) = nats.connect("ants-cli").await?;
             if remove {
                 outbox::remove(&js, &machine).await?;
                 println!("the hub no longer takes anything from the outbox of {machine}");
             } else {
-                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), &machine).await?;
+                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
                 outbox::admit(&leaf, &js, &machine, &auth::members(&personas, &humans)).await?;
                 println!("outbox of {machine} ready; the hub takes from it what its personas and humans send");
             }
             Ok(())
         }
+    }
+}
+
+/// How the CLI reaches NATS, and as whom: the human its credentials name ([`humans::Me`]).
+pub struct Nats<'a> {
+    url: &'a str,
+    creds: Option<&'a Path>,
+    domain: Option<&'a JsDomain>,
+    pub me: humans::Me,
+}
+
+impl<'a> Nats<'a> {
+    fn new(url: &'a str, creds: Option<&'a Path>, domain: Option<&'a JsDomain>) -> Result<Self> {
+        Ok(Self { url, creds, domain, me: humans::Me::from_creds(creds)? })
+    }
+
+    /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]).
+    pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
+        let (client, js) = self.connect_only(name).await?;
+        humans::register_or_warn(&js, &self.me).await;
+        Ok((client, js))
+    }
+
+    /// Connect as [`Nats::me`] without registering it.
+    async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
+        bus::connect(self.url, self.creds, self.domain, &self.me.id, name).await
     }
 }
 
@@ -581,22 +613,11 @@ fn recipient(mut words: Vec<String>) -> Result<(PersonaId, String)> {
     Ok((to, words.join(" ")))
 }
 
-async fn ask(
-    url: &str,
-    creds: Option<&Path>,
-    domain: Option<&JsDomain>,
-    thread: Option<ThreadId>,
-    wait: bool,
-    words: Vec<String>,
-) -> Result<()> {
-    let (to, text) = recipient(words)?;
-    let envelope = match thread {
-        Some(thread) => Envelope::on_thread(thread, PersonaId::human(), to, text),
-        None => Envelope::new(PersonaId::human(), to, text),
-    };
-    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
+    let envelope = ask_envelope(&nats.me.id, thread, words)?;
+    let (client, js) = nats.connect("ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
-    let mut replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await?;
+    let mut replies = client.subscribe(subject::inbox_of(&nats.me.id)).await?;
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
     }
@@ -612,8 +633,12 @@ async fn ask(
         }
         if reply.thread_id == envelope.thread_id {
             println!("{}: {}", reply.from, reply.text);
+            if !nats.me.role.is_human() {
+                // A persona's inbox consumer is its daemon's.
+                return Ok(());
+            }
             // Seen here, so `ants inbox` need not show it again. The other replies stay unread.
-            match inbox::mark_read(&js, &reply).await {
+            match inbox::mark_read(&js, &nats.me.id, &reply).await {
                 Ok(true) => {}
                 Ok(false) => tracing::debug!("reply already read"),
                 Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
@@ -624,10 +649,18 @@ async fn ask(
     bail!("connection closed before a reply arrived")
 }
 
+/// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it.
+fn ask_envelope(me: &PersonaId, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
+    let (to, text) = recipient(words)?;
+    let envelope = match thread {
+        Some(thread) => Envelope::on_thread(thread, me.clone(), to, text),
+        None => Envelope::new(me.clone(), to, text),
+    };
+    Ok(envelope.with_owner(Some(me.clone())))
+}
+
 async fn post(
-    url: &str,
-    creds: Option<&Path>,
-    domain: Option<&JsDomain>,
+    nats: &Nats<'_>,
     channel: ChannelId,
     thread: Option<ThreadId>,
     wait: Option<std::time::Duration>,
@@ -638,7 +671,7 @@ async fn post(
         bail!("nothing to post");
     }
     let post = channel::human_post(channel, thread, text);
-    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+    let (client, js) = nats.connect("ants-cli").await?;
     let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
     if entry.is_none() {
         tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
@@ -667,8 +700,8 @@ async fn post(
     Ok(())
 }
 
-async fn channels(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, command: ChannelCommand) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
+    let (_, js) = nats.connect("ants-cli").await?;
     let kv = channel::open(&js).await?;
     match command {
         ChannelCommand::Create { channel, members, messenger } => {
@@ -736,7 +769,7 @@ async fn channels(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, co
             if channel::get(&kv, &channel).await?.is_none() {
                 tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
             }
-            let mut threads = channel::threads(channel::read(&js, &PersonaId::human(), &channel).await?);
+            let mut threads = channel::threads(channel::read(&js, &nats.me.id, &channel).await?);
             if let Some(thread) = &thread {
                 threads.retain(|t| t.id == *thread);
             }
@@ -775,16 +808,13 @@ async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, personas: impl I
     }
 }
 
-async fn show_inbox(
-    url: &str,
-    creds: Option<&Path>,
-    domain: Option<&JsDomain>,
-    select: &inbox::Select,
-    follow: bool,
-    json: bool,
-) -> Result<()> {
-    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-inbox").await?;
-    let mut inbox = inbox::Inbox::open(&js).await?;
+async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json: bool) -> Result<()> {
+    let me = &nats.me.id;
+    if !nats.me.role.is_human() {
+        bail!("the credentials of {me} are a persona's, whose inbox its daemon reads; `ants inbox` reads a human's");
+    }
+    let (client, js) = nats.connect("ants-inbox").await?;
+    let mut inbox = inbox::Inbox::open(&js, me).await?;
     let show = |e: &Envelope| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(e)?);
@@ -820,8 +850,8 @@ async fn show_inbox(
     result.and(released)
 }
 
-async fn dead_letters(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, command: DeadCommand) -> Result<()> {
-    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+async fn dead_letters(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
+    let (client, js) = nats.connect("ants-cli").await?;
     let stream = || async { js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream") };
     match command {
         DeadCommand::List => {
@@ -878,21 +908,15 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-async fn plan_room(
-    url: &str,
-    creds: Option<&Path>,
-    domain: Option<&JsDomain>,
-    thread: ThreadId,
-    words: Vec<String>,
-) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+async fn plan_room(nats: &Nats<'_>, thread: ThreadId, words: Vec<String>) -> Result<()> {
+    let (_, js) = nats.connect("ants-cli").await?;
     if !words.is_empty() {
-        let post = PlanPost::new(thread, PersonaId::human(), words.join(" "));
+        let post = PlanPost::new(thread, nats.me.id.clone(), words.join(" "));
         plan::publish(&js, &post, None).await?;
         println!("posted to the plan room of thread {} ({} turns left)", post.thread_id, post.turn_budget);
         return Ok(());
     }
-    let room = plan::read(&js, &PersonaId::human(), &thread).await?;
+    let room = plan::read(&js, &nats.me.id, &thread).await?;
     if room.posts.is_empty() {
         println!("the plan room of thread {thread} is empty");
     }
@@ -913,10 +937,10 @@ fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
     }
 }
 
-async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filter: String) -> Result<()> {
+async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
     use std::io::Write as _;
 
-    let (client, _) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-watch").await?;
+    let (client, _) = nats.connect("ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
     let mut printer = Printer::default();
     while let Some(msg) = sub.next().await {
@@ -1025,6 +1049,16 @@ mod tests {
     fn messenger_is_the_default_recipient() {
         let (to, text) = recipient(words("who owns billing?")).unwrap();
         assert_eq!((to, text.as_str()), (PersonaId::messenger(), "who owns billing?"));
+    }
+
+    #[test]
+    fn an_ask_comes_from_and_belongs_to_the_cli_human() {
+        let alice: PersonaId = "alice".parse().unwrap();
+        let ask = ask_envelope(&alice, None, words("@dev-b check the build")).unwrap();
+        assert_eq!((&ask.from, ask.to.as_str(), ask.owner.as_ref()), (&alice, "dev-b", Some(&alice)));
+        let thread: ThreadId = "t1".parse().unwrap();
+        let follow_up = ask_envelope(&alice, Some(thread.clone()), words("and the docs")).unwrap();
+        assert_eq!((follow_up.thread_id, follow_up.owner), (thread, Some(alice)));
     }
 
     #[test]

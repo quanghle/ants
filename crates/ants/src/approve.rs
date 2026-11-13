@@ -1,20 +1,23 @@
-//! `ants approve`: the tool requests personas escalate to the human, and the human's answers.
+//! `ants approve`: the tool requests personas escalate to the humans, and their answers.
 //!
-//! Requests and decisions both live in the ANTS stream, so the pending ones are read back by subject: every request on
-//! `ants.approvals.<persona>` that has not expired and has no decision on `ants.approvals.<persona>.<request id>`. An
-//! expired request needs no answer: its persona already rejected it. The persona of a request is the one its subject
-//! names, as credentials pin it there; a request whose body names another is skipped with a warning.
+//! Requests and decisions both live in the ANTS stream, so the pending ones are read back by subject, without consuming
+//! anything: every human sees every request on `ants.approvals.<persona>` that has not expired and has no decision on
+//! `ants.approvals.<persona>.<request id>`. An expired request needs no answer: its persona already rejected it. The
+//! persona of a request is the one its subject names, as credentials pin it there; a request whose body names another
+//! is skipped with a warning.
+//!
+//! Any human decides, and the first decision wins, as the persona takes the first one it hears: a decision is stored
+//! only while the request's subject holds none ([`answer`]), so of two humans answering at once, the second is told the
+//! request was already answered.
 //!
 //! Request ids are unique only per persona: any persona can publish a request reusing another's id. So a request is
 //! written `<persona>/<id>`, and a bare id (or start of one) matching requests of several personas is refused with
 //! the qualified ids to choose from.
 
-use std::path::Path;
-
-use ants_daemon::bus;
 use ants_proto::{ApprovalDecision, ApprovalRequest, PersonaId, STREAM, Verdict, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
+use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::stream::{LastRawMessageErrorKind, Stream};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt as _;
@@ -80,31 +83,46 @@ pub async fn requests(stream: &Stream) -> Result<Vec<ApprovalRequest>> {
     }
 }
 
-/// The stored decision on `request`, if any.
+/// The decision that counts on `request`, the first stored, if any.
 pub async fn decision(stream: &Stream, request: &ApprovalRequest) -> Result<Option<ApprovalDecision>> {
-    let msg = match stream.get_last_raw_message_by_subject(&request.decision_subject()).await {
-        Ok(msg) => msg,
-        Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading the decision on request {}", request.id)),
-    };
-    match serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
-        Ok(d) if d.request_id == request.id && d.persona == request.persona => Ok(Some(d)),
-        // The persona ignores these too, so the request is still open.
-        _ => {
-            tracing::warn!(seq = msg.sequence, "ignoring a malformed decision");
-            Ok(None)
+    Ok(decisions(stream, request).await?.0)
+}
+
+/// The first stored decision on `request`, if any, and the sequence of the last message on its subject before it (0
+/// for none).
+async fn decisions(stream: &Stream, request: &ApprovalRequest) -> Result<(Option<ApprovalDecision>, u64)> {
+    let mut last = 0;
+    loop {
+        let msg = match stream.get_first_raw_message_by_subject(&request.decision_subject(), last + 1).await {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok((None, last)),
+            Err(e) => return Err(e).with_context(|| format!("reading the decision on request {}", request.id)),
+        };
+        last = msg.sequence;
+        match serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
+            Ok(d) if d.request_id == request.id && d.persona == request.persona => return Ok((Some(d), last)),
+            // The persona ignores these too, so the request is still open.
+            _ => tracing::warn!(seq = msg.sequence, "ignoring a malformed decision"),
         }
     }
 }
 
 pub async fn state(stream: &Stream, request: &ApprovalRequest, now: DateTime<Utc>) -> Result<State> {
-    if let Some(decision) = decision(stream, request).await? {
-        return Ok(State::Decided(decision));
-    }
-    Ok(if request.is_expired(now) { State::Expired } else { State::Pending })
+    Ok(state_at(stream, request, now).await?.0)
 }
 
-/// The requests still waiting for the human at `now`, oldest first.
+/// [`state`], and the sequence of the last message on the request's decision subject (0 for none).
+async fn state_at(stream: &Stream, request: &ApprovalRequest, now: DateTime<Utc>) -> Result<(State, u64)> {
+    let (decision, last) = decisions(stream, request).await?;
+    let state = match decision {
+        Some(decision) => State::Decided(decision),
+        None if request.is_expired(now) => State::Expired,
+        None => State::Pending,
+    };
+    Ok((state, last))
+}
+
+/// The requests still waiting for a human at `now`, oldest first.
 pub async fn pending(stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
     let mut pending = Vec::new();
     for request in requests(stream).await? {
@@ -184,7 +202,8 @@ pub async fn find(stream: &Stream, id: &str) -> Result<ApprovalRequest> {
     select(requests(stream).await?, &query)
 }
 
-/// Answer the pending request `id` picks (see [`find`]), and wait until JetStream has stored the decision.
+/// Answer the pending request `id` picks (see [`find`]), and wait until JetStream has stored the decision. The
+/// decision is stored only while the request has none, so another human's that came first wins over it.
 pub async fn answer(
     js: &jetstream::Context,
     stream: &Stream,
@@ -193,19 +212,54 @@ pub async fn answer(
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let request = find(stream, id).await?;
-    match state(stream, &request, now).await? {
-        State::Pending => {}
-        State::Decided(d) => bail!("request {} was already answered: {}", qualified(&request), spelling(d.verdict)),
-        State::Expired => {
-            bail!("request {} expired at {}; {} rejected it", qualified(&request), request.expires_at, request.persona)
+    let last = check(stream, &request, verdict, now).await?;
+    decide(js, stream, &request, verdict, last).await
+}
+
+fn answered(request: &ApprovalRequest, decision: &ApprovalDecision) -> anyhow::Error {
+    anyhow::anyhow!("request {} was already answered: {}", qualified(request), spelling(decision.verdict))
+}
+
+/// Check that `request` is pending and offers `verdict`. Returns the sequence of the last message on its decision
+/// subject, for [`decide`].
+async fn check(stream: &Stream, request: &ApprovalRequest, verdict: Verdict, now: DateTime<Utc>) -> Result<u64> {
+    let last = match state_at(stream, request, now).await? {
+        (State::Pending, last) => last,
+        (State::Decided(d), _) => return Err(answered(request, &d)),
+        (State::Expired, _) => {
+            bail!("request {} expired at {}; {} rejected it", qualified(request), request.expires_at, request.persona)
         }
-    }
+    };
     if !request.options.contains(&verdict) {
-        bail!("{} is not offered for request {}; choose {}", spelling(verdict), qualified(&request), options(&request));
+        bail!("{} is not offered for request {}; choose {}", spelling(verdict), qualified(request), options(request));
     }
+    Ok(last)
+}
+
+/// Store the decision `verdict` on `request` unless a message came on its decision subject after `last` ([`check`]).
+async fn decide(
+    js: &jetstream::Context,
+    stream: &Stream,
+    request: &ApprovalRequest,
+    verdict: Verdict,
+    last: u64,
+) -> Result<ApprovalDecision> {
     let decision = request.decide(verdict);
-    bus::publish_json(js, decision.subject(), &decision, None).await.context("publishing the decision")?;
-    Ok(decision)
+    let message = jetstream::message::PublishMessage::build()
+        .payload(serde_json::to_vec(&decision)?.into())
+        .expected_last_subject_sequence(last);
+    let stored = match js.send_publish(decision.subject(), message).await {
+        Ok(ack) => ack.await,
+        Err(e) => Err(e),
+    };
+    match stored {
+        Ok(_) => Ok(decision),
+        Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => match self::decision(stream, request).await? {
+            Some(first) => Err(answered(request, &first)),
+            None => Err(e).context("publishing the decision: the request changed meanwhile; try again"),
+        },
+        Err(e) => Err(e).context("publishing the decision"),
+    }
 }
 
 /// Time left before `expires_at`, such as `4m05s`.
@@ -281,8 +335,8 @@ pub struct Args {
     pub json: bool,
 }
 
-pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::JsDomain>, args: Args) -> Result<()> {
-    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-approve").await?;
+pub async fn run(nats: &crate::Nats<'_>, args: Args) -> Result<()> {
+    let (client, js) = nats.connect("ants-approve").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let show = |request: &ApprovalRequest| -> Result<()> {
         if args.json {
@@ -337,7 +391,8 @@ pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::Js
 mod tests {
     use std::time::Duration;
 
-    use ants_proto::{ThreadId, ToolCall};
+    use ants_daemon::bus;
+    use ants_proto::{Role, ThreadId, ToolCall};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -425,6 +480,42 @@ mod tests {
         assert_eq!(stored.subject.as_str(), format!("ants.approvals.dev-a.{id}"));
         assert_eq!(titles(&pending(&stream, Utc::now()).await.unwrap()), ["rm -rf /"]);
         assert_eq!(find(&stream, &format!("dev-b/{id}")).await.unwrap(), copy);
+    }
+
+    /// Two humans with their own credentials see the same pending request; when both answer it, the first decision
+    /// is the one stored and the second is refused, even when both checked it was pending before either answered.
+    #[tokio::test]
+    async fn every_human_sees_every_request_and_the_first_decision_wins() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a): (PersonaId, PersonaId, PersonaId) =
+            ("alice".parse().unwrap(), "bob".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+        let (_, b_js) = server.connect_as(&bob, Role::Human).await;
+        let a_stream = bus::ensure_stream(&a_js).await.unwrap();
+        let b_stream = bus::ensure_stream(&b_js).await.unwrap();
+        let (agent_client, agent) = server.connect(&dev_a).await;
+        let push = request(&dev_a, "git push", vec![Verdict::AllowOnce, Verdict::Reject], Duration::from_secs(60));
+        let mut heard = agent_client.subscribe(push.decision_subject()).await.unwrap();
+        agent_client.flush().await.unwrap();
+        bus::publish_json(&agent, push.subject(), &push, None).await.unwrap();
+        for stream in [&a_stream, &b_stream] {
+            assert_eq!(titles(&pending(stream, Utc::now()).await.unwrap()), ["git push"]);
+        }
+
+        let a_last = check(&a_stream, &push, Verdict::AllowOnce, Utc::now()).await.unwrap();
+        let b_last = check(&b_stream, &push, Verdict::Reject, Utc::now()).await.unwrap();
+        let first = decide(&a_js, &a_stream, &push, Verdict::AllowOnce, a_last).await.unwrap();
+        let late = decide(&b_js, &b_stream, &push, Verdict::Reject, b_last).await.unwrap_err();
+        assert!(late.to_string().contains("already answered: allow-once"), "{late:#}");
+        let again = answer(&b_js, &b_stream, &push.id.to_string(), Verdict::Reject, Utc::now()).await.unwrap_err();
+        assert!(again.to_string().contains("already answered: allow-once"), "{again:#}");
+        for stream in [&a_stream, &b_stream] {
+            assert_eq!(state(stream, &push, Utc::now()).await.unwrap(), State::Decided(first.clone()));
+            assert!(pending(stream, Utc::now()).await.unwrap().is_empty());
+        }
+        // The persona takes the first decision it hears: alice's.
+        let msg = tokio::time::timeout(Duration::from_secs(5), heard.next()).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<ApprovalDecision>(&msg.payload).unwrap(), first);
     }
 
     #[test]

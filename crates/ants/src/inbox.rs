@@ -1,4 +1,4 @@
-//! The human's inbox: replies kept in the durable consumer `inbox-human` until `ants inbox` shows them.
+//! A human's inbox: replies kept in the human's durable consumer, `inbox-<name>`, until `ants inbox` shows them.
 //!
 //! A reply is read once its message is acked. Messages fetched but not wanted (peeked, on another thread, past the
 //! limit) are held and handed back with a nak on [`Inbox::release`], so they stay unread; if the process dies first,
@@ -43,9 +43,10 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    pub async fn open(js: &jetstream::Context) -> Result<Self> {
+    /// The inbox of `human`.
+    pub async fn open(js: &jetstream::Context, human: &PersonaId) -> Result<Self> {
         let stream = bus::ensure_stream(js).await?;
-        let consumer = bus::human_inbox_consumer(&stream, &PersonaId::human(), ACK_WAIT).await?;
+        let consumer = bus::human_inbox_consumer(&stream, human, ACK_WAIT).await?;
         Ok(Self { client: js.client(), consumer, held: BTreeMap::new(), taken: 0 })
     }
 
@@ -154,10 +155,10 @@ impl Inbox {
     }
 }
 
-/// Mark `reply`, already shown by `ants ask --wait`, read. JetStream may store it a moment after it was delivered, so
-/// a miss is retried briefly. Returns whether it was found unread.
-pub async fn mark_read(js: &jetstream::Context, reply: &Envelope) -> Result<bool> {
-    let mut inbox = Inbox::open(js).await?;
+/// Mark `reply`, already shown by `ants ask --wait`, read in the inbox of `human`. JetStream may store it a moment
+/// after it was delivered, so a miss is retried briefly. Returns whether it was found unread.
+pub async fn mark_read(js: &jetstream::Context, human: &PersonaId, reply: &Envelope) -> Result<bool> {
+    let mut inbox = Inbox::open(js, human).await?;
     let select = Select { thread: Some(reply.thread_id.clone()), limit: Some(1), peek: false };
     let mut found = false;
     for _ in 0..5 {
@@ -190,7 +191,7 @@ mod tests {
     }
 
     async fn read(js: &jetstream::Context, select: Select) -> Vec<Envelope> {
-        let mut inbox = Inbox::open(js).await.unwrap();
+        let mut inbox = Inbox::open(js, &PersonaId::human()).await.unwrap();
         let unread = inbox.unread(&select).await.unwrap();
         inbox.release().await.unwrap();
         unread
@@ -226,9 +227,9 @@ mod tests {
 
         let last = asks[0].reply(dev_a.clone(), "four", Role::Human).unwrap();
         bus::publish(&agent, &last).await.unwrap();
-        assert!(mark_read(&human, &last).await.unwrap(), "ask --wait marks its reply read");
+        assert!(mark_read(&human, &PersonaId::human(), &last).await.unwrap(), "ask --wait marks its reply read");
         assert_eq!(texts(&read(&human, Select::default()).await), ["three"]);
         assert!(read(&human, Select::default()).await.is_empty());
-        assert!(!mark_read(&human, &last).await.unwrap());
+        assert!(!mark_read(&human, &PersonaId::human(), &last).await.unwrap());
     }
 }

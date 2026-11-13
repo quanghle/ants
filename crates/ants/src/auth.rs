@@ -271,10 +271,16 @@ pub(crate) mod tests {
             self.connect_as(persona, role(persona, false)).await
         }
 
-        /// A connection with credentials of `persona` issued in `role`.
-        async fn connect_as(&self, persona: &PersonaId, role: Role) -> (Client, jetstream::Context) {
+        /// Credentials of `persona` issued in `role`.
+        pub(crate) fn creds_as(&self, persona: &PersonaId, role: Role) -> PathBuf {
             let creds = self.dir().join(format!("{persona}-{role:?}.creds"));
             issue(&self.dir().join("auth"), persona, role, None, &creds).unwrap();
+            creds
+        }
+
+        /// A connection with credentials of `persona` issued in `role`.
+        pub(crate) async fn connect_as(&self, persona: &PersonaId, role: Role) -> (Client, jetstream::Context) {
+            let creds = self.creds_as(persona, role);
             let (client, mut js) = bus::connect(&self.url, Some(&creds), None, persona, "test").await.unwrap();
             // Denied JetStream requests only time out.
             js.set_timeout(Duration::from_secs(1));
