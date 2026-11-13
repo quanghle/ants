@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
             let dir = team_dir(dir)?;
             auth::init(&dir)?;
             println!(
-                "team keys in {0}\ninclude {0}/{1} from the nats-server configuration",
+                "team keys in {0}\ncopy {0}/{1} next to the nats-server configuration and include \"{1}\" from it (include paths are relative)",
                 dir.display(),
                 auth::SERVER_CONF
             );

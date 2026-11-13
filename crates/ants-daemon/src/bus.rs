@@ -12,6 +12,11 @@ use async_nats::jetstream::{self, kv, stream};
 /// How long the stream keeps messages, and the sessions bucket a thread's session.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
+/// sleep, dropped tunnel) is noticed within about a minute instead of three, and proxies with a 60 s idle timeout see
+/// traffic. Reconnects are unlimited by default.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+
 /// Connect to NATS as `persona`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
 /// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`.
 pub async fn connect(
@@ -22,6 +27,7 @@ pub async fn connect(
 ) -> Result<(async_nats::Client, jetstream::Context)> {
     let mut options = async_nats::ConnectOptions::new()
         .name(name)
+        .ping_interval(PING_INTERVAL)
         .custom_inbox_prefix(inbox_prefix(persona))
         .event_callback(|event| async move {
             match event {

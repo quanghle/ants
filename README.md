@@ -3,7 +3,8 @@
 Headless agent teams on several machines, talking to each other and to a human at the terminal over NATS.
 
 - **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster and sessions.
-- **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback bridge.
+- **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
+  bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio. Copilot CLI (`copilot --acp`) comes first.
 - **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and (later) the MCP server.
 
@@ -150,9 +151,11 @@ ants auth user human                   # ~/.config/ants/auth/human.creds, for th
 ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
-Add `include "/path/to/server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
+Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
 with the human's credentials to create the stream and the roster and sessions buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
+nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
+`server.conf` next to the server configuration (or include it by a relative path).
 
 ## Footprint
 
