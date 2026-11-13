@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{INTAKE_STREAM, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, PersonaId, STREAM, subject};
+use ants_proto::{INTAKE_STREAM, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, PersonaId, Role, STREAM, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -30,7 +30,9 @@ const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connect as the human to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
 pub async fn connect(url: &str, creds: Option<&Path>, machine: &Machine) -> Result<async_nats::Client> {
-    let mut options = async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox());
+    let mut options = async_nats::ConnectOptions::new()
+        .name("ants-cli")
+        .custom_inbox_prefix(machine.setup_inbox(&PersonaId::human()));
     if let Some(path) = creds {
         options =
             options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))?;
@@ -155,7 +157,7 @@ fn admissions(machine: &Machine, personas: &[PersonaId], start: u64) -> Vec<Sour
             name: INTAKE_STREAM.to_owned(),
             start_sequence: Some(start),
             subject_transforms: machine
-                .admitted(persona, persona.is_human() || !human)
+                .admitted(persona, Role::by_default(persona), persona.is_human() || !human)
                 .into_iter()
                 .map(|(source, destination)| SubjectTransform { source, destination })
                 .collect(),

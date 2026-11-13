@@ -742,6 +742,15 @@ entry whose channel disagrees with its key. A persona takes channel posts throug
 and reads channels back through `chanread-<persona>`; credentials pin the filter of both under `ants.chan.>`, so
 neither reaches an inbox. Credentials and streams set up before channels need `ants auth user` and `ants init` again.
 
+Humans: a human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a
+`HumanEntry` naming it); readers skip an entry whose persona disagrees with its key. Every human gets the same
+credentials, whatever its name (`Permissions::for_persona` with `Role::Human`): what the human's credentials allow
+here, plus creating and writing `ants_humans`. Persona credentials only read the bucket. For now `ants auth user`
+issues the human role to `human` only, and daemons and the CLI do not read the bucket yet. An envelope may carry
+`owner`, the human who started its thread: replies, messages an agent sends on or from the thread, escalations and
+notices on it keep it; envelopes without one stay valid. Credentials issued before `ants_humans` need `ants auth user`
+again.
+
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI

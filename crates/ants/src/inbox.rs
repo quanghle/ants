@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{Envelope, ThreadId};
+use ants_proto::{Envelope, PersonaId, ThreadId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{self, AckKind};
@@ -45,7 +45,7 @@ pub struct Inbox {
 impl Inbox {
     pub async fn open(js: &jetstream::Context) -> Result<Self> {
         let stream = bus::ensure_stream(js).await?;
-        let consumer = bus::human_inbox_consumer(&stream, ACK_WAIT).await?;
+        let consumer = bus::human_inbox_consumer(&stream, &PersonaId::human(), ACK_WAIT).await?;
         Ok(Self { client: js.client(), consumer, held: BTreeMap::new(), taken: 0 })
     }
 
@@ -180,7 +180,7 @@ pub fn render(e: &Envelope) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::PersonaId;
+    use ants_proto::Role;
 
     use super::*;
     use crate::auth::tests::Server;
@@ -209,9 +209,9 @@ mod tests {
             Envelope::new(PersonaId::human(), dev_a.clone(), "b"),
         ];
         for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three")] {
-            bus::publish(&agent, &ask.reply(dev_a.clone(), text).unwrap()).await.unwrap();
+            bus::publish(&agent, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
-        let forged = asks[0].reply(dev_a.clone(), "forged").unwrap();
+        let forged = asks[0].reply(dev_a.clone(), "forged", Role::Human).unwrap();
         let subject = ants_proto::subject::inbox(&PersonaId::human(), &PersonaId::human());
         bus::publish_json(&human, subject, &forged, None).await.unwrap();
 
@@ -224,7 +224,7 @@ mod tests {
         let first = Select { limit: Some(1), ..Default::default() };
         assert_eq!(texts(&read(&human, first).await), ["one"]);
 
-        let last = asks[0].reply(dev_a.clone(), "four").unwrap();
+        let last = asks[0].reply(dev_a.clone(), "four", Role::Human).unwrap();
         bus::publish(&agent, &last).await.unwrap();
         assert!(mark_read(&human, &last).await.unwrap(), "ask --wait marks its reply read");
         assert_eq!(texts(&read(&human, Select::default()).await), ["three"]);

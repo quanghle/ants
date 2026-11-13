@@ -152,6 +152,7 @@ pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
         text: post.text.clone(),
         turn_budget: post.turn_budget,
         in_reply_to: None,
+        owner: None,
         sent_at: post.sent_at,
     }
 }

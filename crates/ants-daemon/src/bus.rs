@@ -289,15 +289,18 @@ pub async fn chan_consumer(
     Ok(consumer.messages().await?)
 }
 
-/// The durable consumer of the human's inbox, created if missing. A reply stays in it, unread, until acked. Any number
-/// may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
+/// The durable consumer of the inbox of `human`, created if missing. A reply stays in it, unread, until acked. Any
+/// number may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
 /// consumer from before inbox subjects named the sender gets the current filter.
-pub async fn human_inbox_consumer(stream: &stream::Stream, ack_wait: Duration) -> Result<PullConsumer> {
-    let human = PersonaId::human();
-    let name = ants_proto::inbox_consumer(&human);
+pub async fn human_inbox_consumer(
+    stream: &stream::Stream,
+    human: &PersonaId,
+    ack_wait: Duration,
+) -> Result<PullConsumer> {
+    let name = ants_proto::inbox_consumer(human);
     let config = pull::Config {
         durable_name: Some(name.clone()),
-        filter_subject: subject::inbox_of(&human),
+        filter_subject: subject::inbox_of(human),
         ack_policy: consumer::AckPolicy::Explicit,
         ack_wait,
         max_deliver: -1,

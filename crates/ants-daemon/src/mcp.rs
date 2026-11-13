@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
-use ants_proto::{Envelope, PersonaId, PlanPost, ROSTER_BUCKET, RosterEntry, ThreadId, Uuid};
+use ants_proto::{Envelope, PersonaId, PlanPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, Uuid};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -311,7 +311,7 @@ impl Hub {
         let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
         let mut envelope = current
-            .reply(self.persona.clone(), text)
+            .reply(self.persona.clone(), text, Role::by_default(&current.from))
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?;
         envelope.to = to;
         envelope.in_reply_to = None;
@@ -326,8 +326,10 @@ impl Hub {
     /// Post `text` to the plan room of `thread`, spending one of its turns. The post that spends the last one tells the
     /// human, who has the thread from then on.
     async fn post_plan(&self, thread: &ThreadId, text: String) -> Result<String, String> {
-        let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| e.turn_budget);
-        let budget = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
+        let current =
+            self.sessions.lock().expect("sessions").current.get(thread).map(|e| (e.turn_budget, e.owner.clone()));
+        let (budget, owner) =
+            current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let room = self.rooms.read(thread).await.map_err(|e| format!("cannot read the plan room: {e:#}"))?;
             let post = PlanPost::spend(thread.clone(), self.persona.clone(), text.clone(), budget, room.last())
@@ -350,7 +352,8 @@ impl Hub {
                      `ants plan {thread}` shows the room; `ants plan {thread} TEXT` posts there with a fresh budget.",
                     post.from, post.text
                 ),
-            );
+            )
+            .with_owner(owner.clone());
             self.send(&notice).await.map_err(|e| {
                 format!("posted the room's last turn, but the human was not told ({e}); message the human")
             })?;
@@ -1126,7 +1129,7 @@ mod tests {
         });
         let ask = sent.recv().await.unwrap();
         assert_eq!(ask.to, persona("dev-c"));
-        let reply = ask.reply(persona("dev-c"), "paid").unwrap();
+        let reply = ask.reply(persona("dev-c"), "paid", Role::Persona).unwrap();
         mcp.hub.route(reply).await;
         let (ok, text) = asking.await.unwrap();
         assert!(ok && text == "Routed to dev-c for billing. dev-c replied:\npaid", "{text}");
@@ -1206,12 +1209,12 @@ mod tests {
         assert_eq!((&ask.to, &ask.thread_id), (&persona("dev-b"), &current.thread_id));
 
         // Someone else answering does not count.
-        let mut forged = ask.reply(persona("dev-c"), "13").unwrap();
+        let mut forged = ask.reply(persona("dev-c"), "13", Role::Persona).unwrap();
         forged.in_reply_to = Some(ask.id);
         mcp.hub.route(forged.clone()).await;
         assert!(!mcp.claim(&forged).await.unwrap(), "a forged reply is an ordinary message");
 
-        let reply = ask.reply(persona("dev-b"), "42").unwrap();
+        let reply = ask.reply(persona("dev-b"), "42", Role::Persona).unwrap();
         mcp.hub.route(reply.clone()).await;
         let (ok, text) = asking.await.unwrap();
         assert!(ok && text.ends_with("42"), "{text}");
@@ -1230,7 +1233,7 @@ mod tests {
             tokio::spawn(
                 async move { call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "?"})).await },
             );
-        let reply = sent.recv().await.unwrap().reply(persona("dev-b"), "yes").unwrap();
+        let reply = sent.recv().await.unwrap().reply(persona("dev-b"), "yes", Role::Persona).unwrap();
         assert!(mcp.claim(&reply).await.unwrap());
         assert!(asking.await.unwrap().1.ends_with("yes"));
         mcp.hub.route(reply).await;
@@ -1252,7 +1255,7 @@ mod tests {
 
         // The reply comes after a restart: it is still known as a reply, not a new message.
         let (mcp, _sent) = start(&dir).await;
-        let reply = ask.reply(persona("dev-b"), "late answer").unwrap();
+        let reply = ask.reply(persona("dev-b"), "late answer", Role::Persona).unwrap();
         assert!(mcp.claim(&reply).await.unwrap());
         assert!(mcp.claim(&reply).await.is_ok_and(|claimed| !claimed), "kept once");
         drop(mcp);

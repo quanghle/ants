@@ -40,7 +40,10 @@ pub const ATTEMPTS_BUCKET: &str = "ants_attempts";
 /// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Only the human writes it;
 /// personas read it.
 pub const CHANNELS_BUCKET: &str = "ants_channels";
-/// Turns a new thread may spend on agent-to-agent replies before it goes back to the human.
+/// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its persona id. Only humans write it; personas read
+/// it. [`PersonaId::human`] is a human without an entry.
+pub const HUMANS_BUCKET: &str = "ants_humans";
+/// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 
 /// Errors from parsing ants identifiers and building replies.
@@ -126,7 +129,8 @@ token_id!(ChannelId, "channel id");
 token_id!(JsDomain, "JetStream domain");
 
 impl PersonaId {
-    /// The human at the terminal.
+    /// The default human: a human whether or not [`HUMANS_BUCKET`] lists it, and the one escalations go to when a
+    /// thread has no owner.
     pub fn human() -> Self {
         Self("human".to_owned())
     }
@@ -136,8 +140,29 @@ impl PersonaId {
         Self("messenger".to_owned())
     }
 
+    /// Whether this is the default human, [`PersonaId::human`]. Other humans are known only from [`HUMANS_BUCKET`]
+    /// ([`Humans`]).
     pub fn is_human(&self) -> bool {
         self.0 == "human"
+    }
+}
+
+/// What a set of credentials, or the sender of a message, is: a human, with every human right, or a persona.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    Human,
+    Persona,
+}
+
+impl Role {
+    /// The role of `persona` without the [`HUMANS_BUCKET`]: human for the default human, [`PersonaId::human`], else
+    /// persona.
+    pub fn by_default(persona: &PersonaId) -> Self {
+        if persona.is_human() { Self::Human } else { Self::Persona }
+    }
+
+    pub fn is_human(self) -> bool {
+        self == Self::Human
     }
 }
 
@@ -169,19 +194,19 @@ impl Machine {
         format!("$JSC.R.{self}.*.{OUTBOX_STREAM}")
     }
 
-    /// Inbox prefix of the human's connection that sets up the machine's outbox (`ants leaf outbox`): the leaf node
-    /// answers on it, so it is the machine's own, apart from the replies of any other request of the human.
-    pub fn setup_inbox(&self) -> String {
-        format!("{}.leaf.{self}", inbox_prefix(&PersonaId::human()))
+    /// Inbox prefix of the connection of `human` that sets up the machine's outbox (`ants leaf outbox`): the leaf node
+    /// answers on it, so it is the machine's own, apart from the replies of any other request of that human.
+    pub fn setup_inbox(&self, human: &PersonaId) -> String {
+        format!("{}.leaf.{self}", inbox_prefix(human))
     }
 
-    /// What the hub's [`STREAM`] admits from the machine's outbox for `persona`, as pairs of an [`INTAKE_STREAM`]
-    /// subject filter and the subject it is stored under: exactly the inbox, plan and channel subjects the persona may
-    /// publish itself ([`subject::sendable`]). With `inbox` false, only its plan and channel posts: the human's
-    /// admission takes every inbox subject of a machine it is on, and the filters of one stream's sources may not
-    /// overlap.
-    pub fn admitted(&self, persona: &PersonaId, inbox: bool) -> Vec<(String, String)> {
-        let [own_inbox, own_plan, own_chan] = subject::sendable(persona);
+    /// What the hub's [`STREAM`] admits from the machine's outbox for `persona` in `role`, as pairs of an
+    /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, plan and channel subjects
+    /// the persona may publish itself ([`subject::sendable`]). With `inbox` false, only its plan and channel posts: a
+    /// human's admission takes every inbox subject of a machine it is on, and the filters of one stream's sources may
+    /// not overlap.
+    pub fn admitted(&self, persona: &PersonaId, role: Role, inbox: bool) -> Vec<(String, String)> {
+        let [own_inbox, own_plan, own_chan] = subject::sendable(persona, role);
         let patterns = if inbox { vec![own_inbox, own_plan, own_chan] } else { vec![own_plan, own_chan] };
         patterns
             .into_iter()
@@ -242,7 +267,7 @@ impl ThreadId {
 
 /// Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 pub mod subject {
-    use super::{ChannelId, PersonaId, ThreadId};
+    use super::{ChannelId, PersonaId, Role, ThreadId};
 
     /// Durable inbox of `to`, for messages from `from`. The sender is part of the subject because credentials can pin
     /// it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
@@ -335,10 +360,10 @@ pub mod subject {
         format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{}.*", super::STREAM)
     }
 
-    /// The inbox, plan and channel subjects `persona` may publish on: every inbox for the human (to replay dead letters
-    /// as they were), else [`inbox_from`]; [`plan_from`]; and [`chan_from`].
-    pub fn sendable(persona: &PersonaId) -> [String; 3] {
-        let inbox = if persona.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(persona) };
+    /// The inbox, plan and channel subjects `persona` in `role` may publish on: every inbox for a human (to replay dead
+    /// letters as they were), else [`inbox_from`]; [`plan_from`]; and [`chan_from`].
+    pub fn sendable(persona: &PersonaId, role: Role) -> [String; 3] {
+        let inbox = if role.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(persona) };
         [inbox, plan_from(persona), chan_from(persona)]
     }
 
@@ -380,6 +405,11 @@ pub mod subject {
     /// The roster entry of a persona: the subject its daemon puts [`super::RosterEntry`] on.
     pub fn roster(persona: &PersonaId) -> String {
         format!("$KV.{}.{persona}", super::ROSTER_BUCKET)
+    }
+
+    /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
+    pub fn human_entry(persona: &PersonaId) -> String {
+        format!("$KV.{}.{persona}", super::HUMANS_BUCKET)
     }
 
     /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject the human puts [`super::ChannelEntry`] on.
@@ -460,37 +490,38 @@ pub struct Permissions {
 }
 
 impl Permissions {
-    /// What the credentials of `persona` allow.
+    /// What the credentials of `persona` in `role` allow.
     ///
     /// Any persona may write to every inbox, every plan room and every channel, but only as itself (the sender is the
     /// last token of inbox, plan and channel subjects). It speaks only for itself on status, approvals and dead letters,
     /// reads only its own inbox (consumer and live), every plan room (live, and from the stream through its own plan
     /// consumer), every channel (live, and from the stream through its own channel consumer and reader), its own
     /// replies and the decisions on its own approval requests, reads the roster to find personas by capability but
-    /// writes only its own entry, reads the channels bucket but never writes it, and reads and writes only its own keys
-    /// in the sessions and attempts buckets. The filter of each of its consumers is part of the subject that creates it,
-    /// so none can be pointed at another inbox: a consumer with several filters has none in that subject, so no persona
-    /// may create one. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and
-    /// upgrade the stream and create the roster, sessions, attempts and channels buckets, writes the channels bucket,
-    /// and reads and removes dead letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown
-    /// yet. The human may send under any sender, to replay a dead
-    /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox. So
-    /// only the human hears the max-deliveries advisories of the stream's consumers and stores the dead letters of the
-    /// messages they name, on any persona's dead letter subject.
+    /// writes only its own entry, reads the channels and humans buckets but never writes them, and reads and writes
+    /// only its own keys in the sessions and attempts buckets. The filter of each of its consumers is part of the
+    /// subject that creates it, so none can be pointed at another inbox: a consumer with several filters has none in
+    /// that subject, so no persona may create one. A human (a CLI user; [`Role::Human`], whatever its name) also watches
+    /// all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
+    /// attempts, channels and humans buckets, writes the channels and humans buckets, and reads and removes dead
+    /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
+    /// any sender, to replay a dead letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it
+    /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
+    /// stores the dead letters of the messages they name, on any persona's dead letter subject.
     ///
     /// Each inbox, plan and channel subject a persona may publish it may also publish in its outbox form
-    /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only the human sets up leaf outboxes and the hub's
+    /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only a human sets up leaf outboxes and the hub's
     /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no persona
     /// may create or change one.
-    pub fn for_persona(persona: &PersonaId) -> Self {
+    pub fn for_persona(persona: &PersonaId, role: Role) -> Self {
         let consumer = inbox_consumer(persona);
         let plan = plan_consumer(persona);
         let (chan, chan_read) = (chan_consumer(persona), chan_reader(persona));
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
+        let humans = kv_stream(HUMANS_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
-        let sendable = subject::sendable(persona);
+        let sendable = subject::sendable(persona, role);
         // The same subjects in the leaf's outbox, for when the hub is out of reach.
         let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
         let mut publish: Vec<String> = sendable.iter().cloned().chain(outbox).collect();
@@ -524,9 +555,14 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{channels}.>"),
             format!("$JS.API.CONSUMER.CREATE.{channels}"),
             format!("$JS.FC.{channels}.>"),
+            // And the humans.
+            format!("$JS.API.STREAM.INFO.{humans}"),
+            format!("$JS.API.DIRECT.GET.{humans}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{humans}"),
+            format!("$JS.FC.{humans}.>"),
         ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
-        if persona.is_human() {
+        if role.is_human() {
             publish.extend([
                 format!("$JS.API.STREAM.CREATE.{STREAM}"),
                 // Creating a KV bucket first looks up the account's JetStream limits.
@@ -535,8 +571,10 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
                 format!("$JS.API.STREAM.CREATE.{attempts}"),
                 format!("$JS.API.STREAM.CREATE.{channels}"),
-                // Put and delete of every channel's entry.
+                format!("$JS.API.STREAM.CREATE.{humans}"),
+                // Put and delete of every channel's and every human's entry.
                 format!("$KV.{CHANNELS_BUCKET}.>"),
+                format!("$KV.{HUMANS_BUCKET}.>"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
@@ -604,28 +642,33 @@ impl Permissions {
         self
     }
 
-    /// What the uplink credentials of `machine`'s leaf node allow: everything any of `personas` may do, since every
-    /// message of a persona on the machine crosses that one connection, except the outbox subjects, which stay on the
-    /// leaf. Include [`PersonaId::human`] when the machine runs the CLI.
+    /// What the uplink credentials of `machine`'s leaf node allow: everything any of `personas` may do in its role,
+    /// since every message of a persona on the machine crosses that one connection, except the outbox subjects, which
+    /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`].
     ///
     /// Besides, the hub's intake may source the leaf's outbox through the machine's own JetStream domain: the hub
     /// sends the leaf requests to create, update and look up the outbox and to create and delete the consumers that
     /// read it, and flow control. The leaf delivers the outbox under [`Machine::deliver_prefix`] and answers under
-    /// [`Machine::source_replies`] and [`Machine::setup_inbox`] only, all of them the machine's own. nats-server
+    /// [`Machine::source_replies`] and the [`Machine::setup_inbox`] of the default human and of each human among
+    /// `personas` only, all of them the machine's own. nats-server
     /// carries a reply across a leaf connection only if the leaf may publish it: the interest behind it reaches the
     /// leaf only then.
     ///
     /// For each pattern of a persona's inbox, plan and channel subjects, which has a wildcard before the sender, the
     /// uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
     /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
-    pub fn for_leaf<'a>(machine: &Machine, personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
+    pub fn for_leaf<'a>(machine: &Machine, personas: impl IntoIterator<Item = (&'a PersonaId, Role)>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
-        for persona in personas {
-            let Self { publish, subscribe } = Self::for_persona(persona);
+        let mut setup = vec![PersonaId::human()];
+        for (persona, role) in personas {
+            if role.is_human() && !setup.contains(persona) {
+                setup.push(persona.clone());
+            }
+            let Self { publish, subscribe } = Self::for_persona(persona, role);
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.plan.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
-            let found = subject::sendable(persona).map(|s| s.replace('*', persona.as_str()));
+            let found = subject::sendable(persona, role).map(|s| s.replace('*', persona.as_str()));
             for (all, new) in
                 [(&mut leaf.publish, publish.into_iter().chain(found).collect()), (&mut leaf.subscribe, subscribe)]
             {
@@ -637,11 +680,8 @@ impl Permissions {
             }
         }
         let api = machine.api_prefix();
-        leaf.publish.extend([
-            format!("{}.>", machine.deliver_prefix()),
-            format!("{}.>", machine.source_replies()),
-            format!("{}.>", machine.setup_inbox()),
-        ]);
+        leaf.publish.extend([format!("{}.>", machine.deliver_prefix()), format!("{}.>", machine.source_replies())]);
+        leaf.publish.extend(setup.iter().map(|human| format!("{}.>", machine.setup_inbox(human))));
         leaf.subscribe.extend([
             format!("{api}.STREAM.CREATE.{OUTBOX_STREAM}"),
             format!("{api}.STREAM.UPDATE.{OUTBOX_STREAM}"),
@@ -731,7 +771,88 @@ impl RosterEntry {
     }
 }
 
-/// One message between personas, or between a persona and the human.
+/// A human's entry in the [`HUMANS_BUCKET`], under the key of its persona id. Only humans write it.
+///
+/// Readers should treat unknown fields as additions, not errors, and skip an entry naming another persona than its key
+/// ([`HumanEntry::check_key`], [`Humans::add`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanEntry {
+    pub persona: PersonaId,
+    /// When the human was registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<DateTime<Utc>>,
+}
+
+impl HumanEntry {
+    /// The entry of `persona`, registered now.
+    pub fn new(persona: PersonaId) -> Self {
+        Self { persona, registered_at: Some(Utc::now()) }
+    }
+
+    /// The KV key of the entry.
+    pub fn key(&self) -> &str {
+        self.persona.as_str()
+    }
+
+    /// Check that the entry was read from its own key; a reader skips one naming another persona.
+    pub fn check_key(&self, key: &str) -> Result<(), Error> {
+        if key == self.key() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona { kind: "human entry", persona: self.persona.clone(), at: format!("key {key}") })
+    }
+}
+
+/// The humans of a team: [`PersonaId::human`], always, and every persona [`HUMANS_BUCKET`] lists under its own key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Humans(std::collections::BTreeSet<PersonaId>);
+
+impl Default for Humans {
+    fn default() -> Self {
+        Self([PersonaId::human()].into())
+    }
+}
+
+impl Humans {
+    /// The default human and the humans of `entries`, as pairs of a KV key and the entry read from it. Entries naming
+    /// another persona than their key are skipped.
+    pub fn from_entries<'a>(entries: impl IntoIterator<Item = (&'a str, HumanEntry)>) -> Self {
+        let mut humans = Self::default();
+        for (key, entry) in entries {
+            let _ = humans.add(key, entry);
+        }
+        humans
+    }
+
+    /// Add the human of `entry`, read from `key`; an entry naming another persona is refused and changes nothing.
+    pub fn add(&mut self, key: &str, entry: HumanEntry) -> Result<(), Error> {
+        entry.check_key(key)?;
+        self.0.insert(entry.persona);
+        Ok(())
+    }
+
+    /// Drop `persona`, whose entry was deleted. The default human stays a human.
+    pub fn remove(&mut self, persona: &PersonaId) {
+        if !persona.is_human() {
+            self.0.remove(persona);
+        }
+    }
+
+    pub fn contains(&self, persona: &PersonaId) -> bool {
+        self.0.contains(persona)
+    }
+
+    /// The role of `persona`: [`Role::Human`] for a human, else [`Role::Persona`].
+    pub fn role(&self, persona: &PersonaId) -> Role {
+        if self.contains(persona) { Role::Human } else { Role::Persona }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &PersonaId> {
+        self.0.iter()
+    }
+}
+
+/// One message between personas, or between a persona and a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub id: Uuid,
@@ -739,10 +860,14 @@ pub struct Envelope {
     pub from: PersonaId,
     pub to: PersonaId,
     pub text: String,
-    /// Agent-to-agent replies left on this thread. At zero the thread goes back to the human.
+    /// Agent-to-agent replies left on this thread. At zero the thread goes back to a human: its owner, else the
+    /// default one.
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
+    /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<PersonaId>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -752,7 +877,7 @@ impl Envelope {
         Self::on_thread(ThreadId::generate(), from, to, text)
     }
 
-    /// A message on an existing thread, with a fresh budget.
+    /// A message on an existing thread, with a fresh budget and no owner.
     pub fn on_thread(thread_id: ThreadId, from: PersonaId, to: PersonaId, text: impl Into<String>) -> Self {
         Self {
             id: Uuid::now_v7(),
@@ -762,14 +887,25 @@ impl Envelope {
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
+            owner: None,
             sent_at: Utc::now(),
         }
     }
 
-    /// Reply to the sender. Replies to the human are free; agent-to-agent replies spend one turn, and fail when none
-    /// are left, so the caller escalates to the human instead of looping.
-    pub fn reply(&self, from: PersonaId, text: impl Into<String>) -> Result<Self, Error> {
-        let turn_budget = if self.from.is_human() {
+    /// The envelope with `owner` as the human who started its thread.
+    pub fn with_owner(self, owner: Option<PersonaId>) -> Self {
+        Self { owner, ..self }
+    }
+
+    /// A message on this envelope's thread, with a fresh budget and the same owner.
+    pub fn follow_up(&self, from: PersonaId, to: PersonaId, text: impl Into<String>) -> Self {
+        Self::on_thread(self.thread_id.clone(), from, to, text).with_owner(self.owner.clone())
+    }
+
+    /// Reply to the sender, whose role is `to`, keeping the thread's owner. Replies to a human are free; agent-to-agent
+    /// replies spend one turn, and fail when none are left, so the caller escalates to a human instead of looping.
+    pub fn reply(&self, from: PersonaId, text: impl Into<String>, to: Role) -> Result<Self, Error> {
+        let turn_budget = if to.is_human() {
             self.turn_budget
         } else {
             self.turn_budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?
@@ -782,6 +918,7 @@ impl Envelope {
             text: text.into(),
             turn_budget,
             in_reply_to: Some(self.id),
+            owner: self.owner.clone(),
             sent_at: Utc::now(),
         })
     }
@@ -1387,7 +1524,7 @@ mod tests {
     #[test]
     fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
         let domain: JsDomain = "hub".parse().unwrap();
-        let plain = Permissions::for_persona(&p("dev-a"));
+        let plain = Permissions::for_persona(&p("dev-a"), Role::Persona);
         assert_eq!(plain.clone().with_js_domain(None), plain);
         let Permissions { publish, subscribe } = plain.clone().with_js_domain(Some(&domain));
         assert_eq!(subscribe, plain.subscribe);
@@ -1410,9 +1547,10 @@ mod tests {
     fn leaf_permissions_cover_each_persona_once() {
         let (human, a, b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
         let m1: Machine = "m1".parse().unwrap();
-        let leaf = Permissions::for_leaf(&m1, [&a, &b, &human]);
-        for persona in [&a, &b, &human] {
-            let own = Permissions::for_persona(persona);
+        let all = [(&a, Role::Persona), (&b, Role::Persona), (&human, Role::Human)];
+        let leaf = Permissions::for_leaf(&m1, all);
+        for (persona, role) in all {
+            let own = Permissions::for_persona(persona, role);
             let crossing = own.publish.iter().filter(|s| !s.starts_with("ants.out."));
             assert!(crossing.into_iter().all(|s| leaf.publish.contains(s)), "{persona} publish");
             assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)), "{persona} subscribe");
@@ -1420,8 +1558,8 @@ mod tests {
         assert_eq!(leaf.publish.iter().filter(|s| *s == "$JS.API.STREAM.INFO.ANTS").count(), 1);
         assert!(leaf.publish.iter().all(|s| !s.starts_with("ants.out.")), "the outbox stays on the leaf");
         // The hub may source the outbox of m1, and the leaf deliver it on m1's subjects only.
-        let only_a = Permissions::for_leaf(&m1, [&a]);
-        let own = Permissions::for_persona(&a);
+        let only_a = Permissions::for_leaf(&m1, [(&a, Role::Persona)]);
+        let own = Permissions::for_persona(&a, Role::Persona);
         let extra: Vec<_> = only_a.publish.iter().filter(|s| !own.publish.contains(s)).collect();
         assert_eq!(
             extra,
@@ -1458,11 +1596,11 @@ mod tests {
         for other in [subject::dead(&p("dev-a")), subject::approvals(&p("dev-a")), "ants.outbox.x".to_owned()] {
             assert_eq!(subject::outbox(&other), None, "{other}");
         }
-        let a = Permissions::for_persona(&p("dev-a"));
+        let a = Permissions::for_persona(&p("dev-a"), Role::Persona);
         for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a", "ants.out.chan.*.dev-a"] {
             assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
         }
-        let human = Permissions::for_persona(&PersonaId::human());
+        let human = Permissions::for_persona(&PersonaId::human(), Role::Human);
         assert!(human.publish.iter().any(|s| s == "ants.out.inbox.>"));
         assert!(human.publish.iter().any(|s| s == "ants.out.chan.*.human"));
     }
@@ -1471,7 +1609,7 @@ mod tests {
     fn the_hub_admits_from_a_machine_what_its_personas_may_send() {
         let m1: Machine = "m1".parse().unwrap();
         assert_eq!(
-            m1.admitted(&p("dev-a"), true),
+            m1.admitted(&p("dev-a"), Role::Persona, true),
             [
                 ("ants.in.m1.ants.out.inbox.*.dev-a".to_owned(), "ants.inbox.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.plan.*.dev-a".to_owned(), "ants.plan.{{wildcard(1)}}.dev-a".to_owned()),
@@ -1479,10 +1617,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            m1.admitted(&PersonaId::human(), true)[0],
+            m1.admitted(&PersonaId::human(), Role::Human, true)[0],
             ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned())
         );
-        let posts: Vec<_> = m1.admitted(&p("dev-a"), false).into_iter().map(|(filter, _)| filter).collect();
+        let posts: Vec<_> =
+            m1.admitted(&p("dev-a"), Role::Persona, false).into_iter().map(|(filter, _)| filter).collect();
         assert_eq!(posts, ["ants.in.m1.ants.out.plan.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a"], "posts only");
         assert_eq!(subject::intake(&m1), "ants.in.m1.>");
     }
@@ -1556,13 +1695,15 @@ mod tests {
         assert!(chunk.check_subject("ants.status.dev-a.t2").is_err(), "another thread");
         let forged = chunk.check_subject("ants.status.dev-b.t1").unwrap_err();
         assert_eq!(forged.to_string(), "status update of dev-a found at ants.status.dev-b.t1 (thread t1)");
-        assert!(Permissions::for_persona(&p("dev-a")).publish.contains(&subject::status_of(&p("dev-a"))));
+        assert!(
+            Permissions::for_persona(&p("dev-a"), Role::Persona).publish.contains(&subject::status_of(&p("dev-a")))
+        );
     }
 
     #[test]
     fn reply_swaps_parties_and_links_the_message() {
         let ask = Envelope::new(PersonaId::human(), p("dev-a"), "hi");
-        let reply = ask.reply(p("dev-a"), "hello").unwrap();
+        let reply = ask.reply(p("dev-a"), "hello", Role::Human).unwrap();
         assert_eq!((reply.from.as_str(), reply.to.as_str()), ("dev-a", "human"));
         assert_eq!(reply.thread_id, ask.thread_id);
         assert_eq!(reply.in_reply_to, Some(ask.id));
@@ -1744,7 +1885,7 @@ mod tests {
 
     #[test]
     fn channels_are_readable_by_personas_and_written_by_the_human_only() {
-        let a = Permissions::for_persona(&p("dev-a"));
+        let a = Permissions::for_persona(&p("dev-a"), Role::Persona);
         for s in [
             "ants.chan.*.dev-a",
             "ants.out.chan.*.dev-a",
@@ -1760,7 +1901,7 @@ mod tests {
         assert!(a.subscribe.iter().any(|s| s == subject::ALL_CHANNELS));
         assert!(!a.publish.iter().any(|s| s.contains("$KV.ants_channels") || s.contains("CREATE.KV_ants_channels.")));
         assert!(!a.publish.iter().any(|s| s == "ants.chan.>" || s == "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a"));
-        let human = Permissions::for_persona(&PersonaId::human());
+        let human = Permissions::for_persona(&PersonaId::human(), Role::Human);
         for s in ["ants.chan.*.human", "$KV.ants_channels.>", "$JS.API.STREAM.CREATE.KV_ants_channels"] {
             assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
         }
@@ -1791,9 +1932,116 @@ mod tests {
     fn agent_replies_spend_the_budget_until_exhausted() {
         let mut msg = Envelope::new(p("dev-a"), p("dev-b"), "plan?");
         msg.turn_budget = 1;
-        let reply = msg.reply(p("dev-b"), "draft").unwrap();
+        let reply = msg.reply(p("dev-b"), "draft", Role::Persona).unwrap();
         assert_eq!(reply.turn_budget, 0);
-        assert_eq!(reply.reply(p("dev-a"), "again"), Err(Error::BudgetExhausted(msg.thread_id.clone())));
+        assert_eq!(reply.reply(p("dev-a"), "again", Role::Persona), Err(Error::BudgetExhausted(msg.thread_id.clone())));
+    }
+
+    #[test]
+    fn replies_keep_the_owner_and_any_human_s_reply_is_free() {
+        let alice = p("alice");
+        let ask = Envelope::new(alice.clone(), p("dev-a"), "build it").with_owner(Some(alice.clone()));
+        let answer = ask.reply(p("dev-a"), "built", Role::Human).unwrap();
+        assert_eq!((answer.to.clone(), answer.owner.clone()), (alice.clone(), Some(alice.clone())));
+        assert_eq!(answer.turn_budget, ask.turn_budget, "replying to a human spends no turn, whatever its name");
+        let handoff = ask.reply(p("dev-a"), "check it", Role::Human).unwrap();
+        let mut handoff = Envelope { to: p("dev-b"), from: p("dev-a"), ..handoff };
+        handoff.turn_budget = 3;
+        let back = handoff.reply(p("dev-b"), "fine", Role::Persona).unwrap();
+        assert_eq!((back.turn_budget, back.owner.clone()), (2, Some(alice.clone())), "an agent's reply spends one");
+        let notice = back.follow_up(p("dev-b"), alice.clone(), "over to you");
+        assert_eq!((notice.thread_id.clone(), notice.owner.clone()), (ask.thread_id.clone(), Some(alice)));
+        assert_eq!((notice.turn_budget, notice.in_reply_to), (DEFAULT_TURN_BUDGET, None));
+        let ownerless = Envelope::new(p("dev-a"), p("dev-b"), "q");
+        assert_eq!(ownerless.reply(p("dev-b"), "a", Role::Persona).unwrap().owner, None);
+    }
+
+    #[test]
+    fn the_owner_is_left_out_when_none_and_older_envelopes_have_none() {
+        let msg = Envelope::new(p("dev-a"), p("dev-b"), "q");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("owner"), "{json}");
+        let owned = msg.clone().with_owner(Some(p("alice")));
+        let json = serde_json::to_string(&owned).unwrap();
+        assert!(json.contains(r#""owner":"alice""#), "{json}");
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), owned);
+        let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
+            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
+        assert_eq!(serde_json::from_str::<Envelope>(older).unwrap().owner, None);
+    }
+
+    #[test]
+    fn humans_are_the_default_one_and_those_listed_under_their_own_key() {
+        let entry = HumanEntry::new(p("alice"));
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(serde_json::from_str::<HumanEntry>(&json).unwrap(), entry);
+        let read = |json: &str| serde_json::from_str::<HumanEntry>(json).unwrap();
+        let bob = read(r#"{"persona":"bob","team":"ops"}"#);
+        assert_eq!(bob.registered_at, None);
+        assert_eq!(bob.check_key("bob"), Ok(()));
+        assert_eq!(bob.check_key("dev-a").unwrap_err().to_string(), "human entry of bob found at key dev-a");
+        assert_eq!(subject::human_entry(&p("bob")), "$KV.ants_humans.bob");
+
+        let mut humans = Humans::from_entries([("alice", entry), ("dev-a", read(r#"{"persona":"carol"}"#))]);
+        assert!(humans.contains(&PersonaId::human()), "the default human needs no entry");
+        assert!(humans.contains(&p("alice")));
+        assert!(!humans.contains(&p("dev-a")) && !humans.contains(&p("carol")), "a mismatched entry is skipped");
+        assert_eq!((humans.role(&p("alice")), humans.role(&p("dev-a"))), (Role::Human, Role::Persona));
+        assert!(humans.add("dev-b", bob.clone()).is_err() && !humans.contains(&p("bob")));
+        humans.add("bob", bob).unwrap();
+        humans.remove(&p("bob"));
+        humans.remove(&PersonaId::human());
+        assert_eq!(humans.iter().map(PersonaId::as_str).collect::<Vec<_>>(), ["alice", "human"]);
+    }
+
+    #[test]
+    fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
+        let alice = Permissions::for_persona(&p("alice"), Role::Human);
+        let human = Permissions::for_persona(&PersonaId::human(), Role::Human);
+        let rename = |s: &String| s.replace(".human", ".alice").replace("-human", "-alice");
+        assert_eq!(alice.publish, human.publish.iter().map(rename).collect::<Vec<_>>(), "the same rights by any name");
+        assert_eq!(alice.subscribe, human.subscribe.iter().map(rename).collect::<Vec<_>>());
+        for s in [
+            "ants.inbox.>",
+            "$JS.API.STREAM.CREATE.ANTS",
+            "$JS.API.STREAM.MSG.GET.ANTS",
+            "ants.approvals.*.*",
+            "ants.dead.>",
+            "$JS.API.STREAM.CREATE.KV_ants_humans",
+            "$KV.ants_humans.>",
+            "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.*",
+            "$JS.API.CONSUMER.CREATE.ANTS.plan-alice.ants.plan.>",
+        ] {
+            assert!(alice.publish.iter().any(|have| have == s), "{s} missing from {:?}", alice.publish);
+        }
+        assert!(alice.subscribe.iter().any(|s| s == subject::ALL));
+
+        let reads = [
+            "$JS.API.STREAM.INFO.KV_ants_humans",
+            "$JS.API.DIRECT.GET.KV_ants_humans.>",
+            "$JS.API.CONSUMER.CREATE.KV_ants_humans",
+            "$JS.FC.KV_ants_humans.>",
+        ];
+        let named_human = Permissions::for_persona(&PersonaId::human(), Role::Persona);
+        for persona in [Permissions::for_persona(&p("dev-a"), Role::Persona), named_human] {
+            for s in reads {
+                assert!(persona.publish.iter().any(|have| have == s), "{s} missing from {:?}", persona.publish);
+            }
+            assert!(
+                !persona
+                    .publish
+                    .iter()
+                    .any(|s| s.contains("$KV.ants_humans") || s.contains("STREAM.CREATE.KV_ants_humans"))
+            );
+            assert!(!persona.publish.iter().any(|s| s == "ants.inbox.>" || s == "ants.dead.>"), "no human rights");
+        }
+
+        let m1: Machine = "m1".parse().unwrap();
+        assert_eq!(m1.setup_inbox(&p("alice")), "_INBOX.alice.leaf.m1");
+        let leaf = Permissions::for_leaf(&m1, [(&p("alice"), Role::Human), (&p("dev-a"), Role::Persona)]);
+        for s in ["_INBOX.alice.leaf.m1.>", "_INBOX.human.leaf.m1.>", "$KV.ants_humans.>"] {
+            assert!(leaf.publish.iter().any(|have| have == s), "{s} missing from {:?}", leaf.publish);
+        }
     }
 
     #[test]

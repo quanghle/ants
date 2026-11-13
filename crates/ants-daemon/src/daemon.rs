@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject,
+    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, Role, State, ThreadId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -578,7 +578,7 @@ impl Inbox<'_> {
         };
         let spent = match (&incoming.post, &read) {
             (Some(posted), Some(read)) => posted.post.reply(self.persona.clone(), "", &read.later).err(),
-            _ => envelope.reply(self.persona.clone(), "").err(),
+            _ => envelope.reply(self.persona.clone(), "", Role::by_default(&envelope.from)).err(),
         };
         if let Some(ProtoError::BudgetExhausted(_)) = spent {
             // Out of turns: hand the thread to the human instead of spending another prompt.
@@ -698,7 +698,7 @@ impl Inbox<'_> {
                     Err(e) => return Err(e.into()),
                 }
             }
-            _ => Reply::Message(envelope.reply(self.persona.clone(), text)?),
+            _ => Reply::Message(envelope.reply(self.persona.clone(), text, Role::by_default(&envelope.from))?),
         };
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
@@ -783,8 +783,7 @@ impl Inbox<'_> {
         if let Some(answer) = unposted {
             text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.persona));
         }
-        let mut escalation =
-            Envelope::on_thread(envelope.thread_id.clone(), self.persona.clone(), PersonaId::human(), text);
+        let mut escalation = envelope.follow_up(self.persona.clone(), PersonaId::human(), text);
         escalation.in_reply_to = Some(envelope.id);
         let id = format!("escalation-{}-{seq}", self.persona);
         bus::store(self.js, escalation.subject(), &escalation, &id).await?;
@@ -1228,7 +1227,7 @@ mod tests {
             bus.stream.create_consumer(old).await.unwrap();
         }
         drop(crate::bus::inbox_consumer(&bus.stream, &bus.dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap());
-        crate::bus::human_inbox_consumer(&bus.stream, ACK_WAIT).await.unwrap();
+        crate::bus::human_inbox_consumer(&bus.stream, &human, ACK_WAIT).await.unwrap();
         for persona in [&bus.dev, &human] {
             let mut consumer: PullConsumer =
                 bus.stream.get_consumer(&ants_proto::inbox_consumer(persona)).await.unwrap();
@@ -1447,7 +1446,7 @@ mod tests {
         let (ask, seq) = bus.send(&t1, "a").await;
 
         // The crashed attempt recorded its reply and stored it, but never acked.
-        let reply = ask.reply(bus.dev.clone(), "s1: done before").unwrap();
+        let reply = ask.reply(bus.dev.clone(), "s1: done before", Role::Human).unwrap();
         bus.attempts.start(seq, &ask).await.unwrap();
         bus.attempts.replied(seq, &ask, &Reply::Message(reply.clone())).await.unwrap();
         bus::publish_json(&bus.js, reply.subject(), &reply, Some(&reply_id(&bus.dev, &ask))).await.unwrap();
@@ -1578,7 +1577,7 @@ mod tests {
         let rooms = Arc::new(crate::plan::JetStreamRooms::new(bus.js.clone(), bus.dev.clone()));
         bus.mcp = Some(Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms).await.unwrap());
         for ask in &asks {
-            let reply = ask.reply(dev_b.clone(), "late").unwrap();
+            let reply = ask.reply(dev_b.clone(), "late", Role::Persona).unwrap();
             bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
         }
         bus.send(&t1, "a").await;

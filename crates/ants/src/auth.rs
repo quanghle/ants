@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ants_proto::{JsDomain, Machine, Permissions, PersonaId};
+use ants_proto::{JsDomain, Machine, Permissions, PersonaId, Role};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -55,7 +55,7 @@ pub fn init(dir: &Path) -> Result<()> {
 pub fn issue(dir: &Path, persona: &PersonaId, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let permissions = Permissions::for_persona(persona).with_js_domain(js_domain);
+    let permissions = Permissions::for_persona(persona, Role::by_default(persona)).with_js_domain(js_domain);
     write_secret(out, &creds(&user_jwt(&account, &user, persona.as_str(), permissions, json!({}))?, &seed(&user)?))
 }
 
@@ -80,7 +80,8 @@ pub fn issue_leaf(
     }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let permissions = Permissions::for_leaf(machine, personas).with_js_domain(js_domain);
+    let roles = personas.iter().map(|persona| (persona, Role::by_default(persona)));
+    let permissions = Permissions::for_leaf(machine, roles).with_js_domain(js_domain);
     let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
     let jwt = user_jwt(&account, &user, &format!("leaf-{machine}"), permissions, only_leaf)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))
@@ -311,7 +312,7 @@ pub(crate) mod tests {
         let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 2).await.unwrap();
         let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
-        let reply = ask.reply(dev_a.clone(), "hello").unwrap();
+        let reply = ask.reply(dev_a.clone(), "hello", Role::Human).unwrap();
         bus::publish(&a_js, &reply).await.unwrap();
         msg.double_ack().await.unwrap();
         let got = timeout(WAIT, human_inbox.next()).await.unwrap().unwrap();
@@ -795,7 +796,7 @@ pub(crate) mod tests {
         attempts.put(&marker, "started".into()).await.unwrap();
         assert!(attempts.get(&marker).await.unwrap().is_some());
         attempts.delete(&marker).await.unwrap();
-        let reply = ask.reply(dev_a.clone(), "hello").unwrap();
+        let reply = ask.reply(dev_a.clone(), "hello", Role::Human).unwrap();
         bus::publish(&a_js, &reply).await.unwrap();
         msg.double_ack().await.unwrap();
         let got = timeout(WAIT, human_inbox.next()).await.unwrap().unwrap();

@@ -259,8 +259,7 @@ async fn find(stream: &stream::Stream, persona: &PersonaId, seq: u64) -> Result<
 
 /// The message on the thread that tells the human a message died, so `ants ask --wait` returns too.
 fn notice(persona: &PersonaId, envelope: &Envelope, dead: &DeadLetter, dead_seq: u64) -> Envelope {
-    let mut notice = Envelope::on_thread(
-        envelope.thread_id.clone(),
+    let mut notice = envelope.follow_up(
         persona.clone(),
         PersonaId::human(),
         format!(
