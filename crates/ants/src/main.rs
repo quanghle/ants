@@ -259,7 +259,7 @@ async fn ask(url: &str, creds: Option<&Path>, thread: Option<ThreadId>, wait: bo
     };
     let (client, js) = bus::connect(url, creds, &PersonaId::human(), "ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
-    let mut replies = client.subscribe(subject::inbox(&PersonaId::human())).await?;
+    let mut replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await?;
     bus::publish(&js, &envelope).await?;
     println!("thread {}", envelope.thread_id);
     if !wait {
@@ -267,6 +267,10 @@ async fn ask(url: &str, creds: Option<&Path>, thread: Option<ThreadId>, wait: bo
     }
     while let Some(msg) = replies.next().await {
         let Ok(reply) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
+        if let Err(e) = reply.check_subject(&msg.subject) {
+            tracing::warn!("ignoring a reply with a forged sender: {e}");
+            continue;
+        }
         if reply.thread_id == envelope.thread_id {
             println!("{}: {}", reply.from, reply.text);
             // Seen here, so `ants inbox` need not show it again. The other replies stay unread.
@@ -365,7 +369,11 @@ async fn watch(url: &str, creds: Option<&Path>, filter: String) -> Result<()> {
     let mut sub = client.subscribe(filter).await?;
     while let Some(msg) = sub.next().await {
         if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
-            println!("[{}] {} -> {}: {}", e.thread_id, e.from, e.to, e.text);
+            let forged = match e.check_subject(&msg.subject) {
+                Ok(()) => String::new(),
+                Err(_) => format!(" (forged: sent on {})", msg.subject),
+            };
+            println!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text);
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             println!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error);
         } else {

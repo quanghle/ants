@@ -195,6 +195,14 @@ so `bd remember`, `bd ready` and the session-start `bd prime` hook all see the p
 On a shared hub, each persona and the human connect with their own NKey/JWT credentials. Each persona may publish
 only to the subjects its role allows (see `Permissions::for_persona` in `ants-proto`).
 
+A message from `<from>` to `<to>` goes on `ants.inbox.<to>.<from>`, and a persona's credentials publish only on
+`ants.inbox.*.<persona>`, so the subject proves the sender. Daemons, `ants ask --wait` and `ants inbox` check the
+envelope's `from` and `to` against the subject: a daemon dead-letters a mismatch without its envelope (so it cannot be
+replayed), and the CLI drops it with a warning; `ants watch` marks it forged. The human's credentials may send under
+any sender, to replay dead letters as they were; `ants dead replay` replays only a message to the persona that buried
+it. Messages left on the older `ants.inbox.<persona>` subjects are no longer delivered; daemons and `ants inbox` move
+their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
+
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI

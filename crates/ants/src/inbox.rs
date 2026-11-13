@@ -111,13 +111,18 @@ impl Inbox {
         Ok(())
     }
 
-    /// Hold `msg` unread. A malformed one is dropped instead, unless peeking.
+    /// Hold `msg` unread. A malformed one, or one whose sender is forged, is dropped instead, unless peeking; either
+    /// way it is not shown.
     async fn hold(&mut self, msg: jetstream::Message, peek: bool) -> Result<Fetched> {
         let sequence = msg.info().map_err(|e| anyhow!(e))?.stream_sequence;
         if self.held.insert(sequence, msg).is_some() {
             return Ok(Fetched::Again);
         }
-        match serde_json::from_slice::<Envelope>(&self.held[&sequence].payload) {
+        let msg = &self.held[&sequence];
+        let envelope = serde_json::from_slice::<Envelope>(&msg.payload)
+            .map_err(|e| e.to_string())
+            .and_then(|e| e.check_subject(&msg.subject).map(|()| e).map_err(|e| format!("forged sender: {e}")));
+        match envelope {
             Ok(envelope) => Ok(Fetched::New(sequence, Some(envelope))),
             Err(e) => {
                 if !peek {
@@ -206,6 +211,9 @@ mod tests {
         for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three")] {
             bus::publish(&agent, &ask.reply(dev_a.clone(), text).unwrap()).await.unwrap();
         }
+        let forged = asks[0].reply(dev_a.clone(), "forged").unwrap();
+        let subject = ants_proto::subject::inbox(&PersonaId::human(), &PersonaId::human());
+        bus::publish_json(&human, subject, &forged, None).await.unwrap();
 
         let peek = Select { peek: true, ..Default::default() };
         assert_eq!(texts(&read(&human, peek.clone()).await), ["one", "two", "three"]);
