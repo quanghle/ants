@@ -106,10 +106,10 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
 | `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`). |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
-| `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. |
+| `ants init` | Creates the stream and buckets on the hub, or adds stream subjects an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME` / `leaf MACHINE` | Issues the team's operator and account, persona credentials, and leaf uplink credentials. |
+| `ants auth init` / `user NAME [--human]` / `leaf MACHINE` | Issues the team's operator and account, persona or human credentials, and leaf uplink credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
 | `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
 | `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
@@ -742,23 +742,30 @@ entry whose channel disagrees with its key. A persona takes channel posts throug
 and reads channels back through `chanread-<persona>`; credentials pin the filter of both under `ants.chan.>`, so
 neither reaches an inbox. Credentials and streams set up before channels need `ants auth user` and `ants init` again.
 
-Humans: a human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a
-`HumanEntry` naming it); readers skip an entry whose persona disagrees with its key. Every human gets the same
-credentials, whatever its name (`Permissions::for_persona` with `Role::Human`): what the human's credentials allow
-here, plus creating and writing `ants_humans`. Persona credentials only read the bucket. For now `ants auth user`
-issues the human role to `human` only, and daemons and the CLI do not read the bucket yet. An envelope may carry
-`owner`, the human who started its thread: replies, messages an agent sends on or from the thread, escalations and
-notices on it keep it; envelopes without one stay valid. Credentials issued before `ants_humans` need `ants auth user`
-again.
+Humans: a team may have several, each with its own name, credentials and inbox, and all with the same rights. A
+human is the persona `human`, or a persona listed in the KV bucket `ants_humans` under its id (a `HumanEntry` naming
+it); readers skip an entry whose persona disagrees with its key. `ants auth user NAME --human` issues a human's
+credentials, whatever the name (`Permissions::for_persona` with `Role::Human`); without `--human` it issues a
+persona's, except for the name `human`, which always gets a human's. A human's credentials allow what this section
+grants the human: creating and upgrading the stream and the buckets, reading and removing dead letters, sending under
+any sender to replay them, deciding approvals, setting up leaf outboxes and the intake, watching `ants.>`, plus
+writing `ants_humans`. Each human reads its replies only through its own inbox consumer, `inbox-<name>`. Persona
+credentials only read `ants_humans`. The holder of the team directory (`ants auth init`) is the first human and
+issues its own credentials with `ants auth user NAME --human`. A human joins `ants_humans` on its first CLI connection, not when its
+credentials are issued: until then daemons take its messages for an agent's. For now the CLI acts as `human` whatever
+its credentials, and daemons do not read the bucket yet. An envelope may carry `owner`, the human who started its
+thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
+without one stay valid. Credentials issued before `ants_humans` need `ants auth user` again.
 
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI
+ants auth user alice --human           # alice.creds: another human, with the same rights
 ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with the human's credentials to create the stream and the roster, sessions, attempts and channels buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with a human's credentials to create the stream and the roster, sessions, attempts, channels and humans buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 Credentials carry their permissions in the CONNECT line, past the 4 KB nats-server allows by default, so `server.conf`
 sets `max_control_line: 16384`; add that line to a `server.conf` written before channels.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
@@ -774,14 +781,15 @@ as well, and issue every credential with it:
 
 ```sh
 ants auth user dev-a --js-domain hub
-ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub   # leaf-macbook.creds
+ants auth leaf macbook --persona dev-a --persona dev-b --persona human --human alice --js-domain hub   # leaf-macbook.creds
 ```
 
 Credentials issued with `--js-domain` allow the JetStream API both as `$JS.<domain>.API` and as the plain `$JS.API`
 the hub maps it to (the hub checks both); without it they allow only the plain form, which a leaf does not forward.
 `ants auth leaf` issues the credentials of the leaf's uplink (`leafnodes.remotes[].credentials`): they allow what the
-listed personas may do together, and only for a leaf node connection, never a client. List `human` when the
-machine runs the CLI. The leaf still checks each local client against its own credentials; the uplink credentials
+listed personas and humans may do together, and only for a leaf node connection, never a client. List each human
+that runs the CLI on the machine: `human` with `--persona` or `--human`, any other with `--human NAME`, so that it
+gets a human's rights. The leaf still checks each local client against its own credentials; the uplink credentials
 bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
 
 `ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on
@@ -815,15 +823,15 @@ and the hub takes them once the uplink is back. The hub needs `feature_flags { j
 the human sets it up once per machine, with the leaf connected:
 
 ```sh
-ants leaf outbox macbook --persona dev-a --persona dev-b --persona human   # again when the personas change
-ants leaf outbox macbook --remove                                          # stop taking from the machine
+ants leaf outbox macbook --persona dev-a --persona dev-b --persona human --human alice   # again when they change
+ants leaf outbox macbook --remove                                                       # stop taking from the machine
 ```
 
-The hub's stream takes from a machine's outbox only what the listed personas may send themselves, so issue the leaf's
-uplink credentials for the same personas. Whatever needs an answer from the hub at once still fails while the uplink
-is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters, approvals and replays. A
-message sent while the uplink is down lands after what reached the hub meanwhile; a reply whose request could not be
-acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
+The hub's stream takes from a machine's outbox only what the listed personas and humans may send themselves, so issue
+the leaf's uplink credentials for the same personas and humans. Whatever needs an answer from the hub at once still
+fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters,
+approvals and replays. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
+whose request could not be acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
 ## Transport options
 

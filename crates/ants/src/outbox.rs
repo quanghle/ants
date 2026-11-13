@@ -8,7 +8,7 @@
 //! 2. The hub's [`STREAM`] sources from the intake, per machine and persona, only the subjects the persona may publish
 //!    itself ([`Machine::admitted`]), back on their usual subjects. Anything else a machine claims stays in the intake.
 //!
-//! A machine's credentials thus never decide what the hub's stream stores: only the human, who sets up both hops here,
+//! A machine's credentials thus never decide what the hub's stream stores: only a human, who sets up both hops here,
 //! does. Each message keeps its `Nats-Msg-Id`, so the hub's stream drops a buffered copy of a message it already took
 //! within its duplicate window.
 
@@ -27,12 +27,16 @@ const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long to wait for the leaf node to answer through the hub.
 const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Connect as the human to set up the outbox of `machine`, with the machine's own inbox prefix
+/// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
-pub async fn connect(url: &str, creds: Option<&Path>, machine: &Machine) -> Result<async_nats::Client> {
-    let mut options = async_nats::ConnectOptions::new()
-        .name("ants-cli")
-        .custom_inbox_prefix(machine.setup_inbox(&PersonaId::human()));
+pub async fn connect(
+    url: &str,
+    creds: Option<&Path>,
+    human: &PersonaId,
+    machine: &Machine,
+) -> Result<async_nats::Client> {
+    let mut options =
+        async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox(human));
     if let Some(path) = creds {
         options =
             options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))?;
@@ -40,12 +44,17 @@ pub async fn connect(url: &str, creds: Option<&Path>, machine: &Machine) -> Resu
     options.connect(url).await.with_context(|| format!("connecting to NATS at {url}"))
 }
 
-/// Set up store and forward for `machine`, on which `personas` run: create or update the machine's outbox on its leaf
-/// node (which must be connected), through `leaf` from [`connect`], and have the hub's stream take from it what those
-/// personas may send. Admissions of personas no longer listed are dropped; those already in place are kept as they
-/// are.
-pub async fn admit(leaf: &async_nats::Client, hub: &Context, machine: &Machine, personas: &[PersonaId]) -> Result<()> {
-    anyhow::ensure!(!personas.is_empty(), "a machine needs at least one persona");
+/// Set up store and forward for `machine`, on which `members` run, personas and humans each in its role
+/// ([`crate::auth::members`]): create or update the machine's outbox on its leaf node (which must be connected),
+/// through `leaf` from [`connect`], and have the hub's stream take from it what those members may send. Admissions of
+/// members no longer listed are dropped; those already in place are kept as they are.
+pub async fn admit(
+    leaf: &async_nats::Client,
+    hub: &Context,
+    machine: &Machine,
+    members: &[(PersonaId, Role)],
+) -> Result<()> {
+    anyhow::ensure!(!members.is_empty(), "a machine needs at least one persona or human");
     let mut leaf = jetstream::with_domain(leaf.clone(), machine.as_str());
     leaf.set_timeout(LEAF_TIMEOUT);
     leaf.create_or_update_stream(outbox_config()).await.with_context(|| {
@@ -60,7 +69,7 @@ pub async fn admit(leaf: &async_nats::Client, hub: &Context, machine: &Machine, 
     };
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream (`ants init` creates it)")?;
     let mut config = ants.info().await?.config.clone();
-    let wanted = admissions(machine, personas, start);
+    let wanted = admissions(machine, members, start);
     let mut sources: Vec<Source> = config.sources.take().unwrap_or_default();
     let kept: Vec<Source> = sources.extract_if(.., |s| from_machine(s, machine)).collect();
     for source in wanted {
@@ -143,21 +152,21 @@ fn outbox_of(source: &Source, machine: &Machine) -> bool {
     source.name == OUTBOX_STREAM && source.external.as_ref().is_some_and(|e| e.api_prefix == machine.api_prefix())
 }
 
-/// The hub stream's sources for `machine`: one per persona, so admitting or dropping one leaves the others as they
-/// are. The filters of one stream's sources may not overlap, so when the human runs on the machine, its admission
-/// takes every inbox subject and the others' only their plan and channel posts.
-fn admissions(machine: &Machine, personas: &[PersonaId], start: u64) -> Vec<Source> {
-    let human = personas.iter().any(PersonaId::is_human);
-    let mut personas: Vec<&PersonaId> = personas.iter().collect();
-    personas.sort();
-    personas.dedup();
-    personas
-        .into_iter()
-        .map(|persona| Source {
+/// The hub stream's sources for `machine`: one per member, so admitting or dropping one leaves the others as they
+/// are. The filters of one stream's sources may not overlap, so when humans run on the machine, the admission of the
+/// first of them by name takes every inbox subject and the others' only their plan and channel posts.
+fn admissions(machine: &Machine, members: &[(PersonaId, Role)], start: u64) -> Vec<Source> {
+    let mut members: Vec<&(PersonaId, Role)> = members.iter().collect();
+    members.sort_by(|(a, _), (b, _)| a.cmp(b));
+    members.dedup_by(|(a, _), (b, _)| a == b);
+    let inboxes = members.iter().find(|(_, role)| role.is_human()).map(|(human, _)| human);
+    members
+        .iter()
+        .map(|(persona, role)| Source {
             name: INTAKE_STREAM.to_owned(),
             start_sequence: Some(start),
             subject_transforms: machine
-                .admitted(persona, Role::by_default(persona), persona.is_human() || !human)
+                .admitted(persona, *role, inboxes.is_none_or(|human| human == persona))
                 .into_iter()
                 .map(|(source, destination)| SubjectTransform { source, destination })
                 .collect(),
@@ -226,7 +235,7 @@ mod tests {
             (PersonaId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
         let creds = |p: &PersonaId| {
             let out = hub.dir().join(format!("{p}.creds"));
-            auth::issue(&team, p, Some(&domain), &out).unwrap();
+            auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
             out
         };
         let connect = async |url: &str, p: &PersonaId| {
@@ -239,7 +248,8 @@ mod tests {
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         // The CLI runs on m1 too.
-        let on_m1 = [dev_a.clone(), human.clone()];
+        let alice: PersonaId = "alice".parse().unwrap();
+        let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
         auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);
         let listen = format!("127.0.0.1:{}", free_port());
@@ -273,9 +283,15 @@ mod tests {
 
         // Before the outbox exists, a publish that cannot reach the hub fails outright.
         outbox_missing_fails(&b_js).await;
-        let setup = super::connect(&hub.url, Some(&creds(&human)), &m1).await.unwrap();
+        let setup = super::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
         admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
-        admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+        // Any human on the machine may set it up again.
+        let alice_creds = hub.dir().join("alice.creds");
+        auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
+        let (_alice, alice_js) =
+            bus::connect(&hub.url, Some(&alice_creds), Some(&domain), &alice, "test").await.unwrap();
+        let setup = super::connect(&hub.url, Some(&alice_creds), &alice, &m1).await.unwrap();
+        admit(&setup, &alice_js, &m1, &on_m1).await.unwrap();
 
         // Stored directly, and a copy of it in the outbox is dropped as a duplicate.
         let direct = Envelope::new(dev_a.clone(), human.clone(), "direct");
@@ -327,15 +343,17 @@ mod tests {
         assert!(js.send_publish(outboxed, message).await.unwrap().await.is_err());
     }
 
+    fn filters(sources: &[Source]) -> Vec<&str> {
+        sources.iter().flat_map(|s| s.subject_transforms.iter().map(|t| t.source.as_str())).collect()
+    }
+
     #[test]
-    fn with_the_human_on_a_machine_no_two_admissions_overlap() {
+    fn with_humans_on_a_machine_no_two_admissions_overlap() {
         let m1: Machine = "m1".parse().unwrap();
         let personas = ["dev-a".parse().unwrap(), PersonaId::human(), "dev-b".parse().unwrap()];
-        let sources = admissions(&m1, &personas, 7);
-        let filters: Vec<&str> =
-            sources.iter().flat_map(|s| s.subject_transforms.iter().map(|t| t.source.as_str())).collect();
+        let sources = admissions(&m1, &auth::members(&personas, &[]), 7);
         assert_eq!(
-            filters,
+            filters(&sources),
             [
                 "ants.in.m1.ants.out.plan.*.dev-a",
                 "ants.in.m1.ants.out.chan.*.dev-a",
@@ -348,5 +366,23 @@ mod tests {
         );
         assert!(sources.iter().all(|s| s.start_sequence == Some(7) && from_machine(s, &m1)));
         assert!(!from_machine(&sources[0], &"m".parse().unwrap()));
+
+        // With a second human, the first by name takes every inbox subject; each human posts under its own name.
+        let alice: PersonaId = "alice".parse().unwrap();
+        let sources = admissions(&m1, &auth::members(&personas, &[alice.clone(), alice]), 7);
+        assert_eq!(
+            filters(&sources),
+            [
+                "ants.in.m1.ants.out.inbox.>",
+                "ants.in.m1.ants.out.plan.*.alice",
+                "ants.in.m1.ants.out.chan.*.alice",
+                "ants.in.m1.ants.out.plan.*.dev-a",
+                "ants.in.m1.ants.out.chan.*.dev-a",
+                "ants.in.m1.ants.out.plan.*.dev-b",
+                "ants.in.m1.ants.out.chan.*.dev-b",
+                "ants.in.m1.ants.out.plan.*.human",
+                "ants.in.m1.ants.out.chan.*.human",
+            ]
+        );
     }
 }

@@ -4,6 +4,7 @@ mod approve;
 mod auth;
 mod bridge;
 mod channel;
+mod humans;
 mod inbox;
 mod leaf;
 mod outbox;
@@ -116,8 +117,8 @@ enum Command {
         /// With a persona, follow only this thread.
         thread: Option<ThreadId>,
     },
-    /// Create the ANTS stream and the roster, sessions, attempts and channels buckets on the server, or add the stream
-    /// subjects an older version lacks.
+    /// Create the ANTS stream and the roster, sessions, attempts, channels and humans buckets on the server, or add the
+    /// stream subjects an older version lacks. Needs a human's credentials.
     Init,
     /// Tool requests personas escalate: list the pending ones, show one, or answer it.
     Approve {
@@ -151,7 +152,7 @@ enum Command {
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
-    /// Issue NATS credentials: one operator and account for the team, one user per persona.
+    /// Issue NATS credentials: one operator and account for the team, one user per persona or human.
     #[command(subcommand)]
     Auth(AuthCommand),
     /// The machine's local NATS leaf node, which every ants process on it connects to.
@@ -289,10 +290,14 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Issue credentials for a persona, allowing only the subjects of its role. `human` is the CLI user. Give the
-    /// hub's --js-domain, if it has one, so they work with it.
+    /// Issue credentials for a persona, allowing only the subjects of its role, or with --human for a human, a CLI
+    /// user. `human` always gets a human's. Give the hub's --js-domain, if it has one, so they work with it.
     User {
         persona: PersonaId,
+        /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
+        /// the team's humans, on its first CLI connection.
+        #[arg(long)]
+        human: bool,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -301,14 +306,17 @@ enum AuthCommand {
         out: Option<PathBuf>,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
-    /// personas on the machine may do and usable only by a leaf node connection.
+    /// personas and humans on the machine may do and usable only by a leaf node connection.
     Leaf {
         /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
         /// '-' and '_'.
         machine: Machine,
-        /// Persona served on the machine (repeatable). Add `human` if the machine runs the CLI.
-        #[arg(long = "persona", value_name = "PERSONA", required = true)]
+        /// Persona served on the machine (repeatable). `human` counts as a human.
+        #[arg(long = "persona", value_name = "PERSONA", required_unless_present = "humans")]
         personas: Vec<PersonaId>,
+        /// Human running the CLI on the machine (repeatable), as issued with `ants auth user NAME --human`.
+        #[arg(long = "human", value_name = "NAME")]
+        humans: Vec<PersonaId>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -352,17 +360,20 @@ enum LeafCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// As the human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
-    /// what its personas send while the hub is out of reach, and have the hub's stream take from it what those
-    /// personas may send once the uplink is back. Run it again when the machine's personas change.
+    /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
+    /// what its personas and humans send while the hub is out of reach, and have the hub's stream take from it what
+    /// they may send once the uplink is back. Run it again when the machine's personas or humans change.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
-        /// Persona served on the machine (repeatable), as given to `ants auth leaf`.
-        #[arg(long = "persona", value_name = "PERSONA", required_unless_present = "remove")]
+        /// Persona served on the machine (repeatable), as given to `ants auth leaf`. `human` counts as a human.
+        #[arg(long = "persona", value_name = "PERSONA", required_unless_present_any = ["humans", "remove"])]
         personas: Vec<PersonaId>,
+        /// Human running the CLI on the machine (repeatable), as given to `ants auth leaf`.
+        #[arg(long = "human", value_name = "NAME")]
+        humans: Vec<PersonaId>,
         /// Stop taking anything from the machine's outbox instead.
-        #[arg(long, conflicts_with = "personas")]
+        #[arg(long, conflicts_with_all = ["personas", "humans"])]
         remove: bool,
     },
 }
@@ -418,13 +429,15 @@ async fn main() -> Result<()> {
             bus::ensure_sessions(&js).await?;
             bus::ensure_attempts(&js).await?;
             bus::ensure_channels(&js).await?;
+            humans::ensure(&js).await?;
             println!(
-                "stream {} and buckets {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
                 ants_proto::ATTEMPTS_BUCKET,
-                ants_proto::CHANNELS_BUCKET
+                ants_proto::CHANNELS_BUCKET,
+                ants_proto::HUMANS_BUCKET
             );
             Ok(())
         }
@@ -464,17 +477,17 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { persona, dir, out }) => {
+        Command::Auth(AuthCommand::User { persona, human, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{persona}.creds")));
-            auth::issue(&dir, &persona, domain, &out)?;
+            auth::issue(&dir, &persona, auth::role(&persona, human), domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Leaf { machine, personas, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, personas, humans, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &personas, domain, &out)?;
+            auth::issue_leaf(&dir, &machine, &auth::members(&personas, &humans), domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }
@@ -511,7 +524,7 @@ async fn main() -> Result<()> {
                 "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
-                 once the leaf is up: ants leaf outbox {machine} --persona ...",
+                 once the leaf is up: ants leaf outbox {machine} --persona ... --human ...",
                 out.display()
             );
             Ok(())
@@ -529,16 +542,16 @@ async fn main() -> Result<()> {
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
             remote.run(listener).await
         }
-        Command::Leaf(LeafCommand::Outbox { machine, personas, remove }) => {
+        Command::Leaf(LeafCommand::Outbox { machine, personas, humans, remove }) => {
             let (_, js) =
                 bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
             if remove {
                 outbox::remove(&js, &machine).await?;
                 println!("the hub no longer takes anything from the outbox of {machine}");
             } else {
-                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &machine).await?;
-                outbox::admit(&leaf, &js, &machine, &personas).await?;
-                println!("outbox of {machine} ready; the hub takes from it what its personas send");
+                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), &machine).await?;
+                outbox::admit(&leaf, &js, &machine, &auth::members(&personas, &humans)).await?;
+                println!("outbox of {machine} ready; the hub takes from it what its personas and humans send");
             }
             Ok(())
         }

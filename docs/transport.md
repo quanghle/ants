@@ -190,12 +190,13 @@ Verified with nats-server 2.15.3:
 ## Leaf uplink credentials
 
 ```sh
-ants auth leaf macbook --persona dev-a --persona dev-b --persona human --js-domain hub
+ants auth leaf macbook --persona dev-a --persona dev-b --persona human --human alice --js-domain hub
 # -> ~/.config/ants/auth/leaf-macbook.creds, for leafnodes.remotes[].credentials on macbook
 ```
 
-The leaf user may do what the listed personas may do together (`Permissions::for_leaf`, the union of
-`Permissions::for_persona`), with the domain forms of `--js-domain`; list `human` when the machine runs the CLI. Its
+The leaf user may do what the listed personas and humans may do together (`Permissions::for_leaf`, the union of
+`Permissions::for_persona` in each one's role), with the domain forms of `--js-domain`; list each human that runs the
+CLI on the machine, `human` with `--persona` and any other with `--human NAME`. Its
 JWT sets `allowed_connection_types: [LEAFNODE, LEAFNODE_WS]`, so it works only as a leaf uplink (over TCP or
 `wss://`), never as a client that could act as all those personas at once. Issue it again when the machine's
 personas change. Beyond the personas' subjects it carries only the hub's sourcing of the machine's outbox (see "Store
@@ -270,11 +271,11 @@ logs a warning. Everything else needs the hub at once and is not buffered: consu
 roster), stream reads (`ants watch --replay`, dead-letter replay), plan posts that expect a sequence (a persona's
 `post_plan`), dead letters and approvals.
 
-Set up, as the human, with the leaf up and connected:
+Set up, as a human, with the leaf up and connected:
 
 ```sh
-ants leaf outbox macbook --persona dev-a --persona dev-b --persona human   # again when the personas change
-ants leaf outbox macbook --remove                                          # stop taking from it
+ants leaf outbox macbook --persona dev-a --persona dev-b --persona human --human alice   # again when they change
+ants leaf outbox macbook --remove                                                       # stop taking from it
 ```
 
 It creates or updates the outbox through the hub (`$JS.macbook.API`), creates `ANTS_IN` with a source for the machine
@@ -286,8 +287,9 @@ Found while building it (nats-server 2.15.3, source reading and verified):
 - **Replies to the hub must be publishable by the leaf.** The hub tells a leaf about a subscription only if the leaf's
   uplink credentials allow publishing on it (`canSubscribeInternal`, swapped permissions). The hub's requests to a
   leaf get their replies only on subjects the leaf may publish:
-  - Setting up the outbox, the human connects with the inbox prefix `_INBOX.human.leaf.<machine>`, which that leaf may
-    publish. A leaf cannot answer the human's other requests, which use `_INBOX.human`.
+  - Setting up the outbox, a human connects with the inbox prefix `_INBOX.<human>.leaf.<machine>`, which that leaf
+    may publish for `human` and each human its uplink credentials list. A leaf cannot answer a human's other requests,
+    which use `_INBOX.<human>`.
   - The hub's own requests for a source use `$JSC.R.<random>` by default, which the leaf cannot be allowed without
     allowing every other source's replies. `feature_flags { js_api_reply_v2: true }` on the hub makes them
     `$JSC.R.<domain>.<account hash>.<stream>.…`, so the leaf may publish `$JSC.R.<machine>.*.ANTS_OUT.>` only. Without

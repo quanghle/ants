@@ -297,7 +297,7 @@ mod tests {
     use std::time::Duration;
 
     use ants_daemon::{bus, plan};
-    use ants_proto::{ChannelPost, Envelope, PersonaId, PlanPost};
+    use ants_proto::{ChannelPost, Envelope, PersonaId, PlanPost, Role};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
 
@@ -337,7 +337,7 @@ mod tests {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, &M1, &["dev-a".parse().unwrap()], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Persona)], None, &creds).unwrap();
         (dir, creds)
     }
 
@@ -384,7 +384,7 @@ mod tests {
         assert!(err(Leaf { proxy, ..leaf(&tcp, &creds, &server_conf) }).contains("HTTP CONNECT"));
 
         let persona = dir.join("dev-a.creds");
-        auth::issue(&dir, &"dev-a".parse().unwrap(), None, &persona).unwrap();
+        auth::issue(&dir, &"dev-a".parse().unwrap(), Role::Persona, None, &persona).unwrap();
         assert!(err(leaf(&tcp, &persona, &server_conf)).contains("not leaf uplink credentials"));
         let other = scratch_dir("leaf-other-team");
         auth::init(&other).unwrap();
@@ -440,13 +440,13 @@ mod tests {
         let (human, dev_a) = (PersonaId::human(), "dev-a".parse::<PersonaId>().unwrap());
         let creds = |p: &PersonaId| {
             let out = hub.dir().join(format!("{p}.creds"));
-            auth::issue(&team, p, Some(&domain), &out).unwrap();
+            auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
             out
         };
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &M1, std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Persona)], Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);
