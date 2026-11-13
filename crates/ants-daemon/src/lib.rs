@@ -1,6 +1,7 @@
 //! Persona daemon: consumes a persona's durable inbox and answers each message through an ACP harness.
 
 pub mod approvals;
+pub mod attempts;
 pub mod bus;
 pub mod config;
 pub mod daemon;

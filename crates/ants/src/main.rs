@@ -249,11 +249,13 @@ async fn main() -> Result<()> {
             bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
             bus::ensure_sessions(&js).await?;
+            bus::ensure_attempts(&js).await?;
             println!(
-                "stream {} and buckets {} and {} ready",
+                "stream {} and buckets {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
-                ants_proto::SESSIONS_BUCKET
+                ants_proto::SESSIONS_BUCKET,
+                ants_proto::ATTEMPTS_BUCKET
             );
             Ok(())
         }

@@ -2,7 +2,8 @@
 
 Headless agent teams on several machines, talking to each other and to a human at the terminal over NATS.
 
-- **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster and sessions.
+- **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster, sessions and
+  attempt markers.
 - **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
   bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio. Copilot CLI (`copilot --acp`) comes first.
@@ -51,6 +52,21 @@ Every message in hand, waiting for its thread or a harness or being prompted (a 
 included), gets a progress ack every 20 s. A message held by a daemon that crashed or lost its link is redelivered
 after the 60 s ack wait; a copy redelivered to a daemon still holding the message is ignored. The daemon updates its
 inbox consumer to these settings when it starts.
+
+Delivery is at least once: a daemon acks a message only after its reply is stored, so an attempt cut off in between
+(a crash, a lost link, a second Ctrl-C, a failed prompt) is redelivered and its tools may run again. Before prompting,
+the daemon marks the attempt as started in the KV bucket `ants_attempts` under `<persona>.<stream sequence>`. A later
+attempt that finds the mark gets this warning before the message text, and resumes the thread's session, whose history
+may show what ran:
+
+> [ants] An earlier attempt at this message was cut off before its reply was stored, so tools it ran may already have
+> taken effect. The session history may show what ran. Check the current state before repeating any action.
+
+Once the harness has answered, the reply is recorded with the mark before it goes to the stream, so an attempt cut off
+after that sends the recorded reply without prompting again. Replies carry a message id made of the persona and the
+stream sequence, so JetStream keeps one copy of a reply sent twice within its duplicate window (2 min). A mark is
+removed when the message is acked or dead-lettered; one left behind expires after 30 days. A daemon needs the bucket: `ants init`
+as the human creates it, and persona and leaf credentials issued before it existed must be issued again.
 
 Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
 daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires
@@ -166,7 +182,7 @@ between machines shifts them. `--json` prints one entry per line with its `state
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
 `ants.dead.<persona>` (with the error and delivery count), sends a notice to the human on the same thread, and only
 then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran out), the consumer's
-one extra delivery dead-letters it without another prompt. A payload that is not an envelope becomes a dead letter at
+one extra delivery dead-letters it without another prompt (or, when that attempt recorded its reply, sends the reply). A payload that is not an envelope becomes a dead letter at
 once.
 
 ```sh
@@ -332,7 +348,7 @@ ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with the human's credentials to create the stream and the roster and sessions buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with the human's credentials to create the stream and the roster, sessions and attempts buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
 `server.conf` next to the server configuration (or include it by a relative path).

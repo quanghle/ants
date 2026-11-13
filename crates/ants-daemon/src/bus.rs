@@ -4,14 +4,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
+    ATTEMPTS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS,
+    inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::Event;
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::{self, kv, stream};
 
-/// How long the stream keeps messages, and the sessions bucket a thread's session.
+/// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
+/// message can be redelivered for as long as the stream keeps it.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
@@ -122,20 +124,28 @@ pub fn missing_subjects(subjects: &[String]) -> Vec<String> {
 
 /// The KV bucket mapping threads to harness sessions, created when missing and the credentials allow it.
 pub async fn ensure_sessions(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(SESSIONS_BUCKET).await {
+    ensure_kept(js, SESSIONS_BUCKET).await
+}
+
+/// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`]), created when missing and the credentials allow it.
+pub async fn ensure_attempts(js: &jetstream::Context) -> Result<kv::Store> {
+    ensure_kept(js, ATTEMPTS_BUCKET).await
+}
+
+/// A file-backed bucket whose entries expire with the stream's messages.
+async fn ensure_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(bucket).await {
         return Ok(store);
     }
     js.create_key_value(kv::Config {
-        bucket: SESSIONS_BUCKET.to_owned(),
+        bucket: bucket.to_owned(),
         history: 1,
         max_age: RETENTION,
         storage: stream::StorageType::File,
         ..Default::default()
     })
     .await
-    .with_context(|| {
-        format!("creating the {SESSIONS_BUCKET} bucket (with credentials, `ants init` as the human creates it)")
-    })
+    .with_context(|| format!("creating the {bucket} bucket (with credentials, `ants init` as the human creates it)"))
 }
 
 /// Messages from the durable consumer of `persona`'s inbox, which is created if missing and updated if its settings

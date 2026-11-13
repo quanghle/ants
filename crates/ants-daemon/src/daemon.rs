@@ -15,6 +15,7 @@ use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
+use crate::attempts::{Attempts, Marker};
 use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch};
 use crate::mcp::Mcp;
@@ -37,6 +38,11 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
+
+/// Put before the text of a message whose earlier attempt started and stored no reply.
+const CUT_OFF: &str = "[ants] An earlier attempt at this message was cut off before its reply was stored, so tools it \
+ran may already have taken effect. The session history may show what ran. Check the current state before repeating \
+any action.";
 
 /// A few progress periods, so one late or lost progress ack does not redeliver a message still in hand.
 const fn ack_wait(progress_every: Duration) -> Duration {
@@ -91,6 +97,7 @@ pub async fn run(config: Config) -> Result<()> {
         .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
     let sessions = SessionStore::kv(bus::ensure_sessions(&js).await?, config.persona.clone());
+    let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.persona.clone());
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
@@ -113,6 +120,7 @@ pub async fn run(config: Config) -> Result<()> {
         js: &js,
         persona: &config.persona,
         pool: &pool,
+        attempts: &attempts,
         mcp: Some(&mcp),
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
@@ -170,6 +178,7 @@ struct Inbox<'a> {
     js: &'a jetstream::Context,
     persona: &'a PersonaId,
     pool: &'a Pool,
+    attempts: &'a Attempts,
     mcp: Option<&'a Mcp>,
     retry_delay: Duration,
     progress_every: Duration,
@@ -318,36 +327,62 @@ impl Inbox<'_> {
     /// Returns its thread, and the redelivery to wait for when there is one.
     async fn handle(&self, envelope: Envelope, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
         let thread = envelope.thread_id.clone();
-        let attempt = Attempt::of(msg.info().map_or(1, |i| i.delivered), MAX_ATTEMPTS);
-        if attempt == Attempt::Overdue {
+        let (delivered, seq) = match msg.info() {
+            Ok(info) => (info.delivered, info.stream_sequence),
+            Err(e) => {
+                self.bury_unanswerable(&msg, &format!("no delivery info: {e}")).await;
+                return (thread, None);
+            }
+        };
+        let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
+        let marker = self.attempts.get(seq, &envelope).await;
+        if attempt == Attempt::Overdue && !matches!(marker, Ok(Some(Marker::Replied(_)))) {
             let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
-            if let Err(e) = dead::bury(self.js, self.persona, &msg, Some(&envelope), &error).await {
-                tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering");
+            match dead::bury(self.js, self.persona, &msg, Some(&envelope), &error).await {
+                Ok(_) => self.attempts.forget(seq).await,
+                Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
             return (thread, None);
         }
-        let Err(e) = self.answer(&envelope, &msg).await else { return (thread, None) };
+        let result = match marker {
+            Ok(marker) => self.answer(&envelope, &msg, seq, marker).await,
+            Err(e) => Err(e),
+        };
+        let Err(e) = result else { return (thread, None) };
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         if let Err(e) = self.client.publish(subject::status(self.persona, &thread), "failed".into()).await {
             tracing::warn!(error = %e, "publishing status");
         }
-        if attempt == Attempt::Last {
+        // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
+        if attempt != Attempt::Early {
             match dead::bury(self.js, self.persona, &msg, Some(&envelope), &format!("{e:#}")).await {
-                Ok(_) => return (thread, None),
+                Ok(_) => {
+                    self.attempts.forget(seq).await;
+                    return (thread, None);
+                }
                 // The overdue delivery tries again.
                 Err(bury) => tracing::warn!(error = format!("{bury:#}"), "dead-lettering"),
             }
         }
         nak(&msg, Some(self.retry_delay)).await;
-        let retry = msg.info().ok().filter(|info| info.delivered < MAX_DELIVER).map(|info| Retry {
-            seq: info.stream_sequence,
+        let retry = (delivered < MAX_DELIVER).then(|| Retry {
+            seq,
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
             until: tokio::time::Instant::now() + self.retry_delay * 3,
         });
         (thread, retry)
     }
 
-    async fn answer(&self, envelope: &Envelope, msg: &jetstream::Message) -> Result<()> {
+    /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
+    /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
+    /// recorded is not prompted again.
+    async fn answer(
+        &self,
+        envelope: &Envelope,
+        msg: &jetstream::Message,
+        seq: u64,
+        marker: Option<Marker>,
+    ) -> Result<()> {
         if let Err(ProtoError::BudgetExhausted(_)) = envelope.reply(self.persona.clone(), "") {
             // Out of turns: hand the thread to the human instead of spending another prompt.
             let mut escalation = Envelope::on_thread(
@@ -357,16 +392,31 @@ impl Inbox<'_> {
                 format!("Turn budget spent; needs a decision. Last message from {}:\n{}", envelope.from, envelope.text),
             );
             escalation.in_reply_to = Some(envelope.id);
-            bus::publish(self.js, &escalation).await?;
+            let id = format!("escalation-{}-{seq}", self.persona);
+            bus::publish_json(self.js, escalation.subject(), &escalation, Some(&id)).await?;
             return msg.double_ack().await.map_err(|e| anyhow!(e));
         }
 
+        let cut_off = match marker {
+            Some(Marker::Replied(reply)) => {
+                tracing::info!(thread = %envelope.thread_id, "sending the reply an earlier attempt recorded");
+                return self.deliver(&reply, msg, seq).await;
+            }
+            Some(Marker::Started) => true,
+            None => {
+                // Durable before the harness can run anything.
+                self.attempts.start(seq, envelope).await?;
+                false
+            }
+        };
+
         let status = subject::status(self.persona, &envelope.thread_id);
-        tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "prompting");
-        self.client.publish(status.clone(), "working".into()).await?;
+        tracing::info!(thread = %envelope.thread_id, from = %envelope.from, cut_off, "prompting");
+        self.client.publish(status, "working".into()).await?;
 
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
-        let prompt = self.pool.prompt(&envelope.thread_id, &envelope.text);
+        let text = if cut_off { warned(&envelope.text) } else { envelope.text.clone() };
+        let prompt = self.pool.prompt(&envelope.thread_id, &text);
         tokio::pin!(prompt);
         let mut progress = self.progress();
         let text = loop {
@@ -381,10 +431,20 @@ impl Inbox<'_> {
         };
 
         let reply = envelope.reply(self.persona.clone(), text)?;
+        // From here on a redelivery sends this reply rather than prompting again.
+        self.attempts.replied(seq, envelope, &reply).await?;
+        self.deliver(&reply, msg, seq).await
+    }
+
+    /// Store `reply` to the message at stream sequence `seq`, then ack the message and forget its marker. The message
+    /// id makes JetStream drop a copy an earlier attempt stored within the stream's duplicate window.
+    async fn deliver(&self, reply: &Envelope, msg: &jetstream::Message, seq: u64) -> Result<()> {
+        let id = format!("reply-{}-{seq}", self.persona);
         // Store the reply before acking: a crash in between redelivers rather than loses the message.
-        bus::publish(self.js, &reply).await?;
+        bus::publish_json(self.js, reply.subject(), reply, Some(&id)).await?;
         msg.double_ack().await.map_err(|e| anyhow!(e))?;
-        self.client.publish(status, "idle".into()).await?;
+        self.attempts.forget(seq).await;
+        self.client.publish(subject::status(self.persona, &reply.thread_id), "idle".into()).await?;
         Ok(())
     }
 
@@ -420,6 +480,11 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
         }
     }
     next
+}
+
+/// The prompt for a message whose earlier attempt was cut off.
+fn warned(text: &str) -> String {
+    format!("{CUT_OFF}\n\n{text}")
 }
 
 fn stream_seq(msg: &jetstream::Message) -> Option<u64> {
@@ -460,6 +525,8 @@ mod tests {
         client: async_nats::Client,
         js: jetstream::Context,
         stream: jetstream::stream::Stream,
+        attempts: Attempts,
+        markers: jetstream::kv::Store,
         dev: PersonaId,
     }
 
@@ -470,14 +537,22 @@ mod tests {
             let dev: PersonaId = "dev-a".parse().unwrap();
             let (client, js) = bus::connect(&server.url, None, None, &dev, "test").await.unwrap();
             let stream = bus::ensure_stream(&js).await.unwrap();
+            let markers = bus::ensure_attempts(&js).await.unwrap();
+            let attempts = Attempts::new(markers.clone(), dev.clone());
             let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
-            Some((Self { _server: server, client, js, stream, dev }, replies))
+            Some((Self { _server: server, client, js, stream, attempts, markers, dev }, replies))
         }
 
-        async fn send(&self, thread: &ThreadId, text: &str) {
+        /// Send `text` from the human, returning the envelope and its stream sequence.
+        async fn send(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
             let envelope = Envelope::on_thread(thread.clone(), PersonaId::human(), self.dev.clone(), text);
-            bus::publish(&self.js, &envelope).await.unwrap();
+            let seq = bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
+            (envelope, seq)
+        }
+
+        async fn marked(&self, seq: u64) -> bool {
+            self.markers.get(ants_proto::attempt_key(&self.dev, seq)).await.unwrap().is_some()
         }
 
         /// Serve the inbox until a permit is added to `ctrl_c` (twice to stop mid-prompt).
@@ -498,6 +573,7 @@ mod tests {
                 js: &self.js,
                 persona: &self.dev,
                 pool,
+                attempts: &self.attempts,
                 mcp: None,
                 retry_delay: Duration::from_millis(300),
                 progress_every,
@@ -571,12 +647,13 @@ mod tests {
 
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
-            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "flaky a".to_owned()));
+            // The failed attempt may have run tools too, so the retry carries the warning.
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), warned("flaky a")));
             assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
-        assert_eq!(log.lock().unwrap().answered, ["flaky a", "b"]);
+        assert_eq!(log.lock().unwrap().answered, [warned("flaky a"), "b".to_owned()]);
         assert_eq!(bus.unacked().await, 0);
     }
 
@@ -717,5 +794,103 @@ mod tests {
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, Duration::from_secs(3600), ack_wait), check);
         assert_eq!(log.lock().unwrap().answered, ["hold a", "b"]);
         assert_eq!(bus.unacked().await, 0, "acks of the first delivery count");
+    }
+
+    #[tokio::test]
+    async fn a_first_delivery_is_prompted_as_sent_and_leaves_no_marker() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let (_, seq) = bus.send(&t1, "a").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "a".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered, ["a"]);
+        assert!(!bus.marked(seq).await, "the marker is removed with the ack");
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let t1 = ThreadId::generate();
+        let (_, seq) = bus.send(&t1, "hold a").await;
+
+        // Stopped mid-prompt, as by a crash: the harness may have run tools, and the message was not acked.
+        let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let crash = async {
+            until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+            ctrl_c.add_permits(2);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);
+        // Its harness is still held mid-prompt, so it is dropped rather than shut down.
+        drop(pool);
+        assert!(bus.marked(seq).await, "the attempt is marked as started");
+        assert!(log.lock().unwrap().answered.is_empty());
+
+        let pool = Pool::new(launch, store, 2, IDLE);
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), warned("hold a")));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+        {
+            let log = log.lock().unwrap();
+            assert_eq!(log.answered, [warned("hold a")]);
+            assert_eq!(log.loaded, ["s1"], "the session resumes, with the history of the cut-off attempt");
+        }
+        assert!(!bus.marked(seq).await);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let (ask, seq) = bus.send(&t1, "a").await;
+
+        // The crashed attempt recorded its reply and stored it, but never acked.
+        let reply = ask.reply(bus.dev.clone(), "s1: done before").unwrap();
+        bus.attempts.start(seq, &ask).await.unwrap();
+        bus.attempts.replied(seq, &ask, &reply).await.unwrap();
+        let id = format!("reply-{}-{seq}", bus.dev);
+        bus::publish_json(&bus.js, reply.subject(), &reply, Some(&id)).await.unwrap();
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "done before".to_owned()));
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            timeout(WAIT, async {
+                let name = ants_proto::inbox_consumer(&bus.dev);
+                loop {
+                    // The consumer may not be there yet.
+                    if let Ok(mut consumer) = bus.stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await
+                        && consumer.info().await.unwrap().ack_floor.stream_sequence >= seq
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("no ack");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().starts, 0, "not prompted again");
+        let state = bus.stream.get_info().await.unwrap().state;
+        assert_eq!(state.messages, 2, "the message and one copy of its reply");
+        assert!(!bus.marked(seq).await);
+        assert_eq!(bus.unacked().await, 0);
     }
 }
