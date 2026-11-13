@@ -540,6 +540,8 @@ This agent is the messenger of an ants team. It routes each request instead of d
 4. When no persona has the capability, say so and name the capabilities there are.
 ```
 
+In channels the messenger triages the human's posts that @mention nobody (see Channel delivery).
+
 `route` picks deterministically: the first persona by name with the tag, so the same roster always routes the same
 way; `list_personas` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
 and `send_message`. Every persona gets these tools, not only the messenger.
@@ -605,8 +607,8 @@ messenger need not be a member.
 there too. `ants post --wait` prints each post on the thread as it arrives, until `--timeout` (seconds, default 600)
 or Ctrl-C. `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
 
-**Turn budget.** Channel posts spend a thread's turn budget like messages between agents: an agent's post that
-@mentions another agent wakes it and spends a turn, and the thread goes back to the human when none are left. The
+**Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
+turn, and the thread goes back to the human when none are left. The
 human's posts carry a fresh budget (8 turns). `ants watch` shows the turns left after each post.
 
 **Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
@@ -621,6 +623,38 @@ write: `create` fails when the channel exists, and `set`, `add` and `remove` cha
 changed it since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a
 warning (`set`, `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning
 rather than a refusal, as their daemon may start later; the human cannot be a member or the messenger.
+
+### Channel delivery
+
+A daemon takes every channel post through its persona's durable consumer `chan-<persona>` (filter `ants.chan.>`),
+with the same guarantees as its inbox: the posts of one thread are answered in order and different threads
+concurrently, an attempt is marked in `ants_attempts`, a post is acked only once its reply is stored, and a post whose
+last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice to the human on the post's thread. The
+consumer starts at the posts stored from its creation on, so a persona's first start does not answer the channels'
+history. The daemon watches `ants_channels` for the members of each channel, skipping an entry whose channel disagrees
+with its key.
+
+A post prompts a persona only when it @mentions it and the persona is a member of the channel, or when the persona is
+to triage it (below). The rest are acked without a prompt: posts in other channels, the persona's own, posts that
+mention only others or nobody. A malformed post, or one whose `from` or channel disagrees with its subject, is dropped (terminated, no dead letter). A prompt
+starts with the posts on its thread that the persona has not been shown yet, oldest first, without its own: those
+since the last post it answered on the thread, or since the thread started. At most 50 are shown, with a count of the
+older ones left out. The stream sequence of the last post answered is kept per thread under
+`<persona>.<thread>.seen` in `ants_sessions`, so a restarted daemon goes on from there.
+
+The final answer is posted to the same channel and thread on `ants.chan.<channel>.<persona>`, replying to the post. An
+@mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget, counted
+from the post it answers (each branch of a thread spends its own); a post from the human gives a fresh budget. A post
+that reaches a persona with no turns left is not prompted: the human gets a notice in the inbox
+(`ants.inbox.human.<persona>`) on the thread with the post, as in the inbox. Spending caps apply as to inbox messages.
+
+A post of the human that @mentions nobody prompts the channel's messenger instead: the persona its entry assigns, or
+else `messenger` (built in or configured), a member or not. Its prompt adds the triage rules of ants and lists the
+channel's members with their capabilities and `whoami` from the roster, members missing from the roster as offline;
+the messenger's own instructions add to the rules. It answers on the post's thread with a short post that @mentions
+the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it does not answer the
+request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any agent's post. Its
+mentions wake members only: a mention of a non-member stays in the post's `mentions` but wakes nobody.
 
 ## Persona memory
 

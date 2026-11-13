@@ -191,6 +191,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use ants_daemon::bus;
+    use ants_daemon::channel::{Channels, Threads};
     use ants_daemon::dead::{self, Attempt};
     use ants_daemon::plan;
     use ants_daemon::roster::Registration;
@@ -528,7 +529,7 @@ pub(crate) mod tests {
             a_stream.create_consumer(consumer(chan_consumer(&dev_a), subject::ALL_CHANNELS)).await.unwrap();
         let msg = chan.messages().await.unwrap().next().await.unwrap().unwrap();
         let got: ChannelPost = serde_json::from_slice(&msg.payload).unwrap();
-        assert_eq!((got.check_subject(&msg.subject), got), (Ok(()), post));
+        assert_eq!((got.check_subject(&msg.subject), &got), (Ok(()), &post));
         msg.double_ack().await.unwrap();
         let room = consumer(chan_reader(&dev_a), &subject::chan_room(&ops));
         a_js.create_consumer_on_stream(room, STREAM).await.unwrap();
@@ -543,6 +544,19 @@ pub(crate) mod tests {
             assert!(a_stream.create_consumer(several).await.is_err());
         }
         assert!(a_stream.create_consumer(consumer(chan_consumer(&dev_b), subject::ALL_CHANNELS)).await.is_err());
+
+        // What dev-a's daemon reads: the channels, and the thread of a post back for its prompt.
+        h_kv.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let channels = Channels::watch(a_kv).await.unwrap();
+        assert_eq!(channels.get(&ops), Some(&entry));
+        bus::ensure_sessions(&h_js).await.unwrap();
+        let note = post.reply(human.clone(), "noted").unwrap();
+        bus::publish_json(&h_js, note.subject(), &note, None).await.unwrap();
+        let ask = post.reply(human.clone(), "@dev-a go").unwrap();
+        let seq = bus::publish_json(&h_js, ask.subject(), &ask, None).await.unwrap();
+        let threads = Threads::new(a_js.clone(), dev_a.clone(), bus::ensure_sessions(&a_js).await.unwrap());
+        assert_eq!(threads.context(&ask, seq).await.unwrap().posts, [note], "without dev-a's own post");
+        threads.seen(&ask.thread_id, seq).await.unwrap();
     }
 
     #[tokio::test]

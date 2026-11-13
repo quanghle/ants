@@ -412,6 +412,12 @@ pub fn thread_spend_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}.spend")
 }
 
+/// Key of the stream sequence of the last post on a channel thread the persona was shown, in [`SESSIONS_BUCKET`] beside
+/// the thread's session: its next prompt on the thread shows the posts after it.
+pub fn channel_seen_key(persona: &PersonaId, thread: &ThreadId) -> String {
+    format!("{persona}.{thread}.seen")
+}
+
 /// Key of what a persona has spent on `day` (`YYYY-MM-DD`, UTC), in [`SESSIONS_BUCKET`].
 pub fn daily_spend_key(persona: &PersonaId, day: &str) -> String {
     format!("{persona}.day.{day}")
@@ -897,7 +903,8 @@ pub struct ChannelEntry {
     /// The personas in the channel, in the order they were added.
     #[serde(default)]
     pub members: Vec<PersonaId>,
-    /// The persona that triages the human's posts that @mention nobody.
+    /// The persona that triages the human's posts that @mention nobody, when not the default `messenger`
+    /// ([`ChannelEntry::messenger`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messenger: Option<PersonaId>,
 }
@@ -925,6 +932,12 @@ impl ChannelEntry {
         self.members.contains(persona)
     }
 
+    /// The persona that triages the human's posts that @mention nobody: the one assigned, or else the default
+    /// [`PersonaId::messenger`]. It need not be a member.
+    pub fn messenger(&self) -> PersonaId {
+        self.messenger.clone().unwrap_or_else(PersonaId::messenger)
+    }
+
     /// Add `persona` after the other members; false when it already is one.
     pub fn add_member(&mut self, persona: PersonaId) -> bool {
         if self.is_member(&persona) {
@@ -941,18 +954,15 @@ impl ChannelEntry {
         self.members.len() != before
     }
 
-    /// The personas `post` wakes: the members it @mentions, except its author and the human. A post of the human that
-    /// mentions nobody wakes the channel's messenger instead, to triage it; an agent's post that mentions nobody wakes
-    /// nobody. A post to another channel wakes nobody here.
+    /// The personas `post` wakes: the members it @mentions, except its author and the human; mentions of anyone else
+    /// wake nobody. A post of the human that mentions nobody wakes the channel's [`ChannelEntry::messenger`] instead,
+    /// to triage it; an agent's post that mentions nobody wakes nobody. A post to another channel wakes nobody here.
     pub fn woken(&self, post: &ChannelPost) -> Vec<PersonaId> {
         if post.channel != self.channel {
             return Vec::new();
         }
         if post.mentions.is_empty() {
-            return match &self.messenger {
-                Some(messenger) if post.from.is_human() => vec![messenger.clone()],
-                _ => Vec::new(),
-            };
+            return if post.from.is_human() { vec![self.messenger()] } else { Vec::new() };
         }
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !m.is_human()).cloned().collect()
     }
@@ -961,8 +971,8 @@ impl ChannelEntry {
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
 /// post on an existing thread.
 ///
-/// Posts spend the thread's turn budget like messages between agents do: an agent's post that @mentions another agent
-/// wakes it and spends a turn ([`ChannelPost::spend`]); the human's posts carry a fresh budget.
+/// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn
+/// ([`ChannelPost::spend`]), and at zero the thread goes to the human; the human's posts carry a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelPost {
     pub id: Uuid,
@@ -1007,14 +1017,10 @@ impl ChannelPost {
         }
     }
 
-    /// The post as an agent's, with what is left of `budget` (the turns of the message the agent is handling): one
-    /// turn less when the post wakes another agent ([`ChannelPost::wakes_agents`]), which fails when none are left.
+    /// The post as an agent's, with what is left of `budget` (the turns of the post the agent is answering): one turn
+    /// less, whoever it wakes, which fails when none are left.
     pub fn spend(self, budget: u32) -> Result<Self, Error> {
-        let turn_budget = if self.wakes_agents() {
-            budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?
-        } else {
-            budget
-        };
+        let turn_budget = budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?;
         Ok(Self { turn_budget, ..self })
     }
 
@@ -1635,20 +1641,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_channel_posts_spend_a_turn_only_to_wake_another_agent() {
+    fn every_agent_channel_post_spends_a_turn() {
         let c: ChannelId = "ops".parse().unwrap();
         let ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a deploy?");
         let answer = ask.reply(p("dev-a"), "done, @human").unwrap();
         assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
         assert_eq!(answer.in_reply_to, Some(ask.id));
-        assert_eq!(answer.turn_budget, ask.turn_budget, "waking nobody spends nothing");
+        assert_eq!(answer.turn_budget, DEFAULT_TURN_BUDGET - 1, "waking nobody spends a turn too");
         let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait").unwrap();
         assert_eq!(handoff.turn_budget, DEFAULT_TURN_BUDGET - 1);
         handoff.turn_budget = 1;
         let back = handoff.reply(p("dev-b"), "@dev-a fine").unwrap();
         assert_eq!(back.turn_budget, 0);
         assert_eq!(back.reply(p("dev-a"), "@dev-b again"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
-        assert_eq!(back.reply(p("dev-a"), "@human over to you").unwrap().turn_budget, 0);
+        assert_eq!(back.reply(p("dev-a"), "@human over to you"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
         let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on").unwrap();
         assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
         let own = ChannelPost::new(c, p("dev-a"), "@dev-b status?").spend(3).unwrap();
@@ -1693,9 +1699,9 @@ mod tests {
 
         let human = PersonaId::human();
         let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
-        assert!(entry.woken(&untagged).is_empty(), "no messenger to triage");
-        entry.messenger = Some(PersonaId::messenger());
-        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()]);
+        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()], "the default messenger triages");
+        entry.messenger = Some(p("dev-c"));
+        assert_eq!(entry.woken(&untagged), [p("dev-c")], "the assigned one, member or not");
         assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?")).is_empty(), "agents never fan out");
         let tagged = ChannelPost::new(c.clone(), p("dev-a"), "@dev-b @dev-c @dev-a @human look");
         assert_eq!(entry.woken(&tagged), [p("dev-b")], "members only, not the author or the human");

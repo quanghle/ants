@@ -262,6 +262,33 @@ pub async fn inbox_consumer(
     Ok(consumer.messages().await?)
 }
 
+/// Messages from the durable consumer `chan-<persona>` of every channel post, with the settings of
+/// [`inbox_consumer`]; the daemon picks out the posts meant for the persona. A new consumer starts with the posts
+/// stored from then on, so a first start does not answer a channel's history.
+pub async fn chan_consumer(
+    stream: &stream::Stream,
+    persona: &PersonaId,
+    ack_wait: Duration,
+    max_deliver: i64,
+    max_ack_pending: i64,
+) -> Result<pull::Stream> {
+    let name = ants_proto::chan_consumer(persona);
+    let consumer: PullConsumer = stream
+        .create_consumer(pull::Config {
+            durable_name: Some(name.clone()),
+            filter_subject: subject::ALL_CHANNELS.to_owned(),
+            deliver_policy: consumer::DeliverPolicy::New,
+            ack_policy: consumer::AckPolicy::Explicit,
+            ack_wait,
+            max_deliver,
+            max_ack_pending,
+            ..Default::default()
+        })
+        .await
+        .with_context(|| format!("creating consumer {name}"))?;
+    Ok(consumer.messages().await?)
+}
+
 /// The durable consumer of the human's inbox, created if missing. A reply stays in it, unread, until acked. Any number
 /// may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
 /// consumer from before inbox subjects named the sender gets the current filter.
