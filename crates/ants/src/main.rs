@@ -108,7 +108,7 @@ enum Command {
     #[command(subcommand)]
     Dead(DeadCommand),
     /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
-    Daemon(serve::DaemonArgs),
+    Daemon(Box<serve::DaemonArgs>),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
         /// The daemon's MCP socket.
@@ -291,7 +291,13 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Harness(HarnessCommand::Prompt { harness, words }) => {
-            let launch = Launch::new(harness, std::env::current_dir()?, Vec::new(), PermissionPolicy::reject_all());
+            let launch = Launch::new(
+                harness,
+                std::env::current_dir()?,
+                Vec::new(),
+                PermissionPolicy::reject_all(),
+                Default::default(),
+            );
             let reply = harness::prompt_once(&launch, &words.join(" ")).await?;
             println!("{reply}");
             Ok(())

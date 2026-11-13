@@ -439,6 +439,7 @@ pub(crate) mod tests {
             machine: "m1".to_owned(),
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned()],
+            whoami: None,
             workdir: None,
             started_at: now,
             heartbeat_at: now,

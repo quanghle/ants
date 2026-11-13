@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, SessionNotification, SessionUpdate, StopReason, TextContent,
+    NewSessionResponse, PromptRequest, PromptResponse, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOption, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio as AcpStdio};
 use ants_test_support::{NatsServer, scratch_dir};
@@ -24,7 +26,7 @@ fn main() {
     }
     let tests: [(&str, fn()); 2] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
-        ("custom_memory_and_tasks_reach_the_harness", custom_memory_and_tasks_reach_the_harness),
+        ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
@@ -39,7 +41,7 @@ fn ask_gets_the_reply_of_a_daemon_harness() {
     exercise_daemon(false);
 }
 
-fn custom_memory_and_tasks_reach_the_harness() {
+fn custom_whoami_and_tools_reach_the_harness() {
     exercise_daemon(true);
 }
 
@@ -66,6 +68,8 @@ fn exercise_daemon(custom_tools: bool) {
             &config,
             format!(
                 "[[persona]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                 whoami = \"Maintain the Rust backend.\"\n\
+                 model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
                  memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
                  env = {{ ANTS_TEST_TOOL_DB = \"custom.db\", BD_DB = \"unmanaged.db\", BD_REMOTE = \"\" }}\n"
             ),
@@ -93,13 +97,26 @@ fn exercise_daemon(custom_tools: bool) {
     assert!(ask.status.success(), "ants ask: {}\ndaemon log:\n{}", String::from_utf8_lossy(&ask.stderr), daemon_log());
     assert!(stdout.starts_with("thread "), "{stdout}");
     let expected = if custom_tools {
-        "dev-a: stub: [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
-         hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n"
+        "dev-a: stub: [ants persona dev-a]\nMaintain the Rust backend.\n\n\
+         [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
+         hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
+         model=stub-model; effort=high; context=long_context\n"
     } else {
         "dev-a: stub: hello there\n"
     };
     assert!(stdout.contains(expected), "{stdout}\ndaemon log:\n{}", daemon_log());
     assert!(!home.join(".bd").exists(), "ants must not initialize a tool workspace");
+
+    let roster = run(ants(&["roster", "--json"]));
+    assert!(roster.status.success(), "ants roster: {}", String::from_utf8_lossy(&roster.stderr));
+    let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
+    assert_eq!(entry["persona"], "dev-a");
+    if custom_tools {
+        assert_eq!(entry["whoami"], "Maintain the Rust backend.");
+        assert!(!String::from_utf8_lossy(&roster.stdout).contains("Use the notes tool."));
+    } else {
+        assert!(entry.get("whoami").is_none());
+    }
 
     let inbox = run(ants(&["inbox"]));
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
@@ -151,6 +168,31 @@ impl Drop for Killed {
 
 /// ACP over stdio: every prompt is answered with `stub: <prompt>`.
 fn stub_harness() {
+    let options = std::sync::Arc::new(std::sync::Mutex::new(vec![
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "stub-default",
+            ["stub-default", "stub-model"]
+                .into_iter()
+                .map(|value| SessionConfigSelectOption::new(value, value))
+                .collect::<Vec<_>>(),
+        ),
+        SessionConfigOption::select(
+            "reasoning_effort",
+            "Reasoning effort",
+            "low",
+            ["low", "high"].into_iter().map(|value| SessionConfigSelectOption::new(value, value)).collect::<Vec<_>>(),
+        ),
+    ]));
+    let on_new = options.clone();
+    let on_set = options.clone();
+    let args: Vec<_> = std::env::args().collect();
+    let context = args
+        .windows(2)
+        .find(|args| args[0] == "--context")
+        .map(|args| args[1].clone())
+        .unwrap_or_else(|| "unset".to_owned());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let served = runtime.block_on(
         Agent
@@ -165,7 +207,19 @@ fn stub_harness() {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_: NewSessionRequest, responder, _cx| responder.respond(NewSessionResponse::new("stub")),
+                async move |_: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new("stub").config_options(on_new.lock().unwrap().clone()))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    let mut options = on_set.lock().unwrap();
+                    let option = options.iter_mut().find(|option| option.id == request.config_id).unwrap();
+                    let SessionConfigKind::Select(select) = &mut option.kind else { unreachable!() };
+                    select.current_value = request.value.as_value_id().unwrap().clone();
+                    responder.respond(SetSessionConfigOptionResponse::new(options.clone()))
+                },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
@@ -185,6 +239,15 @@ fn stub_harness() {
                             std::env::var("BD_DB").unwrap(),
                             std::env::var("BD_REMOTE").unwrap()
                         ));
+                        let options = options.lock().unwrap();
+                        let selected: Vec<_> = options
+                            .iter()
+                            .map(|option| {
+                                let SessionConfigKind::Select(select) = &option.kind else { unreachable!() };
+                                select.current_value.0.as_ref()
+                            })
+                            .collect();
+                        reply.push_str(&format!("\nmodel={}; effort={}; context={context}", selected[0], selected[1]));
                     }
                     let reply = ContentBlock::Text(TextContent::new(reply));
                     cx.send_notification(SessionNotification::new(

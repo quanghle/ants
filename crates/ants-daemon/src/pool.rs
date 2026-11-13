@@ -515,10 +515,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_instructions_reach_every_prompt_and_resumed_session() {
+    async fn persona_and_tool_instructions_reach_every_prompt_and_resumed_session() {
         let (launch, log, _) = fake::launch(true);
-        let instructions = "[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
-        let pool = Pool::new(launch.with_instructions(instructions.to_owned()), SessionStore::memory(), 1, IDLE);
+        let mut persona = crate::config::Persona::new("dev-a".parse().unwrap(), env!("CARGO_MANIFEST_DIR").into());
+        persona.whoami = Some("Maintain the Rust backend.".to_owned());
+        persona.memory = Some("Use notes.".to_owned());
+        persona.tasks = Some("Use tickets.".to_owned());
+        let config = persona.into_config("nats://unused").unwrap();
+        let instructions = "[ants persona dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
+        let pool = Pool::new(launch.with_instructions(config.instructions), SessionStore::memory(), 1, IDLE);
         for (thread_id, text, session) in [(1, "one", "s1"), (1, "two", "s1"), (2, "three", "s2"), (1, "four", "s1")] {
             assert_eq!(
                 pool.prompt(&thread(thread_id), text).await.unwrap(),

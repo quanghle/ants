@@ -88,7 +88,11 @@ name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
 harness = "copilot"                        # default; or "claude", "antigravity"
+model = "gpt-6.1-sol"                      # optional; exact model ID offered by the harness
+reasoning_effort = "high"                  # optional; a value offered by the selected model
+context = "long_context"                  # optional; provider-native tier/window, not a token cap
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
+whoami = "Maintain Rust services and review backend changes." # optional; shared in the roster
 memory = "Use the notes MCP server for durable memory."  # optional, any tool available to the harness
 tasks = "Use the tracker CLI for task tracking."         # optional, independent of memory
 env = { TRACKER_DB = "/srv/ants/dev-a/tasks.db" }         # optional harness environment overrides
@@ -127,6 +131,35 @@ How flags and the file combine:
   `nats` and `js_domain` may also be set per persona.
 
 ## Limits and caps
+
+### Model, reasoning effort and context
+
+Each persona may set `model`, `reasoning_effort` and `context`. The matching flags are `--model`,
+`--reasoning-effort` and `--context`; with a config file, select one persona using `--persona` before overriding
+settings. Omitted fields keep the harness's defaults, including saved session settings on resume.
+
+The daemon selects the model through ACP before setting reasoning effort, since available effort levels depend on
+the selected model. Settings are reapplied to new and resumed sessions. Values must match the harness's advertised
+option IDs; unsupported values, missing selectors, rejected changes or a selector that reports a different value
+fail the session before a prompt runs. Errors list available choices for unsupported values.
+
+| Harness | Model and reasoning effort | Native `context` selection |
+|---|---|---|
+| Copilot | ACP model and reasoning-effort selectors | `default` or `long_context`, passed to `copilot --acp --context ...`; support depends on the selected model and account |
+| Claude | ACP model and effort selectors | `default`, or `1m` with an explicit `model`; `1m` selects the exact advertised `<model>[1m]` variant, without falling back to another model |
+| Antigravity | ACP model and thinking-level selectors | No separate context selector; omit `context` and select a model with the required native window |
+
+For Claude, a model ID already ending in `[1m]` can be used without a separate `context`; `context = "default"`
+with such an ID is a configuration error. Other model IDs must match the advertised IDs exactly; aliases work only
+when the harness lists the alias. A configured context is a native tier/window, not a custom numeric token limit
+or a spending cap. ants does not truncate or compact history to enforce a context size. Copilot's context tier is
+applied at process launch; ACP does not expose a context selector for read-back. Actual context capacity remains
+model- and account-dependent.
+
+These settings are separate from `whoami`; the roster's role description does not claim an effective model or
+context capacity. Provider settings and credentials remain managed by the harness and persona `env`.
+
+### Prompt limits and spending caps
 
 Every prompt has a time limit, `--prompt-timeout-secs` (default 1800, tool requests waiting for the human included),
 and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spending can be capped per thread,
@@ -201,7 +234,7 @@ A tunnel the uplink depends on, such as `devtunnel connect`, needs a service of 
 ## Roster
 
 Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, harness, workdir,
-capabilities, start and last heartbeat time (`RosterEntry` in `ants-proto`). It refreshes the entry every 10 s and
+capabilities, `whoami`, start and last heartbeat time (`RosterEntry` in `ants-proto`). It refreshes the entry every 10 s and
 deletes it on a clean stop. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; every persona's and the
@@ -213,6 +246,31 @@ skip, with a warning, an entry that names another. Persona credentials issued be
 capabilities and workdir. An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
 without one: its daemon is likely gone and the entry expires shortly. Ages come from the daemons' clocks, so skew
 between machines shifts them. `--json` prints one entry per line with its `state` added.
+
+### Persona identity and role
+
+Set `whoami` on each `[[persona]]` to describe the role, responsibilities and boundaries:
+
+```toml
+[[persona]]
+name = "reviewer"
+workdir = "~/src/app"
+whoami = """
+Review Rust changes for correctness and regressions.
+Provide findings and recommendations; leave implementation to a development persona.
+"""
+capabilities = ["rust", "review"]
+```
+
+The daemon prepends the persona name and `whoami` to every harness prompt, including resumed sessions. The same
+`whoami` is published in the roster and returned by `list_personas`, so other personas can understand the role and
+choose a recipient with `ask_agent` or `send_message`. `route` still matches capability tags, not the `whoami` text.
+Other personas' `whoami` fields are role descriptions, not instructions for the receiving session.
+
+`--whoami TEXT` sets or overrides the field for a selected persona; `--whoami ""` clears it. Missing or blank
+`whoami` adds no role instructions, and old roster entries without the field still work. `ants roster --json` includes
+the field when configured. The text is visible to every persona: keep secrets and private instructions out.
+Memory and task instructions remain separate and are not published in the roster.
 
 ## Dead letters
 
@@ -304,7 +362,7 @@ speak as the persona, on the thread the session serves:
 | `send_message(to, text, thread?)` | Sends to another persona or `human` and returns once JetStream has stored it. `thread` omitted: the current thread; `new`: a fresh one; else that thread id. |
 | `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
-| `list_personas(capability?)` | Lists the other personas in the roster with their capabilities, harness and machine; only those advertising `capability` when given. |
+| `list_personas(capability?)` | Lists the other personas in the roster with `whoami`, capabilities, harness and machine; only those advertising `capability` when given. |
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |

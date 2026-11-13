@@ -22,6 +22,9 @@ pub struct DaemonArgs {
     /// The persona's own files (default: ~/.ants/<persona>).
     #[arg(long)]
     home: Option<PathBuf>,
+    /// Role instructions shared in the roster and prepended to every prompt.
+    #[arg(long)]
+    whoami: Option<String>,
     /// Instructions for the memory tool available through the harness; prepended to every prompt.
     #[arg(long)]
     memory: Option<String>,
@@ -34,6 +37,15 @@ pub struct DaemonArgs {
     /// Agent harness: `copilot` (default), `claude` or `antigravity`.
     #[arg(long)]
     harness: Option<HarnessKind>,
+    /// Model ID advertised by the harness. Omitted: keep the harness default.
+    #[arg(long)]
+    model: Option<String>,
+    /// Reasoning effort value advertised by the selected model.
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+    /// Provider-native context: Copilot default/long_context, Claude default/1m.
+    #[arg(long)]
+    context: Option<String>,
     /// Let the harness run tool requests matching RULE without asking: `*`, a tool kind such as `read`, or
     /// `<kind>:<pattern>` such as `execute:cargo test*` or `edit:src/*`. Repeatable, added to the file's `allow`.
     /// Other requests go to the human.
@@ -83,10 +95,14 @@ impl DaemonArgs {
     fn sets_persona_options(&self) -> bool {
         self.workdir.is_some()
             || self.home.is_some()
+            || self.whoami.is_some()
             || self.memory.is_some()
             || self.tasks.is_some()
             || !self.env.is_empty()
             || self.harness.is_some()
+            || self.model.is_some()
+            || self.reasoning_effort.is_some()
+            || self.context.is_some()
             || !self.allow.is_empty()
             || self.allow_tools
             || self.approval_timeout_secs.is_some()
@@ -109,6 +125,9 @@ impl DaemonArgs {
         if let Some(home) = &self.home {
             p.home = Some(home.clone());
         }
+        if let Some(whoami) = &self.whoami {
+            p.whoami = Some(whoami.clone());
+        }
         if let Some(memory) = &self.memory {
             p.memory = Some(memory.clone());
         }
@@ -118,6 +137,15 @@ impl DaemonArgs {
         p.env.extend(self.env.iter().cloned());
         if let Some(harness) = self.harness {
             p.harness = harness;
+        }
+        if let Some(model) = &self.model {
+            p.model = Some(model.clone());
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            p.reasoning_effort = Some(effort.clone());
+        }
+        if let Some(context) = &self.context {
+            p.context = Some(context.clone());
         }
         p.allow.extend(self.allow.iter().cloned());
         p.allow_tools |= self.allow_tools;
@@ -342,31 +370,59 @@ mod tests {
     }
 
     #[test]
+    fn model_flags_override_only_the_selected_persona() {
+        let mut p = persona("dev-a");
+        p.model = Some("old-model".to_owned());
+        p.reasoning_effort = Some("low".to_owned());
+        p.context = Some("default".to_owned());
+        let picked = pick(
+            vec![p.clone(), persona("dev-b")],
+            &args("--persona dev-a --model smart --reasoning-effort high --context long_context"),
+            Path::new("config.toml"),
+        )
+        .unwrap();
+        assert_eq!(picked[0].model.as_deref(), Some("smart"));
+        assert_eq!(picked[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(picked[0].context.as_deref(), Some("long_context"));
+        let only_model = args("--model smart").apply(p);
+        assert_eq!(only_model.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(only_model.context.as_deref(), Some("default"));
+        for line in ["--model smart", "--reasoning-effort high", "--context long_context"] {
+            assert!(pick(vec![persona("dev-a")], &args(line), Path::new("config.toml")).is_err());
+        }
+    }
+
+    #[test]
     fn tool_flags_override_only_the_selected_settings() {
         let mut p = persona("dev-a");
+        p.whoami = Some("file-role".to_owned());
         p.memory = Some("file-memory".to_owned());
         p.tasks = Some("file-tasks".to_owned());
         p.env.insert("TASK_DB".to_owned(), "file.db".to_owned());
         p.env.insert("KEEP".to_owned(), "keep".to_owned());
         let picked = pick(
             vec![p],
-            &args("--persona dev-a --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
+            &args("--persona dev-a --whoami custom-role --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
             Path::new("config.toml"),
         )
         .unwrap();
+        assert_eq!(picked[0].whoami.as_deref(), Some("custom-role"));
         assert_eq!(picked[0].memory.as_deref(), Some("custom-memory"));
         assert_eq!(picked[0].tasks.as_deref(), Some("file-tasks"));
         assert_eq!(picked[0].env["TASK_DB"], "cli.db");
         assert_eq!(picked[0].env["KEEP"], "keep");
         assert_eq!(picked[0].env["EXTRA"], "a=b");
         let clear =
-            Cmd::try_parse_from(["daemon", "--persona", "dev-a", "--tasks", "", "--env", "EMPTY="]).unwrap().args;
+            Cmd::try_parse_from(["daemon", "--persona", "dev-a", "--whoami", "", "--tasks", "", "--env", "EMPTY="])
+                .unwrap()
+                .args;
         let cleared = clear.apply(picked[0].clone());
+        assert_eq!(cleared.whoami.as_deref(), Some(""));
         assert_eq!(cleared.tasks.as_deref(), Some(""));
         assert_eq!(cleared.env["EMPTY"], "");
         assert!(Cmd::try_parse_from(["daemon", "--env", "=value"]).is_err());
         assert!(Cmd::try_parse_from(["daemon", "--env", "NAME"]).is_err());
-        for line in ["--memory notes", "--tasks tickets", "--env NAME=value"] {
+        for line in ["--whoami role", "--memory notes", "--tasks tickets", "--env NAME=value"] {
             assert!(pick(vec![persona("dev-a")], &args(line), Path::new("config.toml")).is_err());
         }
     }

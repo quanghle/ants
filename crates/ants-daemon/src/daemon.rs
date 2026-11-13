@@ -18,7 +18,7 @@ use crate::approvals::NatsApprover;
 use crate::attempts::{Attempts, Marker};
 use crate::caps::{Caps, Ledger};
 use crate::dead::{self, Attempt};
-use crate::harness::{HarnessKind, Launch, Prompt, PromptLimits, Spend};
+use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::mcp::Mcp;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
@@ -62,10 +62,13 @@ pub struct Config {
     pub workdir: PathBuf,
     /// The persona's own files (usually `~/.ants/<persona>`).
     pub home: PathBuf,
-    /// Memory and task instructions prepended to every prompt.
+    /// Persona, memory and task instructions prepended to every prompt.
     pub instructions: String,
+    /// The persona's role instructions, shared in the roster.
+    pub whoami: Option<String>,
     pub env: BTreeMap<String, String>,
     pub harness: HarnessKind,
+    pub model_settings: ModelSettings,
     /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
     /// goes to the human on `ants.approvals.<persona>`.
     pub allow: Vec<String>,
@@ -110,9 +113,15 @@ pub async fn run(config: Config) -> Result<()> {
     let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
     let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster, rooms).await?;
     mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
-    let launch = Launch::new(config.harness, config.workdir.clone(), config.env.clone().into_iter().collect(), policy)
-        .with_instructions(config.instructions.clone())
-        .with_mcp(mcp.servers());
+    let launch = Launch::new(
+        config.harness,
+        config.workdir.clone(),
+        config.env.clone().into_iter().collect(),
+        policy,
+        config.model_settings.clone(),
+    )
+    .with_instructions(config.instructions.clone())
+    .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
     let sessions_kv = bus::ensure_sessions(&js).await?;
     let ledger = Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps);
@@ -125,6 +134,7 @@ pub async fn run(config: Config) -> Result<()> {
     tracing::info!(
         persona = %config.persona,
         harness = %config.harness,
+        model_settings = ?config.model_settings,
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
         idle_timeout = ?config.idle_timeout,

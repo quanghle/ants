@@ -22,7 +22,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::caps::Caps;
 use crate::daemon::Config;
-use crate::harness::{self, HarnessKind, PromptLimits};
+use crate::harness::{self, HarnessKind, ModelSettings, PromptLimits};
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -64,6 +64,8 @@ pub struct Persona {
     pub workdir: PathBuf,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
+    /// Role instructions shared in the roster and prepended to every prompt.
+    pub whoami: Option<String>,
     /// Memory and task instructions prepended to every prompt. Tools are provided by the harness.
     pub memory: Option<String>,
     pub tasks: Option<String>,
@@ -72,6 +74,9 @@ pub struct Persona {
     pub env: BTreeMap<String, String>,
     #[serde(default, deserialize_with = "harness")]
     pub harness: HarnessKind,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub context: Option<String>,
     /// Same as `allow = ["*"]`.
     #[serde(default)]
     pub allow_tools: bool,
@@ -137,10 +142,14 @@ impl Persona {
             js_domain: None,
             workdir,
             home: None,
+            whoami: None,
             memory: None,
             tasks: None,
             env: BTreeMap::new(),
             harness: HarnessKind::default(),
+            model: None,
+            reasoning_effort: None,
+            context: None,
             allow_tools: false,
             allow: Vec::new(),
             approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
@@ -159,7 +168,10 @@ impl Persona {
     /// The daemon config, with `default_nats` as the server when none is set.
     pub fn into_config(self, default_nats: &str) -> Result<Config> {
         validate_env(&self.env)?;
-        let instructions = self.instructions();
+        let instructions = self.prompt_instructions();
+        let model_settings =
+            ModelSettings { model: self.model, reasoning_effort: self.reasoning_effort, context: self.context };
+        model_settings.validate(self.harness)?;
         let workdir = self
             .workdir
             .canonicalize()
@@ -175,8 +187,10 @@ impl Persona {
             workdir,
             home,
             instructions,
+            whoami: self.whoami,
             env: self.env,
             harness: self.harness,
+            model_settings,
             max_harnesses: self.max_harnesses,
             idle_timeout: Duration::from_secs(self.idle_timeout_secs),
             allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
@@ -196,14 +210,18 @@ impl Persona {
         })
     }
 
-    fn instructions(&self) -> String {
-        [("memory", self.memory.as_deref()), ("tasks", self.tasks.as_deref())]
-            .into_iter()
-            .filter_map(|(role, text)| {
-                text.filter(|text| !text.trim().is_empty()).map(|text| format!("[ants {role}]\n{text}"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    fn prompt_instructions(&self) -> String {
+        [
+            (format!("persona {}", self.name), self.whoami.as_deref()),
+            ("memory".to_owned(), self.memory.as_deref()),
+            ("tasks".to_owned(), self.tasks.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(role, text)| {
+            text.filter(|text| !text.trim().is_empty()).map(|text| format!("[ants {role}]\n{text}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
     }
 }
 
@@ -287,10 +305,15 @@ mod tests {
             workdir = "~/crates/ants"
             creds = "~/auth/dev-a.creds"
             home = "/srv/ants/dev-a"
+            whoami = """Maintain the Rust backend.
+Review changes for correctness."""
             memory = "Use the memory MCP server."
             tasks = "Use the tracker CLI."
             env = { TRACKER_DB = "/srv/ants/dev-a/tasks.db" }
             harness = "copilot"
+            model = "test-model"
+            reasoning_effort = "high"
+            context = "long_context"
             allow = ["read", "search"]
             capabilities = ["rust", "review"]
             max_harnesses = 2
@@ -319,8 +342,18 @@ mod tests {
         assert_eq!((a.max_harnesses, a.idle_timeout_secs), (2, 60));
         let config = a.clone().into_config("nats://unused").unwrap();
         assert_eq!(
+            config.model_settings,
+            ModelSettings {
+                model: Some("test-model".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                context: Some("long_context".to_owned()),
+            }
+        );
+        assert_eq!(config.whoami.as_deref(), Some("Maintain the Rust backend.\nReview changes for correctness."));
+        assert_eq!(
             config.instructions,
-            "[ants memory]\nUse the memory MCP server.\n\n[ants tasks]\nUse the tracker CLI."
+            "[ants persona dev-a]\nMaintain the Rust backend.\nReview changes for correctness.\n\n\
+             [ants memory]\nUse the memory MCP server.\n\n[ants tasks]\nUse the tracker CLI."
         );
         assert_eq!(config.env.get("TRACKER_DB").map(String::as_str), Some("/srv/ants/dev-a/tasks.db"));
         assert_eq!(config.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
@@ -341,20 +374,46 @@ mod tests {
         assert_eq!(config.limits, PromptLimits::default());
         assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
         assert!(config.home.ends_with(".ants/dev-b"));
+        assert_eq!(config.whoami, None);
+        assert_eq!(config.model_settings, ModelSettings::default());
         assert!(config.instructions.is_empty(), "no memory or task tool by default");
         assert!(config.env.is_empty(), "no tool-specific environment by default");
     }
 
     #[test]
-    fn memory_and_tasks_are_independent_and_can_be_cleared() {
+    fn whoami_memory_and_tasks_are_independent_and_can_be_cleared() {
         let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
+        p.whoami = Some("Maintain the backend.".to_owned());
         p.memory = Some("Use notes.".to_owned());
-        assert_eq!(p.instructions(), "[ants memory]\nUse notes.");
+        assert_eq!(p.prompt_instructions(), "[ants persona dev-a]\nMaintain the backend.\n\n[ants memory]\nUse notes.");
+        p.whoami = Some(String::new());
+        assert_eq!(p.prompt_instructions(), "[ants memory]\nUse notes.");
         p.memory = Some(String::new());
         p.tasks = Some("Use tickets.".to_owned());
-        assert_eq!(p.instructions(), "[ants tasks]\nUse tickets.");
+        assert_eq!(p.prompt_instructions(), "[ants tasks]\nUse tickets.");
+        p.whoami = Some(" \n".to_owned());
         p.tasks = Some(" \n".to_owned());
-        assert!(p.instructions().is_empty());
+        assert!(p.prompt_instructions().is_empty());
+    }
+
+    #[test]
+    fn invalid_native_settings_fail_before_starting_a_persona() {
+        for (harness, model, effort, context, error) in [
+            (HarnessKind::Copilot, Some(" "), None, None, "model must not be blank"),
+            (HarnessKind::Claude, None, Some(""), None, "reasoning_effort must not be blank"),
+            (HarnessKind::Copilot, None, None, Some("128000"), "default or long_context"),
+            (HarnessKind::Claude, None, None, Some("1m"), "requires an explicit model"),
+            (HarnessKind::Claude, Some("smart[1m]"), None, Some("default"), "conflicts"),
+            (HarnessKind::Antigravity, None, None, Some("long_context"), "no separate context selector"),
+        ] {
+            let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
+            p.harness = harness;
+            p.model = model.map(str::to_owned);
+            p.reasoning_effort = effort.map(str::to_owned);
+            p.context = context.map(str::to_owned);
+            let err = p.into_config("nats://unused").unwrap_err().to_string();
+            assert!(err.contains(error), "{err}");
+        }
     }
 
     #[test]

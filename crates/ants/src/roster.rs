@@ -132,6 +132,7 @@ mod tests {
             machine: "m1".to_owned(),
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned(), "review".to_owned()],
+            whoami: None,
             workdir: Some("/src/app".to_owned()),
             started_at: now - chrono::Duration::seconds(started),
             heartbeat_at: now - chrono::Duration::seconds(beat),

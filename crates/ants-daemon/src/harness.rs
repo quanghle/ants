@@ -12,11 +12,13 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionId, SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest, TextContent, ToolCallId,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    TextContent, ToolCallId,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::ThreadId;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::permission::PermissionPolicy;
@@ -64,9 +66,67 @@ impl HarnessKind {
     }
 
     /// The harness process, with `env` added to the daemon's environment.
-    fn agent(self, env: &[(String, String)]) -> AcpAgent {
-        let (program, args) = self.command();
-        AcpAgent::new(AcpAgentConfig::new(program).args(args.iter().copied()).envs(env.iter().cloned()))
+    fn args(self, settings: &ModelSettings) -> Vec<String> {
+        let mut args: Vec<String> = self.command().1.iter().map(|arg| (*arg).to_owned()).collect();
+        if self == Self::Copilot
+            && let Some(context) = &settings.context
+        {
+            args.extend(["--context".to_owned(), context.clone()]);
+        }
+        args
+    }
+
+    fn agent(self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
+        AcpAgent::new(AcpAgentConfig::new(self.command().0).args(self.args(settings)).envs(env.iter().cloned()))
+    }
+}
+
+/// Explicit per-persona settings; absent values keep the harness's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSettings {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    /// Provider-native context selection, not a token spending cap.
+    pub context: Option<String>,
+}
+
+impl ModelSettings {
+    pub fn validate(&self, harness: HarnessKind) -> Result<()> {
+        for (name, value) in
+            [("model", &self.model), ("reasoning_effort", &self.reasoning_effort), ("context", &self.context)]
+        {
+            if value.as_ref().is_some_and(|s| s.trim().is_empty()) {
+                bail!("{name} must not be blank; omit it to keep the harness default");
+            }
+        }
+        if let Some(context) = self.context.as_deref() {
+            match (harness, context) {
+                (HarnessKind::Copilot, "default" | "long_context") => {}
+                (HarnessKind::Claude, "default") => {
+                    if self.model.as_deref().is_some_and(|model| model.ends_with("[1m]")) {
+                        bail!("claude context default conflicts with an explicit [1m] model");
+                    }
+                }
+                (HarnessKind::Claude, "1m") if self.model.is_some() => {}
+                (HarnessKind::Claude, "1m") => bail!("claude context 1m requires an explicit model"),
+                (HarnessKind::Copilot, _) => bail!("copilot context must be default or long_context"),
+                (HarnessKind::Claude, _) => bail!("claude context must be default or 1m"),
+                (HarnessKind::Antigravity, _) => {
+                    bail!("antigravity ACP has no separate context selector; omit context and select a model instead")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn model_id(&self, harness: HarnessKind) -> Option<String> {
+        self.model.as_ref().map(|model| {
+            if harness == HarnessKind::Claude && self.context.as_deref() == Some("1m") {
+                format!("{}[1m]", model.trim_end_matches("[1m]"))
+            } else {
+                model.clone()
+            }
+        })
     }
 }
 
@@ -91,7 +151,7 @@ pub async fn check(kind: HarnessKind) -> Result<String> {
     Client
         .v1()
         .name("ants")
-        .connect_with(kind.agent(&[]), async |cx: ConnectionTo<Agent>| {
+        .connect_with(kind.agent(&[], &ModelSettings::default()), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             Ok(format!("{:?}", init.agent_info))
         })
@@ -109,6 +169,8 @@ pub type McpServers = Arc<dyn Fn(&ThreadId, bool) -> Vec<McpServer> + Send + Syn
 #[derive(Clone)]
 pub struct Launch {
     name: String,
+    kind: HarnessKind,
+    settings: ModelSettings,
     connect: Connector,
     /// See [`HarnessKind::mode`].
     mode: Option<&'static str>,
@@ -122,10 +184,19 @@ pub struct Launch {
 
 impl Launch {
     /// `kind` working in `cwd`, with `env` added to the daemon's environment.
-    pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
-        let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
+    pub fn new(
+        kind: HarnessKind,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+        policy: PermissionPolicy,
+        settings: ModelSettings,
+    ) -> Self {
+        let process_settings = settings.clone();
+        let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env, &process_settings)));
         Self {
             name: kind.name().to_owned(),
+            kind,
+            settings,
             connect,
             mode: kind.mode(),
             cwd,
@@ -162,6 +233,8 @@ impl Launch {
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
         Self {
             name: "test".to_owned(),
+            kind: HarnessKind::Copilot,
+            settings: ModelSettings::default(),
             connect,
             mode: None,
             cwd,
@@ -182,6 +255,7 @@ impl fmt::Debug for Launch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launch")
             .field("name", &self.name)
+            .field("settings", &self.settings)
             .field("mode", &self.mode)
             .field("cwd", &self.cwd)
             .field("policy", &self.policy)
@@ -514,7 +588,7 @@ async fn open(
             let load = LoadSessionRequest::new(id.clone(), launch.cwd.clone()).mcp_servers(mcp.clone());
             match cx.send_request(load).block_task().await {
                 Ok(loaded) => {
-                    set_mode(cx, launch, &id, loaded.modes).await?;
+                    configure(cx, launch, &id, loaded.modes, loaded.config_options.unwrap_or_default()).await?;
                     return Ok(id);
                 }
                 Err(e) => tracing::warn!(session = %id, error = %e, "session/load failed; starting a new session"),
@@ -522,8 +596,87 @@ async fn open(
         }
     }
     let new = cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?;
-    set_mode(cx, launch, &new.session_id, new.modes).await?;
+    configure(cx, launch, &new.session_id, new.modes, new.config_options.unwrap_or_default()).await?;
     Ok(new.session_id)
+}
+
+async fn configure(
+    cx: &ConnectionTo<Agent>,
+    launch: &Launch,
+    id: &SessionId,
+    modes: Option<SessionModeState>,
+    mut options: Vec<SessionConfigOption>,
+) -> Result<(), agent_client_protocol::Error> {
+    launch
+        .settings
+        .validate(launch.kind)
+        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+    set_mode(cx, launch, id, modes).await?;
+    let model = launch.settings.model_id(launch.kind);
+    for (name, value) in
+        [("model", model.as_deref()), ("reasoning_effort", launch.settings.reasoning_effort.as_deref())]
+    {
+        if let Some(value) = value {
+            options = set_option(cx, id, name, value, options).await?;
+        }
+    }
+    // Applying a later option must not silently reset an earlier explicit setting.
+    for (name, value) in
+        [("model", model.as_deref()), ("reasoning_effort", launch.settings.reasoning_effort.as_deref())]
+    {
+        if let Some(value) = value {
+            check_option(&options, name, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn option<'a>(options: &'a [SessionConfigOption], name: &str) -> Option<&'a SessionConfigOption> {
+    options.iter().find(|option| match name {
+        "model" => option.id.0.as_ref() == "model" || option.category == Some(SessionConfigOptionCategory::Model),
+        "reasoning_effort" => {
+            matches!(option.id.0.as_ref(), "reasoning_effort" | "effort")
+                || option.category == Some(SessionConfigOptionCategory::ThoughtLevel)
+        }
+        _ => false,
+    })
+}
+
+fn check_option(options: &[SessionConfigOption], name: &str, value: &str) -> Result<(), agent_client_protocol::Error> {
+    if option(options, name).is_some_and(
+        |option| matches!(&option.kind, SessionConfigKind::Select(select) if select.current_value.0.as_ref() == value),
+    ) {
+        return Ok(());
+    }
+    Err(agent_client_protocol::Error::internal_error().data(format!("harness did not apply {name}={value:?}")))
+}
+
+async fn set_option(
+    cx: &ConnectionTo<Agent>,
+    id: &SessionId,
+    name: &str,
+    value: &str,
+    options: Vec<SessionConfigOption>,
+) -> Result<Vec<SessionConfigOption>, agent_client_protocol::Error> {
+    let fail = |message: String| agent_client_protocol::Error::internal_error().data(message);
+    let option = option(&options, name).ok_or_else(|| fail(format!("harness does not expose {name} configuration")))?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return Err(fail(format!("harness {name} is not a selectable option")));
+    };
+    let values: Vec<&str> = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(values) => values.iter().map(|v| v.value.0.as_ref()).collect(),
+        SessionConfigSelectOptions::Grouped(groups) => {
+            groups.iter().flat_map(|group| &group.options).map(|v| v.value.0.as_ref()).collect()
+        }
+        _ => return Err(fail(format!("harness {name} has an unsupported option format"))),
+    };
+    if !values.contains(&value) {
+        return Err(fail(format!("unsupported {name}={value:?}; available values: {}", values.join(", "))));
+    }
+    let response =
+        cx.send_request(SetSessionConfigOptionRequest::new(id.clone(), option.id.clone(), value)).block_task().await?;
+    check_option(&response.config_options, name, value)?;
+    Ok(response.config_options)
 }
 
 /// Put the session in the launch's mode, if it has one; a harness that does not offer it fails the session.
@@ -550,7 +703,8 @@ async fn set_mode(
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        InitializeResponse, NewSessionResponse, SessionMode, SetSessionModeResponse,
+        AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse, SessionConfigSelectGroup,
+        SessionConfigSelectOption, SessionMode, SetSessionConfigOptionResponse, SetSessionModeResponse,
     };
 
     use super::*;
@@ -604,5 +758,168 @@ mod tests {
         let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
         assert!(err.contains("does not offer session mode default"), "{err}");
         assert!(set.lock().unwrap().is_empty());
+    }
+
+    #[derive(Clone, Copy)]
+    enum ConfigBehavior {
+        Apply,
+        NoOptions,
+        Ignore,
+        ResetModel,
+    }
+
+    type ConfigCalls = Arc<Mutex<Vec<(String, String)>>>;
+
+    fn model_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
+        let models = ["base", "smart", "smart[1m]"]
+            .into_iter()
+            .map(|value| SessionConfigSelectOption::new(value, value))
+            .collect();
+        let efforts = if model == "base" { vec!["low"] } else { vec!["medium", "high"] };
+        vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                model.to_owned(),
+                vec![SessionConfigSelectGroup::new("available", "Available models", models)],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "provider-effort",
+                "Thinking level",
+                effort.to_owned(),
+                efforts.into_iter().map(|value| SessionConfigSelectOption::new(value, value)).collect::<Vec<_>>(),
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ]
+    }
+
+    fn configurable(kind: HarnessKind, settings: ModelSettings, behavior: ConfigBehavior) -> (Launch, ConfigCalls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let connect: Connector = Arc::new(move || {
+            let options =
+                if matches!(behavior, ConfigBehavior::NoOptions) { vec![] } else { model_options("base", "low") };
+            let initial = options.clone();
+            let loaded = options.clone();
+            let state = Arc::new(Mutex::new(options));
+            let log = log.clone();
+            DynConnectTo::new(
+                Agent
+                    .v1()
+                    .name("configurable")
+                    .on_receive_request(
+                        async move |init: InitializeRequest, responder, _cx| {
+                            responder.respond(
+                                InitializeResponse::new(init.protocol_version)
+                                    .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                            )
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: NewSessionRequest, responder, _cx| {
+                            responder.respond(NewSessionResponse::new("s1").config_options(initial.clone()))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: LoadSessionRequest, responder, _cx| {
+                            responder.respond(LoadSessionResponse::new().config_options(loaded.clone()))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                            let value = request.value.as_value_id().unwrap().0.to_string();
+                            let config_id = request.config_id.0.as_ref();
+                            log.lock().unwrap().push((config_id.to_owned(), value.clone()));
+                            let mut options = state.lock().unwrap();
+                            if !matches!(behavior, ConfigBehavior::Ignore) {
+                                if config_id == "model" {
+                                    *options = model_options(&value, "medium");
+                                } else {
+                                    let model = if matches!(behavior, ConfigBehavior::ResetModel) {
+                                        "base".to_owned()
+                                    } else {
+                                        let SessionConfigKind::Select(select) = &options[0].kind else {
+                                            unreachable!()
+                                        };
+                                        select.current_value.0.to_string()
+                                    };
+                                    *options = model_options(&model, &value);
+                                }
+                            }
+                            responder.respond(SetSessionConfigOptionResponse::new(options.clone()))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    ),
+            )
+        });
+        let mut launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default());
+        launch.kind = kind;
+        launch.settings = settings;
+        (launch, calls)
+    }
+
+    #[tokio::test]
+    async fn model_then_effort_are_applied_to_new_and_resumed_sessions() {
+        let settings =
+            ModelSettings { model: Some("smart".to_owned()), reasoning_effort: Some("high".to_owned()), context: None };
+        for kind in HarnessKind::ALL {
+            let (launch, calls) = configurable(kind, settings.clone(), ConfigBehavior::Apply);
+            Session::start(&launch, None).await.unwrap().close().await;
+            Session::start(&launch, Some("s1".into())).await.unwrap().close().await;
+            let calls = calls.lock().unwrap();
+            assert_eq!(
+                calls.as_slice(),
+                [
+                    ("model".to_owned(), "smart".to_owned()),
+                    ("provider-effort".to_owned(), "high".to_owned()),
+                    ("model".to_owned(), "smart".to_owned()),
+                    ("provider-effort".to_owned(), "high".to_owned()),
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_settings_never_silently_fall_back() {
+        for (behavior, model, effort, expected) in [
+            (ConfigBehavior::NoOptions, "smart", None, "does not expose model"),
+            (ConfigBehavior::Apply, "missing", None, "unsupported model"),
+            (ConfigBehavior::Apply, "smart", Some("max"), "unsupported reasoning_effort"),
+            (ConfigBehavior::Ignore, "smart", None, "did not apply model"),
+            (ConfigBehavior::ResetModel, "smart", Some("high"), "did not apply model"),
+        ] {
+            let settings = ModelSettings {
+                model: Some(model.to_owned()),
+                reasoning_effort: effort.map(str::to_owned),
+                context: None,
+            };
+            let (launch, _) = configurable(HarnessKind::Copilot, settings, behavior);
+            for resume in [None, Some("s1".into())] {
+                let err = Session::start(&launch, resume).await.err().expect("settings should fail").to_string();
+                assert!(err.contains(expected), "{err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_context_selects_only_an_advertised_model_variant() {
+        for (model, expected) in [("smart", Some("smart[1m]")), ("smart[1m]", Some("smart[1m]")), ("base", None)] {
+            let settings =
+                ModelSettings { model: Some(model.to_owned()), context: Some("1m".to_owned()), ..Default::default() };
+            let (launch, calls) = configurable(HarnessKind::Claude, settings, ConfigBehavior::Apply);
+            let session = Session::start(&launch, None).await;
+            if let Some(expected) = expected {
+                session.unwrap().close().await;
+                assert_eq!(calls.lock().unwrap()[0], ("model".to_owned(), expected.to_owned()));
+            } else {
+                let err = session.err().expect("unavailable context variant must fail").to_string();
+                assert!(err.contains("unsupported model") && err.contains("base[1m]"), "{err}");
+                assert!(calls.lock().unwrap().is_empty());
+            }
+        }
     }
 }

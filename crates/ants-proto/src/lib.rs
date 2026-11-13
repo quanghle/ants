@@ -564,6 +564,9 @@ pub struct RosterEntry {
     /// Free-form tags the persona is good for (`rust`, `frontend`, `billing`), for routing requests to it.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Role instructions advertised to other personas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whoami: Option<String>,
     /// Directory the harness works in, on `machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
@@ -1138,6 +1141,7 @@ mod tests {
             machine: "build-1".to_owned(),
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned(), "nats".to_owned()],
+            whoami: Some("Maintain the Rust backend.\nReview NATS changes.".to_owned()),
             workdir: None,
             started_at: Utc::now(),
             heartbeat_at: Utc::now(),
@@ -1154,6 +1158,7 @@ mod tests {
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.capabilities.is_empty());
+        assert_eq!(entry.whoami, None);
     }
 
     #[test]

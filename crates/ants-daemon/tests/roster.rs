@@ -15,6 +15,7 @@ fn entry(persona: &str) -> RosterEntry {
         machine: "test".to_owned(),
         harness: "copilot".to_owned(),
         capabilities: vec!["rust".to_owned()],
+        whoami: Some("Maintain the Rust backend.".to_owned()),
         workdir: None,
         started_at: now,
         heartbeat_at: now,
@@ -47,10 +48,12 @@ async fn entries_refresh_leave_and_expire() {
     let a = Registration::start(kv.clone(), entry("dev-a"), beat).await.unwrap();
     let first = read(&kv, "dev-a").await.expect("dev-a registered");
     assert_eq!(first.capabilities, ["rust"]);
+    assert_eq!(first.whoami.as_deref(), Some("Maintain the Rust backend."));
     tokio::time::sleep(ttl + Duration::from_secs(1)).await;
     let later = read(&kv, "dev-a").await.expect("heartbeats keep dev-a listed");
     assert!(later.heartbeat_at > first.heartbeat_at);
     assert_eq!(later.started_at, first.started_at);
+    assert_eq!(later.whoami, first.whoami);
     a.deregister().await;
     assert!(read(&kv, "dev-a").await.is_none());
 
