@@ -4,6 +4,10 @@
 //! `ants.approvals.<persona>` that has not expired and has no decision on `ants.approvals.<persona>.<request id>`. An
 //! expired request needs no answer: its persona already rejected it. The persona of a request is the one its subject
 //! names, as credentials pin it there; a request whose body names another is skipped with a warning.
+//!
+//! Request ids are unique only per persona: any persona can publish a request reusing another's id. So a request is
+//! written `<persona>/<id>`, and a bare id (or start of one) matching requests of several personas is refused with
+//! the qualified ids to choose from.
 
 use std::path::Path;
 
@@ -112,21 +116,75 @@ pub async fn pending(stream: &Stream, now: DateTime<Utc>) -> Result<Vec<Approval
     Ok(pending)
 }
 
-/// The one request whose id starts with `id`.
-pub async fn find(stream: &Stream, id: &str) -> Result<ApprovalRequest> {
-    let id = id.trim().to_ascii_lowercase();
-    if id.is_empty() {
-        bail!("no request id given");
+/// How a request is written on the command line: `<persona>/<id>`. Persona names and ids never contain `/`.
+pub fn qualified(request: &ApprovalRequest) -> String {
+    format!("{}/{}", request.persona, request.id)
+}
+
+/// What `ants approve` was given to pick a request: a start of its id, and the persona when written `<persona>/<id>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query {
+    pub persona: Option<PersonaId>,
+    pub id: String,
+}
+
+impl Query {
+    pub fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let (persona, id) = match text.split_once('/') {
+            Some((persona, id)) => (Some(persona.parse::<PersonaId>()?), id),
+            None => (None, text),
+        };
+        let id = id.to_ascii_lowercase();
+        if id.is_empty() {
+            bail!("no request id given");
+        }
+        if !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            bail!("{id} is not a request id: hex digits and dashes only");
+        }
+        Ok(Self { persona, id })
     }
-    let mut found: Vec<_> = requests(stream).await?.into_iter().filter(|r| r.id.to_string().starts_with(&id)).collect();
-    match found.len() {
-        0 => bail!("no approval request {id}"),
-        1 => Ok(found.remove(0)),
-        n => bail!("{n} approval requests start with {id}; give more of the id"),
+
+    fn matches(&self, request: &ApprovalRequest) -> bool {
+        self.persona.as_ref().is_none_or(|p| *p == request.persona) && request.id.to_string().starts_with(&self.id)
     }
 }
 
-/// Answer the pending request whose id starts with `id`, and wait until JetStream has stored the decision.
+impl std::fmt::Display for Query {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.persona {
+            Some(persona) => write!(f, "{persona}/{}", self.id),
+            None => f.write_str(&self.id),
+        }
+    }
+}
+
+/// The one request among `requests` that `query` picks. When several match, the error lists them qualified.
+pub fn select(requests: Vec<ApprovalRequest>, query: &Query) -> Result<ApprovalRequest> {
+    const LISTED: usize = 10;
+    let mut found: Vec<_> = requests.into_iter().filter(|r| query.matches(r)).collect();
+    match found.len() {
+        0 => bail!("no approval request {query}"),
+        1 => Ok(found.remove(0)),
+        n => {
+            let mut names = found.iter().take(LISTED).map(qualified).collect::<Vec<_>>().join(", ");
+            if n > LISTED {
+                names.push_str(&format!(" and {} more", n - LISTED));
+            }
+            bail!(
+                "{n} approval requests match {query}: {names}; give more of the id or name the persona as <persona>/<id>"
+            )
+        }
+    }
+}
+
+/// The one request `id` picks: a unique start of its id, optionally written `<persona>/<id>`.
+pub async fn find(stream: &Stream, id: &str) -> Result<ApprovalRequest> {
+    let query = Query::parse(id)?;
+    select(requests(stream).await?, &query)
+}
+
+/// Answer the pending request `id` picks (see [`find`]), and wait until JetStream has stored the decision.
 pub async fn answer(
     js: &jetstream::Context,
     stream: &Stream,
@@ -137,13 +195,13 @@ pub async fn answer(
     let request = find(stream, id).await?;
     match state(stream, &request, now).await? {
         State::Pending => {}
-        State::Decided(d) => bail!("request {} was already answered: {}", request.id, spelling(d.verdict)),
+        State::Decided(d) => bail!("request {} was already answered: {}", qualified(&request), spelling(d.verdict)),
         State::Expired => {
-            bail!("request {} expired at {}; {} rejected it", request.id, request.expires_at, request.persona)
+            bail!("request {} expired at {}; {} rejected it", qualified(&request), request.expires_at, request.persona)
         }
     }
     if !request.options.contains(&verdict) {
-        bail!("{} is not offered for request {}; choose {}", spelling(verdict), request.id, options(&request));
+        bail!("{} is not offered for request {}; choose {}", spelling(verdict), qualified(&request), options(&request));
     }
     let decision = request.decide(verdict);
     bus::publish_json(js, decision.subject(), &decision, None).await.context("publishing the decision")?;
@@ -170,13 +228,12 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-/// One line of the pending list: id, persona, thread, tool, files, options and time left.
+/// One line of the pending list: `<persona>/<id>`, thread, tool, files, options and time left.
 fn row(request: &ApprovalRequest, now: DateTime<Utc>) -> String {
     let files = if request.tool.locations.is_empty() { "-".to_owned() } else { request.tool.locations.join(",") };
     format!(
-        "{}\t{}\t{}\t{}: {}\t{}\t{}\t{} left",
-        request.id,
-        request.persona,
+        "{}\t{}\t{}: {}\t{}\t{}\t{} left",
+        qualified(request),
         request.thread_id,
         request.tool.kind,
         excerpt(&request.tool.title, 80),
@@ -203,7 +260,7 @@ fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> Stri
         State::Pending => out.push_str(&format!(
             "expires  in {}\nanswer   ants approve {} {}",
             left(request.expires_at, now),
-            request.id,
+            qualified(request),
             options(request)
         )),
         State::Decided(d) => {
@@ -238,12 +295,7 @@ pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::Js
     match (&args.id, args.answer) {
         (Some(id), Some(verdict)) => {
             let decision = answer(&js, &stream, id, verdict.into(), Utc::now()).await?;
-            println!(
-                "answered request {} of {}: {}",
-                decision.request_id,
-                decision.persona,
-                spelling(decision.verdict)
-            );
+            println!("answered request {}/{}: {}", decision.persona, decision.request_id, spelling(decision.verdict));
         }
         (Some(id), None) => {
             let request = find(&stream, id).await?;
@@ -269,7 +321,9 @@ pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::Js
                     let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
                     if let Err(e) = request.check_subject(&msg.subject) {
                         tracing::warn!(error = %e, "skipping a request for another persona");
-                    } else if !request.is_expired(Utc::now()) && !listed.iter().any(|r| r.id == request.id) {
+                    } else if !request.is_expired(Utc::now())
+                        && !listed.iter().any(|r| r.id == request.id && r.persona == request.persona)
+                    {
                         show(&request)?;
                     }
                 }
@@ -338,6 +392,58 @@ mod tests {
         assert!(unoffered.to_string().contains("choose allow-once|reject"), "{unoffered:#}");
         assert_eq!(super::decision(&stream, &rm).await.unwrap(), None, "an unoffered verdict publishes nothing");
         assert_eq!(state(&stream, &rm, rm.expires_at).await.unwrap(), State::Expired);
+    }
+
+    /// dev-b reuses the id of dev-a's request under its own name: a bare id is refused with both qualified ids, and
+    /// `<persona>/<id>` answers the right one, on that persona's subject.
+    #[tokio::test]
+    async fn a_persona_qualified_id_picks_among_colliding_ids() {
+        let Some(server) = Server::start() else { return };
+        let (dev_a, dev_b): (PersonaId, PersonaId) = ("dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        let (_, human) = server.connect(&PersonaId::human()).await;
+        let stream = bus::ensure_stream(&human).await.unwrap();
+        let minute = Duration::from_secs(60);
+        let real = request(&dev_a, "git push", vec![Verdict::AllowOnce], minute);
+        let mut copy = request(&dev_b, "rm -rf /", vec![Verdict::AllowOnce], minute);
+        copy.id = real.id;
+        for (persona, r) in [(&dev_a, &real), (&dev_b, &copy)] {
+            let (_, agent) = server.connect(persona).await;
+            bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+        }
+
+        let id = real.id.to_string();
+        let err = answer(&human, &stream, &id, Verdict::AllowOnce, Utc::now()).await.unwrap_err();
+        assert!(
+            err.to_string().contains(&format!("2 approval requests match {id}: dev-a/{id}, dev-b/{id};")),
+            "{err:#}"
+        );
+
+        let decision =
+            answer(&human, &stream, &format!("dev-a/{}", &id[..8]), Verdict::AllowOnce, Utc::now()).await.unwrap();
+        assert_eq!((&decision.persona, decision.request_id), (&dev_a, real.id));
+        let stored = stream.get_last_raw_message_by_subject(&real.decision_subject()).await.unwrap();
+        assert_eq!(stored.subject.as_str(), format!("ants.approvals.dev-a.{id}"));
+        assert_eq!(titles(&pending(&stream, Utc::now()).await.unwrap()), ["rm -rf /"]);
+        assert_eq!(find(&stream, &format!("dev-b/{id}")).await.unwrap(), copy);
+    }
+
+    #[test]
+    fn a_query_names_a_known_persona_and_a_request_id() {
+        let minute = Duration::from_secs(60);
+        let dev_a: PersonaId = "dev-a".parse().unwrap();
+        let known = vec![request(&dev_a, "git push", vec![], minute)];
+        let id = known[0].id.to_string();
+        let pick = |text: &str| Query::parse(text).and_then(|q| select(known.clone(), &q)).map_err(|e| e.to_string());
+        assert_eq!(
+            pick(&format!(" DEV-A/{} ", id.to_uppercase())).unwrap_err(),
+            "invalid persona id \"DEV-A\": use 1-64 of a-z, 0-9 and '-', starting with a letter or digit"
+        );
+        assert_eq!(pick(&format!("dev-a/{}", id.to_uppercase())), Ok(known[0].clone()));
+        assert_eq!(pick(&format!("dev-c/{id}")).unwrap_err(), format!("no approval request dev-c/{id}"));
+        assert_eq!(pick("0000").unwrap_err(), "no approval request 0000");
+        assert_eq!(pick("dev-a/").unwrap_err(), "no request id given");
+        assert!(pick("dev-a/dev-b/0").unwrap_err().contains("is not a request id"));
+        assert!(pick("/0").unwrap_err().contains("invalid persona id"));
     }
 
     #[test]
