@@ -254,7 +254,8 @@ How flags and the file combine:
 ### Escalations
 
 What a persona cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, a plan
-room out of turns) goes up its escalation chain, in the end to the thread's owner (the envelope's `owner`, the human who
+room out of turns) goes up its escalation chain (tool requests outside the allowlist go to its own chain only; see Tool
+permissions), in the end to the thread's owner (the envelope's `owner`, the human who
 started the thread), else to the daemon's default human, the config file key `human` (default `human`; top-level or per
 persona). Without a chain it goes to the owner at once.
 
@@ -500,8 +501,18 @@ run of characters:
 Allowed requests are answered "allow once". Every other request goes to the humans: the daemon publishes an
 `ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting_approval`,
 and waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<persona>.<request id>`.
-Only human credentials may publish decisions, and the first one wins. The verdict is `allow_once`, `allow_always` (the
-harness remembers it for the session) or `reject`; no decision in time rejects the request.
+Only human credentials may publish decisions there. The verdict is `allow_once`, `allow_always` (the harness
+remembers it for the session) or `reject`; no decision in time rejects the request.
+
+A persona with an `escalate_to` (see Escalations) also sends the request to every persona of that chain, in its inbox
+on the request's thread, as an `[ants]` notice showing the tool call, its files and its input, and carrying an
+`approval` escalation with the request id. Any of them may decide it with the MCP tool `decide_approval` while handling
+that notice; the decision goes to the requesting persona's inbox, `ants.inbox.<persona>.<decider>`. The persona takes
+such a decision only from a persona of its own `escalate_to` and only while the request waits: decisions from anyone
+else, for another request or arriving late are acked and ignored, and none is ever prompted with. The first decision
+wins, whether a human's or an agent's: an agent's loses to a human's already stored when it arrives. The request does
+not climb past the persona's own chain, and the time limit stays the same. Without a chain only humans decide.
+`ants approve` lists a request decided by an agent as pending until it expires.
 `--allow-tools` is `--allow '*'`, for trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ```sh
@@ -541,6 +552,7 @@ speak as the persona, on the thread the session serves:
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
+| `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting persona. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
 from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -560,7 +572,7 @@ calling thread; requests without a known token get 401. Harnesses whose ACP `mcp
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the persona's allowlist like
 any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_personas`, `other:route`,
-`other:post_plan`, `other:read_plan`, or `other`). Persona credentials issued
+`other:post_plan`, `other:read_plan`, `other:decide_approval`, or `other`). Persona credentials issued
 before the MCP tools existed lack the subscription to the persona's own inbox; issue them again with `ants auth user`.
 
 ## Messenger
@@ -821,7 +833,7 @@ name (see CLI); daemons read the bucket (see Escalations). An envelope may carry
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
-Escalation chains (see Escalations; approvals do not go up chains yet): a roster entry may carry `escalate_to`, the
+Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
 persona's chain in order, whose first persona leads. An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the

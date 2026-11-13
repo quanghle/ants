@@ -135,8 +135,9 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
     }
-    let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
-    let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
+    let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout)
+        .with_chain(config.escalation.clone());
+    let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone())));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
     let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
     let humans = Registry::new(config.human.clone());
@@ -215,6 +216,7 @@ pub async fn run(config: Config) -> Result<()> {
         attempts: &attempts,
         answered: &answered,
         mcp: Some(&mcp),
+        approvals: Some(&approver),
         workload: &workload,
         limits: config.limits,
         ledger: &ledger,
@@ -309,6 +311,8 @@ struct Inbox<'a> {
     attempts: &'a Attempts,
     answered: &'a Answered,
     mcp: Option<&'a Mcp>,
+    /// Takes the decisions agents of the persona's chain send on its tool requests.
+    approvals: Option<&'a NatsApprover>,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
     limits: PromptLimits,
@@ -430,9 +434,10 @@ impl Inbox<'_> {
         }
     }
 
-    /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, and a reply to an
-    /// `ask_agent` call is handed over. An owner that is no human is dropped ([`Registry::human_owner`]), so neither
-    /// the escalations nor the messages that follow on from this one name it.
+    /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
+    /// `ask_agent` call is handed over, and so is an approval decision, which is acked and never prompted with
+    /// ([`NatsApprover::offer`]). An owner that is no human is dropped ([`Registry::human_owner`]), so neither the
+    /// escalations nor the messages that follow on from this one name it.
     async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
         let mut envelope: Envelope = match serde_json::from_slice(&msg.payload) {
             Ok(e) => e,
@@ -444,6 +449,15 @@ impl Inbox<'_> {
         // A forged sender is buried without its envelope, so a replay cannot pass it on as genuine.
         if let Err(e) = envelope.check_subject(&msg.subject) {
             self.bury_unanswerable(msg, &format!("sender mismatch: {e}")).await;
+            return None;
+        }
+        if envelope.approval.is_some() {
+            if let Some(approvals) = self.approvals {
+                approvals.offer(&envelope);
+            }
+            if let Err(e) = bus::double_ack(self.client, msg).await {
+                tracing::warn!(error = %e, "acking an approval decision");
+            }
             return None;
         }
         envelope.owner = self.humans.human_owner(envelope.owner.as_ref());
@@ -1098,6 +1112,7 @@ mod tests {
                 attempts: &self.attempts,
                 answered: &self.answered,
                 mcp: self.mcp.as_ref(),
+                approvals: None,
                 workload: &self.workload,
                 limits: self.limits,
                 ledger: &self.ledger,
@@ -1331,6 +1346,33 @@ mod tests {
         let [(_, letter)] = letters.as_slice() else { panic!("{letters:?}") };
         assert!(letter.error.contains("sender mismatch"), "{}", letter.error);
         assert_eq!(letter.envelope, None, "a forged envelope is not replayable");
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_approval_decision_is_acked_without_a_prompt() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let thread = ThreadId::generate();
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let decision = ants_proto::ApprovalDecision::new(
+            ants_proto::Uuid::new_v4(),
+            bus.dev.clone(),
+            ants_proto::Verdict::AllowOnce,
+        );
+        let late = Envelope::decision(thread.clone(), dev_b, decision);
+        crate::bus::publish_json(&bus.js, late.subject(), &late, None).await.unwrap();
+        bus.send(&thread, "genuine").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (thread.clone(), "genuine".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered, ["genuine"]);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty());
         assert_eq!(bus.unacked().await, 0);
     }
 

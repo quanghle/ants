@@ -2,6 +2,8 @@
 //! `route` to find personas by their roster capabilities, and `post_plan` and `read_plan` for the thread's plan room
 //! (see [`crate::plan`]). Memory and task tools are configured separately by each persona.
 //!
+//! `decide_approval` answers another persona's tool request that came up its chain (see [`crate::approvals`]).
+//!
 //! One server per persona, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
 //! own bearer token, which tells the tools which thread calls them.
@@ -16,7 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
-use ants_proto::{Envelope, EscalationReason, PersonaId, PlanPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, Uuid};
+use ants_proto::{
+    ApprovalDecision, Envelope, EscalationReason, PersonaId, PlanPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId,
+    Uuid, Verdict,
+};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -399,6 +404,32 @@ impl Hub {
         (self.outbox)(envelope.clone()).await.map_err(|e| format!("not sent: {e:#}"))
     }
 
+    /// Send the persona's `verdict` on the approval request that the message `thread` is handling escalates, to the
+    /// persona that made it, on its inbox.
+    async fn decide_approval(&self, thread: &ThreadId, verdict: &str) -> Result<String, String> {
+        let verdict: Verdict = serde_json::from_value(serde_json::Value::String(verdict.trim().replace('-', "_")))
+            .map_err(|_| format!("unknown verdict {verdict}: allow_once, allow_always or reject"))?;
+        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current =
+            current.ok_or("no message is being handled on this thread; decisions go out only while one is")?;
+        let request = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval);
+        let (escalation, id) = request
+            .and_then(|e| Some((e, e.request_id?)))
+            .ok_or("the message being handled is no approval request; decide_approval answers one sent up the chain")?;
+        if escalation.stuck == self.persona {
+            return Err("the approval request is this persona's own; its chain or a human decides it".to_owned());
+        }
+        let decision = ApprovalDecision::new(id, escalation.stuck.clone(), verdict);
+        let envelope = Envelope::decision(escalation.thread_id.clone(), self.persona.clone(), decision)
+            .with_owner(current.owner.clone());
+        self.send(&envelope).await?;
+        Ok(format!(
+            "Sent {} on approval request {id} to {}; the first decision wins, a human's included.",
+            verdict.as_str(),
+            escalation.stuck
+        ))
+    }
+
     /// The roster without this persona, by persona id.
     async fn others(&self) -> Result<Vec<RosterEntry>, String> {
         let mut entries = (self.roster)().await.map_err(|e| {
@@ -645,6 +676,12 @@ struct CheckInbox {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct DecideApproval {
+    /// `allow_once`, `allow_always` or `reject`.
+    verdict: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct PostPlan {
     /// The post.
     text: String,
@@ -835,6 +872,19 @@ impl Tools {
             .map(|e| format!("From {} on thread {} at {}:\n{}", e.from, e.thread_id, e.sent_at.to_rfc3339(), e.text))
             .collect();
         Ok(text(Ok(shown.join("\n\n"))))
+    }
+
+    #[tool(description = "Decide the approval request that the message being handled brings up the chain: another \
+        persona asks to run a tool outside its allowlist, shown in the message. `verdict` is allow_once, allow_always \
+        or reject, and goes to that persona; the first decision wins, a human's included, and none before the \
+        request expires rejects it.")]
+    async fn decide_approval(
+        &self,
+        Parameters(args): Parameters<DecideApproval>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.decide_approval(&thread, &args.verdict).await))
     }
 
     #[tool(description = "List the other personas being served, from the roster, with each persona's advertised \
@@ -1081,7 +1131,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 7, "{tools:?}");
+        assert_eq!(tools.len(), 8, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1125,6 +1175,53 @@ mod tests {
         let _turn = mcp.begin(&current);
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-c", "text": "more"})).await;
         assert!(!ok && text.contains("no turns left"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn decide_approval_answers_a_request_from_the_chain() {
+        let (mcp, mut sent) = start(&home("decide")).await;
+        let tool = ants_proto::ToolCall {
+            kind: "execute".to_owned(),
+            title: "rm -rf target".to_owned(),
+            locations: Vec::new(),
+            input: None,
+        };
+        let request = ants_proto::ApprovalRequest::new(
+            persona("dev-b"),
+            ThreadId::generate(),
+            tool,
+            vec![Verdict::AllowOnce, Verdict::Reject],
+            Duration::from_secs(60),
+        );
+        let ants_proto::Hop::Chain { escalation, .. } =
+            ants_proto::Escalation::of_request(&request).up(&[persona("dev-a")], 3)
+        else {
+            panic!("a chain hop")
+        };
+        let asked = Envelope::on_thread(request.thread_id.clone(), persona("dev-b"), persona("dev-a"), "may it?")
+            .with_owner(Some(PersonaId::human()))
+            .with_escalation(Some(escalation));
+        let client = {
+            let (url, token) = http_server(&mcp, &asked.thread_id);
+            http_client(&url, &token).await
+        };
+
+        let plain = Envelope::on_thread(asked.thread_id.clone(), persona("dev-b"), persona("dev-a"), "hi");
+        let turn = mcp.begin(&plain);
+        let (ok, text) = call(&client, "decide_approval", serde_json::json!({"verdict": "reject"})).await;
+        assert!(!ok && text.contains("no approval request"), "{text}");
+        drop(turn);
+
+        let _turn = mcp.begin(&asked);
+        let (ok, text) = call(&client, "decide_approval", serde_json::json!({"verdict": "maybe"})).await;
+        assert!(!ok && text.contains("unknown verdict"), "{text}");
+        let (ok, text) = call(&client, "decide_approval", serde_json::json!({"verdict": "allow-once"})).await;
+        assert!(ok, "{text}");
+        let out = sent.recv().await.unwrap();
+        assert_eq!((&out.from, &out.to, &out.thread_id), (&persona("dev-a"), &persona("dev-b"), &request.thread_id));
+        assert_eq!(out.owner, Some(PersonaId::human()));
+        assert_eq!(out.chain_decision(&request, &[persona("dev-a")]).unwrap().verdict, Verdict::AllowOnce);
+        assert!(sent.try_recv().is_err(), "one decision");
     }
 
     #[tokio::test]
