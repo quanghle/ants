@@ -9,7 +9,9 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ants_proto::{ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject};
+use ants_proto::{
+    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject,
+};
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
@@ -20,7 +22,7 @@ use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Threads, Wake};
 use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
-use crate::mcp::Mcp;
+use crate::mcp::{Mcp, Roster};
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::status::{self, Status};
@@ -130,7 +132,7 @@ pub async fn run(config: Config) -> Result<()> {
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
     let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
-    let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster, rooms).await?;
+    let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster.clone(), rooms).await?;
     mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
     let launch = Launch::new(
         config.harness,
@@ -189,6 +191,7 @@ pub async fn run(config: Config) -> Result<()> {
         limits: config.limits,
         ledger: &ledger,
         threads: &threads,
+        roster: &roster,
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
     };
@@ -243,6 +246,8 @@ struct Incoming {
 
 struct Posted {
     post: ChannelPost,
+    /// The channel's entry, when the persona is to triage the post as its messenger.
+    triage: Option<ChannelEntry>,
 }
 
 /// The messages of one thread in hand: one in flight at most, the rest waiting their turn.
@@ -276,6 +281,8 @@ struct Inbox<'a> {
     limits: PromptLimits,
     ledger: &'a Ledger,
     threads: &'a Threads,
+    /// The roster, for the members a triage prompt shows.
+    roster: &'a Roster,
     retry_delay: Duration,
     progress_every: Duration,
 }
@@ -407,9 +414,9 @@ impl Inbox<'_> {
         Some(Incoming { envelope, post: None })
     }
 
-    /// The channel post `msg` to answer, if it wakes the persona. Any other is acked at once: the persona's own, one
-    /// in a channel it is not a member of, one that does not @mention it. A malformed or forged one is dropped, with
-    /// no dead letter: every member's daemon sees it.
+    /// The channel post `msg` to answer, if it wakes the persona ([`channel::wake`]). Any other is acked at once: the
+    /// persona's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -425,8 +432,9 @@ impl Inbox<'_> {
             }
         };
         let mut wake = channel::wake(self.persona, channels.get(&post.channel), &post);
-        if wake == Wake::Skip && post.mentions(self.persona) && post.from != *self.persona {
-            // The post may have overtaken the change that made the persona a member.
+        let unseen = channels.get(&post.channel).is_none() && post.mentions.is_empty() && post.from.is_human();
+        if wake == Wake::Skip && (post.mentions(self.persona) && post.from != *self.persona || unseen) {
+            // The post may have overtaken the change that made the persona a member, or created the channel.
             channels.refresh(&post.channel).await;
             wake = channel::wake(self.persona, channels.get(&post.channel), &post);
         }
@@ -436,8 +444,9 @@ impl Inbox<'_> {
             }
             return None;
         }
+        let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         let envelope = channel::as_envelope(&post, self.persona);
-        Some(Incoming { envelope, post: Some(Box::new(Posted { post })) })
+        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })) })
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -609,7 +618,7 @@ impl Inbox<'_> {
             None => 0,
         };
         let text = match &incoming.post {
-            Some(posted) => self.channel_prompt(&posted.post, seq).await?,
+            Some(posted) => self.channel_prompt(posted, seq).await?,
             None => envelope.text.clone(),
         };
         let text = prompt_text(&text, cut_off, late);
@@ -679,10 +688,17 @@ impl Inbox<'_> {
         self.deliver(incoming, &reply, msg, seq).await
     }
 
-    /// The prompt for channel post `post`, at stream sequence `seq`, with the posts on its thread not shown before.
-    async fn channel_prompt(&self, post: &ChannelPost, seq: u64) -> Result<String> {
+    /// The prompt for a channel post, at stream sequence `seq`, with the posts on its thread not shown before.
+    async fn channel_prompt(&self, posted: &Posted, seq: u64) -> Result<String> {
+        let post = &posted.post;
         let context = self.threads.context(post, seq).await?;
-        Ok(channel::prompt(self.persona, post, &context, post.turn_budget.saturating_sub(1)))
+        let left = post.turn_budget.saturating_sub(1);
+        let Some(entry) = &posted.triage else { return Ok(channel::prompt(self.persona, post, &context, left)) };
+        let roster = (self.roster)().await.unwrap_or_else(|e| {
+            tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
+            Vec::new()
+        });
+        Ok(channel::triage_prompt(post, entry, &roster, &context, left))
     }
 
     /// Store `reply` to `request`, the message at stream sequence `seq`, in the hub's stream or, out of its reach, in
@@ -857,6 +873,7 @@ mod tests {
         mcp: Option<Mcp>,
         channels: jetstream::kv::Store,
         threads: Threads,
+        roster: Roster,
     }
 
     impl Bus {
@@ -884,6 +901,7 @@ mod tests {
             // Before any post: a new channel consumer starts at the posts stored from then on.
             bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
             let threads = Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js).await.unwrap());
+            let roster = crate::mcp::jetstream_roster(js.clone());
             let bus = Self {
                 _server: server,
                 client,
@@ -899,6 +917,7 @@ mod tests {
                 mcp: None,
                 channels,
                 threads,
+                roster,
             };
             (bus, replies)
         }
@@ -946,6 +965,7 @@ mod tests {
                 limits: self.limits,
                 ledger: &self.ledger,
                 threads: &self.threads,
+                roster: &self.roster,
                 retry_delay: Duration::from_millis(300),
                 progress_every,
             };
@@ -1629,5 +1649,52 @@ mod tests {
         let answered = log.lock().unwrap().answered.clone();
         assert_eq!(answered.len(), 1, "{answered:?}");
         assert!(answered[0].contains("Post from human mentioning dev-a:\n@dev-a go"), "{}", answered[0]);
+    }
+
+    #[tokio::test]
+    async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_concerns() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        // dev-a is the channel's messenger, not a member.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member("dev-b".parse().unwrap());
+        entry.add_member("dev-c".parse().unwrap());
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let roster = bus::ensure_roster(&bus.js, ants_proto::ROSTER_TTL).await.unwrap();
+        let now = chrono::Utc::now();
+        let dev_b = ants_proto::RosterEntry {
+            persona: "dev-b".parse().unwrap(),
+            machine: "m".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: vec!["ci".to_owned()],
+            whoami: Some("Keeps the build green.".to_owned()),
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
+        };
+        roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
+        let post = ChannelPost::new(entry.channel.clone(), PersonaId::human(), "the build is red");
+        let seq = bus.post(&post).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let answer = next_post(&mut replies).await;
+            assert_eq!((&answer.thread_id, answer.in_reply_to), (&post.thread_id, Some(post.id)));
+            assert_eq!(answer.turn_budget, DEFAULT_TURN_BUDGET - 1);
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let prompt = log.lock().unwrap().answered[0].clone();
+        assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
+        let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
+        assert!(prompt.contains(members), "{prompt}");
     }
 }

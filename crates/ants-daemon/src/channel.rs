@@ -5,17 +5,29 @@
 //! on a channel thread shows the posts on the thread the persona has not been shown yet ([`Threads::context`]): the
 //! stream sequence of the last post shown is kept per thread in the sessions bucket, so a restarted daemon goes on from
 //! there. The reply is posted on the same thread, spending one of its turns.
+//!
+//! A post of the human that @mentions nobody goes to the channel's messenger instead, to triage: its answer
+//! @mentions the members the post is relevant to, which wakes them ([`triage_prompt`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, PersonaId, STREAM, ThreadId, Uuid, chan_reader, channel_seen_key,
-    subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, PersonaId, RosterEntry, STREAM, ThreadId, Uuid, chan_reader,
+    channel_seen_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
+
+/// What ants tells a channel's messenger about triaging a post; the messenger's own instructions add to it.
+pub const TRIAGE_RULES: &str = "[ants] Triage this post; do not answer or act on the request itself.
+1. Read the post, and the thread before it.
+2. Decide which members of the channel below the post is relevant to, by their roles and capabilities.
+3. Answer with a short post that @mentions exactly the relevant members, each with a few words on why.
+4. When no member is relevant, answer with a short post saying so, mentioning nobody.
+Only @mentions of members wake anyone: mention no one else. A member not in the roster is offline and gets the post \
+when its daemon starts again.";
 
 /// Most earlier posts a prompt shows; older unseen ones are counted instead.
 pub const MAX_CONTEXT: usize = 50;
@@ -111,16 +123,22 @@ pub enum Wake {
     Skip,
     /// An answer: the post @mentions the persona, a member.
     Mentioned,
+    /// A triage: the post is the human's, mentions nobody, and the persona is the channel's messenger.
+    Triage,
 }
 
 /// What `post` asks of `persona`, given the entry of its channel: a prompt only when it @mentions the persona, a
-/// member, and is not the persona's own.
+/// member, or when the persona is the channel's messenger and it is a post of the human that mentions nobody; never
+/// for the persona's own.
 pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost) -> Wake {
     let Some(entry) = entry else { return Wake::Skip };
     if post.from == *persona || !entry.woken(post).contains(persona) {
-        return Wake::Skip;
+        Wake::Skip
+    } else if post.mentions.is_empty() {
+        Wake::Triage
+    } else {
+        Wake::Mentioned
     }
-    Wake::Mentioned
 }
 
 /// `post` as an inbox message from its author to `persona`: what the attempt markers, caps and tools of the thread
@@ -195,6 +213,50 @@ pub fn prompt(persona: &PersonaId, post: &ChannelPost, context: &Context, left: 
          nobody."
     ));
     text
+}
+
+/// The prompt of the channel's messenger for `post`, a post of the human that mentions nobody, after the `context` of
+/// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `roster` shows them. `left` is the turns the thread
+/// keeps after the answer.
+pub fn triage_prompt(
+    post: &ChannelPost,
+    entry: &ChannelEntry,
+    roster: &[RosterEntry],
+    context: &Context,
+    left: u32,
+) -> String {
+    let channel = &post.channel;
+    let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
+    text.push_str(&context_text(context));
+    text.push_str(&format!("[ants] Post from {} mentioning nobody:\n{}\n\n", post.from, post.text));
+    text.push_str(TRIAGE_RULES);
+    text.push_str(&format!("\n\n[ants] Members of #{channel}:\n"));
+    if entry.members.is_empty() {
+        text.push_str("(none)\n");
+    }
+    for member in &entry.members {
+        text.push_str(&format!("- {}\n", member_line(member, roster)));
+    }
+    text.push_str(&format!(
+        "\n[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
+         ({left} left after it)."
+    ));
+    text
+}
+
+/// `member` with its role and capabilities from the roster, or as offline when the roster lacks it.
+fn member_line(member: &PersonaId, roster: &[RosterEntry]) -> String {
+    let Some(entry) = roster.iter().find(|e| e.persona == *member) else {
+        return format!("@{member} (offline: not in the roster)");
+    };
+    let mut line = format!("@{member}");
+    if !entry.capabilities.is_empty() {
+        line.push_str(&format!(" [{}]", entry.capabilities.join(", ")));
+    }
+    if let Some(whoami) = entry.whoami.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        line.push_str(&format!(": {}", whoami.replace('\n', " ")));
+    }
+    line
 }
 
 fn context_text(context: &Context) -> String {
@@ -353,6 +415,55 @@ mod tests {
         assert_eq!(wake(&p("dev-c"), Some(&entry), &post("human", "@dev-c deploy")), Wake::Skip, "no member");
         let other = ChannelPost::new("dev".parse().unwrap(), PersonaId::human(), "@dev-a deploy");
         assert_eq!(wake(&a, Some(&entry), &other), Wake::Skip, "another channel's entry");
+    }
+
+    #[test]
+    fn the_messenger_triages_the_human_posts_that_mention_nobody() {
+        let (mut entry, messenger) = (ops(), PersonaId::messenger());
+        let untagged = post("human", "the build is red");
+        assert_eq!(wake(&messenger, Some(&entry), &untagged), Wake::Triage, "the default messenger, no member");
+        assert_eq!(wake(&p("dev-a"), Some(&entry), &untagged), Wake::Skip, "members wait for its mentions");
+        assert_eq!(wake(&messenger, Some(&entry), &post("dev-a", "the build is red")), Wake::Skip, "agents' posts");
+        assert_eq!(wake(&messenger, Some(&entry), &post("human", "@dev-a the build")), Wake::Skip, "mentions");
+        assert_eq!(wake(&messenger, Some(&entry), &post("human", "@human the build")), Wake::Skip, "mentions");
+        entry.messenger = Some(p("dev-b"));
+        assert_eq!(wake(&p("dev-b"), Some(&entry), &untagged), Wake::Triage, "the assigned one");
+        assert_eq!(wake(&messenger, Some(&entry), &untagged), Wake::Skip, "not the default then");
+        assert_eq!(wake(&p("dev-b"), Some(&entry), &post("human", "@dev-b look")), Wake::Mentioned);
+    }
+
+    #[test]
+    fn the_triage_prompt_has_the_rules_and_the_members_with_their_roles() {
+        let (entry, root) = (ops(), post("human", "the build is red"));
+        let now = chrono::Utc::now();
+        let a = RosterEntry {
+            persona: p("dev-a"),
+            machine: "m".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: vec!["rust".to_owned(), "ci".to_owned()],
+            whoami: Some("Keeps the build\ngreen.".to_owned()),
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
+        };
+        let context = Context { posts: vec![post("dev-b", "earlier")], skipped: 0 };
+        let text = triage_prompt(&root, &entry, &[a], &context, 7);
+        let expected = format!(
+            "[ants] Channel #ops, thread {}.\n\n\
+             [ants] Earlier posts on the thread not shown before, oldest first:\ndev-b: earlier\n\n\
+             [ants] Post from human mentioning nobody:\nthe build is red\n\n\
+             {TRIAGE_RULES}\n\n\
+             [ants] Members of #ops:\n\
+             - @dev-a [rust, ci]: Keeps the build green.\n\
+             - @dev-b (offline: not in the roster)\n\n\
+             [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (7 \
+             left after it).",
+            root.thread_id
+        );
+        assert_eq!(text, expected);
     }
 
     #[test]

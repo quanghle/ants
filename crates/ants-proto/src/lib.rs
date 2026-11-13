@@ -903,7 +903,8 @@ pub struct ChannelEntry {
     /// The personas in the channel, in the order they were added.
     #[serde(default)]
     pub members: Vec<PersonaId>,
-    /// The persona that triages the human's posts that @mention nobody.
+    /// The persona that triages the human's posts that @mention nobody, when not the default `messenger`
+    /// ([`ChannelEntry::messenger`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messenger: Option<PersonaId>,
 }
@@ -931,6 +932,12 @@ impl ChannelEntry {
         self.members.contains(persona)
     }
 
+    /// The persona that triages the human's posts that @mention nobody: the one assigned, or else the default
+    /// [`PersonaId::messenger`]. It need not be a member.
+    pub fn messenger(&self) -> PersonaId {
+        self.messenger.clone().unwrap_or_else(PersonaId::messenger)
+    }
+
     /// Add `persona` after the other members; false when it already is one.
     pub fn add_member(&mut self, persona: PersonaId) -> bool {
         if self.is_member(&persona) {
@@ -947,18 +954,15 @@ impl ChannelEntry {
         self.members.len() != before
     }
 
-    /// The personas `post` wakes: the members it @mentions, except its author and the human. A post of the human that
-    /// mentions nobody wakes the channel's messenger instead, to triage it; an agent's post that mentions nobody wakes
-    /// nobody. A post to another channel wakes nobody here.
+    /// The personas `post` wakes: the members it @mentions, except its author and the human; mentions of anyone else
+    /// wake nobody. A post of the human that mentions nobody wakes the channel's [`ChannelEntry::messenger`] instead,
+    /// to triage it; an agent's post that mentions nobody wakes nobody. A post to another channel wakes nobody here.
     pub fn woken(&self, post: &ChannelPost) -> Vec<PersonaId> {
         if post.channel != self.channel {
             return Vec::new();
         }
         if post.mentions.is_empty() {
-            return match &self.messenger {
-                Some(messenger) if post.from.is_human() => vec![messenger.clone()],
-                _ => Vec::new(),
-            };
+            return if post.from.is_human() { vec![self.messenger()] } else { Vec::new() };
         }
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !m.is_human()).cloned().collect()
     }
@@ -1695,9 +1699,9 @@ mod tests {
 
         let human = PersonaId::human();
         let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
-        assert!(entry.woken(&untagged).is_empty(), "no messenger to triage");
-        entry.messenger = Some(PersonaId::messenger());
-        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()]);
+        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()], "the default messenger triages");
+        entry.messenger = Some(p("dev-c"));
+        assert_eq!(entry.woken(&untagged), [p("dev-c")], "the assigned one, member or not");
         assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?")).is_empty(), "agents never fan out");
         let tagged = ChannelPost::new(c.clone(), p("dev-a"), "@dev-b @dev-c @dev-a @human look");
         assert_eq!(entry.woken(&tagged), [p("dev-b")], "members only, not the author or the human");
