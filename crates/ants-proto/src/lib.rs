@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,13 @@ use uuid::Uuid;
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
 pub const STREAM_SUBJECTS: [&str; 3] = ["ants.inbox.>", "ants.plan.>", "ants.approvals.>"];
-/// KV bucket where each daemon registers its personas.
+/// KV bucket where each daemon registers its personas: one [`RosterEntry`] per persona, keyed by the persona id.
 pub const ROSTER_BUCKET: &str = "ants_roster";
+/// How often a daemon re-puts its roster entry.
+pub const ROSTER_HEARTBEAT: Duration = Duration::from_secs(10);
+/// Max age of the roster bucket: an entry not refreshed for this long is gone, so a persona whose daemon died drops
+/// out of the roster after at most a few missed heartbeats.
+pub const ROSTER_TTL: Duration = Duration::from_secs(30);
 /// KV bucket mapping a thread to its harness session, for resuming after a restart.
 pub const SESSIONS_BUCKET: &str = "ants_sessions";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to the human.
@@ -131,6 +137,11 @@ pub mod subject {
         format!("ants.status.{persona}.{thread}")
     }
 
+    /// The roster entry of a persona: the subject its daemon puts [`super::RosterEntry`] on.
+    pub fn roster(persona: &PersonaId) -> String {
+        format!("$KV.{}.{persona}", super::ROSTER_BUCKET)
+    }
+
     /// Everything, for `ants watch`.
     pub const ALL: &str = "ants.>";
 }
@@ -156,14 +167,17 @@ impl Permissions {
     /// What the credentials of `persona` allow.
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status and approvals, reads
-    /// only its own inbox consumer and its own replies. The human (the CLI user) also watches all ants traffic and
-    /// may create the stream; its inbox consumer keeps the replies `ants inbox` has not shown yet.
+    /// only its own inbox consumer and its own replies, and writes only its own roster entry. The human (the CLI user)
+    /// also watches all ants traffic, reads the roster and may create the stream and the roster bucket; its inbox
+    /// consumer keeps the replies `ants inbox` has not shown yet.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
+        let roster_stream = format!("KV_{ROSTER_BUCKET}");
         let mut publish = vec![
             "ants.inbox.*".to_owned(),
             "ants.plan.>".to_owned(),
             format!("$JS.API.STREAM.INFO.{STREAM}"),
+            format!("$JS.API.STREAM.INFO.{roster_stream}"),
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox(persona)),
@@ -172,13 +186,58 @@ impl Permissions {
         ];
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
-            publish.push(format!("$JS.API.STREAM.CREATE.{STREAM}"));
+            publish.extend([
+                format!("$JS.API.STREAM.CREATE.{STREAM}"),
+                // Creating a KV bucket first looks up the account's JetStream limits.
+                "$JS.API.INFO".to_owned(),
+                format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+                // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
+                format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
+                format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
+                format!("$JS.FC.{roster_stream}.>"),
+            ]);
             subscribe.push(subject::ALL.to_owned());
         } else {
-            publish.extend([subject::approvals(persona), format!("ants.status.{persona}.*")]);
+            publish.extend([
+                subject::approvals(persona),
+                format!("ants.status.{persona}.*"),
+                // Put and delete of its own roster entry.
+                subject::roster(persona),
+            ]);
             subscribe.push("ants.plan.>".to_owned());
         }
         Self { publish, subscribe }
+    }
+}
+
+/// A persona's entry in the [`ROSTER_BUCKET`], under the key of its persona id.
+///
+/// The serving daemon puts it on start, re-puts it every [`ROSTER_HEARTBEAT`] and deletes it on a clean stop. The
+/// bucket's max age is [`ROSTER_TTL`], so the entry of a daemon that died expires on its own. Readers should treat
+/// unknown fields as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterEntry {
+    pub persona: PersonaId,
+    /// Host name of the machine the daemon runs on.
+    pub machine: String,
+    /// Agent harness behind the persona, such as `copilot`.
+    pub harness: String,
+    /// Free-form tags the persona is good for (`rust`, `frontend`, `billing`), for routing requests to it.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Directory the harness works in, on `machine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    /// When the daemon started serving the persona.
+    pub started_at: DateTime<Utc>,
+    /// When the daemon last refreshed the entry.
+    pub heartbeat_at: DateTime<Utc>,
+}
+
+impl RosterEntry {
+    /// The KV key of the entry.
+    pub fn key(&self) -> &str {
+        self.persona.as_str()
     }
 }
 
@@ -301,5 +360,28 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("in_reply_to"));
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn roster_entry_round_trips_and_tolerates_additions() {
+        let entry = RosterEntry {
+            persona: p("dev-a"),
+            machine: "build-1".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: vec!["rust".to_owned(), "nats".to_owned()],
+            workdir: None,
+            started_at: Utc::now(),
+            heartbeat_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("workdir"));
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
+        assert_eq!(entry.key(), "dev-a");
+        assert_eq!(subject::roster(&entry.persona), "$KV.ants_roster.dev-a");
+
+        let minimal = r#"{"persona":"dev-b","machine":"m","harness":"copilot","state":"idle",
+            "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
+        let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
+        assert!(entry.capabilities.is_empty());
     }
 }

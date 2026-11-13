@@ -65,7 +65,7 @@ enum Command {
         #[arg(default_value = subject::ALL)]
         subject: String,
     },
-    /// Create the ANTS stream on the server (the daemon also does this on start).
+    /// Create the ANTS stream and the roster bucket on the server (the daemon also does this on start).
     Init,
     /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
     Daemon(serve::DaemonArgs),
@@ -130,7 +130,8 @@ async fn main() -> Result<()> {
         Command::Init => {
             let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;
             bus::ensure_stream(&js).await?;
-            println!("stream {} ready", ants_proto::STREAM);
+            bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
+            println!("stream {} and roster bucket {} ready", ants_proto::STREAM, ants_proto::ROSTER_BUCKET);
             Ok(())
         }
         Command::Daemon(args) => {

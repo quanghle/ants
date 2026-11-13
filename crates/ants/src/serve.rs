@@ -35,6 +35,10 @@ pub struct DaemonArgs {
     /// 600).
     #[arg(long)]
     idle_timeout_secs: Option<u64>,
+    /// Tag the persona is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
+    /// the file's `capabilities`.
+    #[arg(long = "capability", value_name = "TAG", value_delimiter = ',')]
+    capabilities: Vec<String>,
 }
 
 impl DaemonArgs {
@@ -45,6 +49,7 @@ impl DaemonArgs {
             || self.allow_tools
             || self.max_harnesses.is_some()
             || self.idle_timeout_secs.is_some()
+            || !self.capabilities.is_empty()
     }
 
     /// The persona with the flags given on the command line in place of its own settings.
@@ -64,6 +69,9 @@ impl DaemonArgs {
         }
         if let Some(secs) = self.idle_timeout_secs {
             p.idle_timeout_secs = secs;
+        }
+        if !self.capabilities.is_empty() {
+            p.capabilities.clone_from(&self.capabilities);
         }
         p
     }
@@ -197,10 +205,16 @@ mod tests {
     fn flags_override_the_picked_persona() {
         let all = vec![persona("dev-a"), persona("dev-b")];
         let path = Path::new("config.toml");
-        let picked = pick(all.clone(), &args("--persona dev-b --max-harnesses 1 --allow-tools"), path).unwrap();
+        let picked = pick(
+            all.clone(),
+            &args("--persona dev-b --max-harnesses 1 --allow-tools --capability rust,nats --capability acp"),
+            path,
+        )
+        .unwrap();
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].name.as_str(), "dev-b");
         assert_eq!((picked[0].max_harnesses, picked[0].allow_tools), (1, true));
+        assert_eq!(picked[0].capabilities, ["rust", "nats", "acp"]);
         assert_eq!(picked[0].idle_timeout_secs, config::DEFAULT_IDLE_TIMEOUT_SECS);
 
         assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);

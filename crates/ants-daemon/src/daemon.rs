@@ -10,7 +10,7 @@ use futures::StreamExt as _;
 
 use crate::harness::{HarnessKind, Launch, PermissionPolicy};
 use crate::pool::Pool;
-use crate::{bus, workspace};
+use crate::{bus, roster, workspace};
 
 /// Redelivery window. The daemon extends it with progress acks while a prompt runs, so a crash mid-task redelivers.
 const ACK_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -53,6 +53,7 @@ pub async fn run(config: Config) -> Result<()> {
             .await?;
     let stream = bus::ensure_stream(&js).await?;
     let mut messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER).await?;
+    let registration = roster::register(&js, &config).await?;
     tracing::info!(
         persona = %config.persona,
         harness = %config.harness,
@@ -60,6 +61,7 @@ pub async fn run(config: Config) -> Result<()> {
         workspace = %db.display(),
         max_harnesses = config.max_harnesses,
         idle_timeout = ?config.idle_timeout,
+        capabilities = ?config.capabilities,
         "serving inbox"
     );
 
@@ -83,6 +85,7 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
     }
+    registration.deregister().await;
     pool.shutdown().await;
     tracing::info!("stopped");
     Ok(())

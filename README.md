@@ -76,6 +76,15 @@ How flags and the file combine:
 - In the file, `nats` and `creds` win over `--nats` / `ANTS_NATS_URL` and `--creds` / `ANTS_CREDS`, which fill in what
   the file leaves out. `--creds` applies only when one persona is served.
 
+## Roster
+
+Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, harness, workdir,
+capabilities, start and last heartbeat time (`RosterEntry` in `ants-proto`). It refreshes the entry every 10 s and
+deletes it on a clean stop. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
+drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
+`--capability rust --capability billing`. A persona's credentials write only its own entry; the human's read the
+roster.
+
 ## Persona memory
 
 Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
@@ -95,7 +104,7 @@ ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "/path/to/server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with the human's credentials to create the stream, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with the human's credentials to create the stream and the roster bucket, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 
 ## Footprint

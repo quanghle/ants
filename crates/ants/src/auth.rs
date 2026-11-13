@@ -155,9 +155,10 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use ants_daemon::bus;
-    use ants_proto::{Envelope, ThreadId, inbox_prefix, subject};
+    use ants_daemon::roster::Registration;
+    use ants_proto::{Envelope, RosterEntry, ThreadId, inbox_prefix, subject};
     use async_nats::{Client, Event, jetstream};
-    use futures::StreamExt as _;
+    use futures::{StreamExt as _, TryStreamExt as _};
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
@@ -318,5 +319,45 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
         }
+    }
+
+    #[tokio::test]
+    async fn personas_write_their_own_roster_entry_and_the_human_reads_the_roster() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let ttl = ants_proto::ROSTER_TTL;
+
+        let (_a, a_js) = server.connect(&dev_a).await;
+        assert!(bus::ensure_roster(&a_js, ttl).await.is_err(), "only the human creates the bucket");
+        let (_h, h_js) = server.connect(&human).await;
+        let h_kv = bus::ensure_roster(&h_js, ttl).await.unwrap();
+
+        let a_kv = bus::ensure_roster(&a_js, ttl).await.unwrap();
+        let now = chrono::Utc::now();
+        let entry = RosterEntry {
+            persona: dev_a.clone(),
+            machine: "m1".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: vec!["rust".to_owned()],
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+        };
+        let registration =
+            Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
+        assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
+        assert!(a_kv.get("dev-a").await.is_err(), "personas do not read the roster");
+
+        let listed: RosterEntry = serde_json::from_slice(&h_kv.get("dev-a").await.unwrap().unwrap()).unwrap();
+        assert_eq!(listed, entry);
+        let keys: Vec<String> = h_kv.keys().await.unwrap().try_collect().await.unwrap();
+        assert_eq!(keys, ["dev-a"]);
+        let mut watch = h_kv.watch_with_history(">").await.unwrap();
+        let seen = timeout(WAIT, watch.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(seen.key, "dev-a");
+        assert!(h_kv.put("dev-a", "spoof".into()).await.is_err(), "the human does not write the roster");
+
+        registration.deregister().await;
+        assert!(h_kv.get("dev-a").await.unwrap().is_none());
     }
 }

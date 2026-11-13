@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod harness;
 pub mod pool;
+pub mod roster;
 pub mod workspace;
 
 pub use daemon::{Config, run};

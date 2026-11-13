@@ -3,11 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{Envelope, PersonaId, STREAM, STREAM_SUBJECTS, inbox_prefix, subject};
+use ants_proto::{Envelope, PersonaId, ROSTER_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject};
 use anyhow::{Context as _, Result};
 use async_nats::Event;
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
-use async_nats::jetstream::{self, stream};
+use async_nats::jetstream::{self, kv, stream};
 
 /// How long the stream keeps messages.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -50,6 +50,25 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     })
     .await
     .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")
+}
+
+/// Open the roster bucket, creating it if missing with entries that expire `ttl` after their last put. Only the
+/// human's credentials may create it; an existing bucket keeps its own max age.
+pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(ROSTER_BUCKET).await {
+        return Ok(store);
+    }
+    js.create_key_value(kv::Config {
+        bucket: ROSTER_BUCKET.to_owned(),
+        description: "Personas being served, refreshed by daemon heartbeats".to_owned(),
+        history: 1,
+        max_age: ttl,
+        // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
+        storage: stream::StorageType::Memory,
+        ..Default::default()
+    })
+    .await
+    .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// Messages from the durable consumer of `persona`'s inbox, which is created if missing.
