@@ -19,9 +19,18 @@ pub struct DaemonArgs {
     /// Directory the harness works in (default: the current directory).
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// The persona's own files, its bd workspace of to-dos and memories among them (default: ~/.ants/<persona>).
+    /// The persona's own files (default: ~/.ants/<persona>).
     #[arg(long)]
     home: Option<PathBuf>,
+    /// Instructions for the memory tool available through the harness; prepended to every prompt.
+    #[arg(long)]
+    memory: Option<String>,
+    /// Instructions for the task tool available through the harness; prepended to every prompt.
+    #[arg(long)]
+    tasks: Option<String>,
+    /// Add NAME=VALUE to the harness environment (repeatable); overrides the file's entry for NAME.
+    #[arg(long = "env", value_name = "NAME=VALUE", value_parser = env_pair)]
+    env: Vec<(String, String)>,
     /// Agent harness: `copilot` (default), `claude` or `antigravity`.
     #[arg(long)]
     harness: Option<HarnessKind>,
@@ -74,6 +83,9 @@ impl DaemonArgs {
     fn sets_persona_options(&self) -> bool {
         self.workdir.is_some()
             || self.home.is_some()
+            || self.memory.is_some()
+            || self.tasks.is_some()
+            || !self.env.is_empty()
             || self.harness.is_some()
             || !self.allow.is_empty()
             || self.allow_tools
@@ -97,6 +109,13 @@ impl DaemonArgs {
         if let Some(home) = &self.home {
             p.home = Some(home.clone());
         }
+        if let Some(memory) = &self.memory {
+            p.memory = Some(memory.clone());
+        }
+        if let Some(tasks) = &self.tasks {
+            p.tasks = Some(tasks.clone());
+        }
+        p.env.extend(self.env.iter().cloned());
         if let Some(harness) = self.harness {
             p.harness = harness;
         }
@@ -126,6 +145,14 @@ impl DaemonArgs {
         }
         p
     }
+}
+
+fn env_pair(text: &str) -> Result<(String, String), String> {
+    let (name, value) = text.split_once('=').ok_or("expected NAME=VALUE")?;
+    if name.is_empty() || name.contains('\0') || value.contains('\0') {
+        return Err("invalid environment variable".to_owned());
+    }
+    Ok((name.to_owned(), value.to_owned()))
 }
 
 #[derive(Debug, PartialEq)]
@@ -312,5 +339,35 @@ mod tests {
         let two = configs(vec![bare, persona("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
+    }
+
+    #[test]
+    fn tool_flags_override_only_the_selected_settings() {
+        let mut p = persona("dev-a");
+        p.memory = Some("file-memory".to_owned());
+        p.tasks = Some("file-tasks".to_owned());
+        p.env.insert("TASK_DB".to_owned(), "file.db".to_owned());
+        p.env.insert("KEEP".to_owned(), "keep".to_owned());
+        let picked = pick(
+            vec![p],
+            &args("--persona dev-a --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
+            Path::new("config.toml"),
+        )
+        .unwrap();
+        assert_eq!(picked[0].memory.as_deref(), Some("custom-memory"));
+        assert_eq!(picked[0].tasks.as_deref(), Some("file-tasks"));
+        assert_eq!(picked[0].env["TASK_DB"], "cli.db");
+        assert_eq!(picked[0].env["KEEP"], "keep");
+        assert_eq!(picked[0].env["EXTRA"], "a=b");
+        let clear =
+            Cmd::try_parse_from(["daemon", "--persona", "dev-a", "--tasks", "", "--env", "EMPTY="]).unwrap().args;
+        let cleared = clear.apply(picked[0].clone());
+        assert_eq!(cleared.tasks.as_deref(), Some(""));
+        assert_eq!(cleared.env["EMPTY"], "");
+        assert!(Cmd::try_parse_from(["daemon", "--env", "=value"]).is_err());
+        assert!(Cmd::try_parse_from(["daemon", "--env", "NAME"]).is_err());
+        for line in ["--memory notes", "--tasks tickets", "--env NAME=value"] {
+            assert!(pick(vec![persona("dev-a")], &args(line), Path::new("config.toml")).is_err());
+        }
     }
 }

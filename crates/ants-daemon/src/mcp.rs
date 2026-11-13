@@ -1,7 +1,6 @@
 //! MCP tools for the persona's harness sessions: `send_message`, `ask_agent`, `check_inbox`, `list_personas` and
 //! `route` to find personas by their roster capabilities, and `post_plan` and `read_plan` for the thread's plan room
-//! (see [`crate::plan`]). To-dos and memories go through the persona's bd workspace instead (see
-//! [`crate::workspace`]).
+//! (see [`crate::plan`]). Memory and task tools are configured separately by each persona.
 //!
 //! One server per persona, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
@@ -888,7 +887,7 @@ fn instructions(persona: &PersonaId) -> String {
          personas, check_inbox collects late replies, list_personas shows who is there with their capabilities and \
          route sends a request to the persona with a capability. post_plan and read_plan share the thread's plan room \
          with the other personas on it: post a plan there, ask them to read and answer it, and settle it before the \
-         work starts. To-dos and memories go through bd."
+         work starts. Memory and task tools follow the persona's configured instructions."
     );
     if *persona == PersonaId::messenger() {
         text.push_str(

@@ -4,7 +4,7 @@
 //! harness from the pool.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ use crate::harness::{HarnessKind, Launch, Prompt, PromptLimits, Spend};
 use crate::mcp::Mcp;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
-use crate::{bus, roster, workspace};
+use crate::{bus, roster};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
 /// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
@@ -60,8 +60,11 @@ pub struct Config {
     pub js_domain: Option<JsDomain>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
-    /// The persona's own files, its bd workspace among them (usually `~/.ants/<persona>`).
+    /// The persona's own files (usually `~/.ants/<persona>`).
     pub home: PathBuf,
+    /// Memory and task instructions prepended to every prompt.
+    pub instructions: String,
+    pub env: BTreeMap<String, String>,
     pub harness: HarnessKind,
     /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
     /// goes to the human on `ants.approvals.<persona>`.
@@ -84,7 +87,6 @@ pub struct Config {
 /// the NATS server can be reached the daemon keeps trying ([`bus::connect_retrying`]).
 pub async fn run(config: Config) -> Result<()> {
     let allow = Allowlist::parse(&config.allow)?;
-    let db = workspace::ensure(&config.home, &config.persona).await?;
     let Some((client, js)) = bus::connect_retrying(
         &config.nats_url,
         config.creds.as_deref(),
@@ -108,7 +110,8 @@ pub async fn run(config: Config) -> Result<()> {
     let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
     let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster, rooms).await?;
     mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
-    let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy)
+    let launch = Launch::new(config.harness, config.workdir.clone(), config.env.clone().into_iter().collect(), policy)
+        .with_instructions(config.instructions.clone())
         .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
     let sessions_kv = bus::ensure_sessions(&js).await?;
@@ -123,7 +126,6 @@ pub async fn run(config: Config) -> Result<()> {
         persona = %config.persona,
         harness = %config.harness,
         workdir = %config.workdir.display(),
-        workspace = %db.display(),
         max_harnesses = config.max_harnesses,
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,

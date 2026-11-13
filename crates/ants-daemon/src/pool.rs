@@ -515,6 +515,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_instructions_reach_every_prompt_and_resumed_session() {
+        let (launch, log, _) = fake::launch(true);
+        let instructions = "[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
+        let pool = Pool::new(launch.with_instructions(instructions.to_owned()), SessionStore::memory(), 1, IDLE);
+        for (thread_id, text, session) in [(1, "one", "s1"), (1, "two", "s1"), (2, "three", "s2"), (1, "four", "s1")] {
+            assert_eq!(
+                pool.prompt(&thread(thread_id), text).await.unwrap(),
+                format!("{session}: {instructions}\n\n{text}")
+            );
+        }
+        assert_eq!(log.lock().unwrap().loaded, ["s1"]);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
         let (pool, log, _) = fake_pool(1, true);
         let limits = PromptLimits { timeout: Some(Duration::from_millis(50)), max_tool_calls: None };

@@ -13,7 +13,6 @@
 #           FOOTPRINT_ASK_TIMEOUT (seconds, default 180)
 #
 # RSS comes from `ps -o rss=` (KB on Linux and macOS). The idle figure is the largest sample.
-# Without bd on PATH, an empty workspace database stands in so the daemon skips `bd init`.
 set -eu
 
 die() {
@@ -120,11 +119,6 @@ mkdir -p "$work/js" "$work/home" "$work/workdir"
 "$nats_server" -js -a 127.0.0.1 -p "$port" -sd "$work/js" >"$work/nats.log" 2>&1 &
 nats_pid=$!
 wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
-
-if ! command -v bd >/dev/null 2>&1; then
-    mkdir -p "$work/home/.bd"
-    : >"$work/home/.bd/bd.db"
-fi
 
 url=nats://127.0.0.1:$port
 ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --persona footprint \

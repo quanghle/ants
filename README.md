@@ -18,7 +18,7 @@ cargo build --release   # target/release/ants
 cargo test
 ```
 
-Tests that need `nats-server` or `bd` on PATH skip without them; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
+Tests that need `nats-server` on PATH skip without it; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
 instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
 test binary itself as a stub ACP harness.
 
@@ -89,6 +89,9 @@ workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
 harness = "copilot"                        # default; or "claude", "antigravity"
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
+memory = "Use the notes MCP server for durable memory."  # optional, any tool available to the harness
+tasks = "Use the tracker CLI for task tracking."         # optional, independent of memory
+env = { TRACKER_DB = "/srv/ants/dev-a/tasks.db" }         # optional harness environment overrides
 allow = ["read", "search"]                 # tool allowlist, see Tool permissions
 approval_timeout_secs = 300                # default
 capabilities = ["rust", "review"]          # advertised in the roster
@@ -179,7 +182,7 @@ ants roster
 `scripts/install-units.sh` fills in the absolute paths of `ants` and `nats-server` (found on `PATH`, or `--ants`,
 `--nats-server`), the nats-server configuration (`--nats-conf`, default `~/.config/ants/leaf.conf`; the hub machine
 gives its hub configuration), the daemon config file (`--config`) and the current `PATH`, on which the daemon finds the
-harness and `bd`. It installs them in `~/Library/LaunchAgents` or `~/.config/systemd/user` and (re)starts them.
+harness and configured tools. It installs them in `~/Library/LaunchAgents` or `~/.config/systemd/user` and (re)starts them.
 `--out DIR` only writes the filled-in units; `--no-daemon` installs nats-server alone. Run it again after moving a
 binary or changing `PATH`.
 
@@ -379,12 +382,49 @@ plan rooms need `ants auth user` again.
 
 ## Persona memory
 
-Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
-(`--home` moves it). The daemon creates it on first start and runs every harness session with `BD_DB` pointing at it,
-so `bd remember`, `bd ready` and the session-start `bd prime` hook all see the persona's workspace, not the workdir's.
-`bd` must be on the daemon's `PATH`, and the harness needs the bd session-start hooks (`bd setup copilot` or
-`bd setup claude` in the workdir, or user-level hooks; for Antigravity CLI, `bd setup gemini` writes instructions to
-run `bd prime` into `GEMINI.md`).
+Memory and task tracking are optional and tool-agnostic. ants does not initialize a tool workspace, run setup or
+context-loading commands, or require bd. Install and configure any CLI or MCP tools through the harness as usual.
+
+Set `memory` and `tasks` independently on each `[[persona]]` to describe which tools to use and how. Both default to
+unset. Their text is prepended to every prompt, including prompts in resumed sessions; it is guidance to the agent,
+not commands executed by ants. An empty string clears that role's instructions. Configured tools still follow the
+normal harness permissions and ants approval rules.
+
+The persona's `env` map overrides the harness's inherited environment, including for hooks and tool subprocesses.
+Values are literal: `~`, `$HOME` and relative paths are not expanded or resolved by ants. Use absolute paths for
+persona-local data; sharing a path shares the tool's state across personas. The persona's `home` remains for ants'
+own files, and does not configure external tools.
+
+The equivalent flags are `--memory TEXT`, `--tasks TEXT` and repeatable `--env NAME=VALUE`. With a config file, select
+a persona using `--persona`; each flag overrides only its corresponding instructions or environment key.
+
+### Example: bd for memory and task tracking
+
+bd is one possible tool, configured entirely outside ants. Create a workspace manually:
+
+```sh
+mkdir -p ~/.ants/dev-a
+bd init -C ~/.ants/dev-a --prefix dev-a
+```
+
+Then configure the persona (replace `/absolute/path` with the home directory):
+
+```toml
+[[persona]]
+name = "dev-a"
+workdir = "~/src/some-repo"
+memory = "Run bd prime at the start; use bd remember for durable memories."
+tasks = "Use bd ready, bd claim, bd create and bd close for task tracking."
+env = { BD_DB = "/absolute/path/.ants/dev-a/.bd/bd.db", BD_REMOTE = "" }
+```
+
+Keep `bd` on the harness's `PATH`. `BD_DB` selects the workspace instead of the workdir's; empty `BD_REMOTE` avoids an
+inherited remote overriding it. Optional harness hooks can load context (`bd setup copilot` or `bd setup claude` in
+the workdir, or user-level hooks; `bd setup gemini` writes instructions to run `bd prime` into `GEMINI.md`).
+Memory and tasks can instead use different tools by changing their instructions and environment settings.
+
+**Migration:** existing personas no longer get a bd workspace or `BD_DB` automatically. Existing databases are left
+untouched; add the instructions and environment settings above to retain bd-based memory and task tracking.
 
 ## Credentials
 

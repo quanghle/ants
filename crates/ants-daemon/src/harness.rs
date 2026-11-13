@@ -117,13 +117,23 @@ pub struct Launch {
     /// The thread the sessions serve, so a permission request can be escalated on it.
     thread: Option<ThreadId>,
     mcp: Option<McpServers>,
+    instructions: String,
 }
 
 impl Launch {
     /// `kind` working in `cwd`, with `env` added to the daemon's environment.
     pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
         let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
-        Self { name: kind.name().to_owned(), connect, mode: kind.mode(), cwd, policy, thread: None, mcp: None }
+        Self {
+            name: kind.name().to_owned(),
+            connect,
+            mode: kind.mode(),
+            cwd,
+            policy,
+            thread: None,
+            mcp: None,
+            instructions: String::new(),
+        }
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -136,6 +146,11 @@ impl Launch {
         Self { mcp: Some(mcp), ..self }
     }
 
+    /// Prepend persona instructions to every prompt, including after session/load.
+    pub fn with_instructions(self, instructions: String) -> Self {
+        Self { instructions, ..self }
+    }
+
     fn mcp_servers(&self, http: bool) -> Vec<McpServer> {
         match (&self.mcp, &self.thread) {
             (Some(mcp), Some(thread)) => mcp(thread, http),
@@ -145,7 +160,16 @@ impl Launch {
 
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
-        Self { name: "test".to_owned(), connect, mode: None, cwd, policy, thread: None, mcp: None }
+        Self {
+            name: "test".to_owned(),
+            connect,
+            mode: None,
+            cwd,
+            policy,
+            thread: None,
+            mcp: None,
+            instructions: String::new(),
+        }
     }
 
     #[cfg(test)]
@@ -394,6 +418,8 @@ async fn serve(
                         spend: spend.clone(),
                     });
                 }
+                let text =
+                    if launch.instructions.is_empty() { text } else { format!("{}\n\n{text}", launch.instructions) };
                 let request = cx
                     .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
                     .block_task();

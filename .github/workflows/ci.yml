@@ -11,7 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   NATS_SERVER_VERSION: v2.15.3
-  BD_VERSION: v0.8.0
 
 jobs:
   check:
@@ -30,9 +29,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Tests that need nats-server or bd skip without them, except under ANTS_REQUIRE_TOOLS=1 (set for `cargo test`
+      # Tests that need nats-server skip without it, except under ANTS_REQUIRE_TOOLS=1 (set for `cargo test`
       # below), where they fail: a broken install must not pass as skipped tests.
-      - name: Install nats-server and bd
+      - name: Install nats-server
         run: |
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) target=linux-amd64 ;;
@@ -45,8 +44,6 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "https://github.com/nats-io/nats-server/releases/download/$NATS_SERVER_VERSION/$name.tar.gz" \
             | tar xz -C "$HOME/.local/bin" --strip-components=1 "$name/nats-server"
-          curl -fsSL https://raw.githubusercontent.com/quanghle/bd-sync/main/scripts/install.sh \
-            | BD_INSTALL_DIR="$HOME/.local/bin" sh -s -- --version "$BD_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - run: cargo fmt --all --check

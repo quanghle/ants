@@ -12,7 +12,7 @@ use agent_client_protocol::v1::schema::{
     NewSessionResponse, PromptRequest, PromptResponse, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio as AcpStdio};
-use ants_test_support::{NatsServer, have, scratch_dir};
+use ants_test_support::{NatsServer, scratch_dir};
 
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
 const WAIT: Duration = Duration::from_secs(60);
@@ -22,7 +22,10 @@ fn main() {
     if Path::new(&me).file_name().is_some_and(|name| name == "copilot") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 1] = [("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness)];
+    let tests: [(&str, fn()); 2] = [
+        ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
+        ("custom_memory_and_tasks_reach_the_harness", custom_memory_and_tasks_reach_the_harness),
+    ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
         if filters.is_empty() || filters.iter().any(|f| name.contains(f.as_str())) {
@@ -33,19 +36,19 @@ fn main() {
 }
 
 fn ask_gets_the_reply_of_a_daemon_harness() {
-    if !have("bd") {
-        return;
-    }
+    exercise_daemon(false);
+}
+
+fn custom_memory_and_tasks_reach_the_harness() {
+    exercise_daemon(true);
+}
+
+fn exercise_daemon(custom_tools: bool) {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("e2e");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
-    let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
-    )
-    .unwrap();
-
     let ants = |args: &[&str]| {
         let mut command = Command::new(ANTS);
         command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
@@ -56,12 +59,27 @@ fn ask_gets_the_reply_of_a_daemon_harness() {
 
     let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
     let home = dir.join("home");
-    let daemon = ants(&["daemon", "--persona", "dev-a"])
-        .arg("--home")
-        .arg(&home)
-        .arg("--workdir")
-        .arg(&dir)
-        .env("PATH", &path)
+    let mut command = ants(&["daemon"]);
+    if custom_tools {
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[[persona]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                 memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
+                 env = {{ ANTS_TEST_TOOL_DB = \"custom.db\", BD_DB = \"unmanaged.db\", BD_REMOTE = \"\" }}\n"
+            ),
+        )
+        .unwrap();
+        command.arg("--config").arg(config);
+    } else {
+        command.args(["--persona", "dev-a"]).arg("--home").arg(&home).arg("--workdir").arg(&dir);
+    }
+    let daemon = command
+        .env("PATH", &bin)
+        .env_remove("BD_DB")
+        .env_remove("BD_REMOTE")
+        .env_remove("ANTS_TEST_TOOL_DB")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(log)
@@ -74,7 +92,14 @@ fn ask_gets_the_reply_of_a_daemon_harness() {
     let stdout = String::from_utf8_lossy(&ask.stdout);
     assert!(ask.status.success(), "ants ask: {}\ndaemon log:\n{}", String::from_utf8_lossy(&ask.stderr), daemon_log());
     assert!(stdout.starts_with("thread "), "{stdout}");
-    assert!(stdout.contains("dev-a: stub: hello there\n"), "{stdout}\ndaemon log:\n{}", daemon_log());
+    let expected = if custom_tools {
+        "dev-a: stub: [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
+         hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n"
+    } else {
+        "dev-a: stub: hello there\n"
+    };
+    assert!(stdout.contains(expected), "{stdout}\ndaemon log:\n{}", daemon_log());
+    assert!(!home.join(".bd").exists(), "ants must not initialize a tool workspace");
 
     let inbox = run(ants(&["inbox"]));
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
@@ -153,7 +178,15 @@ fn stub_harness() {
                             _ => None,
                         })
                         .collect();
-                    let reply = ContentBlock::Text(TextContent::new(format!("stub: {text}")));
+                    let mut reply = format!("stub: {text}");
+                    if let Ok(db) = std::env::var("ANTS_TEST_TOOL_DB") {
+                        reply.push_str(&format!(
+                            "\n{db}; BD_DB={}; BD_REMOTE={}",
+                            std::env::var("BD_DB").unwrap(),
+                            std::env::var("BD_REMOTE").unwrap()
+                        ));
+                    }
+                    let reply = ContentBlock::Text(TextContent::new(reply));
                     cx.send_notification(SessionNotification::new(
                         prompt.session_id,
                         SessionUpdate::AgentMessageChunk(ContentChunk::new(reply)),

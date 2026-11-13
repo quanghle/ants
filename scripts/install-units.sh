@@ -13,7 +13,7 @@
 #           --no-daemon          only the nats-server service, on a machine without personas
 #           --out DIR            write the units into DIR; install and start nothing
 #
-# The daemon gets the PATH of this shell, so it finds the harness (copilot) and bd. Logs: ~/Library/Logs/ants on
+# The daemon gets the PATH of this shell, so it finds the harness and configured tools. Logs: ~/Library/Logs/ants on
 # macOS, the journal on Linux (journalctl --user -u ants-daemon).
 set -eu
 

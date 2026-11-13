@@ -1,6 +1,6 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools and a throwaway nats-server.
 //!
-//! A test that needs `nats-server` or `bd` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
+//! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests.
 
 use std::path::{Path, PathBuf};
