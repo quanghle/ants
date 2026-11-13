@@ -8,6 +8,7 @@ use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 
+use crate::dead::{self, Attempt};
 use crate::harness::{HarnessKind, Launch, PermissionPolicy};
 use crate::pool::Pool;
 use crate::{bus, roster, workspace};
@@ -15,8 +16,10 @@ use crate::{bus, roster, workspace};
 /// Redelivery window. The daemon extends it with progress acks while a prompt runs, so a crash mid-task redelivers.
 const ACK_WAIT: Duration = Duration::from_secs(5 * 60);
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
-/// Deliveries before a message is given up on.
-const MAX_DELIVER: i64 = 5;
+/// Attempts a message gets before it becomes a dead letter on `ants.dead.<persona>`.
+const MAX_ATTEMPTS: i64 = 5;
+/// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
+const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
@@ -101,10 +104,20 @@ async fn handle(
     let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(error = %e, subject = %msg.subject, "dropping malformed message");
-            return msg.ack_with(AckKind::Term).await.map_err(|e| anyhow::anyhow!(e));
+            tracing::warn!(error = %e, subject = %msg.subject, "dead-lettering malformed message");
+            if let Err(e) = dead::bury(js, &config.persona, &msg, None, &format!("not an envelope: {e}")).await {
+                // Never redelivered, dead letter or not.
+                tracing::warn!(error = format!("{e:#}"), "dead-lettering");
+                return msg.ack_with(AckKind::Term).await.map_err(|e| anyhow::anyhow!(e));
+            }
+            return Ok(());
         }
     };
+    let attempt = Attempt::of(msg.info().map_or(1, |i| i.delivered), MAX_ATTEMPTS);
+    if attempt == Attempt::Overdue {
+        let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
+        return dead::bury(js, &config.persona, &msg, Some(&envelope), &error).await.map(drop);
+    }
     if let Err(ProtoError::BudgetExhausted(_)) = envelope.reply(config.persona.clone(), "") {
         // Out of turns: hand the thread to the human instead of spending another prompt.
         let mut escalation = Envelope::on_thread(
@@ -141,6 +154,13 @@ async fn handle(
         Ok(text) => text,
         Err(e) => {
             client.publish(status, "failed".into()).await?;
+            if attempt == Attempt::Last {
+                match dead::bury(js, &config.persona, &msg, Some(&envelope), &format!("{e:#}")).await {
+                    Ok(_) => return Err(e),
+                    // The overdue delivery tries again.
+                    Err(bury) => tracing::warn!(error = format!("{bury:#}"), "dead-lettering"),
+                }
+            }
             msg.ack_with(AckKind::Nak(Some(RETRY_DELAY))).await.map_err(|e| anyhow::anyhow!(e))?;
             return Err(e);
         }

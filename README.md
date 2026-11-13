@@ -84,6 +84,22 @@ deletes it on a clean stop. The bucket keeps an entry 30 s after its last refres
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; the human's read the
 roster.
+## Dead letters
+
+A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
+`ants.dead.<persona>` (with the error and delivery count), sends a notice to the human on the same thread, and only
+then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran out), the consumer's
+one extra delivery dead-letters it without another prompt. A payload that is not an envelope becomes a dead letter at
+once.
+
+```sh
+ants dead list          # seq, persona, thread, from, deliveries, time, error, text
+ants dead replay 42     # send the message to its inbox again, as it was, and remove the dead letter
+ants dead drop 42       # remove it without replaying
+```
+
+Reading and removing dead letters by sequence needs the human's credentials. A stream created before dead letters
+existed lacks `ants.dead.>`; `ants init` adds it.
 
 ## Persona memory
 

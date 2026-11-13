@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
-pub const STREAM_SUBJECTS: [&str; 3] = ["ants.inbox.>", "ants.plan.>", "ants.approvals.>"];
+pub const STREAM_SUBJECTS: [&str; 4] = ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>"];
 /// KV bucket where each daemon registers its personas: one [`RosterEntry`] per persona, keyed by the persona id.
 pub const ROSTER_BUCKET: &str = "ants_roster";
 /// How often a daemon re-puts its roster entry.
@@ -132,6 +132,14 @@ pub mod subject {
         format!("ants.approvals.{persona}")
     }
 
+    /// Messages a persona gave up on, as [`DeadLetter`](super::DeadLetter)s.
+    pub fn dead(persona: &PersonaId) -> String {
+        format!("ants.dead.{persona}")
+    }
+
+    /// Every persona's dead letters.
+    pub const DEAD_ALL: &str = "ants.dead.>";
+
     /// Live progress of a persona on a thread (core NATS, not stored).
     pub fn status(persona: &PersonaId, thread: &ThreadId) -> String {
         format!("ants.status.{persona}.{thread}")
@@ -166,10 +174,11 @@ pub struct Permissions {
 impl Permissions {
     /// What the credentials of `persona` allow.
     ///
-    /// Any persona may write to every inbox and plan room, but speaks only for itself on status and approvals, reads
-    /// only its own inbox consumer and its own replies, and writes only its own roster entry. The human (the CLI user)
-    /// also watches all ants traffic, reads the roster and may create the stream and the roster bucket; its inbox
-    /// consumer keeps the replies `ants inbox` has not shown yet.
+    /// Any persona may write to every inbox and plan room, but speaks only for itself on status, approvals and dead
+    /// letters, reads only its own inbox consumer and its own replies, and writes only its own roster entry. The human
+    /// (the CLI user) also watches all ants traffic, reads the roster, may create and upgrade the stream and create the
+    /// roster bucket, and reads and removes dead letters by sequence; its inbox consumer keeps the replies `ants inbox`
+    /// has not shown yet. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
         let roster_stream = format!("KV_{ROSTER_BUCKET}");
@@ -195,11 +204,15 @@ impl Permissions {
                 format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
                 format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
                 format!("$JS.FC.{roster_stream}.>"),
+                format!("$JS.API.STREAM.UPDATE.{STREAM}"),
+                format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
+                format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
             ]);
             subscribe.push(subject::ALL.to_owned());
         } else {
             publish.extend([
                 subject::approvals(persona),
+                subject::dead(persona),
                 format!("ants.status.{persona}.*"),
                 // Put and delete of its own roster entry.
                 subject::roster(persona),
@@ -301,6 +314,81 @@ impl Envelope {
     }
 }
 
+/// A message a persona gave up on: it failed on every allowed delivery, or was not an envelope. Kept on
+/// [`subject::dead`] until the human replays or drops it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadLetter {
+    /// The persona whose inbox held the message.
+    pub persona: PersonaId,
+    /// Stream sequence of the original message.
+    pub stream_seq: u64,
+    /// Deliveries the message got.
+    pub deliveries: u64,
+    /// Why it was given up on.
+    pub error: String,
+    pub died_at: DateTime<Utc>,
+    /// The original message, ready to replay; `None` when the payload was not an envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<Envelope>,
+    /// The start of a payload that was not an envelope, for inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
+
+impl DeadLetter {
+    /// Most bytes of an unparsable payload kept in [`DeadLetter::payload`].
+    pub const PAYLOAD_EXCERPT: usize = 4096;
+
+    /// The dead letter of an envelope that failed `deliveries` times.
+    pub fn of_envelope(
+        persona: PersonaId,
+        stream_seq: u64,
+        deliveries: u64,
+        error: impl Into<String>,
+        envelope: Envelope,
+    ) -> Self {
+        Self {
+            persona,
+            stream_seq,
+            deliveries,
+            error: error.into(),
+            died_at: Utc::now(),
+            envelope: Some(envelope),
+            payload: None,
+        }
+    }
+
+    /// The dead letter of a payload that is not an envelope; keeps at most [`Self::PAYLOAD_EXCERPT`] bytes of it.
+    pub fn of_payload(
+        persona: PersonaId,
+        stream_seq: u64,
+        deliveries: u64,
+        error: impl Into<String>,
+        payload: &[u8],
+    ) -> Self {
+        // A cut through a multi-byte character leaves a replacement character, which is fine for inspection.
+        let payload = String::from_utf8_lossy(&payload[..payload.len().min(Self::PAYLOAD_EXCERPT)]).into_owned();
+        Self {
+            persona,
+            stream_seq,
+            deliveries,
+            error: error.into(),
+            died_at: Utc::now(),
+            envelope: None,
+            payload: Some(payload),
+        }
+    }
+
+    /// `Nats-Msg-Id` of the dead letter, so a daemon that crashes after storing it does not store it twice.
+    pub fn msg_id(&self) -> String {
+        format!("dead-{}", self.stream_seq)
+    }
+
+    pub fn subject(&self) -> String {
+        subject::dead(&self.persona)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +419,8 @@ mod tests {
         assert_eq!(subject::plan(&t), "ants.plan.t1");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
+        assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
+        assert!(STREAM_SUBJECTS.contains(&subject::DEAD_ALL), "dead letters are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
     }
 
@@ -383,5 +473,20 @@ mod tests {
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.capabilities.is_empty());
+    }
+
+    #[test]
+    fn dead_letters_keep_the_envelope_or_an_excerpt_of_the_payload() {
+        let msg = Envelope::new(PersonaId::human(), p("dev-a"), "build it");
+        let dead = DeadLetter::of_envelope(p("dev-a"), 7, 5, "harness crashed", msg.clone());
+        assert_eq!((dead.subject().as_str(), dead.msg_id().as_str()), ("ants.dead.dev-a", "dead-7"));
+        let json = serde_json::to_string(&dead).unwrap();
+        assert!(!json.contains("payload"));
+        assert_eq!(serde_json::from_str::<DeadLetter>(&json).unwrap().envelope, Some(msg));
+
+        let junk = vec![b'x'; DeadLetter::PAYLOAD_EXCERPT + 10];
+        let dead = DeadLetter::of_payload(p("dev-a"), 8, 1, "not an envelope", &junk);
+        assert_eq!(dead.envelope, None);
+        assert_eq!(dead.payload.unwrap().len(), DeadLetter::PAYLOAD_EXCERPT);
     }
 }

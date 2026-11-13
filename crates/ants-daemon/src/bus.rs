@@ -39,17 +39,14 @@ pub async fn connect(
     Ok((client, js))
 }
 
-/// Create the `ANTS` stream, or return it as it is. Only the human's credentials may create it.
-pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
-    js.get_or_create_stream(stream::Config {
+fn stream_config() -> stream::Config {
+    stream::Config {
         name: STREAM.to_owned(),
         subjects: STREAM_SUBJECTS.iter().map(|s| (*s).to_owned()).collect(),
         storage: stream::StorageType::File,
         max_age: RETENTION,
         ..Default::default()
-    })
-    .await
-    .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")
+    }
 }
 
 /// Open the roster bucket, creating it if missing with entries that expire `ttl` after their last put. Only the
@@ -71,7 +68,40 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
 
-/// Messages from the durable consumer of `persona`'s inbox, which is created if missing.
+/// Create the `ANTS` stream, or return it as it is. Only the human's credentials may create it. A stream from an older
+/// version that lacks some of [`STREAM_SUBJECTS`] is returned with a warning: [`init_stream`] upgrades it.
+pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
+    let stream = js
+        .get_or_create_stream(stream_config())
+        .await
+        .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")?;
+    let missing = missing_subjects(&stream.cached_info().config.subjects);
+    if !missing.is_empty() {
+        tracing::warn!(?missing, "stream {STREAM} lacks subjects; `ants init` as the human adds them");
+    }
+    Ok(stream)
+}
+
+/// Create the `ANTS` stream, or add the subjects an older version did not capture. Needs the human's credentials.
+pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
+    let stream = ensure_stream(js).await?;
+    let mut config = stream.cached_info().config.clone();
+    let missing = missing_subjects(&config.subjects);
+    if missing.is_empty() {
+        return Ok(stream);
+    }
+    config.subjects.extend(missing);
+    js.update_stream(&config).await.context("adding subjects to the ANTS stream")?;
+    Ok(js.get_stream(STREAM).await?)
+}
+
+/// The subjects of [`STREAM_SUBJECTS`] that `subjects` lacks.
+pub fn missing_subjects(subjects: &[String]) -> Vec<String> {
+    STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
+}
+
+/// Messages from the durable consumer of `persona`'s inbox, which is created if missing and updated if its settings
+/// changed.
 pub async fn inbox_consumer(
     stream: &stream::Stream,
     persona: &PersonaId,
@@ -80,19 +110,16 @@ pub async fn inbox_consumer(
 ) -> Result<pull::Stream> {
     let name = ants_proto::inbox_consumer(persona);
     let consumer: PullConsumer = stream
-        .get_or_create_consumer(
-            &name,
-            pull::Config {
-                durable_name: Some(name.clone()),
-                filter_subject: subject::inbox(persona),
-                ack_policy: consumer::AckPolicy::Explicit,
-                ack_wait,
-                max_deliver,
-                // One message at a time keeps one harness alive at most; per-thread concurrency comes later.
-                max_ack_pending: 1,
-                ..Default::default()
-            },
-        )
+        .create_consumer(pull::Config {
+            durable_name: Some(name.clone()),
+            filter_subject: subject::inbox(persona),
+            ack_policy: consumer::AckPolicy::Explicit,
+            ack_wait,
+            max_deliver,
+            // One message at a time keeps one harness alive at most; per-thread concurrency comes later.
+            max_ack_pending: 1,
+            ..Default::default()
+        })
         .await
         .with_context(|| format!("creating consumer {name}"))?;
     Ok(consumer.messages().await?)
@@ -122,11 +149,27 @@ pub async fn human_inbox_consumer(stream: &stream::Stream, ack_wait: Duration) -
 
 /// Publish an envelope and wait until JetStream has stored it.
 pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<()> {
-    let payload = serde_json::to_vec(envelope)?;
-    js.publish(envelope.subject(), payload.into())
+    publish_json(js, envelope.subject(), envelope, None).await?;
+    Ok(())
+}
+
+/// Publish `value` as JSON and wait until JetStream has stored it, returning its stream sequence. With `msg_id`, a
+/// second publish within the duplicate window stores nothing and returns the first one's sequence.
+pub async fn publish_json<T: serde::Serialize>(
+    js: &jetstream::Context,
+    subject: String,
+    value: &T,
+    msg_id: Option<&str>,
+) -> Result<u64> {
+    let mut message = jetstream::message::PublishMessage::build().payload(serde_json::to_vec(value)?.into());
+    if let Some(id) = msg_id {
+        message = message.message_id(id);
+    }
+    let ack = js
+        .send_publish(subject, message)
         .await
         .context("publishing")?
         .await
         .context("waiting for JetStream to store the message")?;
-    Ok(())
+    Ok(ack.sequence)
 }

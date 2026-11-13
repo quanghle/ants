@@ -3,6 +3,7 @@
 pub mod bus;
 pub mod config;
 pub mod daemon;
+pub mod dead;
 pub mod harness;
 pub mod pool;
 pub mod roster;

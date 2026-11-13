@@ -155,8 +155,10 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use ants_daemon::bus;
+    use ants_daemon::dead::{self, Attempt};
     use ants_daemon::roster::Registration;
-    use ants_proto::{Envelope, RosterEntry, ThreadId, inbox_prefix, subject};
+    use ants_proto::{Envelope, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, subject};
+    use async_nats::jetstream::AckKind;
     use async_nats::{Client, Event, jetstream};
     use futures::{StreamExt as _, TryStreamExt as _};
     use tokio::sync::mpsc;
@@ -314,6 +316,9 @@ pub(crate) mod tests {
         a_raw.publish(subject::approvals(&dev_b), "spoof".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains("Publish to \"ants.approvals.dev-b\""), "{v}");
+        a_raw.publish(subject::dead(&dev_b), "spoof".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains("Publish to \"ants.dead.dev-b\""), "{v}");
         for denied in [subject::inbox(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()] {
             let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;
@@ -359,5 +364,81 @@ pub(crate) mod tests {
 
         registration.deregister().await;
         assert!(h_kv.get("dev-a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_messages_become_dead_letters_the_human_replays() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (h_client, h_js) = server.connect(&human).await;
+        let (_, a_js) = server.connect(&dev_a).await;
+
+        // A stream from before dead letters gains their subject on `ants init`.
+        let old: Vec<String> =
+            STREAM_SUBJECTS.iter().filter(|s| **s != subject::DEAD_ALL).map(|s| (*s).to_owned()).collect();
+        h_js.create_stream(jetstream::stream::Config { name: STREAM.to_owned(), subjects: old, ..Default::default() })
+            .await
+            .unwrap();
+        let stream = bus::init_stream(&h_js).await.unwrap();
+        assert!(bus::missing_subjects(&stream.cached_info().config.subjects).is_empty());
+
+        let mut human_inbox = h_client.subscribe(subject::inbox(&human)).await.unwrap();
+        h_client.flush().await.unwrap();
+        let ask = Envelope::new(human.clone(), dev_a.clone(), "build it");
+        bus::publish(&h_js, &ask).await.unwrap();
+
+        // dev-a fails every attempt, as the daemon does when the harness errors.
+        let a_stream = bus::ensure_stream(&a_js).await.unwrap();
+        let mut inbox = bus::inbox_consumer(&a_stream, &dev_a, WAIT, 3).await.unwrap();
+        loop {
+            let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
+            assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
+            match Attempt::of(msg.info().unwrap().delivered, 2) {
+                Attempt::Early => msg.ack_with(AckKind::Nak(None)).await.unwrap(),
+                _ => {
+                    dead::bury(&a_js, &dev_a, &msg, Some(&ask), "harness crashed").await.unwrap();
+                    break;
+                }
+            }
+        }
+        let notice: Envelope =
+            serde_json::from_slice(&timeout(WAIT, human_inbox.next()).await.unwrap().unwrap().payload).unwrap();
+        assert_eq!((notice.thread_id.clone(), notice.in_reply_to), (ask.thread_id.clone(), Some(ask.id)));
+
+        // A payload that is no envelope is kept for inspection too.
+        h_client.publish(subject::inbox(&dev_a), "{oops".into()).await.unwrap();
+        let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
+        dead::bury(&a_js, &dev_a, &msg, None, "not an envelope").await.unwrap();
+
+        let letters = dead::list(&stream).await.unwrap();
+        assert_eq!(letters.len(), 2, "{letters:?}");
+        let (seq, letter) = &letters[0];
+        assert_eq!(
+            (letter.persona.clone(), letter.deliveries, letter.error.as_str()),
+            (dev_a.clone(), 2, "harness crashed")
+        );
+        assert_eq!(letter.envelope.as_ref(), Some(&ask));
+        assert!(notice.text.contains(&format!("ants dead replay {seq}")), "{}", notice.text);
+        let (junk_seq, junk) = &letters[1];
+        assert_eq!(junk.payload.as_deref(), Some("{oops"));
+
+        // Only the human reads dead letters by sequence.
+        assert!(dead::list(&a_stream).await.is_err());
+        assert!(dead::get(&stream, ask_seq(&stream, &ask).await).await.is_err(), "not a dead letter");
+
+        // Replay: the message reaches dev-a again, as it was, and the dead letter is gone.
+        dead::replay(&h_js, &stream, *seq).await.unwrap();
+        let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
+        assert_eq!(msg.info().unwrap().delivered, 1);
+        msg.double_ack().await.unwrap();
+        assert!(dead::replay(&h_js, &stream, *junk_seq).await.is_err(), "nothing to replay");
+        dead::discard(&stream, *junk_seq).await.unwrap();
+        assert!(dead::list(&stream).await.unwrap().is_empty());
+    }
+
+    /// Stream sequence of the first copy of `envelope`.
+    async fn ask_seq(stream: &jetstream::stream::Stream, envelope: &Envelope) -> u64 {
+        stream.get_first_raw_message_by_subject(envelope.subject(), 1).await.unwrap().sequence
     }
 }

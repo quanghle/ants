@@ -6,9 +6,9 @@ mod serve;
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, harness};
-use ants_proto::{Envelope, PersonaId, ThreadId, subject};
-use anyhow::{Result, bail};
+use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness};
+use ants_proto::{DeadLetter, Envelope, PersonaId, ThreadId, subject};
+use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
 
@@ -65,8 +65,11 @@ enum Command {
         #[arg(default_value = subject::ALL)]
         subject: String,
     },
-    /// Create the ANTS stream and the roster bucket on the server (the daemon also does this on start).
+    /// Create the ANTS stream and the roster bucket on the server, or add the stream subjects an older version lacks.
     Init,
+    /// Messages personas gave up on: inspect, replay or drop them.
+    #[command(subcommand)]
+    Dead(DeadCommand),
     /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
     Daemon(serve::DaemonArgs),
     /// Talk to a harness directly, without NATS.
@@ -75,6 +78,16 @@ enum Command {
     /// Issue NATS credentials: one operator and account for the team, one user per persona.
     #[command(subcommand)]
     Auth(AuthCommand),
+}
+
+#[derive(Subcommand)]
+enum DeadCommand {
+    /// List dead letters, oldest first.
+    List,
+    /// Send a dead letter's message to its inbox again, as it was, and remove the dead letter.
+    Replay { seq: u64 },
+    /// Remove a dead letter without replaying it.
+    Drop { seq: u64 },
 }
 
 #[derive(Subcommand)]
@@ -129,11 +142,12 @@ async fn main() -> Result<()> {
         Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), subject).await,
         Command::Init => {
             let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;
-            bus::ensure_stream(&js).await?;
+            bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
             println!("stream {} and roster bucket {} ready", ants_proto::STREAM, ants_proto::ROSTER_BUCKET);
             Ok(())
         }
+        Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), command).await,
         Command::Daemon(args) => {
             let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
             serve::run(serve::configs(personas, &cli.nats, cli.creds)?).await
@@ -249,13 +263,67 @@ async fn show_inbox(url: &str, creds: Option<&Path>, select: &inbox::Select, fol
     result.and(released)
 }
 
+async fn dead_letters(url: &str, creds: Option<&Path>, command: DeadCommand) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, &PersonaId::human(), "ants-cli").await?;
+    let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
+    match command {
+        DeadCommand::List => {
+            let letters = dead::list(&stream).await?;
+            if letters.is_empty() {
+                println!("no dead letters");
+            }
+            for (seq, letter) in &letters {
+                println!("{}", dead_row(*seq, letter));
+            }
+        }
+        DeadCommand::Replay { seq } => {
+            let envelope = dead::replay(&js, &stream, seq).await?;
+            println!("replayed to {} on thread {}", envelope.to, envelope.thread_id);
+        }
+        DeadCommand::Drop { seq } => {
+            dead::discard(&stream, seq).await?;
+            println!("dropped dead letter {seq}");
+        }
+    }
+    Ok(())
+}
+
+/// One line of `ants dead list`: sequence, persona, thread, sender, deliveries, time, error and the start of the text.
+fn dead_row(seq: u64, letter: &DeadLetter) -> String {
+    let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
+    let (thread, from, text) = match &letter.envelope {
+        Some(e) => (e.thread_id.as_str(), e.from.as_str(), e.text.as_str()),
+        None => ("-", "-", letter.payload.as_deref().unwrap_or("")),
+    };
+    format!(
+        "{seq}\t{}\t{thread}\t{from}\t{}x\t{time}\t{}\t{}",
+        letter.persona,
+        letter.deliveries,
+        excerpt(&letter.error, 60),
+        excerpt(text, 60)
+    )
+}
+
+/// The first line of `text`, cut to `max` characters.
+fn excerpt(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("");
+    let mut out: String = line.chars().take(max).collect();
+    if out.len() < text.len() {
+        out.push('…');
+    }
+    out
+}
+
 async fn watch(url: &str, creds: Option<&Path>, filter: String) -> Result<()> {
     let (client, _) = bus::connect(url, creds, &PersonaId::human(), "ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
     while let Some(msg) = sub.next().await {
-        match serde_json::from_slice::<Envelope>(&msg.payload) {
-            Ok(e) => println!("[{}] {} -> {}: {}", e.thread_id, e.from, e.to, e.text),
-            Err(_) => println!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)),
+        if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
+            println!("[{}] {} -> {}: {}", e.thread_id, e.from, e.to, e.text);
+        } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
+            println!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error);
+        } else {
+            println!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload));
         }
     }
     Ok(())
@@ -279,6 +347,19 @@ mod tests {
     fn messenger_is_the_default_recipient() {
         let (to, text) = recipient(words("who owns billing?")).unwrap();
         assert_eq!((to, text.as_str()), (PersonaId::messenger(), "who owns billing?"));
+    }
+
+    #[test]
+    fn dead_rows_show_the_message_or_the_bad_payload() {
+        let mut ask = Envelope::new(PersonaId::human(), "dev-a".parse().unwrap(), "build it\nand test it");
+        ask.thread_id = "t1".parse().unwrap();
+        let letter = DeadLetter::of_envelope("dev-a".parse().unwrap(), 3, 5, "harness crashed", ask);
+        let row = dead_row(12, &letter);
+        assert!(row.starts_with("12\tdev-a\tt1\thuman\t5x\t"), "{row}");
+        assert!(row.ends_with("\tharness crashed\tbuild it…"), "{row}");
+
+        let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, "not an envelope", b"{oops");
+        assert!(dead_row(13, &letter).ends_with("\tnot an envelope\t{oops"));
     }
 
     #[test]
