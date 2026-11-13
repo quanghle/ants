@@ -3,6 +3,7 @@
 mod approve;
 mod auth;
 mod bridge;
+mod channel;
 mod inbox;
 mod leaf;
 mod outbox;
@@ -13,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
 use ants_proto::{
-    DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, StatusEvent, StatusUpdate, ThreadId, subject,
+    ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, StatusEvent, StatusUpdate,
+    ThreadId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -78,6 +80,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Post to a channel as the human. An @persona in the text wakes only that member; a post that @mentions nobody
+    /// goes to the channel's messenger, which wakes the members the post concerns.
+    Post {
+        /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Post on an existing thread of the channel instead of starting one.
+        #[arg(long)]
+        thread: Option<ThreadId>,
+        /// Print the posts on the thread as each arrives, until the timeout or Ctrl-C.
+        #[arg(long)]
+        wait: bool,
+        /// Seconds to wait for posts with `--wait`.
+        #[arg(long, value_name = "SECS", default_value_t = 600, requires = "wait")]
+        timeout: u64,
+        /// The post; each @persona mention wakes that member.
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
+    /// Channels: named groups of personas that the human posts to with `ants post`.
+    #[command(subcommand)]
+    Channel(ChannelCommand),
     /// Show the plan room of a thread, or post to it as the human, which gives the room a fresh turn budget.
     Plan {
         thread: ThreadId,
@@ -136,6 +160,76 @@ enum Command {
     /// Carry a leaf node's uplink over plain HTTPS requests, for networks whose proxies block WebSocket.
     #[command(subcommand)]
     Bridge(BridgeCommand),
+}
+
+#[derive(Subcommand)]
+enum ChannelCommand {
+    /// Create a channel; fails when the channel exists.
+    Create {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Member persona (repeatable, or comma-separated).
+        #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
+        members: Vec<PersonaId>,
+        /// Persona that triages the posts of the human that @mention nobody (default: `messenger`).
+        #[arg(long, value_parser = channel::parse_persona)]
+        messenger: Option<PersonaId>,
+    },
+    /// Replace the members or the messenger of a channel; what is not given stays.
+    Set {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Member persona (repeatable, or comma-separated): together, the new members.
+        #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
+        members: Option<Vec<PersonaId>>,
+        /// Persona that triages the posts of the human that @mention nobody.
+        #[arg(long, value_parser = channel::parse_persona, conflicts_with = "no_messenger")]
+        messenger: Option<PersonaId>,
+        /// Go back to the default messenger, `messenger`.
+        #[arg(long)]
+        no_messenger: bool,
+    },
+    /// Add members to a channel.
+    Add {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Personas: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_parser = channel::parse_persona)]
+        personas: Vec<PersonaId>,
+    },
+    /// Remove members from a channel.
+    Remove {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Personas: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_parser = channel::parse_persona)]
+        personas: Vec<PersonaId>,
+    },
+    /// List the channels with the members and the messenger of each.
+    List,
+    /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
+    /// replies on the thread, indented.
+    Read {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+        /// Only this thread.
+        #[arg(long)]
+        thread: Option<ThreadId>,
+        /// Only the last this many threads.
+        #[arg(long, conflicts_with = "thread")]
+        limit: Option<usize>,
+    },
+    /// Delete a channel. The posts to the channel stay in the stream.
+    Delete {
+        /// The channel: `ops` or `'#ops'`.
+        #[arg(value_parser = channel::parse_channel)]
+        channel: ChannelId,
+    },
 }
 
 #[derive(Subcommand)]
@@ -306,6 +400,11 @@ async fn main() -> Result<()> {
             show_inbox(&cli.nats, cli.creds.as_deref(), domain, &select, follow, json).await
         }
         Command::Roster { json } => roster::show(&cli.nats, cli.creds.as_deref(), domain, json).await,
+        Command::Post { channel, thread, wait, timeout, words } => {
+            let wait = wait.then(|| std::time::Duration::from_secs(timeout));
+            post(&cli.nats, cli.creds.as_deref(), domain, channel, thread, wait, words).await
+        }
+        Command::Channel(command) => channels(&cli.nats, cli.creds.as_deref(), domain, command).await,
         Command::Plan { thread, words } => plan_room(&cli.nats, cli.creds.as_deref(), domain, thread, words).await,
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
@@ -512,6 +611,157 @@ async fn ask(
     bail!("connection closed before a reply arrived")
 }
 
+async fn post(
+    url: &str,
+    creds: Option<&Path>,
+    domain: Option<&JsDomain>,
+    channel: ChannelId,
+    thread: Option<ThreadId>,
+    wait: Option<std::time::Duration>,
+    words: Vec<String>,
+) -> Result<()> {
+    let text = words.join(" ");
+    if text.trim().is_empty() {
+        bail!("nothing to post");
+    }
+    let post = channel::human_post(channel, thread, text);
+    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+    let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
+    if entry.is_none() {
+        tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
+    }
+    for persona in channel::idle_mentions(&post, entry.as_ref()) {
+        tracing::warn!("@{persona} is no member of #{}: the post does not wake {persona}", post.channel);
+    }
+    // Subscribe first so a fast reply is not missed.
+    let mut replies = match wait {
+        Some(_) => Some(client.subscribe(subject::chan_room(&post.channel)).await?),
+        None => None,
+    };
+    if bus::store(&js, post.subject(), &post, &post.id.to_string()).await? == bus::Stored::Outbox {
+        println!("kept in this machine's outbox until the hub is reachable");
+    }
+    println!("thread {}", post.thread_id);
+    let (Some(timeout), Some(replies)) = (wait, replies.as_mut()) else { return Ok(()) };
+    let stop = async { _ = tokio::signal::ctrl_c().await };
+    let shown = channel::follow_thread(replies, &post, timeout, stop, |reply| {
+        println!("{}: {}", reply.from, reply.text);
+    })
+    .await?;
+    if shown == 0 {
+        println!("no post on the thread within {}s", timeout.as_secs());
+    }
+    Ok(())
+}
+
+async fn channels(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, command: ChannelCommand) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+    let kv = channel::open(&js).await?;
+    match command {
+        ChannelCommand::Create { channel, members, messenger } => {
+            channel::check_not_human(members.iter().chain(&messenger))?;
+            let mut entry = ants_proto::ChannelEntry::new(channel);
+            for member in members {
+                entry.add_member(member);
+            }
+            entry.messenger = messenger;
+            channel::create(&kv, &entry).await?;
+            warn_unserved(&js, entry.members.iter().chain(&entry.messenger)).await;
+            println!("created {}", channel::describe(&entry));
+        }
+        ChannelCommand::Set { channel, members, messenger, no_messenger } => {
+            if members.is_none() && messenger.is_none() && !no_messenger {
+                bail!("nothing to change: give --member, --messenger or --no-messenger");
+            }
+            channel::check_not_human(members.iter().flatten().chain(&messenger))?;
+            let (entry, ()) = channel::update(&kv, &channel, |entry| {
+                if let Some(members) = &members {
+                    entry.members.clear();
+                    for member in members {
+                        entry.add_member(member.clone());
+                    }
+                }
+                if messenger.is_some() || no_messenger {
+                    entry.messenger.clone_from(&messenger);
+                }
+            })
+            .await?;
+            warn_unserved(&js, members.iter().flatten().chain(&messenger)).await;
+            println!("{}", channel::describe(&entry));
+        }
+        ChannelCommand::Add { channel, personas } => {
+            channel::check_not_human(&personas)?;
+            let (entry, added) = channel::update(&kv, &channel, |entry| {
+                personas.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
+            })
+            .await?;
+            for persona in personas.iter().filter(|p| !added.contains(p)) {
+                tracing::warn!("{persona} is already a member of #{channel}");
+            }
+            warn_unserved(&js, &added).await;
+            println!("{}", channel::describe(&entry));
+        }
+        ChannelCommand::Remove { channel, personas } => {
+            let (entry, removed) = channel::update(&kv, &channel, |entry| {
+                personas.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
+            })
+            .await?;
+            for persona in personas.iter().filter(|p| !removed.contains(p)) {
+                tracing::warn!("{persona} is no member of #{channel}");
+            }
+            println!("{}", channel::describe(&entry));
+        }
+        ChannelCommand::List => {
+            let entries = channel::list(&kv).await?;
+            if entries.is_empty() {
+                println!("no channels");
+            } else {
+                println!("{}", channel::table(&entries));
+            }
+        }
+        ChannelCommand::Read { channel, thread, limit } => {
+            if channel::get(&kv, &channel).await?.is_none() {
+                tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
+            }
+            let mut threads = channel::threads(channel::read(&js, &PersonaId::human(), &channel).await?);
+            if let Some(thread) = &thread {
+                threads.retain(|t| t.id == *thread);
+            }
+            if let Some(limit) = limit {
+                threads.drain(..threads.len().saturating_sub(limit));
+            }
+            if threads.is_empty() {
+                match thread {
+                    Some(thread) => println!("no posts on thread {thread} of #{channel}"),
+                    None => println!("no posts in #{channel}"),
+                }
+            }
+            print!("{}", channel::render(&threads));
+        }
+        ChannelCommand::Delete { channel } => {
+            channel::delete(&kv, &channel).await?;
+            println!("deleted #{channel}; the posts to #{channel} stay in the stream");
+        }
+    }
+    Ok(())
+}
+
+/// Warn about members and messengers no daemon serves now, rather than refuse them: one may start later.
+async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, personas: impl IntoIterator<Item = &'a PersonaId>) {
+    let personas: Vec<&PersonaId> = personas.into_iter().collect();
+    if personas.is_empty() {
+        return;
+    }
+    match roster::list(js).await {
+        Ok(roster) => {
+            for persona in channel::unserved(personas, &roster) {
+                tracing::warn!("{persona} is not in the roster: no daemon serves {persona} now");
+            }
+        }
+        Err(e) => tracing::debug!("not checking the roster: {e:#}"),
+    }
+}
+
 async fn show_inbox(
     url: &str,
     creds: Option<&Path>,
@@ -663,6 +913,9 @@ async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filte
         } else if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
             let forged = forged(e.check_subject(&msg.subject).is_ok());
             printer.line(&format!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text))
+        } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
+            // Before plan posts: a channel post has every field of one.
+            printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
         } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
             let forged = forged(post.check_subject(&msg.subject).is_ok());
             let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
@@ -677,6 +930,12 @@ async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filte
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// A channel post as `ants watch` prints it.
+fn channel_line(post: &ChannelPost, forged: &str) -> String {
+    let (thread, from, channel, left) = (&post.thread_id, &post.from, &post.channel, post.turn_budget);
+    format!("[{thread}] {from} -> #{channel} ({left} turns left){forged}: {}", post.text)
 }
 
 /// Renders watched traffic, continuing a persona's streamed text on one line until something else arrives.
@@ -806,6 +1065,15 @@ mod tests {
             "[t1] dev-a says: Hello\n[t1] dev-a thinks: hmm\n[t1] dev-a tool cargo test (execute): in_progress\n\
              [t1] dev-a says: done\n[t1] dev-a: idle\n"
         );
+    }
+
+    #[test]
+    fn watched_channel_posts_name_the_channel_and_turns_left() {
+        let mut post = ChannelPost::new("ops".parse().unwrap(), "dev-a".parse().unwrap(), "@dev-b ready?");
+        (post.thread_id, post.turn_budget) = ("t1".parse().unwrap(), 3);
+        assert_eq!(channel_line(&post, ""), "[t1] dev-a -> #ops (3 turns left): @dev-b ready?");
+        let forged = " (forged: sent on ants.chan.ops.dev-b)";
+        assert_eq!(channel_line(&post, forged), format!("[t1] dev-a -> #ops (3 turns left){forged}: @dev-b ready?"));
     }
 
     #[test]

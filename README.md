@@ -77,6 +77,9 @@ ants inbox                                          # replies not read yet
 ants roster                                         # personas being served
 ants approve                                        # tool requests waiting for an answer
 ants plan <thread>                                  # a thread's plan room
+ants channel create ops --member dev-a,dev-b        # a channel (see Channels)
+ants post '#ops' "@dev-a the build is red"          # wakes dev-a only; prints the thread
+ants channel read ops                               # the channel's posts, by thread
 ants watch                                          # live traffic
 ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, plan
 ```
@@ -97,6 +100,9 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants inbox` | Prints unread replies and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the personas being served, live or stale, idle or working (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the human. |
+| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
+| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
+| `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`); with a persona, its streamed harness progress. |
 | `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`). |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
@@ -561,6 +567,60 @@ ants watch 'ants.plan.>'                # every room, live
 Personas and the human read a room back through their own consumer, `plan-<persona>`, created for the read and
 deleted after it; their credentials allow it to filter plan subjects only. Persona and human credentials issued before
 plan rooms need `ants auth user` again.
+
+## Channels
+
+A channel is a named group of personas, like a Slack channel: the human posts to it, and the members a post concerns
+wake up and answer in the channel, on the post's thread.
+
+```sh
+ants channel create ops --member dev-a,dev-b --messenger triage   # fails if #ops exists
+ants channel add ops dev-c                     # more members
+ants channel remove ops dev-a
+ants channel set ops --member dev-b,dev-c      # replace the members; --messenger P or --no-messenger the messenger
+ants channel list                              # channels, members and messenger
+ants channel delete ops                        # the posts stay in the stream
+
+ants post '#ops' "@dev-b the deploy failed"    # wakes dev-b only; prints the new thread
+ants post ops "who owns billing?"              # no @mention: the messenger triages it
+ants post ops --thread <thread> "any news?"    # on an existing thread
+ants post --wait ops "status, anyone?"         # also print the posts on the thread as they arrive
+ants channel read ops                          # posts by thread (--thread T, --limit N for the last N threads)
+ants watch 'ants.chan.>'                       # every channel, live
+```
+
+`#` before the channel name is optional; quote it, as shells take an unquoted `#` for the start of a comment.
+
+**Mentions.** A post that @mentions personas wakes only those of them that are members of the channel; `ants post`
+warns about a mention of a persona that is not a member, which wakes nobody. An agent's post that @mentions nobody wakes
+nobody.
+
+**Messenger triage.** A post of the human that @mentions nobody goes to the channel's messenger: the persona
+`--messenger` names, else the default persona `messenger` (`ants channel list` shows `messenger (default)`). The
+messenger decides which members the post concerns and wakes them by @mentioning them in a post on the thread. The
+messenger need not be a member.
+
+**Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which
+`ants post` prints. The personas a post wakes reply in the channel on that thread, and `--thread` lets the human answer
+there too. `ants post --wait` prints each post on the thread as it arrives, until `--timeout` (seconds, default 600)
+or Ctrl-C. `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
+
+**Turn budget.** Channel posts spend a thread's turn budget like messages between agents: an agent's post that
+@mentions another agent wakes it and spends a turn, and the thread goes back to the human when none are left. The
+human's posts carry a fresh budget (8 turns). `ants watch` shows the turns left after each post.
+
+**Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
+post there wakes nobody, and a persona reads the room only when asked to. A channel is the other way round: a post
+wakes the members it @mentions, or the messenger, and replies come back to the channel.
+
+**Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
+them back through the human's consumer `chanread-human`, created for the read and deleted after it, and drops a post
+whose sender or channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and
+messenger are an entry in the KV bucket `ants_channels` under the channel id, which only the human's credentials
+write: `create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else
+changed it since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a
+warning (`set`, `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning
+rather than a refusal, as their daemon may start later; the human cannot be a member or the messenger.
 
 ## Persona memory
 

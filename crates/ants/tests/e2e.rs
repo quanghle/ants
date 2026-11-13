@@ -24,9 +24,10 @@ fn main() {
     if Path::new(&me).file_name().is_some_and(|name| name == "copilot") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 2] = [
+    let tests: [(&str, fn()); 3] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
+        ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
@@ -140,6 +141,95 @@ fn exercise_daemon(custom_tools: bool) {
     drop(daemon);
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn channels_are_managed_posted_to_and_read() {
+    use std::io::BufRead as _;
+
+    let Some(server) = NatsServer::start() else { return };
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
+        command
+    };
+    let ok = |args: &[&str]| {
+        let out = run(ants(args));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "ants {args:?}: {stderr}");
+        (stdout.into_owned(), stderr.into_owned())
+    };
+    ok(&["init"]);
+
+    let (created, warned) = ok(&["channel", "create", "#ops", "--member", "dev-a,dev-b", "--messenger", "triage"]);
+    assert_eq!(created, "created #ops: members dev-a,dev-b; messenger triage\n");
+    assert!(warned.contains("dev-a is not in the roster"), "{warned}");
+    let again = run(ants(&["channel", "create", "ops"]));
+    assert!(!again.status.success(), "a channel is created once");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("exists"));
+    ok(&["channel", "create", "dev"]);
+    assert_eq!(
+        ok(&["channel", "add", "ops", "@dev-c", "dev-a"]).0,
+        "#ops: members dev-a,dev-b,dev-c; messenger triage\n"
+    );
+    assert_eq!(ok(&["channel", "remove", "ops", "dev-a"]).0, "#ops: members dev-b,dev-c; messenger triage\n");
+    assert_eq!(
+        ok(&["channel", "set", "ops", "--no-messenger"]).0,
+        "#ops: members dev-b,dev-c; messenger messenger (default)\n"
+    );
+    assert!(!run(ants(&["channel", "add", "qa", "dev-a"])).status.success(), "no such channel");
+    let rows: Vec<Vec<String>> =
+        ok(&["channel", "list"]).0.lines().map(|l| l.split_whitespace().map(str::to_owned).collect()).collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["CHANNEL", "MEMBERS", "MESSENGER"],
+            vec!["#dev", "-", "messenger", "(default)"],
+            vec!["#ops", "dev-b,dev-c", "messenger", "(default)"]
+        ]
+    );
+
+    let (posted, warned) = ok(&["post", "#ops", "@dev-c", "and", "@dev-z,", "look"]);
+    let thread = posted.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&posted).to_owned();
+    assert!(warned.contains("@dev-z is no member of #ops"), "{warned}");
+    assert!(!warned.contains("@dev-c"), "{warned}");
+
+    // `--wait` prints the posts on the thread as they come.
+    let mut waiting = Command::new(ANTS);
+    waiting.args(["--nats", &server.url, "post", "--wait", "--timeout", "30", "ops", "anyone?"]);
+    let mut waiting =
+        Killed(waiting.env_remove("ANTS_CREDS").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    let mut lines = std::io::BufReader::new(waiting.0.stdout.take().unwrap()).lines();
+    let waited = lines.next().unwrap().unwrap().strip_prefix("thread ").unwrap().to_owned();
+    ok(&["post", "--thread", &waited, "ops", "still", "here"]);
+    assert_eq!(lines.next().unwrap().unwrap(), "human: still here");
+    drop(waiting);
+
+    ok(&["post", "ops", "--thread", &thread, "any", "news?"]);
+    let read = ok(&["channel", "read", "ops"]).0;
+    let expected = [
+        format!("thread {thread}"),
+        "human: @dev-c and @dev-z, look".to_owned(),
+        "    ".to_owned(),
+        "human: any news?".to_owned(),
+        String::new(),
+        format!("thread {waited}"),
+        "human: anyone?".to_owned(),
+        "    ".to_owned(),
+        "human: still here".to_owned(),
+    ];
+    let mut at = 0;
+    for part in &expected {
+        let found = read[at..].find(part.as_str()).unwrap_or_else(|| panic!("{part:?} after {at} in:\n{read}"));
+        at += found + part.len();
+    }
+    let one = ok(&["channel", "read", "#ops", "--thread", &thread]).0;
+    assert!(one.contains("any news?") && !one.contains("anyone?"), "{one}");
+    let last = ok(&["channel", "read", "ops", "--limit", "1"]).0;
+    assert!(last.contains("anyone?") && !last.contains("any news?"), "{last}");
+
+    assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
+    assert!(!ok(&["channel", "list"]).0.contains("#dev"));
+    drop(server);
 }
 
 /// Run `command` to completion, killing it after [`WAIT`].
