@@ -8,6 +8,7 @@ pub mod channel;
 pub mod config;
 pub mod daemon;
 pub mod dead;
+pub mod escalation;
 pub mod harness;
 pub mod humans;
 pub mod mcp;

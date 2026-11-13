@@ -439,7 +439,8 @@ pub fn session_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}")
 }
 
-/// Key of what a thread has spent since the human's last message on it, in [`SESSIONS_BUCKET`] beside its session.
+/// Key of what a thread has spent since the human's last message on it, and of its escalation, in [`SESSIONS_BUCKET`]
+/// beside its session.
 pub fn thread_spend_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}.spend")
 }
@@ -448,6 +449,12 @@ pub fn thread_spend_key(persona: &PersonaId, thread: &ThreadId) -> String {
 /// the thread's session: its next prompt on the thread shows the posts after it.
 pub fn channel_seen_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}.seen")
+}
+
+/// Key of the persona's escalation deadlines, the threads whose escalation awaits its leader until a time, in
+/// [`SESSIONS_BUCKET`]. Each thread's escalation itself is kept with its spend ([`thread_spend_key`]).
+pub fn escalation_deadlines_key(persona: &PersonaId) -> String {
+    format!("{persona}.escalations.deadlines")
 }
 
 /// Key of what a persona has spent on `day` (`YYYY-MM-DD`, UTC), in [`SESSIONS_BUCKET`].

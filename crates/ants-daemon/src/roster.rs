@@ -93,7 +93,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         activity: None,
         handling: None,
         harnesses: None,
-        escalate_to: Vec::new(),
+        escalate_to: config.escalation.escalate_to.clone(),
     }
 }
 

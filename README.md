@@ -223,6 +223,9 @@ prompt_timeout_secs = 1800                 # default; 0 for no limit (see Limits
 max_tool_calls = 300                       # default; 0 for no limit
 max_thread_cost = 5.0                      # default: no cap; also max_thread_tokens
 max_daily_cost = 50.0                      # default: no cap; also max_daily_tokens
+escalate_to = ["lead", "dev-b"]            # optional escalation chain, the first one leads (see Escalations)
+max_escalation_hops = 3                    # default
+escalate_after_secs = 1800                 # default; 0 waits for the leader indefinitely
 
 [[persona]]
 name = "dev-b"
@@ -250,9 +253,29 @@ How flags and the file combine:
 
 ### Escalations
 
-What needs a human goes to the thread's owner (the envelope's `owner`, the human who started the thread), else to the
-daemon's default human, the config file key `human` (default `human`; top-level or per persona): a spent turn budget, a
-reached limit or cap, a dead letter's notice, a plan room out of turns. The daemon tells humans by the KV bucket
+What a persona cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, a plan
+room out of turns) goes up its escalation chain, in the end to the thread's owner (the envelope's `owner`, the human who
+started the thread), else to the daemon's default human, the config file key `human` (default `human`; top-level or per
+persona). Without a chain it goes to the owner at once.
+
+The chain is the persona's `escalate_to` key, a list of other personas whose first one leads; the roster publishes it,
+so any daemon can follow a chain past a persona that is offline. Every member gets the escalation in its inbox, on the
+stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level and the leader, followed by the
+notice the owner would have got. The members coordinate in the thread's plan room; only the leader resolves it, by
+answering the escalating persona on the thread (a reply to the notice does), or escalates it further. The leader's
+answer gives the thread a fresh turn budget and allowance, once per level: the next time the persona is stuck on the
+thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster) not visited
+yet. A chain member stuck while working on an escalation sends it one level higher the same way. A level past
+`max_escalation_hops` (default 3), a chain leading back to a persona already visited, or a leader without a chain hands
+the thread to the owner, with the escalation and the reason. Until the leader answers, a persona stuck again on the
+thread sends the same members the new notice. Members offline are not skipped: their inboxes keep the escalation. When
+the leader does not answer within `escalate_after_secs` (default 1800, as long as a prompt may run; 0 waits
+indefinitely), the persona that escalated sends it one level higher. Only a human's message on the thread ends its
+escalation, and the next one starts at the persona's own chain again. The thread's escalation, its level, whether the
+leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
+keep them.
+
+The daemon tells humans by the KV bucket
 `ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
 looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
 ignores an `owner` that is no human, as a persona may name any, and neither escalates to it nor passes it on. A reply
@@ -297,12 +320,13 @@ and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spend
 
 A prompt that passes a limit or a cap is cancelled with ACP `session/cancel` (a harness that does not stop within 30 s
 is restarted, and its session resumes on the next message). The reply carries what the harness wrote so far and an
-`[ants]` notice naming the limit. When the message came from another agent, the thread then goes to its owner (see
-Escalations) like a spent turn budget: the owner gets the notice, "needs a decision", and the last message. While a cap
-is reached, later messages on the thread are not prompted; each goes to the owner the same way.
+`[ants]` notice naming the limit. When the message came from another agent, the thread then escalates (see Escalations)
+like a spent turn budget: the persona's chain, else the owner, gets the notice, "needs a decision", and the last
+message. While a cap is reached, later messages on the thread are not prompted; each escalates the same way.
 
 - Per-prompt limits start afresh with every prompt.
-- A thread's allowance starts afresh with every message from a human on it.
+- A thread's allowance starts afresh with every message from a human on it, and once per escalation level with the
+  answer of the escalation's leader.
 - A persona's daily allowance starts afresh at 00:00 UTC (or when the daemon restarts with a higher cap); a message
   from a human does not lift it.
 
@@ -411,8 +435,8 @@ Memory and task instructions remain separate and are not published in the roster
 ## Dead letters
 
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
-`ants.dead.<persona>` (with the error and delivery count), sends a notice to the thread's owner (see Escalations) on the
-same thread, and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
+`ants.dead.<persona>` (with the error and delivery count), escalates a notice on the same thread (see
+Escalations: up the persona's chain, else to the thread's owner), and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
 out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
 reply, sends the reply). A payload that is not an envelope becomes a dead letter at once.
 
@@ -590,8 +614,8 @@ persona reads the room when asked to.
 
 Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left: one
 less than the lower of the budget of the message its persona is handling and what the room's last post left. The post
-that spends the last turn hands the thread to its owner (see Escalations): its persona sends the owner a notice on the
-thread with the last post, and the room refuses further agent posts until a human posts there. Two personas spending the
+that spends the last turn escalates the thread (see Escalations): its persona sends a notice on the thread with the
+last post up its chain, else to the owner, and the room refuses further agent posts until a human posts there. Two personas spending the
 same turn cannot both succeed: a post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`,
 nats-server 2.11 or later), and the loser reads the room again.
 
@@ -646,8 +670,8 @@ arrives, until `--timeout` (seconds, default 600) or Ctrl-C. `ants channel read`
 post that started it, then the replies, indented.
 
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
-turn of the thread's budget, whichever post it answers, and the thread goes back to its owner, else the daemon's default
-human (see Escalations), when none are left. So the agents one post wakes spend from the same turns, and agents
+turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the persona's chain,
+else to its owner) when none are left. So the agents one post wakes spend from the same turns, and agents
 mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns). `ants watch`
 shows the turns the thread has left after each post.
 
@@ -669,8 +693,8 @@ refusal, as their daemon may start later; a human cannot be a member or the mess
 A daemon takes every channel post through its persona's durable consumer `chan-<persona>` (filter `ants.chan.>`),
 with the same guarantees as its inbox: the posts of one thread are answered in order and different threads
 concurrently, an attempt is marked in `ants_attempts`, a post is acked only once its reply is stored, and a post whose
-last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice to the thread's owner, else the
-default human, on the post's thread. The
+last attempt fails becomes a dead letter on `ants.dead.<persona>`, with a notice escalated on the post's thread (see
+Escalations). The
 consumer starts at the posts stored from its creation on, so a persona's first start does not answer the channels'
 history. The daemon watches `ants_channels` for the members of each channel, skipping an entry whose channel disagrees
 with its key.
@@ -688,8 +712,9 @@ The final answer is posted to the same channel and thread on `ants.chan.<channel
 carries the turns the thread has left after it, and the daemon reads the posts stored on the thread after the one it
 answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's, which
 gives a fresh budget. A post that reaches a persona with no turns left is not prompted, and an answer whose thread ran
-out of turns during the prompt is not posted: either way the thread's owner, else the default human, gets a notice in
-the inbox (`ants.inbox.<human>.<persona>`) on the thread with the post, and the unposted answer if any, as in the inbox.
+out of turns during the prompt is not posted: either way a notice on the thread with the post, and the unposted answer if
+any, escalates as in the inbox: up the persona's chain, else to the thread's owner, else the default human
+(`ants.inbox.<human>.<persona>`).
 Replies racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it. Spending
 caps apply as to inbox messages.
 
@@ -796,8 +821,8 @@ name (see CLI); daemons read the bucket (see Escalations). An envelope may carry
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
 
-Escalation chains (wire only so far; daemons publish no chain and route nothing by these fields yet): a roster entry may
-carry `escalate_to`, the persona's chain in order, whose first persona leads. An envelope may carry `escalation`
+Escalation chains (see Escalations; approvals do not go up chains yet): a roster entry may carry `escalate_to`, the
+persona's chain in order, whose first persona leads. An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck persona and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck persona's own chain), the
 level's leader and the personas visited. One level up goes to every persona of the leader's chain not visited yet; an

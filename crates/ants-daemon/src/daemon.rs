@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, Humans, JsDomain, PersonaId, State, ThreadId, subject,
+    ChannelEntry, ChannelPost, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, PersonaId, State,
+    ThreadId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -21,6 +22,7 @@ use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt};
+use crate::escalation::{self, Chain, Escalator, Stuck};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
@@ -93,6 +95,8 @@ pub struct Config {
     pub defer_to_other_machines: bool,
     /// The default human, who gets escalations and notices of threads with no owner.
     pub human: PersonaId,
+    /// The persona's escalation chain, published in the roster, and its limits.
+    pub escalation: Chain,
 }
 
 /// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -137,8 +141,26 @@ pub async fn run(config: Config) -> Result<()> {
     let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
-    let mut mcp =
-        Mcp::start(config.persona.clone(), &config.home, outbox, roster.clone(), rooms, humans.clone()).await?;
+    let sessions_kv = bus::ensure_sessions(&js).await?;
+    let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps));
+    let escalator = std::sync::Arc::new(Escalator::new(
+        config.persona.clone(),
+        config.escalation.clone(),
+        roster.clone(),
+        humans.clone(),
+        ledger.clone(),
+        escalation::jetstream_sender(js.clone()),
+    ));
+    let mut mcp = Mcp::start(
+        config.persona.clone(),
+        &config.home,
+        outbox,
+        roster.clone(),
+        rooms,
+        humans.clone(),
+        Some(escalator.clone()),
+    )
+    .await?;
     mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
     let launch = Launch::new(
         config.harness,
@@ -150,8 +172,6 @@ pub async fn run(config: Config) -> Result<()> {
     .with_instructions(config.instructions.clone())
     .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
-    let sessions_kv = bus::ensure_sessions(&js).await?;
-    let ledger = Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps);
     let threads = Threads::new(js.clone(), config.persona.clone(), sessions_kv.clone());
     let sessions = SessionStore::kv(sessions_kv, config.persona.clone());
     let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.persona.clone());
@@ -183,6 +203,7 @@ pub async fn run(config: Config) -> Result<()> {
         limits = ?config.limits,
         caps = ?config.caps,
         human = %config.human,
+        escalation = ?config.escalation,
         "serving inbox"
     );
 
@@ -197,6 +218,7 @@ pub async fn run(config: Config) -> Result<()> {
         workload: &workload,
         limits: config.limits,
         ledger: &ledger,
+        escalator: &escalator,
         threads: &threads,
         roster: &roster,
         humans: &humans,
@@ -209,7 +231,10 @@ pub async fn run(config: Config) -> Result<()> {
             std::future::pending::<()>().await;
         }
     };
-    inbox.serve(messages, channels, config.idle_timeout, ctrl_c).await;
+    tokio::select! {
+        () = inbox.serve(messages, channels, config.idle_timeout, ctrl_c) => {}
+        () = escalator.deadlines() => {}
+    }
     registration.deregister().await;
     pool.shutdown().await;
     tracing::info!("stopped");
@@ -288,6 +313,8 @@ struct Inbox<'a> {
     workload: &'a roster::Workload,
     limits: PromptLimits,
     ledger: &'a Ledger,
+    /// Sends what the persona cannot settle up its chain, and notes the answers.
+    escalator: &'a Escalator,
     threads: &'a Threads,
     /// The roster, for the members a triage prompt shows.
     roster: &'a Roster,
@@ -498,7 +525,7 @@ impl Inbox<'_> {
 
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter.
     /// Returns its thread, and the redelivery to wait for when there is one.
-    async fn handle(&self, incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
+    async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
         let _working = self.workload.working();
         let envelope = &incoming.envelope;
         let thread = envelope.thread_id.clone();
@@ -532,7 +559,10 @@ impl Inbox<'_> {
             return (thread, None);
         }
         let result = match marker {
-            Ok(marker) => self.answer(&incoming, &msg, seq, marker).await,
+            Ok(marker) => match self.arrived(&mut incoming).await {
+                Ok(()) => self.answer(&incoming, &msg, seq, marker).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         let Err(e) = result else { return (thread, None) };
@@ -558,14 +588,27 @@ impl Inbox<'_> {
         (thread, retry)
     }
 
-    /// Store `msg` as a dead letter, telling the thread's owner, else the default human, and terminate it. A channel
-    /// post names its thread's owner ([`Inbox::admit_post`]), and its envelope does too.
+    /// Store `msg` as a dead letter, escalating it up the persona's chain (in the end to the thread's owner, else the
+    /// default human), and terminate it. A channel post names its thread's owner ([`Inbox::admit_post`]), and its
+    /// envelope does too.
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<u64> {
-        let humans = self.humans;
+        let (humans, escalator) = (self.humans, Some(self.escalator));
         match &incoming.post {
-            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error, humans).await,
-            None => dead::bury_to(self.js, self.persona, msg, Some(&incoming.envelope), error, humans).await,
+            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error, humans, escalator).await,
+            None => {
+                let envelope = Some(&incoming.envelope);
+                dead::bury_to(self.js, self.persona, msg, envelope, error, humans, escalator).await
+            }
         }
+    }
+
+    /// Note the message the persona is about to answer with its escalator: a human's ends the thread's escalation and
+    /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
+    /// allowance once per level ([`Escalator::arrived`]).
+    async fn arrived(&self, incoming: &mut Incoming) -> Result<()> {
+        let human = self.humans.is_human(&incoming.envelope.from);
+        self.escalator.arrived(&mut incoming.envelope, human).await?;
+        Ok(())
     }
 
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
@@ -599,21 +642,16 @@ impl Inbox<'_> {
             _ => envelope.reply(self.persona.clone(), "", self.humans.role(&envelope.from)).err(),
         };
         if let Some(ProtoError::BudgetExhausted(_)) = spent {
-            // Out of turns: hand the thread to its owner instead of spending another prompt.
-            self.escalate(incoming, "Turn budget spent", seq, None).await?;
+            // Out of turns: escalate the thread instead of spending another prompt.
+            self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
             bus::double_ack(self.client, msg).await?;
             self.attempts.forget(seq).await;
             return Ok(());
         }
-        if self.humans.is_human(&envelope.from)
-            && let Err(e) = self.ledger.fresh_allowance(thread).await
-        {
-            tracing::warn!(%thread, error = format!("{e:#}"), "renewing the thread's allowance");
-        }
         match self.ledger.reached(thread).await {
             Ok(Some(cap)) => {
-                // Out of allowance: the same, until a human answers or the day ends.
-                self.escalate(incoming, &cap, seq, None).await?;
+                // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
+                self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
                 bus::double_ack(self.client, msg).await?;
                 self.attempts.forget(seq).await;
                 return Ok(());
@@ -707,9 +745,9 @@ impl Inbox<'_> {
                 match posted.post.reply(self.persona.clone(), text.as_str(), &later, &humans) {
                     Ok(post) => Reply::Post(post),
                     Err(ProtoError::BudgetExhausted(_)) => {
-                        // The answer is not posted: the thread's owner gets it with the thread.
+                        // The answer is not posted: the escalation carries it.
                         let why = "Turn budget spent before the answer was posted";
-                        self.escalate(incoming, why, seq, Some(&text)).await?;
+                        self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(&text)).await?;
                         bus::double_ack(self.client, msg).await?;
                         self.attempts.forget(seq).await;
                         return Ok(());
@@ -717,14 +755,18 @@ impl Inbox<'_> {
                     Err(e) => return Err(e.into()),
                 }
             }
-            _ => Reply::Message(envelope.reply(self.persona.clone(), text, self.humans.role(&envelope.from))?),
+            _ => {
+                // A reply on an escalation carries it, so its leader's answer is known as one.
+                let reply = envelope.reply(self.persona.clone(), text, self.humans.role(&envelope.from))?;
+                Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+            }
         };
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
             && !self.humans.is_human(&envelope.from)
         {
-            self.escalate(incoming, &limit, seq, None).await?;
+            self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
         }
         // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
         // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
@@ -788,13 +830,19 @@ impl Inbox<'_> {
         })
     }
 
-    /// Hand the thread to its owner, else the default human, in that human's inbox: `why` it needs a decision, and the
-    /// message or post it was on, and an `unposted` answer. Its message id, from the stream sequence `seq` of the
-    /// message, keeps a redelivery from escalating twice.
-    async fn escalate(&self, incoming: &Incoming, why: &str, seq: u64, unposted: Option<&str>) -> Result<()> {
+    /// Escalate the thread for `reason` up the persona's chain, in the end to its owner, else the default human
+    /// ([`Escalator::escalate`]): `why` it needs a decision, and the message or post it was on, and an `unposted`
+    /// answer. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
+    async fn escalate(
+        &self,
+        incoming: &Incoming,
+        why: &str,
+        reason: EscalationReason,
+        seq: u64,
+        unposted: Option<&str>,
+    ) -> Result<()> {
         let envelope = &incoming.envelope;
         let human = self.humans.owner_of(envelope);
-        tracing::info!(thread = %envelope.thread_id, why, %human, "escalating to the thread's owner");
         let last = match &incoming.post {
             Some(posted) => format!("Last post from {} in #{}", envelope.from, posted.post.channel),
             None => format!("Last message from {}", envelope.from),
@@ -803,10 +851,11 @@ impl Inbox<'_> {
         if let Some(answer) = unposted {
             text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.persona));
         }
-        let mut escalation = envelope.follow_up(self.persona.clone(), human, text);
-        escalation.in_reply_to = Some(envelope.id);
+        let mut notice = envelope.follow_up(self.persona.clone(), human, text);
+        notice.in_reply_to = Some(envelope.id);
         let id = format!("escalation-{}-{seq}", self.persona);
-        bus::store(self.js, escalation.subject(), &escalation, &id).await?;
+        let escalated = self.escalator.escalate(Stuck::new(reason, notice, id, Some(envelope))).await?;
+        tracing::info!(thread = %envelope.thread_id, why, %escalated, "escalated");
         Ok(())
     }
 
@@ -915,7 +964,9 @@ mod tests {
         markers: jetstream::kv::Store,
         dev: PersonaId,
         limits: PromptLimits,
-        ledger: Ledger,
+        ledger: Arc<Ledger>,
+        /// dev-a's escalation chain.
+        chain: Chain,
         workload: roster::Workload,
         mcp: Option<Mcp>,
         channels: jetstream::kv::Store,
@@ -942,7 +993,7 @@ mod tests {
             let answered = Answered::new(&server.dir().join("dev-a"));
             let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
-            let ledger = Ledger::memory(dev.clone(), Caps::default());
+            let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
             let limits = PromptLimits::default();
             let workload = roster::Workload::default();
             let channels = bus::ensure_channels(&js).await.unwrap();
@@ -961,6 +1012,7 @@ mod tests {
                 dev,
                 limits,
                 ledger,
+                chain: Chain::default(),
                 workload,
                 mcp: None,
                 channels,
@@ -980,6 +1032,41 @@ mod tests {
             let envelope = Envelope::on_thread(thread.clone(), from, self.dev.clone(), text);
             let seq = bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
             (envelope, seq)
+        }
+
+        /// Publish `persona` in the roster with `escalate_to` as its chain.
+        async fn put_roster(&self, persona: &PersonaId, escalate_to: &[PersonaId]) {
+            let roster = bus::ensure_roster(&self.js, ants_proto::ROSTER_TTL).await.unwrap();
+            let now = chrono::Utc::now();
+            let entry = ants_proto::RosterEntry {
+                persona: persona.clone(),
+                machine: "m".to_owned(),
+                harness: "copilot".to_owned(),
+                capabilities: Vec::new(),
+                whoami: None,
+                workdir: None,
+                started_at: now,
+                heartbeat_at: now,
+                activity: None,
+                handling: None,
+                harnesses: None,
+                escalate_to: escalate_to.to_vec(),
+            };
+            roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        }
+
+        /// Publish `text` from `from` on `thread` with no turns left, carrying `escalation`.
+        async fn send_spent(
+            &self,
+            from: &PersonaId,
+            thread: &ThreadId,
+            text: &str,
+            escalation: Option<&ants_proto::Escalation>,
+        ) {
+            let mut envelope = Envelope::on_thread(thread.clone(), from.clone(), self.dev.clone(), text)
+                .with_escalation(escalation.cloned());
+            envelope.turn_budget = 0;
+            bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
         }
 
         async fn marked(&self, seq: u64) -> bool {
@@ -1002,6 +1089,7 @@ mod tests {
             let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
             let messages = futures::stream::select(messages, posts);
             let channels = Channels::watch(self.channels.clone()).await.unwrap();
+            let escalator = self.escalator();
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
@@ -1013,6 +1101,7 @@ mod tests {
                 workload: &self.workload,
                 limits: self.limits,
                 ledger: &self.ledger,
+                escalator: &escalator,
                 threads: &self.threads,
                 roster: &self.roster,
                 humans: &self.humans,
@@ -1023,7 +1112,16 @@ mod tests {
                 let ctrl_c = ctrl_c.clone();
                 async move { ctrl_c.acquire().await.unwrap().forget() }
             };
-            inbox.serve(messages, channels, IDLE, stop).await;
+            tokio::select! {
+                () = inbox.serve(messages, channels, IDLE, stop) => {}
+                () = escalator.deadlines() => {}
+            }
+        }
+
+        fn escalator(&self) -> Escalator {
+            let send = escalation::jetstream_sender(self.js.clone());
+            let (dev, chain, roster, humans) = (&self.dev, &self.chain, &self.roster, &self.humans);
+            Escalator::new(dev.clone(), chain.clone(), roster.clone(), humans.clone(), self.ledger.clone(), send)
         }
 
         async fn until_acked(&self, seq: u64) {
@@ -1394,7 +1492,7 @@ mod tests {
     #[tokio::test]
     async fn a_spent_cap_hands_the_thread_to_the_human_until_the_human_answers() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
-        bus.ledger = Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() });
+        bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let dev_b: PersonaId = "dev-b".parse().unwrap();
@@ -1426,7 +1524,7 @@ mod tests {
     #[tokio::test]
     async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
-        bus.ledger = Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() });
+        bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
         let alice: PersonaId = "alice".parse().unwrap();
         // The registry looks for the bucket before it exists, then finds it.
         let _watching = bus.humans.watch(bus.js.clone(), Duration::from_millis(50));
@@ -1470,6 +1568,138 @@ mod tests {
         assert_eq!(bus.unacked().await, 0);
         assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to human");
         assert_eq!(log.lock().unwrap().answered, ["go on"]);
+    }
+
+    fn personas<const N: usize>(names: [&str; N]) -> [PersonaId; N] {
+        names.map(|name| name.parse().unwrap())
+    }
+
+    async fn inboxes<const N: usize>(bus: &Bus, personas: &[PersonaId; N]) -> [async_nats::Subscriber; N] {
+        let mut subscribers = Vec::new();
+        for persona in personas {
+            subscribers.push(bus.client.subscribe(subject::inbox_of(persona)).await.unwrap());
+        }
+        bus.client.flush().await.unwrap();
+        subscribers.try_into().unwrap_or_else(|_| unreachable!())
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_level() {
+        let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+        let [lead, dev_b, boss, carol] = personas(["lead", "dev-b", "boss", "carol"]);
+        bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, ..Chain::default() };
+        bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+        let [mut to_lead, mut to_dev_b, mut to_boss] =
+            inboxes(&bus, &[lead.clone(), dev_b.clone(), boss.clone()]).await;
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send_spent(&carol, &t1, "no turns", None).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let (first, copy) = (next_envelope(&mut to_lead).await, next_envelope(&mut to_dev_b).await);
+            let one = first.escalation.as_deref().expect("the escalation").clone();
+            let visited = vec![bus.dev.clone(), lead.clone(), dev_b.clone()];
+            assert_eq!((one.level, &one.leader, &one.stuck, &one.visited), (1, &lead, &bus.dev, &visited));
+            assert_eq!((copy.escalation, &copy.text), (first.escalation.clone(), &first.text), "every member gets it");
+            let head = format!("[ants] Escalation on thread {t1}, level 1: dev-a is stuck (turn budget spent).");
+            assert!(first.text.starts_with(&head), "{}", first.text);
+            assert!(first.text.contains("Sent to lead, dev-b; lead leads."), "{}", first.text);
+            assert!(first.text.ends_with("Turn budget spent; needs a decision. Last message from carol:\nno turns"));
+
+            // The leader answers with no turns left either: a fresh budget, once at this level.
+            bus.send_spent(&lead, &t1, "go on", Some(&one)).await;
+            bus.send_spent(&lead, &t1, "and on", Some(&one)).await;
+            let reply = next_envelope(&mut to_lead).await;
+            assert!(reply.text.ends_with(": go on"), "{}", reply.text);
+            assert_eq!(reply.escalation.as_deref(), Some(&one), "the answer carries the escalation");
+
+            // The next spend goes one level higher, to the leader's chain in the roster.
+            let up = next_envelope(&mut to_boss).await;
+            let two = up.escalation.as_deref().expect("the escalation").clone();
+            assert_eq!((two.level, &two.leader, &two.stuck), (2, &boss, &bus.dev));
+            assert!(up.text.contains("level 2: dev-a is stuck (turn budget spent). Sent to boss; boss leads."));
+            assert!(up.text.ends_with("Last message from lead:\nand on"), "{}", up.text);
+            bus.send_spent(&boss, &t1, "from boss", Some(&two)).await;
+            assert!(next_envelope(&mut to_boss).await.text.ends_with(": from boss"));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        assert_eq!(log.lock().unwrap().answered, ["go on", "from boss"]);
+        assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
+        assert!(timeout(Duration::from_millis(50), to_dev_b.next()).await.is_err(), "dev-b got level 1 only");
+        let pending = bus.ledger.pending(&t1).await.unwrap().expect("the escalation is kept");
+        assert_eq!((pending.escalation.level, pending.to, pending.renewed_by.is_some()), (2, vec![boss], true));
+    }
+
+    #[tokio::test]
+    async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over() {
+        let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None };
+        bus.put_roster(&lead, &[boss]).await;
+        let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send_spent(&carol, &t1, "stuck", None).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let one = next_envelope(&mut to_lead).await.escalation.expect("the escalation");
+            bus.send_spent(&lead, &t1, "go on", Some(&one)).await;
+            assert!(next_envelope(&mut to_lead).await.text.ends_with(": go on"));
+            bus.send_spent(&lead, &t1, "again", Some(&one)).await;
+            let notice = next_envelope(&mut to_human).await;
+            let text = "Turn budget spent; needs a decision. Last message from lead:\nagain\n\n[ants] The escalation of \
+                        dev-a reached the hop limit (max_escalation_hops = 1).";
+            assert_eq!(notice.text, text);
+            assert_eq!(notice.escalation.as_deref(), Some(&*one), "the human sees how far it went");
+
+            // A human's answer ends the escalation: the next spend starts at the persona's chain again.
+            bus.send(&t1, "carry on").await;
+            assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "carry on".to_owned()));
+            bus.send_spent(&carol, &t1, "stuck again", None).await;
+            let again = next_envelope(&mut to_lead).await.escalation.expect("the escalation");
+            assert_eq!((again.level, &again.leader), (1, &lead));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        assert_eq!(log.lock().unwrap().answered, ["go on", "carry on"]);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
+        let Some((mut bus, _to_human)) = Bus::start().await else { return };
+        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        bus.chain =
+            Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
+        bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+        let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send_spent(&carol, &t1, "stuck", None).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let one = next_envelope(&mut to_lead).await.escalation.expect("the escalation");
+            assert!(timeout(Duration::from_millis(150), to_boss.next()).await.is_err(), "not before the deadline");
+            let up = next_envelope(&mut to_boss).await;
+            assert_eq!(up.escalation.as_deref().map(|e| (e.level, &e.leader)), Some((2, &boss)));
+            let late = format!(
+                "[ants] No answer from lead on thread {t1} within 300 ms; the escalation goes one level higher."
+            );
+            assert!(up.text.contains(&late), "{}", up.text);
+            assert!(up.text.ends_with("Last message from carol:\nstuck"), "{}", up.text);
+            assert!(timeout(Duration::from_millis(500), to_boss.next()).await.is_err(), "no deadline without one set");
+            assert_eq!(one.level, 1);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]
@@ -1680,7 +1910,8 @@ mod tests {
         let (outbox, roster) =
             (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
         let rooms = Arc::new(crate::plan::JetStreamRooms::new(bus.js.clone(), bus.dev.clone()));
-        bus.mcp = Some(Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms, bus.humans.clone()).await.unwrap());
+        let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms, bus.humans.clone(), None).await;
+        bus.mcp = Some(mcp.unwrap());
         for ask in &asks {
             let reply = ask.reply(dev_b.clone(), "late", Role::Persona).unwrap();
             bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();

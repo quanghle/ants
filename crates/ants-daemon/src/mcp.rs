@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
-use ants_proto::{Envelope, PersonaId, PlanPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, Uuid};
+use ants_proto::{Envelope, EscalationReason, PersonaId, PlanPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, Uuid};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -37,6 +37,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::escalation::{Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::plan::Rooms;
@@ -103,7 +104,8 @@ impl Drop for Mcp {
 
 impl Mcp {
     /// Listen on a loopback port and on `<home>/mcp.sock`. What must survive a restart (asks waiting for a reply, late
-    /// replies) lives in `<home>/mcp.json`. `humans` tells the humans the tools reach.
+    /// replies) lives in `<home>/mcp.json`. `humans` tells the humans the tools reach. A plan room out of turns is
+    /// escalated through `escalator`, without one straight to the thread's owner.
     pub async fn start(
         persona: PersonaId,
         home: &Path,
@@ -111,6 +113,7 @@ impl Mcp {
         roster: Roster,
         rooms: Arc<dyn Rooms>,
         humans: Registry,
+        escalator: Option<Arc<Escalator>>,
     ) -> Result<Self> {
         let state_path = home.join("mcp.json");
         let stored = match tokio::fs::read(&state_path).await {
@@ -124,6 +127,7 @@ impl Mcp {
             roster,
             rooms,
             humans,
+            escalator,
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -283,6 +287,7 @@ struct Hub {
     roster: Roster,
     rooms: Arc<dyn Rooms>,
     humans: Registry,
+    escalator: Option<Arc<Escalator>>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -326,20 +331,19 @@ impl Hub {
             Some("new") => envelope.thread_id = ThreadId::generate(),
             Some(other) => envelope.thread_id = other.parse().map_err(|e| format!("{e}"))?,
         }
-        Ok(envelope)
+        // On the escalation's thread, a message carries it, so its leader's answer is known as one.
+        let escalation = current.escalation.as_deref().filter(|e| e.thread_id == envelope.thread_id).cloned();
+        Ok(envelope.with_escalation(escalation))
     }
 
-    /// Post `text` to the plan room of `thread`, spending one of its turns. The post that spends the last one tells the
-    /// thread's owner, else the default human, who has the thread from then on.
+    /// Post `text` to the plan room of `thread`, spending one of its turns. The post that spends the last one escalates
+    /// the thread up the persona's chain, in the end to its owner, else the default human.
     async fn post_plan(&self, thread: &ThreadId, text: String) -> Result<String, String> {
-        let current = self
-            .sessions
-            .lock()
-            .expect("sessions")
-            .current
-            .get(thread)
-            .map(|e| (e.turn_budget, self.humans.human_owner(e.owner.as_ref()), self.humans.owner_of(e)));
-        let (budget, owner, human) =
+        let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| {
+            let carried = e.escalation.as_deref().cloned();
+            (e.turn_budget, self.humans.human_owner(e.owner.as_ref()), self.humans.owner_of(e), carried)
+        });
+        let (budget, owner, human, carried) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let room = self.rooms.read(thread).await.map_err(|e| format!("cannot read the plan room: {e:#}"))?;
@@ -353,7 +357,6 @@ impl Hub {
             if post.turn_budget > 0 {
                 return Ok(format!("Posted to the plan room of thread {thread} ({} turns left).", post.turn_budget));
             }
-            tracing::info!(%thread, %human, "plan room out of turns; handing the thread to its owner");
             let notice = Envelope::on_thread(
                 thread.clone(),
                 self.persona.clone(),
@@ -365,12 +368,29 @@ impl Hub {
                 ),
             )
             .with_owner(owner.clone());
-            self.send(&notice)
-                .await
-                .map_err(|e| format!("posted the room's last turn, but {human} was not told ({e}); message {human}"))?;
-            return Ok(format!(
-                "Posted the last turn of the plan room of thread {thread}; {human} has the thread now."
-            ));
+            let Some(escalator) = &self.escalator else {
+                tracing::info!(%thread, %human, "plan room out of turns; handing the thread to its owner");
+                self.send(&notice).await.map_err(|e| {
+                    format!("posted the room's last turn, but {human} was not told ({e}); message {human}")
+                })?;
+                return Ok(format!(
+                    "Posted the last turn of the plan room of thread {thread}; {human} has the thread now."
+                ));
+            };
+            let stuck =
+                Stuck { carried, ..Stuck::new(EscalationReason::PlanRoom, notice, format!("plan-{}", post.id), None) };
+            let escalated = escalator.escalate(stuck).await.map_err(|e| {
+                format!("posted the room's last turn, but the escalation was not sent ({e:#}); message {human}")
+            })?;
+            tracing::info!(%thread, %escalated, "plan room out of turns; escalated");
+            return Ok(match escalated {
+                Escalated::Owner(human) => {
+                    format!("Posted the last turn of the plan room of thread {thread}; {human} has the thread now.")
+                }
+                Escalated::Chain { .. } => {
+                    format!("Posted the last turn of the plan room of thread {thread}; escalated to {escalated}.")
+                }
+            });
         }
         Err(format!("the plan room of thread {thread} kept changing; read_plan and post again"))
     }
@@ -1009,7 +1029,7 @@ mod tests {
             let roster = roster.clone();
             Box::pin(async move { Ok(roster) })
         });
-        (Mcp::start(persona("dev-a"), home, outbox, roster, rooms, humans).await.unwrap(), rx)
+        (Mcp::start(persona("dev-a"), home, outbox, roster, rooms, humans, None).await.unwrap(), rx)
     }
 
     fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {

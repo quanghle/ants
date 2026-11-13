@@ -10,6 +10,7 @@
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
 //! creds = "~/.config/ants/auth/dev-a.creds"
+//! escalate_to = ["lead", "dev-b"]   # escalations go to these personas first, lead leading
 //! ```
 //!
 //! `~` expands to the home directory; other relative paths are relative to the file's directory.
@@ -27,6 +28,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::caps::Caps;
 use crate::daemon::Config;
+use crate::escalation::{self, Chain};
 use crate::harness::{self, HarnessKind, ModelSettings, PromptLimits};
 
 /// Environment variable naming the config file.
@@ -36,6 +38,7 @@ pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = crate::approvals::DEFAULT_TIMEOUT.as_secs();
 pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = harness::DEFAULT_PROMPT_TIMEOUT.as_secs();
 pub const DEFAULT_MAX_TOOL_CALLS: usize = harness::DEFAULT_MAX_TOOL_CALLS;
+pub const DEFAULT_ESCALATE_AFTER_SECS: u64 = escalation::DEFAULT_ESCALATE_AFTER.as_secs();
 
 /// `~/.ants/config.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -119,6 +122,15 @@ pub struct Persona {
     pub max_daily_tokens: Option<u64>,
     /// Cost the persona may spend in a UTC day.
     pub max_daily_cost: Option<f64>,
+    /// Personas the persona's escalations go to before any human, the first one leading; published in the roster.
+    #[serde(default)]
+    pub escalate_to: Vec<PersonaId>,
+    /// Chain levels an escalation climbs before it goes to the thread's owner.
+    #[serde(default = "default_max_escalation_hops")]
+    pub max_escalation_hops: u32,
+    /// Seconds an escalation waits for its leader's answer before going one level higher; 0 waits for good.
+    #[serde(default = "default_escalate_after_secs")]
+    pub escalate_after_secs: u64,
     /// The built-in messenger, which waits to start while the roster lists a live messenger on another machine.
     #[serde(skip)]
     pub builtin: bool,
@@ -142,6 +154,14 @@ fn default_prompt_timeout_secs() -> u64 {
 
 fn default_max_tool_calls() -> usize {
     DEFAULT_MAX_TOOL_CALLS
+}
+
+fn default_max_escalation_hops() -> u32 {
+    ants_proto::DEFAULT_MAX_ESCALATION_HOPS
+}
+
+fn default_escalate_after_secs() -> u64 {
+    DEFAULT_ESCALATE_AFTER_SECS
 }
 
 fn some_harness<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HarnessKind>, D::Error> {
@@ -179,6 +199,9 @@ impl Persona {
             max_thread_cost: None,
             max_daily_tokens: None,
             max_daily_cost: None,
+            escalate_to: Vec::new(),
+            max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
+            escalate_after_secs: DEFAULT_ESCALATE_AFTER_SECS,
             builtin: false,
         }
     }
@@ -186,6 +209,7 @@ impl Persona {
     /// The daemon config, with `default_nats` as the server when none is set.
     pub fn into_config(self, default_nats: &str) -> Result<Config> {
         validate_env(&self.env)?;
+        self.validate_chain()?;
         let instructions = self.prompt_instructions();
         let harness = self.harness.unwrap_or_default();
         let model_settings =
@@ -230,9 +254,28 @@ impl Persona {
                 daily_tokens: self.max_daily_tokens,
                 daily_cost: self.max_daily_cost,
             },
+            escalation: Chain {
+                escalate_to: self.escalate_to,
+                max_hops: self.max_escalation_hops,
+                after: Some(Duration::from_secs(self.escalate_after_secs)).filter(|t| !t.is_zero()),
+            },
             persona: self.name,
             defer_to_other_machines: self.builtin,
         })
+    }
+
+    /// The escalation chain names other personas, each once.
+    fn validate_chain(&self) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for member in &self.escalate_to {
+            if *member == self.name {
+                bail!("persona {}: escalate_to names the persona itself", self.name);
+            }
+            if !seen.insert(member) {
+                bail!("persona {}: escalate_to lists {member} twice", self.name);
+            }
+        }
+        Ok(())
     }
 
     fn prompt_instructions(&self) -> String {
@@ -303,6 +346,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
             bail!("config {}: persona {} is listed twice", path.display(), p.name);
         }
         validate_env(&p.env)?;
+        p.validate_chain().with_context(|| format!("config {}", path.display()))?;
         if p.harness.is_none() {
             p.harness = file.provider;
         }
@@ -379,6 +423,9 @@ Review changes for correctness."""
             max_tool_calls = 50
             max_thread_cost = 2.5
             max_daily_tokens = 1000000
+            escalate_to = ["lead", "dev-b"]
+            max_escalation_hops = 2
+            escalate_after_secs = 0
 
             [[persona]]
             name = "dev-b"
@@ -418,6 +465,9 @@ Review changes for correctness."""
         assert_eq!(config.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
         let caps = Caps { thread_cost: Some(2.5), daily_tokens: Some(1_000_000), ..Caps::default() };
         assert_eq!(config.caps, caps);
+        let chain =
+            Chain { escalate_to: vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()], max_hops: 2, after: None };
+        assert_eq!(config.escalation, chain, "0 waits for the leader for good");
 
         let b = personas[1].clone();
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
@@ -436,6 +486,8 @@ Review changes for correctness."""
         assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
         assert_eq!(config.limits, PromptLimits::default());
         assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
+        assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
+        assert_eq!(config.escalation.after, Some(Duration::from_secs(DEFAULT_ESCALATE_AFTER_SECS)));
         assert!(config.home.ends_with(".ants/dev-b"));
         assert_eq!(config.whoami, None);
         assert_eq!(config.model_settings, ModelSettings::default());
@@ -587,5 +639,10 @@ Review changes for correctness."""
         assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
         assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
         assert!(err("[[persona]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
+        let chain =
+            |names: &str| err(&format!("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nescalate_to = {names}"));
+        assert!(chain("[\"dev-a\"]").contains("escalate_to names the persona itself"));
+        assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
+        assert!(chain("[\"Lead!\"]").contains("parsing config"));
     }
 }
