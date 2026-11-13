@@ -8,8 +8,8 @@ use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 
-use crate::bus;
 use crate::harness::{self, HarnessKind, PermissionPolicy};
+use crate::{bus, workspace};
 
 /// Redelivery window. The daemon extends it with progress acks while a prompt runs, so a crash mid-task redelivers.
 const ACK_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -26,18 +26,28 @@ pub struct Config {
     pub creds: Option<PathBuf>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
+    /// The persona's own files, its bd workspace among them (usually `~/.ants/<persona>`).
+    pub home: PathBuf,
     pub harness: HarnessKind,
     pub permissions: PermissionPolicy,
 }
 
 /// Serve the persona's inbox until Ctrl-C. A message in hand is finished first.
 pub async fn run(config: Config) -> Result<()> {
+    let db = workspace::ensure(&config.home, &config.persona).await?;
+    let env = workspace::harness_env(&db)?;
     let (client, js) =
         bus::connect(&config.nats_url, config.creds.as_deref(), &config.persona, &format!("antsd-{}", config.persona))
             .await?;
     let stream = bus::ensure_stream(&js).await?;
     let mut messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER).await?;
-    tracing::info!(persona = %config.persona, harness = %config.harness, workdir = %config.workdir.display(), "serving inbox");
+    tracing::info!(
+        persona = %config.persona,
+        harness = %config.harness,
+        workdir = %config.workdir.display(),
+        workspace = %db.display(),
+        "serving inbox"
+    );
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
@@ -48,7 +58,7 @@ pub async fn run(config: Config) -> Result<()> {
                 None => break,
                 Some(Err(e)) => tracing::warn!(error = %e, "inbox stream"),
                 Some(Ok(msg)) => {
-                    if let Err(e) = handle(&client, &js, &config, msg).await {
+                    if let Err(e) = handle(&client, &js, &config, &env, msg).await {
                         tracing::error!(error = format!("{e:#}"), "handling message");
                     }
                 }
@@ -63,6 +73,7 @@ async fn handle(
     client: &async_nats::Client,
     js: &jetstream::Context,
     config: &Config,
+    env: &[(String, String)],
     msg: jetstream::Message,
 ) -> Result<()> {
     let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
@@ -89,7 +100,7 @@ async fn handle(
     tracing::info!(thread = %envelope.thread_id, from = %envelope.from, "prompting {}", config.harness);
     client.publish(status.clone(), "working".into()).await?;
 
-    let prompt = harness::prompt_once(config.harness, &config.workdir, &envelope.text, config.permissions);
+    let prompt = harness::prompt_once(config.harness, &config.workdir, env, &envelope.text, config.permissions);
     tokio::pin!(prompt);
     let mut progress = tokio::time::interval(PROGRESS_EVERY);
     progress.tick().await;

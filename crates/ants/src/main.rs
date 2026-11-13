@@ -54,6 +54,9 @@ enum Command {
         /// Directory the harness works in (default: the current directory).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// The persona's own files, its bd workspace of to-dos and memories among them (default: ~/.ants/<persona>).
+        #[arg(long)]
+        home: Option<PathBuf>,
         #[arg(long, default_value_t = HarnessKind::Copilot)]
         harness: HarnessKind,
         /// Allow every tool request once instead of rejecting it. Only for trusted, sandboxed workdirs.
@@ -120,16 +123,21 @@ async fn main() -> Result<()> {
             println!("stream {} ready", ants_proto::STREAM);
             Ok(())
         }
-        Command::Daemon { persona, workdir, harness, allow_tools } => {
+        Command::Daemon { persona, workdir, home, harness, allow_tools } => {
             let workdir = match workdir {
                 Some(dir) => dir,
                 None => std::env::current_dir()?,
+            };
+            let home = match home {
+                Some(dir) => dir,
+                None => ants_daemon::workspace::default_home(&persona)?,
             };
             ants_daemon::run(ants_daemon::Config {
                 persona,
                 nats_url: cli.nats,
                 creds: cli.creds,
                 workdir: workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?,
+                home,
                 harness,
                 permissions: if allow_tools { PermissionPolicy::AllowOnce } else { PermissionPolicy::Reject },
             })
@@ -140,9 +148,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Harness(HarnessCommand::Prompt { harness, words }) => {
-            let reply =
-                harness::prompt_once(harness, &std::env::current_dir()?, &words.join(" "), PermissionPolicy::Reject)
-                    .await?;
+            let reply = harness::prompt_once(
+                harness,
+                &std::env::current_dir()?,
+                &[],
+                &words.join(" "),
+                PermissionPolicy::Reject,
+            )
+            .await?;
             println!("{reply}");
             Ok(())
         }

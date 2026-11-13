@@ -26,6 +26,13 @@ ants watch                                          # live traffic
 
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`.
 
+## Persona memory
+
+Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
+(`--home` moves it). The daemon creates it on first start and runs every harness session with `BD_DB` pointing at it,
+so `bd remember`, `bd ready` and the session-start `bd prime` hook all see the persona's workspace, not the workdir's.
+`bd` must be on the daemon's `PATH`, and the harness needs the bd session-start hooks (`bd setup copilot` in the workdir, or user-level hooks).
+
 ## Credentials
 
 On a shared hub, each persona and the human connect with their own NKey/JWT credentials. Each persona may publish

@@ -12,7 +12,7 @@ use agent_client_protocol::v1::schema::{
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     TextContent,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client};
 use anyhow::{Result, anyhow};
 
 /// An agent harness ants can drive over ACP.
@@ -32,14 +32,16 @@ impl HarnessKind {
         }
     }
 
-    fn command(self) -> &'static [&'static str] {
+    fn command(self) -> (&'static str, &'static [&'static str]) {
         match self {
-            HarnessKind::Copilot => &["copilot", "--acp"],
+            HarnessKind::Copilot => ("copilot", &["--acp"]),
         }
     }
 
-    fn agent(self) -> Result<AcpAgent> {
-        AcpAgent::from_args(self.command().iter().copied()).map_err(|e| anyhow!("{e}"))
+    /// The harness process, with `env` added to the daemon's environment.
+    fn agent(self, env: &[(String, String)]) -> AcpAgent {
+        let (program, args) = self.command();
+        AcpAgent::new(AcpAgentConfig::new(program).args(args.iter().copied()).envs(env.iter().cloned()))
     }
 }
 
@@ -88,7 +90,7 @@ pub async fn check(kind: HarnessKind) -> Result<String> {
     Client
         .v1()
         .name("ants")
-        .connect_with(kind.agent()?, async |cx: ConnectionTo<Agent>| {
+        .connect_with(kind.agent(&[]), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             Ok(format!("{:?}", init.agent_info))
         })
@@ -96,8 +98,15 @@ pub async fn check(kind: HarnessKind) -> Result<String> {
         .map_err(|e| anyhow!("{kind} ACP handshake: {e}"))
 }
 
-/// Run one prompt in a fresh session rooted at `cwd`, and return the agent's reply text.
-pub async fn prompt_once(kind: HarnessKind, cwd: &Path, text: &str, policy: PermissionPolicy) -> Result<String> {
+/// Run one prompt in a fresh session rooted at `cwd`, with `env` added to the harness environment, and return the
+/// agent's reply text.
+pub async fn prompt_once(
+    kind: HarnessKind,
+    cwd: &Path,
+    env: &[(String, String)],
+    text: &str,
+    policy: PermissionPolicy,
+) -> Result<String> {
     let reply = Arc::new(Mutex::new(String::new()));
     let sink = reply.clone();
     Client
@@ -121,7 +130,7 @@ pub async fn prompt_once(kind: HarnessKind, cwd: &Path, text: &str, policy: Perm
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(kind.agent()?, async |cx: ConnectionTo<Agent>| {
+        .connect_with(kind.agent(env), async |cx: ConnectionTo<Agent>| {
             cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             let session = cx.send_request(NewSessionRequest::new(cwd.to_path_buf())).block_task().await?;
             let done = cx
