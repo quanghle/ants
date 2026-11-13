@@ -579,6 +579,15 @@ impl ApprovalRequest {
         subject::approval_decision(&self.persona, &self.id)
     }
 
+    /// Check that the request arrived on its own [`ApprovalRequest::subject`]. Credentials pin each persona to its own
+    /// subject, while the body is whatever the publisher wrote, so a request naming another persona is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona { kind: "approval request", persona: self.persona.clone(), at: subject.to_owned() })
+    }
+
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
     }
@@ -705,6 +714,9 @@ mod tests {
         let json = serde_json::to_string(&ask).unwrap();
         assert!(json.contains(r#""options":["allow_once","reject"]"#), "{json}");
         assert_eq!(serde_json::from_str::<ApprovalRequest>(&json).unwrap(), ask);
+        assert_eq!(ask.check_subject("ants.approvals.dev-a"), Ok(()));
+        let forged = ask.check_subject("ants.approvals.dev-b").unwrap_err();
+        assert_eq!(forged.to_string(), "approval request of dev-a found at ants.approvals.dev-b");
     }
 
     #[test]

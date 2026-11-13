@@ -164,7 +164,9 @@ ants approve 019a7d2e allow-once    # answer it: allow-once, allow-always or rej
 
 A request is pending until it has a decision or expires; both requests and decisions are read back from the stream,
 so requests made while no CLI was running show up too. Answering stores the decision in the stream before returning,
-and refuses a request already answered, an expired one, or a verdict the harness did not offer.
+and refuses a request already answered, an expired one, or a verdict the harness did not offer. A request belongs to
+the persona its subject names; one whose body names another persona is skipped with a warning, so it is neither
+listed nor answerable.
 
 ## MCP tools
 

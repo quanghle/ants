@@ -2,7 +2,8 @@
 //!
 //! Requests and decisions both live in the ANTS stream, so the pending ones are read back by subject: every request on
 //! `ants.approvals.<persona>` that has not expired and has no decision on `ants.approvals.<persona>.<request id>`. An
-//! expired request needs no answer: its persona already rejected it.
+//! expired request needs no answer: its persona already rejected it. The persona of a request is the one its subject
+//! names, as credentials pin it there; a request whose body names another is skipped with a warning.
 
 use std::path::Path;
 
@@ -66,11 +67,10 @@ pub async fn requests(stream: &Stream) -> Result<Vec<ApprovalRequest>> {
         };
         from = msg.sequence + 1;
         match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
-            // The subject is what the persona's credentials vouch for; the payload could name another persona.
-            Ok(request) if request.subject() == msg.subject.as_str() => requests.push(request),
-            Ok(_) => {
-                tracing::warn!(seq = msg.sequence, subject = %msg.subject, "skipping a request for another persona")
-            }
+            Ok(request) => match request.check_subject(&msg.subject) {
+                Ok(()) => requests.push(request),
+                Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping a request for another persona"),
+            },
             Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping unreadable approval request"),
         }
     }
@@ -267,10 +267,9 @@ pub async fn run(url: &str, creds: Option<&Path>, domain: Option<&ants_proto::Js
             if let Some(live) = &mut live {
                 while let Some(msg) = live.next().await {
                     let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
-                    if request.subject() == msg.subject.as_str()
-                        && !request.is_expired(Utc::now())
-                        && !listed.iter().any(|r| r.id == request.id)
-                    {
+                    if let Err(e) = request.check_subject(&msg.subject) {
+                        tracing::warn!(error = %e, "skipping a request for another persona");
+                    } else if !request.is_expired(Utc::now()) && !listed.iter().any(|r| r.id == request.id) {
                         show(&request)?;
                     }
                 }
@@ -313,7 +312,14 @@ mod tests {
         for r in [&push, &rm, &late] {
             bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
         }
+        // dev-b publishes only on its own subject, so a request there naming dev-a is forged.
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let (_, intruder) = server.connect(&dev_b).await;
+        let forged = request(&dev_a, "git push --force", vec![Verdict::AllowAlways], minute);
+        bus::publish_json(&intruder, subject::approvals(&dev_b), &forged, None).await.unwrap();
         assert_eq!(titles(&pending(&stream, Utc::now()).await.unwrap()), ["git push", "rm -rf build"]);
+        let err = answer(&human, &stream, &forged.id.to_string(), Verdict::AllowAlways, Utc::now()).await.unwrap_err();
+        assert!(err.to_string().contains("no approval request"), "{err:#}");
 
         let id = push.id.to_string();
         let decision = answer(&human, &stream, &id[..id.len() - 4], Verdict::AllowAlways, Utc::now()).await.unwrap();
