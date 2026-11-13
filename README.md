@@ -40,8 +40,9 @@ ants watch                                          # live traffic
 
 Replies to the human wait in the durable JetStream consumer `inbox-human` until read, so those that arrive while no
 CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--peek` leaves them unread, `--thread`
-and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new ones and `--json` prints one
-envelope per line. `ants ask --wait` marks only the reply it prints read.
+and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new ones (and dead-letters what
+JetStream stops delivering, see [Dead letters](#dead-letters)) and `--json` prints one envelope per line.
+`ants ask --wait` marks only the reply it prints read.
 
 The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
 prompted concurrently; messages on one thread are handled one at a time, in order, and a failed one is retried before
@@ -284,10 +285,19 @@ once.
 ants dead list          # seq, persona, thread, from, deliveries, time, error, text
 ants dead replay 42     # send the message to its inbox again, as it was, and remove the dead letter
 ants dead drop 42       # remove it without replaying
+ants dead watch         # until Ctrl-C, dead-letter what JetStream stops delivering, and print it
 ```
 
 Reading and removing dead letters by sequence needs the human's credentials. A stream created before dead letters
 existed lacks `ants.dead.>`; `ants init` adds it.
+
+If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
+only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
+--follow` while it runs, turn each such advisory of a persona's inbox consumer into a dead letter in the same format,
+with the same notice, unless that message is a dead letter already. Fetching a message by sequence
+(`STREAM.MSG.GET`) would let a persona read every inbox, so only the human's credentials hear the advisories; those
+issued before must be issued again with `ants auth user human`. Advisories are core NATS and not stored: one published
+while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
 
 ## Harnesses
 

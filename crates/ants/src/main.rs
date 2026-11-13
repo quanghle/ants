@@ -61,7 +61,8 @@ enum Command {
         /// At most this many replies; the rest stay unread.
         #[arg(long)]
         limit: Option<usize>,
-        /// Keep waiting for new replies until Ctrl-C.
+        /// Keep waiting for new replies until Ctrl-C, meanwhile dead-lettering the messages JetStream stops
+        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does).
         #[arg(long, short)]
         follow: bool,
         /// One JSON envelope per line.
@@ -137,6 +138,9 @@ enum DeadCommand {
     Replay { seq: u64 },
     /// Remove a dead letter without replaying it.
     Drop { seq: u64 },
+    /// Keep dead-lettering, until Ctrl-C, the messages JetStream stops delivering without the daemon having stored
+    /// them as dead letters, and print each one. `ants inbox --follow` does the same while it runs.
+    Watch,
 }
 
 #[derive(Subcommand)]
@@ -454,7 +458,7 @@ async fn show_inbox(
     follow: bool,
     json: bool,
 ) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-inbox").await?;
+    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-inbox").await?;
     let mut inbox = inbox::Inbox::open(&js).await?;
     let show = |e: &Envelope| -> Result<()> {
         if json {
@@ -471,7 +475,17 @@ async fn show_inbox(
         }
         unread.iter().try_for_each(show)?;
         if follow {
-            inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }).await?;
+            // A dead letter stored here tells the human through the inbox, like one the daemon stores.
+            let watch = async {
+                if let Err(e) = dead::watch(&client, &js, |_, _| {}).await {
+                    tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
+                }
+                std::future::pending::<()>().await
+            };
+            tokio::select! {
+                followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
+                () = watch => {}
+            }
         }
         anyhow::Ok(())
     }
@@ -482,11 +496,11 @@ async fn show_inbox(
 }
 
 async fn dead_letters(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, command: DeadCommand) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
-    let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
+    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
+    let stream = || async { js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream") };
     match command {
         DeadCommand::List => {
-            let letters = dead::list(&stream).await?;
+            let letters = dead::list(&stream().await?).await?;
             if letters.is_empty() {
                 println!("no dead letters");
             }
@@ -495,12 +509,19 @@ async fn dead_letters(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>
             }
         }
         DeadCommand::Replay { seq } => {
-            let envelope = dead::replay(&js, &stream, seq).await?;
+            let envelope = dead::replay(&js, &stream().await?, seq).await?;
             println!("replayed to {} on thread {}", envelope.to, envelope.thread_id);
         }
         DeadCommand::Drop { seq } => {
-            dead::discard(&stream, seq).await?;
+            dead::discard(&stream().await?, seq).await?;
             println!("dropped dead letter {seq}");
+        }
+        DeadCommand::Watch => {
+            let watch = dead::watch(&client, &js, |seq, letter| println!("{}", dead_row(seq, letter)));
+            tokio::select! {
+                watched = watch => watched?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
         }
     }
     Ok(())
