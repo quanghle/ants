@@ -292,6 +292,12 @@ pub mod subject {
     /// Every persona's dead letters.
     pub const DEAD_ALL: &str = "ants.dead.>";
 
+    /// JetStream's advisories that a consumer of the `ANTS` stream stopped delivering a message after its last allowed
+    /// delivery went unacked (core NATS, not stored).
+    pub fn max_deliveries_advisories() -> String {
+        format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{}.*", super::STREAM)
+    }
+
     /// The inbox and plan subjects `persona` may publish on: every inbox for the human (to replay dead letters as they
     /// were), else [`inbox_from`]; and [`plan_from`].
     pub fn sendable(persona: &PersonaId) -> [String; 2] {
@@ -403,7 +409,9 @@ impl Permissions {
     /// attempts buckets. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and
     /// upgrade the stream and create the roster, sessions and attempts buckets, and reads and removes dead letters by sequence; its inbox
     /// consumer keeps the replies `ants inbox` has not shown yet. The human may send under any sender, to replay a dead
-    /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
+    /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox. So
+    /// only the human hears the max-deliveries advisories of the stream's consumers and stores the dead letters of the
+    /// messages they name, on any persona's dead letter subject.
     ///
     /// Each inbox and plan subject a persona may publish it may also publish in its outbox form
     /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only the human sets up leaf outboxes and the hub's
@@ -451,6 +459,7 @@ impl Permissions {
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
                 subject::ALL_APPROVAL_DECISIONS.to_owned(),
+                subject::DEAD_ALL.to_owned(),
                 // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
                 // leaf's own domain (the plain form is what a leaf maps its own domain to).
                 format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
@@ -461,7 +470,7 @@ impl Permissions {
                 publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
                 publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
             }
-            subscribe.push(subject::ALL.to_owned());
+            subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{persona}.>");
             let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{persona}.>");

@@ -560,6 +560,69 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (h_client, h_js) = server.connect(&human).await;
+        let (_, a_js) = server.connect(&dev_a).await;
+        let stream = bus::init_stream(&h_js).await.unwrap();
+        let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
+
+        // Two watchers, as with `ants dead watch` and `ants inbox --follow` running at once.
+        let (tx, mut buried) = mpsc::unbounded_channel();
+        let tx2 = tx.clone();
+        let watchers = futures::future::join(
+            dead::watch(&h_client, &h_js, move |seq, d| tx.send((seq, d.clone())).unwrap()),
+            dead::watch(&h_client, &h_js, move |seq, d| tx2.send((seq, d.clone())).unwrap()),
+        );
+
+        let test = async {
+            // Personas may not hear the advisories: those of other consumers name messages they may not read.
+            let (a_raw, mut errors) = server.watched(&dev_a).await;
+            let _sub = a_raw.subscribe(subject::max_deliveries_advisories()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains("Subscription to \"$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.*\""), "{v}");
+
+            let ask = Envelope::new(human.clone(), dev_a.clone(), "build it");
+            bus::publish(&h_js, &ask).await.unwrap();
+            // dev-a takes the message on every delivery and never settles it, as when dead-lettering fails too.
+            let a_stream = bus::ensure_stream(&a_js).await.unwrap();
+            let mut inbox = bus::inbox_consumer(&a_stream, &dev_a, Duration::from_millis(500), 2, 1).await.unwrap();
+            let pulling = tokio::spawn(async move { while let Some(Ok(_unacked)) = inbox.next().await {} });
+
+            let (dead_seq, letter) = timeout(Duration::from_secs(10), buried.recv()).await.unwrap().unwrap();
+            let seq = ask_seq(&stream, &ask).await;
+            assert_eq!((letter.persona.clone(), letter.stream_seq, letter.deliveries), (dev_a.clone(), seq, 2));
+            assert_eq!(letter.envelope.as_ref(), Some(&ask));
+            assert!(letter.error.contains("max-deliveries advisory"), "{}", letter.error);
+            let notice: Envelope =
+                serde_json::from_slice(&timeout(WAIT, human_inbox.next()).await.unwrap().unwrap().payload).unwrap();
+            assert_eq!((notice.from.clone(), notice.in_reply_to), (dev_a.clone(), Some(ask.id)));
+            assert!(notice.text.contains(&format!("ants dead replay {dead_seq}")), "{}", notice.text);
+
+            // A later advisory of the same message, past the duplicate window, finds the dead letter.
+            let advisory = dead::MaxDeliveries {
+                stream: STREAM.to_owned(),
+                consumer: ants_proto::inbox_consumer(&dev_a),
+                stream_seq: seq,
+                deliveries: 2,
+            };
+            assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory).await.unwrap(), None);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
+            let letters = dead::list(&stream).await.unwrap();
+            assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
+            let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();
+            assert_eq!(notices.sequence, dead_seq + 1, "one notice, right after the dead letter");
+            pulling.abort();
+        };
+        tokio::select! {
+            () = test => {}
+            _ = watchers => panic!("the watchers stopped"),
+        }
+    }
+
     /// A port nobody listens on right now (nats-server does not report its leafnode port).
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
