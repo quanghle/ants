@@ -143,7 +143,7 @@ fn outbox_of(source: &Source, machine: &Machine) -> bool {
 
 /// The hub stream's sources for `machine`: one per persona, so admitting or dropping one leaves the others as they
 /// are. The filters of one stream's sources may not overlap, so when the human runs on the machine, its admission
-/// takes every inbox subject and the others' only their plan posts.
+/// takes every inbox subject and the others' only their plan and channel posts.
 fn admissions(machine: &Machine, personas: &[PersonaId], start: u64) -> Vec<Source> {
     let human = personas.iter().any(PersonaId::is_human);
     let mut personas: Vec<&PersonaId> = personas.iter().collect();
@@ -175,7 +175,7 @@ mod tests {
     use std::process::Command;
 
     use ants_daemon::{bus, plan};
-    use ants_proto::{Envelope, JsDomain, PlanPost, ThreadId};
+    use ants_proto::{ChannelPost, Envelope, JsDomain, PlanPost, ThreadId};
     use ants_test_support::NatsServer;
     use async_nats::jetstream::message::PublishMessage;
 
@@ -291,21 +291,26 @@ mod tests {
         assert_eq!(bus::publish(&a_js, &kept).await.unwrap(), bus::Stored::Outbox);
         let thread: ThreadId = "t1".parse().unwrap();
         assert!(plan::publish(&a_js, &PlanPost::new(thread.clone(), dev_a.clone(), "plan"), None).await.unwrap());
+        let chan = ChannelPost::new("ops".parse().unwrap(), dev_a.clone(), "@dev-b kept");
+        let stored = bus::store(&a_js, chan.subject(), &chan, &chan.id.to_string()).await.unwrap();
+        assert_eq!(stored, bus::Stored::Outbox);
         // dev-b may post this itself, but is not admitted from m1.
         let stray = PlanPost::new(thread.clone(), dev_b.clone(), "stray");
         assert!(plan::publish(&b_js, &stray, None).await.unwrap());
         assert!(messages(&h_js, STREAM).await == 1);
 
         reload(leaf_port);
-        eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 4).await;
-        eventually("the hub's stream takes what dev-a sent", async || messages(&h_js, STREAM).await == 3).await;
+        eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 5).await;
+        eventually("the hub's stream takes what dev-a sent", async || messages(&h_js, STREAM).await == 4).await;
         let ants = h_js.get_stream(STREAM).await.unwrap();
         let last = ants.get_last_raw_message_by_subject(&kept.subject()).await.unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&last.payload).unwrap(), kept);
         ants.get_last_raw_message_by_subject(&subject::plan(&thread, &dev_a)).await.unwrap();
+        let last = ants.get_last_raw_message_by_subject(&chan.subject()).await.unwrap();
+        assert_eq!(serde_json::from_slice::<ChannelPost>(&last.payload).unwrap(), chan);
         assert!(ants.get_last_raw_message_by_subject(&stray.subject()).await.is_err());
         tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(messages(&h_js, STREAM).await, 3, "stored once");
+        assert_eq!(messages(&h_js, STREAM).await, 4, "stored once");
 
         remove(&h_js, &m1).await.unwrap();
         let info = h_js.get_stream(STREAM).await.unwrap().info().await.unwrap().config.clone();
@@ -331,9 +336,12 @@ mod tests {
             filters,
             [
                 "ants.in.m1.ants.out.plan.*.dev-a",
+                "ants.in.m1.ants.out.chan.*.dev-a",
                 "ants.in.m1.ants.out.plan.*.dev-b",
+                "ants.in.m1.ants.out.chan.*.dev-b",
                 "ants.in.m1.ants.out.inbox.>",
                 "ants.in.m1.ants.out.plan.*.human",
+                "ants.in.m1.ants.out.chan.*.human",
             ]
         );
         assert!(sources.iter().all(|s| s.start_sequence == Some(7) && from_machine(s, &m1)));

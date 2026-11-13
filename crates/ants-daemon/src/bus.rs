@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS,
-    inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM,
+    STREAM_SUBJECTS, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -201,6 +201,23 @@ pub async fn ensure_sessions(js: &jetstream::Context) -> Result<kv::Store> {
 /// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`]), created when missing and the credentials allow it.
 pub async fn ensure_attempts(js: &jetstream::Context) -> Result<kv::Store> {
     ensure_kept(js, ATTEMPTS_BUCKET).await
+}
+
+/// The KV bucket of the channels ([`CHANNELS_BUCKET`]), created when missing and the credentials allow it (the
+/// human's). Entries never expire: a channel lasts until the human removes it.
+pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(CHANNELS_BUCKET).await {
+        return Ok(store);
+    }
+    js.create_key_value(kv::Config {
+        bucket: CHANNELS_BUCKET.to_owned(),
+        description: "Channels: their members and messenger, written by the human".to_owned(),
+        history: 1,
+        storage: stream::StorageType::File,
+        ..Default::default()
+    })
+    .await
+    .context("creating the channels bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.

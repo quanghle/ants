@@ -14,7 +14,8 @@ pub use uuid::Uuid;
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
-pub const STREAM_SUBJECTS: [&str; 4] = ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>"];
+pub const STREAM_SUBJECTS: [&str; 5] =
+    ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
 /// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
 /// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
 pub const OUTBOX_STREAM: &str = "ANTS_OUT";
@@ -36,6 +37,9 @@ pub const SESSIONS_BUCKET: &str = "ants_sessions";
 /// KV bucket where a daemon marks each attempt at an inbox message it started, and the reply it stored, so a
 /// redelivery knows what an earlier attempt may already have done.
 pub const ATTEMPTS_BUCKET: &str = "ants_attempts";
+/// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Only the human writes it;
+/// personas read it.
+pub const CHANNELS_BUCKET: &str = "ants_channels";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to the human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 
@@ -53,6 +57,11 @@ pub enum Error {
     ForeignPersona { kind: &'static str, persona: PersonaId, at: String },
     #[error("plan post from {from} on thread {thread} arrived on {subject}")]
     WrongPlanSubject { subject: String, from: PersonaId, thread: ThreadId },
+    #[error("channel post from {from} in channel {channel} arrived on {subject}")]
+    WrongChannelSubject { subject: String, from: PersonaId, channel: ChannelId },
+    /// A body naming another channel than the key it was stored under.
+    #[error("{kind} of channel {channel} found at {at}")]
+    ForeignChannel { kind: &'static str, channel: ChannelId, at: String },
     #[error("invalid machine name {0:?}: use 1-64 of letters, digits, '-' and '_', starting with a letter or digit")]
     InvalidMachine(String),
 }
@@ -110,6 +119,8 @@ macro_rules! token_id {
 
 token_id!(PersonaId, "persona id");
 token_id!(ThreadId, "thread id");
+// A channel: a named group of personas, with the same syntax as a persona id.
+token_id!(ChannelId, "channel id");
 // The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node reach the hub's JetStream only
 // through it, as `$JS.<domain>.API`: the plain `$JS.API` stays on the leaf.
 token_id!(JsDomain, "JetStream domain");
@@ -165,12 +176,13 @@ impl Machine {
     }
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `persona`, as pairs of an [`INTAKE_STREAM`]
-    /// subject filter and the subject it is stored under: exactly the inbox and plan subjects the persona may publish
-    /// itself ([`subject::sendable`]). With `inbox` false, only its plan posts: the human's admission takes every
-    /// inbox subject of a machine it is on, and the filters of one stream's sources may not overlap.
+    /// subject filter and the subject it is stored under: exactly the inbox, plan and channel subjects the persona may
+    /// publish itself ([`subject::sendable`]). With `inbox` false, only its plan and channel posts: the human's
+    /// admission takes every inbox subject of a machine it is on, and the filters of one stream's sources may not
+    /// overlap.
     pub fn admitted(&self, persona: &PersonaId, inbox: bool) -> Vec<(String, String)> {
-        let [own_inbox, own_plan] = subject::sendable(persona);
-        let patterns = if inbox { vec![own_inbox, own_plan] } else { vec![own_plan] };
+        let [own_inbox, own_plan, own_chan] = subject::sendable(persona);
+        let patterns = if inbox { vec![own_inbox, own_plan, own_chan] } else { vec![own_plan, own_chan] };
         patterns
             .into_iter()
             .map(|pattern| {
@@ -230,7 +242,7 @@ impl ThreadId {
 
 /// Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 pub mod subject {
-    use super::{PersonaId, ThreadId};
+    use super::{ChannelId, PersonaId, ThreadId};
 
     /// Durable inbox of `to`, for messages from `from`. The sender is part of the subject because credentials can pin
     /// it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
@@ -279,6 +291,31 @@ pub mod subject {
     /// Every planning room.
     pub const ALL_PLANS: &str = "ants.plan.>";
 
+    /// A post by `from` to `channel`. Like an inbox subject it names the sender, so credentials can pin it there
+    /// ([`chan_from`]).
+    pub fn chan(channel: &ChannelId, from: &PersonaId) -> String {
+        format!("ants.chan.{channel}.{from}")
+    }
+
+    /// Every post to `channel`, whoever wrote it.
+    pub fn chan_room(channel: &ChannelId) -> String {
+        format!("ants.chan.{channel}.*")
+    }
+
+    /// Every channel subject `persona` may post on.
+    pub fn chan_from(persona: &PersonaId) -> String {
+        format!("ants.chan.*.{persona}")
+    }
+
+    /// The channel and the sender a channel subject names, or `None` when it is no channel subject.
+    pub fn parse_chan(subject: &str) -> Option<(ChannelId, PersonaId)> {
+        let (channel, from) = subject.strip_prefix("ants.chan.")?.split_once('.')?;
+        Some((channel.parse().ok()?, from.parse().ok()?))
+    }
+
+    /// Every channel.
+    pub const ALL_CHANNELS: &str = "ants.chan.>";
+
     /// Permission requests a persona escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
     pub fn approvals(persona: &PersonaId) -> String {
         format!("ants.approvals.{persona}")
@@ -298,19 +335,19 @@ pub mod subject {
         format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{}.*", super::STREAM)
     }
 
-    /// The inbox and plan subjects `persona` may publish on: every inbox for the human (to replay dead letters as they
-    /// were), else [`inbox_from`]; and [`plan_from`].
-    pub fn sendable(persona: &PersonaId) -> [String; 2] {
+    /// The inbox, plan and channel subjects `persona` may publish on: every inbox for the human (to replay dead letters
+    /// as they were), else [`inbox_from`]; [`plan_from`]; and [`chan_from`].
+    pub fn sendable(persona: &PersonaId) -> [String; 3] {
         let inbox = if persona.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(persona) };
-        [inbox, plan_from(persona)]
+        [inbox, plan_from(persona), chan_from(persona)]
     }
 
-    /// Where a client on a leaf node puts an inbox or plan subject (or pattern) while the hub's stream is out of
-    /// reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]). `None` for other
-    /// subjects, which are not buffered.
+    /// Where a client on a leaf node puts an inbox, plan or channel subject (or pattern) while the hub's stream is out
+    /// of reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]). `None` for
+    /// other subjects, which are not buffered.
     pub fn outbox(subject: &str) -> Option<String> {
         let rest = subject.strip_prefix("ants.")?;
-        (rest.starts_with("inbox.") || rest.starts_with("plan.")).then(|| format!("ants.out.{rest}"))
+        ["inbox.", "plan.", "chan."].iter().any(|kind| rest.starts_with(kind)).then(|| format!("ants.out.{rest}"))
     }
 
     /// Everything the hub's intake ([`super::INTAKE_STREAM`]) took from the outbox of `machine`: the leaf's subjects,
@@ -343,6 +380,11 @@ pub mod subject {
     /// The roster entry of a persona: the subject its daemon puts [`super::RosterEntry`] on.
     pub fn roster(persona: &PersonaId) -> String {
         format!("$KV.{}.{persona}", super::ROSTER_BUCKET)
+    }
+
+    /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject the human puts [`super::ChannelEntry`] on.
+    pub fn channel_entry(channel: &ChannelId) -> String {
+        format!("$KV.{}.{channel}", super::CHANNELS_BUCKET)
     }
 
     /// Everything, for `ants watch`.
@@ -387,6 +429,18 @@ pub fn plan_consumer(persona: &PersonaId) -> String {
     format!("plan-{persona}")
 }
 
+/// Durable JetStream consumer a persona takes channel posts from, to be woken by those meant for it. Its filter is
+/// pinned under [`subject::ALL_CHANNELS`], so it cannot be pointed at an inbox.
+pub fn chan_consumer(persona: &PersonaId) -> String {
+    format!("chan-{persona}")
+}
+
+/// JetStream consumer a persona reads a channel (or a thread of it) back through, one read at a time, like
+/// [`plan_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too.
+pub fn chan_reader(persona: &PersonaId) -> String {
+    format!("chanread-{persona}")
+}
+
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
@@ -402,25 +456,32 @@ pub struct Permissions {
 impl Permissions {
     /// What the credentials of `persona` allow.
     ///
-    /// Any persona may write to every inbox and every plan room, but only as itself (the sender is the last token of
-    /// inbox and plan subjects). It speaks only for itself on status, approvals and dead letters, reads only its own inbox
-    /// (consumer and live), every plan room (live, and from the stream through its own plan consumer), its own replies and the decisions on its own approval requests, reads the roster to find
-    /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions and
-    /// attempts buckets. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and
-    /// upgrade the stream and create the roster, sessions and attempts buckets, and reads and removes dead letters by sequence; its inbox
-    /// consumer keeps the replies `ants inbox` has not shown yet. The human may send under any sender, to replay a dead
+    /// Any persona may write to every inbox, every plan room and every channel, but only as itself (the sender is the
+    /// last token of inbox, plan and channel subjects). It speaks only for itself on status, approvals and dead letters,
+    /// reads only its own inbox (consumer and live), every plan room (live, and from the stream through its own plan
+    /// consumer), every channel (live, and from the stream through its own channel consumer and reader), its own
+    /// replies and the decisions on its own approval requests, reads the roster to find personas by capability but
+    /// writes only its own entry, reads the channels bucket but never writes it, and reads and writes only its own keys
+    /// in the sessions and attempts buckets. The filter of each of its consumers is part of the subject that creates it,
+    /// so none can be pointed at another inbox: a consumer with several filters has none in that subject, so no persona
+    /// may create one. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and
+    /// upgrade the stream and create the roster, sessions, attempts and channels buckets, writes the channels bucket,
+    /// and reads and removes dead letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown
+    /// yet. The human may send under any sender, to replay a dead
     /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox. So
     /// only the human hears the max-deliveries advisories of the stream's consumers and stores the dead letters of the
     /// messages they name, on any persona's dead letter subject.
     ///
-    /// Each inbox and plan subject a persona may publish it may also publish in its outbox form
+    /// Each inbox, plan and channel subject a persona may publish it may also publish in its outbox form
     /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only the human sets up leaf outboxes and the hub's
     /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no persona
     /// may create or change one.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
         let plan = plan_consumer(persona);
+        let (chan, chan_read) = (chan_consumer(persona), chan_reader(persona));
         let roster_stream = kv_stream(ROSTER_BUCKET);
+        let channels = kv_stream(CHANNELS_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         let sendable = subject::sendable(persona);
@@ -439,12 +500,24 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{plan}.{}", subject::ALL_PLANS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{plan}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{plan}"),
+            // Channel posts: its durable consumer, and reading channels back; both only ever filter channel subjects.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan}.{}", subject::ALL_CHANNELS),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan}"),
+            format!("$JS.ACK.{STREAM}.{chan}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan_read}.{}", subject::ALL_CHANNELS),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan_read}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
             format!("$JS.API.STREAM.INFO.{sessions}"),
             format!("$JS.API.STREAM.INFO.{attempts}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
             format!("$JS.FC.{roster_stream}.>"),
+            // Reading the channels the same way.
+            format!("$JS.API.STREAM.INFO.{channels}"),
+            format!("$JS.API.DIRECT.GET.{channels}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{channels}"),
+            format!("$JS.FC.{channels}.>"),
         ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
@@ -455,6 +528,9 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
                 format!("$JS.API.STREAM.CREATE.{attempts}"),
+                format!("$JS.API.STREAM.CREATE.{channels}"),
+                // Put and delete of every channel's entry.
+                format!("$KV.{CHANNELS_BUCKET}.>"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
@@ -490,6 +566,7 @@ impl Permissions {
             ]);
             subscribe.extend([
                 subject::ALL_PLANS.to_owned(),
+                subject::ALL_CHANNELS.to_owned(),
                 format!("{}.*", subject::approvals(persona)),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(persona),
@@ -532,14 +609,14 @@ impl Permissions {
     /// carries a reply across a leaf connection only if the leaf may publish it: the interest behind it reaches the
     /// leaf only then.
     ///
-    /// For each pattern of a persona's inbox and plan subjects, which has a wildcard before the sender, the uplink
-    /// also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
+    /// For each pattern of a persona's inbox, plan and channel subjects, which has a wildcard before the sender, the
+    /// uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
     /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
     pub fn for_leaf<'a>(machine: &Machine, personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         for persona in personas {
             let Self { publish, subscribe } = Self::for_persona(persona);
-            // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.plan.>`) cross the uplink only if
+            // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.plan.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
             let found = subject::sendable(persona).map(|s| s.replace('*', persona.as_str()));
@@ -775,6 +852,209 @@ impl PlanPost {
             subject: subject.to_owned(),
             from: self.from.clone(),
             thread: self.thread_id.clone(),
+        })
+    }
+}
+
+/// The personas `text` @mentions, in the order of their first mention.
+///
+/// A mention is `@` and a persona id, with the `@` at the start of the text or after whitespace or an opening bracket
+/// or quote, so an address such as `a@b` mentions nobody. Punctuation after the id (`,.:;!?)` and the like) ends it;
+/// a letter, `_`, `@` or a dot followed by a letter or digit (`@host.example`) means it was no persona id.
+pub fn parse_mentions(text: &str) -> Vec<PersonaId> {
+    let mut found: Vec<PersonaId> = Vec::new();
+    let mut prev: Option<char> = None;
+    for (i, c) in text.char_indices() {
+        if c == '@' && prev.is_none_or(|p| p.is_whitespace() || "([{<\"'`".contains(p)) {
+            let rest = &text[i + 1..];
+            let end =
+                rest.find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')).unwrap_or(rest.len());
+            let (name, after) = rest.split_at(end);
+            let mut after = after.chars();
+            let glued = match after.next() {
+                Some(c) if c.is_alphanumeric() || c == '_' || c == '@' => true,
+                Some('.') => after.next().is_some_and(char::is_alphanumeric),
+                _ => false,
+            };
+            if !glued
+                && let Ok(id) = name.parse::<PersonaId>()
+                && !found.contains(&id)
+            {
+                found.push(id);
+            }
+        }
+        prev = Some(c);
+    }
+    found
+}
+
+/// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Only the human writes it.
+///
+/// Readers should treat unknown fields as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelEntry {
+    pub channel: ChannelId,
+    /// The personas in the channel, in the order they were added.
+    #[serde(default)]
+    pub members: Vec<PersonaId>,
+    /// The persona that triages the human's posts that @mention nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messenger: Option<PersonaId>,
+}
+
+impl ChannelEntry {
+    /// A channel without members or messenger.
+    pub fn new(channel: ChannelId) -> Self {
+        Self { channel, members: Vec::new(), messenger: None }
+    }
+
+    /// The KV key of the entry.
+    pub fn key(&self) -> &str {
+        self.channel.as_str()
+    }
+
+    /// Check that the entry was read from its own key; a reader skips one naming another channel.
+    pub fn check_key(&self, key: &str) -> Result<(), Error> {
+        if key == self.key() {
+            return Ok(());
+        }
+        Err(Error::ForeignChannel { kind: "channel entry", channel: self.channel.clone(), at: format!("key {key}") })
+    }
+
+    pub fn is_member(&self, persona: &PersonaId) -> bool {
+        self.members.contains(persona)
+    }
+
+    /// Add `persona` after the other members; false when it already is one.
+    pub fn add_member(&mut self, persona: PersonaId) -> bool {
+        if self.is_member(&persona) {
+            return false;
+        }
+        self.members.push(persona);
+        true
+    }
+
+    /// Remove `persona` from the members; false when it was none.
+    pub fn remove_member(&mut self, persona: &PersonaId) -> bool {
+        let before = self.members.len();
+        self.members.retain(|m| m != persona);
+        self.members.len() != before
+    }
+
+    /// The personas `post` wakes: the members it @mentions, except its author and the human. A post of the human that
+    /// mentions nobody wakes the channel's messenger instead, to triage it; an agent's post that mentions nobody wakes
+    /// nobody. A post to another channel wakes nobody here.
+    pub fn woken(&self, post: &ChannelPost) -> Vec<PersonaId> {
+        if post.channel != self.channel {
+            return Vec::new();
+        }
+        if post.mentions.is_empty() {
+            return match &self.messenger {
+                Some(messenger) if post.from.is_human() => vec![messenger.clone()],
+                _ => Vec::new(),
+            };
+        }
+        post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !m.is_human()).cloned().collect()
+    }
+}
+
+/// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
+/// post on an existing thread.
+///
+/// Posts spend the thread's turn budget like messages between agents do: an agent's post that @mentions another agent
+/// wakes it and spends a turn ([`ChannelPost::spend`]); the human's posts carry a fresh budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPost {
+    pub id: Uuid,
+    pub channel: ChannelId,
+    /// The thread the post is on. A top-level post starts a thread with its own id ([`ChannelPost::starts_thread`]).
+    pub thread_id: ThreadId,
+    pub from: PersonaId,
+    pub text: String,
+    /// The personas the post @mentions, in order ([`parse_mentions`] of the text, when built here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<PersonaId>,
+    /// Agent-to-agent turns left on the thread after this post.
+    pub turn_budget: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<Uuid>,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl ChannelPost {
+    /// A top-level post with a fresh budget: it starts a new thread, whose id is the post's own.
+    pub fn new(channel: ChannelId, from: PersonaId, text: impl Into<String>) -> Self {
+        let id = Uuid::now_v7();
+        Self::build(id, channel, ThreadId(id.to_string()), from, text.into())
+    }
+
+    /// A post on an existing thread, with a fresh budget, as the human posts.
+    pub fn on_thread(channel: ChannelId, thread_id: ThreadId, from: PersonaId, text: impl Into<String>) -> Self {
+        Self::build(Uuid::now_v7(), channel, thread_id, from, text.into())
+    }
+
+    fn build(id: Uuid, channel: ChannelId, thread_id: ThreadId, from: PersonaId, text: String) -> Self {
+        Self {
+            id,
+            channel,
+            thread_id,
+            mentions: parse_mentions(&text),
+            from,
+            text,
+            turn_budget: DEFAULT_TURN_BUDGET,
+            in_reply_to: None,
+            sent_at: Utc::now(),
+        }
+    }
+
+    /// The post as an agent's, with what is left of `budget` (the turns of the message the agent is handling): one
+    /// turn less when the post wakes another agent ([`ChannelPost::wakes_agents`]), which fails when none are left.
+    pub fn spend(self, budget: u32) -> Result<Self, Error> {
+        let turn_budget = if self.wakes_agents() {
+            budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?
+        } else {
+            budget
+        };
+        Ok(Self { turn_budget, ..self })
+    }
+
+    /// A reply on the same channel and thread. The human's has a fresh budget; an agent's spends from this post's as
+    /// [`ChannelPost::spend`] does.
+    pub fn reply(&self, from: PersonaId, text: impl Into<String>) -> Result<Self, Error> {
+        let mut reply = Self::on_thread(self.channel.clone(), self.thread_id.clone(), from, text);
+        reply.in_reply_to = Some(self.id);
+        if reply.from.is_human() { Ok(reply) } else { reply.spend(self.turn_budget) }
+    }
+
+    /// Whether the post is a top-level one, which started its thread.
+    pub fn starts_thread(&self) -> bool {
+        self.thread_id.as_str() == self.id.to_string()
+    }
+
+    /// Whether the post @mentions `persona`.
+    pub fn mentions(&self, persona: &PersonaId) -> bool {
+        self.mentions.contains(persona)
+    }
+
+    /// Whether the post @mentions a persona other than its author and the human: an agent it would wake.
+    pub fn wakes_agents(&self) -> bool {
+        self.mentions.iter().any(|m| *m != self.from && !m.is_human())
+    }
+
+    pub fn subject(&self) -> String {
+        subject::chan(&self.channel, &self.from)
+    }
+
+    /// Check that the post arrived on its own [`ChannelPost::subject`]. Credentials pin the sender token of a channel
+    /// subject, so a `from` that disagrees with it is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::WrongChannelSubject {
+            subject: subject.to_owned(),
+            from: self.from.clone(),
+            channel: self.channel.clone(),
         })
     }
 }
@@ -1129,9 +1409,10 @@ mod tests {
         assert_eq!(
             extra,
             [
-                // Already allowed by `ants.inbox.*.dev-a` and `ants.plan.*.dev-a`.
+                // Already allowed by `ants.inbox.*.dev-a`, `ants.plan.*.dev-a` and `ants.chan.*.dev-a`.
                 "ants.inbox.dev-a.dev-a",
                 "ants.plan.dev-a.dev-a",
+                "ants.chan.dev-a.dev-a",
                 "$JS.S.m1.>",
                 "$JSC.R.m1.*.ANTS_OUT.>",
                 "_INBOX.human.leaf.m1.>"
@@ -1151,19 +1432,22 @@ mod tests {
     }
 
     #[test]
-    fn outboxes_take_inbox_and_plan_subjects_only() {
+    fn outboxes_take_inbox_plan_and_channel_subjects_only() {
         let t: ThreadId = "t1".parse().unwrap();
+        let c: ChannelId = "ops".parse().unwrap();
         assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
         assert_eq!(subject::outbox(&subject::plan(&t, &p("dev-a"))).unwrap(), "ants.out.plan.t1.dev-a");
+        assert_eq!(subject::outbox(&subject::chan(&c, &p("dev-a"))).unwrap(), "ants.out.chan.ops.dev-a");
         for other in [subject::dead(&p("dev-a")), subject::approvals(&p("dev-a")), "ants.outbox.x".to_owned()] {
             assert_eq!(subject::outbox(&other), None, "{other}");
         }
         let a = Permissions::for_persona(&p("dev-a"));
-        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a"] {
+        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a", "ants.out.chan.*.dev-a"] {
             assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
         }
         let human = Permissions::for_persona(&PersonaId::human());
         assert!(human.publish.iter().any(|s| s == "ants.out.inbox.>"));
+        assert!(human.publish.iter().any(|s| s == "ants.out.chan.*.human"));
     }
 
     #[test]
@@ -1174,13 +1458,15 @@ mod tests {
             [
                 ("ants.in.m1.ants.out.inbox.*.dev-a".to_owned(), "ants.inbox.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.plan.*.dev-a".to_owned(), "ants.plan.{{wildcard(1)}}.dev-a".to_owned()),
+                ("ants.in.m1.ants.out.chan.*.dev-a".to_owned(), "ants.chan.{{wildcard(1)}}.dev-a".to_owned()),
             ]
         );
         assert_eq!(
             m1.admitted(&PersonaId::human(), true)[0],
             ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned())
         );
-        assert_eq!(m1.admitted(&p("dev-a"), false).len(), 1, "plan posts only");
+        let posts: Vec<_> = m1.admitted(&p("dev-a"), false).into_iter().map(|(filter, _)| filter).collect();
+        assert_eq!(posts, ["ants.in.m1.ants.out.plan.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a"], "posts only");
         assert_eq!(subject::intake(&m1), "ants.in.m1.>");
     }
 
@@ -1292,6 +1578,155 @@ mod tests {
         for bad in ["ants.plan.t1", "ants.plan.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.plan.t1.*"] {
             assert_eq!(subject::parse_plan(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn channel_subjects_name_the_channel_and_the_sender() {
+        let c: ChannelId = "ops".parse().unwrap();
+        assert_eq!(subject::chan(&c, &p("dev-a")), "ants.chan.ops.dev-a");
+        assert_eq!(subject::chan_room(&c), "ants.chan.ops.*");
+        assert_eq!(subject::chan_from(&p("dev-a")), "ants.chan.*.dev-a");
+        assert_eq!(subject::parse_chan("ants.chan.ops.dev-a"), Some((c.clone(), p("dev-a"))));
+        for bad in
+            ["ants.chan.ops", "ants.chan.ops.dev-a.x", "ants.plan.ops.dev-a", "ants.chan.ops.*", "ants.chan.Ops.a"]
+        {
+            assert_eq!(subject::parse_chan(bad), None, "{bad}");
+        }
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_CHANNELS), "channel posts are durable");
+        assert_eq!(subject::channel_entry(&c), "$KV.ants_channels.ops");
+        assert_eq!(
+            (chan_consumer(&p("dev-a")), chan_reader(&p("dev-a"))),
+            ("chan-dev-a".into(), "chanread-dev-a".into())
+        );
+        for bad in ["", "a.b", "*", ">", "Ops", "-ops", &"x".repeat(65)] {
+            assert!(bad.parse::<ChannelId>().is_err(), "{bad:?} should be rejected");
+        }
+        assert!(serde_json::from_str::<ChannelId>(r#""a.b""#).is_err());
+    }
+
+    #[test]
+    fn channel_posts_start_threads_and_are_checked_against_their_subject() {
+        let c: ChannelId = "ops".parse().unwrap();
+        let top = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a, @dev-b: deploy? cc @dev-a");
+        assert!(top.starts_thread());
+        assert_eq!(top.thread_id.as_str(), top.id.to_string());
+        assert_eq!(top.mentions, [p("dev-a"), p("dev-b")]);
+        assert!(top.mentions(&p("dev-b")) && !top.mentions(&p("dev-c")));
+        assert_eq!((top.turn_budget, top.in_reply_to), (DEFAULT_TURN_BUDGET, None));
+        assert_eq!(top.subject(), "ants.chan.ops.human");
+        assert_eq!(subject::parse_chan(&top.subject()), Some((c.clone(), PersonaId::human())));
+        assert_eq!(top.check_subject("ants.chan.ops.human"), Ok(()));
+        let err = top.check_subject("ants.chan.ops.dev-a").unwrap_err();
+        assert_eq!(err.to_string(), "channel post from human in channel ops arrived on ants.chan.ops.dev-a");
+        assert!(top.check_subject("ants.chan.dev.human").is_err(), "posted to another channel");
+
+        let two = ChannelPost::new(c.clone(), PersonaId::human(), "and this");
+        assert_ne!(two.thread_id, top.thread_id, "each top-level post starts its own thread");
+        assert!(two.mentions.is_empty());
+        let on = ChannelPost::on_thread(c.clone(), top.thread_id.clone(), PersonaId::human(), "more");
+        assert!(!on.starts_thread());
+        assert_eq!(on.thread_id, top.thread_id);
+
+        let json = serde_json::to_string(&two).unwrap();
+        assert!(!json.contains("mentions") && !json.contains("in_reply_to"), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), two);
+        let json = serde_json::to_string(&top).unwrap();
+        assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), top);
+    }
+
+    #[test]
+    fn agent_channel_posts_spend_a_turn_only_to_wake_another_agent() {
+        let c: ChannelId = "ops".parse().unwrap();
+        let ask = ChannelPost::new(c.clone(), PersonaId::human(), "@dev-a deploy?");
+        let answer = ask.reply(p("dev-a"), "done, @human").unwrap();
+        assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
+        assert_eq!(answer.in_reply_to, Some(ask.id));
+        assert_eq!(answer.turn_budget, ask.turn_budget, "waking nobody spends nothing");
+        let mut handoff = ask.reply(p("dev-a"), "@dev-b check it; @dev-a will wait").unwrap();
+        assert_eq!(handoff.turn_budget, DEFAULT_TURN_BUDGET - 1);
+        handoff.turn_budget = 1;
+        let back = handoff.reply(p("dev-b"), "@dev-a fine").unwrap();
+        assert_eq!(back.turn_budget, 0);
+        assert_eq!(back.reply(p("dev-a"), "@dev-b again"), Err(Error::BudgetExhausted(ask.thread_id.clone())));
+        assert_eq!(back.reply(p("dev-a"), "@human over to you").unwrap().turn_budget, 0);
+        let human = back.reply(PersonaId::human(), "@dev-a @dev-b go on").unwrap();
+        assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
+        let own = ChannelPost::new(c, p("dev-a"), "@dev-b status?").spend(3).unwrap();
+        assert!(own.starts_thread());
+        assert_eq!(own.turn_budget, 2);
+    }
+
+    #[test]
+    fn mentions_are_persona_ids_after_an_at_sign_that_starts_a_word() {
+        let ids = |text: &str| parse_mentions(text).into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(ids("@dev-a"), ["dev-a"]);
+        assert_eq!(
+            ids("hey @dev-a, @dev-b. @ops2: (@qa) @rev! @x?; @y;"),
+            ["dev-a", "dev-b", "ops2", "qa", "rev", "x", "y"]
+        );
+        assert_eq!(ids("@dev-b then @dev-a then @dev-b"), ["dev-b", "dev-a"], "first-seen order, no duplicates");
+        assert_eq!(ids("\"@dev-a\" [@dev-b] <@dev-c>\n\t@dev-d's"), ["dev-a", "dev-b", "dev-c", "dev-d"]);
+        assert!(ids("mail a@b or q.le@outlook.com").is_empty(), "addresses mention nobody");
+        assert!(ids("@host.example @Dev @dev_a @a@b @ @@dev-a @-x").is_empty());
+        assert_eq!(ids(&format!("@{} @ok", "x".repeat(65))), ["ok"]);
+        assert_eq!(ids("end @dev-a."), ["dev-a"]);
+    }
+
+    #[test]
+    fn channel_entries_list_members_and_wake_those_mentioned() {
+        let c: ChannelId = "ops".parse().unwrap();
+        let mut entry = ChannelEntry::new(c.clone());
+        assert!(entry.add_member(p("dev-a")) && entry.add_member(p("dev-b")) && entry.add_member(p("dev-c")));
+        assert!(!entry.add_member(p("dev-a")), "already a member");
+        assert!(entry.remove_member(&p("dev-c")) && !entry.remove_member(&p("dev-c")));
+        assert_eq!(entry.members, [p("dev-a"), p("dev-b")]);
+        assert!(entry.is_member(&p("dev-a")) && !entry.is_member(&p("dev-c")));
+        assert_eq!(entry.key(), "ops");
+        assert_eq!(entry.check_key("ops"), Ok(()));
+        assert_eq!(entry.check_key("dev").unwrap_err().to_string(), "channel entry of channel ops found at key dev");
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("messenger"), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelEntry>(&json).unwrap(), entry);
+        let minimal: ChannelEntry = serde_json::from_str(r#"{"channel":"ops","topic":"new"}"#).unwrap();
+        assert_eq!(minimal, ChannelEntry::new(c.clone()));
+
+        let human = PersonaId::human();
+        let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
+        assert!(entry.woken(&untagged).is_empty(), "no messenger to triage");
+        entry.messenger = Some(PersonaId::messenger());
+        assert_eq!(entry.woken(&untagged), [PersonaId::messenger()]);
+        assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?")).is_empty(), "agents never fan out");
+        let tagged = ChannelPost::new(c.clone(), p("dev-a"), "@dev-b @dev-c @dev-a @human look");
+        assert_eq!(entry.woken(&tagged), [p("dev-b")], "members only, not the author or the human");
+        assert!(entry.woken(&ChannelPost::new("dev".parse().unwrap(), human, "@dev-a")).is_empty());
+    }
+
+    #[test]
+    fn channels_are_readable_by_personas_and_written_by_the_human_only() {
+        let a = Permissions::for_persona(&p("dev-a"));
+        for s in [
+            "ants.chan.*.dev-a",
+            "ants.out.chan.*.dev-a",
+            "$JS.API.STREAM.INFO.KV_ants_channels",
+            "$JS.API.DIRECT.GET.KV_ants_channels.>",
+            "$JS.API.CONSUMER.CREATE.KV_ants_channels",
+            "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a.ants.chan.>",
+            "$JS.API.CONSUMER.CREATE.ANTS.chanread-dev-a.ants.chan.>",
+            "$JS.ACK.ANTS.chan-dev-a.>",
+        ] {
+            assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
+        }
+        assert!(a.subscribe.iter().any(|s| s == subject::ALL_CHANNELS));
+        assert!(!a.publish.iter().any(|s| s.contains("$KV.ants_channels") || s.contains("CREATE.KV_ants_channels.")));
+        assert!(!a.publish.iter().any(|s| s == "ants.chan.>" || s == "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a"));
+        let human = Permissions::for_persona(&PersonaId::human());
+        for s in ["ants.chan.*.human", "$KV.ants_channels.>", "$JS.API.STREAM.CREATE.KV_ants_channels"] {
+            assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+        }
+        let domain: JsDomain = "hub".parse().unwrap();
+        let in_domain = human.with_js_domain(Some(&domain));
+        assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_channels.>"));
     }
 
     #[test]
