@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
+use ants_proto::{PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::Utc;
@@ -89,6 +89,21 @@ pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
     Ok(entries)
 }
 
+/// Whether `entry` advertises `capability`. Tags compare whole, ignoring case and surrounding space.
+pub fn has_capability(entry: &RosterEntry, capability: &str) -> bool {
+    let capability = capability.trim();
+    entry.capabilities.iter().any(|c| c.trim().eq_ignore_ascii_case(capability))
+}
+
+/// The persona a request needing `capability` goes to: of the entries other than `asking` that advertise it, the
+/// first by persona id, so the same roster always gives the same answer.
+pub fn pick<'a>(entries: &'a [RosterEntry], capability: &str, asking: &PersonaId) -> Option<&'a RosterEntry> {
+    entries
+        .iter()
+        .filter(|e| &e.persona != asking && has_capability(e, capability))
+        .min_by(|a, b| a.persona.cmp(&b.persona))
+}
+
 async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {
     kv.put(entry.key(), serde_json::to_vec(entry)?.into()).await?;
     Ok(())
@@ -107,4 +122,39 @@ async fn machine() -> String {
         _ => {}
     }
     std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(persona: &str, capabilities: &[&str]) -> RosterEntry {
+        let now = Utc::now();
+        RosterEntry {
+            persona: persona.parse().unwrap(),
+            machine: "m".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+        }
+    }
+
+    #[test]
+    fn pick_is_the_first_other_persona_with_the_whole_tag() {
+        let entries = [
+            entry("ops", &["rust-ops"]),
+            entry("dev-c", &[" Rust "]),
+            entry("dev-b", &["rust"]),
+            entry("dev-a", &["rust"]),
+        ];
+        let me: PersonaId = "dev-a".parse().unwrap();
+        let picked = |capability| pick(&entries, capability, &me).map(|e| e.persona.as_str());
+        assert_eq!(picked("rust"), Some("dev-b"));
+        assert_eq!(picked("RUST "), Some("dev-b"));
+        assert_eq!(picked("rust-ops"), Some("ops"));
+        assert_eq!(picked("ops"), None, "tags match whole, not in part");
+        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap()).map(|e| e.persona.as_str()), Some("dev-a"));
+    }
 }

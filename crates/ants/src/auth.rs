@@ -356,7 +356,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn personas_write_their_own_roster_entry_and_the_human_reads_the_roster() {
+    async fn personas_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a) = (PersonaId::human(), p("dev-a"));
         let ttl = ants_proto::ROSTER_TTL;
@@ -380,7 +380,10 @@ pub(crate) mod tests {
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
         assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
-        assert!(a_kv.get("dev-a").await.is_err(), "personas do not read the roster");
+        // Personas read the roster, to route requests by capability.
+        let (_b, b_js) = server.connect(&p("dev-b")).await;
+        let b_kv = bus::ensure_roster(&b_js, ttl).await.unwrap();
+        assert_eq!(ants_daemon::roster::list_entries(&b_kv).await.unwrap(), std::slice::from_ref(&entry));
 
         let listed: RosterEntry = serde_json::from_slice(&h_kv.get("dev-a").await.unwrap().unwrap()).unwrap();
         assert_eq!(listed, entry);
