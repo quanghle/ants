@@ -92,6 +92,26 @@ Add `include "/path/to/server.conf"` to the nats-server configuration (with JetS
 with the human's credentials to create the stream, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 
+## Footprint
+
+An idle daemon serving one persona stays under 20 MB resident memory. `scripts/footprint.sh` checks it: it starts a
+throwaway `nats-server -js` and `ants daemon`, samples the daemon's RSS with `ps`, and fails at or above the limit
+(`--max-mb`, default 20). CI runs it on Linux and macOS. `--ask "reply with ok"` also measures one live harness
+session, which runs the real harness.
+
+```sh
+scripts/footprint.sh --port 14722                     # idle
+scripts/footprint.sh --port 14722 --ask "reply with ok"
+```
+
+Measured with ants 0.1.0 (release build), nats-server 2.15.3:
+
+| | Linux x86_64 | macOS arm64 |
+|---|---|---|
+| Idle daemon | 5.9 MB | 8.5 MB |
+| Daemon with one Copilot session | not measured | 10.5 MB (+2.0 MB) |
+| Copilot CLI harness processes | not measured | 255 MB |
+
 ## Layout
 
 | Crate | Role |

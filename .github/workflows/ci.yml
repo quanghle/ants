@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NATS_SERVER_VERSION: v2.15.3
+  BD_VERSION: v0.8.0
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Tests that need nats-server or bd skip without them; installing both runs them.
+      - name: Install nats-server and bd
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) target=linux-amd64 ;;
+            Linux-aarch64) target=linux-arm64 ;;
+            Darwin-arm64) target=darwin-arm64 ;;
+            Darwin-x86_64) target=darwin-amd64 ;;
+            *) echo "unsupported runner: $(uname -sm)" >&2; exit 1 ;;
+          esac
+          name=nats-server-$NATS_SERVER_VERSION-$target
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/$NATS_SERVER_VERSION/$name.tar.gz" \
+            | tar xz -C "$HOME/.local/bin" --strip-components=1 "$name/nats-server"
+          curl -fsSL https://raw.githubusercontent.com/quanghle/bd-sync/main/scripts/install.sh \
+            | BD_INSTALL_DIR="$HOME/.local/bin" sh -s -- --version "$BD_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+
+      - name: Footprint (idle antsd under 20 MB RSS)
+        run: scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 20
