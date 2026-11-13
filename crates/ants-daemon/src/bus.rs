@@ -79,6 +79,28 @@ pub async fn inbox_consumer(
     Ok(consumer.messages().await?)
 }
 
+/// The durable consumer of the human's inbox, created if missing. A reply stays in it, unread, until acked. Any number
+/// may be outstanding and none is ever given up on, so a reply shown without being marked read never expires.
+pub async fn human_inbox_consumer(stream: &stream::Stream, ack_wait: Duration) -> Result<PullConsumer> {
+    let human = PersonaId::human();
+    let name = ants_proto::inbox_consumer(&human);
+    stream
+        .get_or_create_consumer(
+            &name,
+            pull::Config {
+                durable_name: Some(name.clone()),
+                filter_subject: subject::inbox(&human),
+                ack_policy: consumer::AckPolicy::Explicit,
+                ack_wait,
+                max_deliver: -1,
+                max_ack_pending: -1,
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("creating consumer {name}"))
+}
+
 /// Publish an envelope and wait until JetStream has stored it.
 pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<()> {
     let payload = serde_json::to_vec(envelope)?;

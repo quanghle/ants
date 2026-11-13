@@ -157,25 +157,25 @@ impl Permissions {
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status and approvals, reads
     /// only its own inbox consumer and its own replies. The human (the CLI user) also watches all ants traffic and
-    /// may create the stream; it runs no inbox consumer.
+    /// may create the stream; its inbox consumer keeps the replies `ants inbox` has not shown yet.
     pub fn for_persona(persona: &PersonaId) -> Self {
-        let mut publish =
-            vec!["ants.inbox.*".to_owned(), "ants.plan.>".to_owned(), format!("$JS.API.STREAM.INFO.{STREAM}")];
+        let consumer = inbox_consumer(persona);
+        let mut publish = vec![
+            "ants.inbox.*".to_owned(),
+            "ants.plan.>".to_owned(),
+            format!("$JS.API.STREAM.INFO.{STREAM}"),
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
+            // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox(persona)),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+            format!("$JS.ACK.{STREAM}.{consumer}.>"),
+        ];
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
             publish.push(format!("$JS.API.STREAM.CREATE.{STREAM}"));
             subscribe.push(subject::ALL.to_owned());
         } else {
-            let consumer = inbox_consumer(persona);
-            publish.extend([
-                subject::approvals(persona),
-                format!("ants.status.{persona}.*"),
-                format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
-                // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
-                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox(persona)),
-                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
-                format!("$JS.ACK.{STREAM}.{consumer}.>"),
-            ]);
+            publish.extend([subject::approvals(persona), format!("ants.status.{persona}.*")]);
             subscribe.push("ants.plan.>".to_owned());
         }
         Self { publish, subscribe }

@@ -125,6 +125,7 @@ dependencies = [
  "ants-proto",
  "anyhow",
  "async-nats",
+ "chrono",
  "clap",
  "data-encoding",
  "futures",

@@ -149,9 +149,9 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::net::{TcpListener, TcpStream};
+pub(crate) mod tests {
     use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use ants_daemon::bus;
@@ -166,7 +166,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(5);
 
     /// A nats-server trusting a fresh team, in a temporary directory removed on drop.
-    struct Server {
+    pub(crate) struct Server {
         child: Child,
         dir: PathBuf,
         url: String,
@@ -182,21 +182,24 @@ mod tests {
 
     impl Server {
         /// None when nats-server is not installed.
-        fn start() -> Option<Self> {
+        pub(crate) fn start() -> Option<Self> {
             if Command::new("nats-server").arg("--version").output().is_err() {
                 eprintln!("nats-server not on PATH; skipping");
                 return None;
             }
-            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-            let dir = std::env::temp_dir().join(format!("ants-auth-{}-{nanos}", std::process::id()));
+            static SERVERS: AtomicUsize = AtomicUsize::new(0);
+            let n = SERVERS.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("ants-auth-{}-{n}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
             init(&dir.join("auth")).unwrap();
-            let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
             let conf = dir.join("nats.conf");
             let store = dir.join("js");
+            // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
             fs::write(
                 &conf,
                 format!(
-                    "listen: 127.0.0.1:{port}\njetstream {{ store_dir: {store:?} }}\ninclude \"auth/{SERVER_CONF}\"\n"
+                    "listen: 127.0.0.1:-1\nports_file_dir: {dir:?}\njetstream {{ store_dir: {store:?} }}\n\
+                     include \"auth/{SERVER_CONF}\"\n"
                 ),
             )
             .unwrap();
@@ -207,9 +210,15 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            let server = Self { child, dir, url: format!("nats://127.0.0.1:{port}") };
+            let ports = dir.join(format!("nats-server_{}.ports", child.id()));
+            let mut server = Self { child, dir, url: String::new() };
             for _ in 0..50 {
-                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                let url = fs::read_to_string(&ports).ok().and_then(|json| {
+                    let ports: Value = serde_json::from_str(&json).ok()?;
+                    Some(ports["nats"][0].as_str()?.to_owned())
+                });
+                if let Some(url) = url {
+                    server.url = url;
                     return Some(server);
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -223,7 +232,7 @@ mod tests {
             out
         }
 
-        async fn connect(&self, persona: &PersonaId) -> (Client, jetstream::Context) {
+        pub(crate) async fn connect(&self, persona: &PersonaId) -> (Client, jetstream::Context) {
             let (client, mut js) = bus::connect(&self.url, Some(&self.creds(persona)), persona, "test").await.unwrap();
             // Denied JetStream requests only time out.
             js.set_timeout(Duration::from_secs(1));
