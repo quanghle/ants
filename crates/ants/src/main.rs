@@ -90,7 +90,8 @@ enum Command {
     Init,
     /// Tool requests personas escalate: list the pending ones, show one, or answer it.
     Approve {
-        /// Request id, or a unique start of it. Without it, list the pending requests.
+        /// Request as `<persona>/<id>`, or a bare id when only one persona has it; a unique start of the id will do.
+        /// Without it, list the pending requests.
         id: Option<String>,
         /// Answer the request. Without it, show the request.
         #[arg(requires = "id")]

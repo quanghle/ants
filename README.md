@@ -203,11 +203,15 @@ it for the session) or `reject`; no decision in time rejects the request. `--all
 trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ```sh
-ants approve                        # pending requests: id, persona, thread, tool, files, options, time left
-ants approve --follow               # then keep printing new ones until Ctrl-C (--json: one request per line)
-ants approve 019a7d2e               # one request in full, with the tool input; a unique start of the id will do
-ants approve 019a7d2e allow-once    # answer it: allow-once, allow-always or reject
+ants approve                              # pending requests: persona/id, thread, tool, files, options, time left
+ants approve --follow                     # then keep printing new ones until Ctrl-C (--json: one request per line)
+ants approve dev-a/019a7d2e               # one request in full, with the tool input; a unique start of the id will do
+ants approve dev-a/019a7d2e allow-once    # answer it: allow-once, allow-always or reject
 ```
+
+A request is named `<persona>/<id>`. Ids are unique only per persona, as any persona may publish a request reusing
+another's id, so the persona picks among requests sharing an id. A bare id (or start of one) still works when it
+matches a single request; when it matches several, the command lists their `<persona>/<id>` names and answers none.
 
 A request is pending until it has a decision or expires; both requests and decisions are read back from the stream,
 so requests made while no CLI was running show up too. Answering stores the decision in the stream before returning,
