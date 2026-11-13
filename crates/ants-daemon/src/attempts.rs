@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{ChannelPost, Envelope, PersonaId, ThreadId, Uuid, attempt_key};
+use ants_proto::{ChannelPost, Envelope, PersonaId, PlanPost, ThreadId, Uuid, attempt_key};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
@@ -29,12 +29,14 @@ pub enum Marker {
     Replied(Reply),
 }
 
-/// The reply to a message: an envelope to its sender, or a post on the thread of a channel post.
+/// The reply to a message: an envelope to its sender, a post on the thread of a channel post, or a post to the plan
+/// room of a thread, as a member of an escalation group other than its leader answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Reply {
     Message(Envelope),
     Post(ChannelPost),
+    Plan(PlanPost),
 }
 
 impl Reply {
@@ -42,6 +44,7 @@ impl Reply {
         match self {
             Self::Message(envelope) => envelope.subject(),
             Self::Post(post) => post.subject(),
+            Self::Plan(post) => post.subject(),
         }
     }
 
@@ -49,6 +52,7 @@ impl Reply {
         match self {
             Self::Message(envelope) => &envelope.thread_id,
             Self::Post(post) => &post.thread_id,
+            Self::Plan(post) => &post.thread_id,
         }
     }
 }

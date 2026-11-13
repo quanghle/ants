@@ -8,7 +8,12 @@
 //! roster publishes. With no chain, a chain that loops back or past `max_escalation_hops`, it goes to the thread's
 //! owner, else the default human, as it did before chains. Only a human's message ends an escalation.
 //!
-//! Without an answer from the leader within `escalate_after`, the persona that escalated sends it one level higher
+//! Each level that goes up a chain posts to the thread's plan room with a fresh turn budget, so the members have turns
+//! to coordinate there even when the room ran out. A member's prompt says who leads ([`group_note`]); the leader's
+//! reply goes to the stuck persona, a non-leader's to the plan room. A member that sends the escalation one level
+//! higher also tells the stuck persona, whose daemon takes that level as the thread's ([`Escalator::took_climb`]).
+//!
+//! Without an answer from the leader within `escalate_after`, the stuck persona sends it one level higher
 //! ([`Escalator::deadlines`]). The thread's escalation lives with its spend in `ants_sessions` ([`Pending`]), so
 //! restarts keep its level and deadline.
 
@@ -17,7 +22,7 @@ use std::time::Duration;
 
 use ants_proto::{
     DEFAULT_MAX_ESCALATION_HOPS, DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Hop, OwnerBecause,
-    PersonaId, ThreadId,
+    PersonaId, PlanPost, ThreadId,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -44,6 +49,17 @@ pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();
         Box::pin(async move { bus::store(&js, envelope.subject(), &envelope, &id).await.map(drop) })
+    })
+}
+
+/// Stores a plan post under a message id, resolving once JetStream has it.
+pub type PlanSender = Arc<dyn Fn(PlanPost, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
+/// Stores plan posts through JetStream ([`bus::store`]).
+pub fn jetstream_plan_sender(js: async_nats::jetstream::Context) -> PlanSender {
+    Arc::new(move |post, id| {
+        let js = js.clone();
+        Box::pin(async move { bus::store(&js, post.subject(), &post, &id).await.map(drop) })
     })
 }
 
@@ -116,6 +132,8 @@ pub struct Escalator {
     humans: Registry,
     ledger: Arc<Ledger>,
     send: Sender,
+    /// Gives the thread's plan room a fresh budget as an escalation goes up a level; None leaves the room as it is.
+    plan: Option<PlanSender>,
     /// Held while an escalation is decided and stored, so two on one thread do not climb from the same level.
     busy: Mutex<()>,
     /// A deadline was set.
@@ -132,7 +150,13 @@ impl Escalator {
         ledger: Arc<Ledger>,
         send: Sender,
     ) -> Self {
-        Self { persona, chain, roster, humans, ledger, send, busy: Mutex::default(), deadline_set: Notify::new() }
+        let (busy, deadline_set) = (Mutex::default(), Notify::new());
+        Self { persona, chain, roster, humans, ledger, send, plan: None, busy, deadline_set }
+    }
+
+    /// Post to the thread's plan room through `plan` as each escalation goes up a level, with a fresh budget.
+    pub fn with_plan_room(self, plan: PlanSender) -> Self {
+        Self { plan: Some(plan), ..self }
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -145,6 +169,12 @@ impl Escalator {
     /// answered by its leader goes one level higher too; one still waiting for its leader goes to the same members
     /// again. The escalation is stored before it is sent, so a retry sends the same messages.
     pub async fn escalate(&self, stuck: Stuck) -> Result<Escalated> {
+        self.escalate_explained(stuck).await.map(|(escalated, _)| escalated)
+    }
+
+    /// [`Escalator::escalate`], also returning why the escalation went to the thread's owner rather than up a chain,
+    /// when it went there just now.
+    pub async fn escalate_explained(&self, stuck: Stuck) -> Result<(Escalated, Option<String>)> {
         let _busy = self.busy.lock().await;
         let thread = stuck.notice.thread_id.clone();
         let pending = self.ledger.pending(&thread).await?;
@@ -155,7 +185,7 @@ impl Escalator {
             Step::Again(pending) if pending.at_owner() => self.to_owner(&pending.escalation, None, &stuck).await,
             Step::Again(pending) => {
                 self.to_chain(&pending.escalation, &pending.to, &stuck.notice.text, &stuck).await?;
-                Ok(chain_of(&pending.escalation, pending.to))
+                Ok((chain_of(&pending.escalation, pending.to), None))
             }
             Step::Climb(from) => {
                 let summary = stuck.notice.text.clone();
@@ -181,12 +211,41 @@ impl Escalator {
             return Ok(false);
         }
         let _busy = self.busy.lock().await;
+        if carried.stuck == self.persona {
+            // The leader of a level a member climbed to, should its notice not have come first.
+            self.ledger.climbed(&thread, carried, members_at(carried).to_vec(), None).await?;
+        }
         let renewed = self.ledger.renew(&thread, &envelope.from, envelope.id).await?;
         if renewed {
             tracing::info!(%thread, leader = %envelope.from, "the leader answered the escalation; fresh budget");
             envelope.turn_budget = envelope.turn_budget.max(DEFAULT_TURN_BUDGET);
         }
         Ok(renewed)
+    }
+
+    /// Whether `envelope` tells the persona that a member sent the persona's own escalation one level higher: it
+    /// carries that escalation on the stuck thread, from someone other than its leader. A level above the thread's
+    /// becomes the thread's, with a fresh deadline, so the next escalation climbs from there. Such a message is for
+    /// the daemon, not the harness.
+    pub async fn took_climb(&self, envelope: &Envelope) -> Result<bool> {
+        let Some(carried) = envelope.escalation.as_deref() else { return Ok(false) };
+        let thread = &envelope.thread_id;
+        if carried.thread_id != *thread
+            || carried.stuck != self.persona
+            || envelope.from == self.persona
+            || carried.is_leader(&envelope.from)
+        {
+            return Ok(false);
+        }
+        let _busy = self.busy.lock().await;
+        let deadline = self.chain.after.map(|after| now_ms() + millis(after));
+        if self.ledger.climbed(thread, carried, members_at(carried).to_vec(), deadline).await? {
+            tracing::info!(%thread, by = %envelope.from, level = carried.level, "a member escalated the thread higher");
+            if deadline.is_some() {
+                self.deadline_set.notify_one();
+            }
+        }
+        Ok(true)
     }
 
     /// Send every escalation whose leader did not answer by its deadline one level higher, as deadlines pass. Runs
@@ -250,22 +309,35 @@ impl Escalator {
                 id: format!("overdue-{}-{thread}-{}", self.persona, escalation.level),
                 carried: None,
             };
-            let escalated = self.climb(escalation.clone(), &pending.summary, &stuck, true).await?;
+            let (escalated, _) = self.climb(escalation.clone(), &pending.summary, &stuck, true).await?;
             tracing::info!(%thread, %escalated, "escalated past the deadline");
         }
         Ok(())
     }
 
     /// Send the escalation `from` one level up, keeping `summary` for the escalations that follow it up. `had_pending`
-    /// says whether the thread had an escalation already.
-    async fn climb(&self, from: Escalation, summary: &str, stuck: &Stuck, had_pending: bool) -> Result<Escalated> {
+    /// says whether the thread had an escalation already. A member climbing another persona's escalation sets no
+    /// deadline: the stuck persona's daemon keeps it ([`Escalator::took_climb`]).
+    async fn climb(
+        &self,
+        from: Escalation,
+        summary: &str,
+        stuck: &Stuck,
+        had_pending: bool,
+    ) -> Result<(Escalated, Option<String>)> {
         let thread = &stuck.notice.thread_id;
         let chain = self.chain_of(&from.leader).await;
         let summary: String = summary.chars().take(SUMMARY_CHARS).collect();
         let owner = stuck.notice.owner.clone();
         match from.up(&chain, self.chain.max_hops) {
             Hop::Chain { escalation, to } => {
-                let deadline = self.chain.after.map(|after| now_ms() + millis(after));
+                let ours = escalation.stuck == self.persona;
+                let deadline = self.chain.after.filter(|_| ours).map(|after| now_ms() + millis(after));
+                // Before the escalation is stored: a retry stores the post again under the same id.
+                if let Some(plan) = &self.plan {
+                    let post = PlanPost::new(thread.clone(), self.persona.clone(), room_text(&escalation, &to));
+                    plan(post, format!("{}/plan", stuck.id)).await?;
+                }
                 let pending = Pending {
                     escalation: escalation.clone(),
                     to: to.clone(),
@@ -279,7 +351,7 @@ impl Escalator {
                     self.deadline_set.notify_one();
                 }
                 self.to_chain(&escalation, &to, &stuck.notice.text, stuck).await?;
-                Ok(chain_of(&escalation, to))
+                Ok((chain_of(&escalation, to), None))
             }
             Hop::Owner(because) => {
                 if from.level > 0 || had_pending {
@@ -298,9 +370,23 @@ impl Escalator {
         }
     }
 
-    /// Send `escalation` to every persona of `to`, with `summary`.
+    /// Send `escalation` to every persona of `to`, with `summary`. Another persona's escalation goes to it as well, first,
+    /// so its daemon follows the level ([`Escalator::took_climb`]).
     async fn to_chain(&self, escalation: &Escalation, to: &[PersonaId], summary: &str, stuck: &Stuck) -> Result<()> {
-        let text = chain_text(&self.persona, escalation, to, summary);
+        if escalation.stuck != self.persona {
+            let (thread, leader) = (&escalation.thread_id, &escalation.leader);
+            let text = format!(
+                "[ants] {} escalated thread {thread} to level {}: sent to {}; {leader} leads.",
+                self.persona,
+                escalation.level,
+                join(to)
+            );
+            let notice = Envelope::on_thread(thread.clone(), self.persona.clone(), escalation.stuck.clone(), text)
+                .with_owner(stuck.notice.owner.clone())
+                .with_escalation(Some(escalation.clone()));
+            (self.send)(notice, format!("{}-{}", stuck.id, escalation.stuck)).await?;
+        }
+        let text = chain_text(escalation, to, summary);
         for target in to {
             let mut envelope =
                 Envelope::on_thread(escalation.thread_id.clone(), self.persona.clone(), target.clone(), text.clone())
@@ -313,15 +399,15 @@ impl Escalator {
     }
 
     /// Send the notice of `stuck` to the thread's owner, else the default human, with `escalation` when it went up a
-    /// chain first, and `because` it did not go up one.
+    /// chain first, and `because` it did not go up one, which it returns.
     async fn to_owner(
         &self,
         escalation: &Escalation,
         because: Option<OwnerBecause>,
         stuck: &Stuck,
-    ) -> Result<Escalated> {
+    ) -> Result<(Escalated, Option<String>)> {
         let mut notice = stuck.notice.clone();
-        if let Some(why) = because.and_then(|because| owner_text(escalation, &because)) {
+        if let Some(why) = because.as_ref().and_then(|because| owner_text(escalation, because)) {
             notice.text = format!("{}\n\n{why}", notice.text);
         }
         if escalation.level > 0 {
@@ -329,7 +415,7 @@ impl Escalator {
         }
         let human = notice.to.clone();
         (self.send)(notice, stuck.id.clone()).await?;
-        Ok(Escalated::Owner(human))
+        Ok((Escalated::Owner(human), because.map(|because| why_text(escalation, &because))))
     }
 
     /// The escalate_to of `leader`: the persona's own, else what the roster lists, else none.
@@ -385,17 +471,95 @@ fn chain_of(escalation: &Escalation, to: Vec<PersonaId>) -> Escalated {
 }
 
 /// The text every member of a chain gets: the escalation, how the members settle it, and `summary`.
-fn chain_text(from: &PersonaId, escalation: &Escalation, to: &[PersonaId], summary: &str) -> String {
-    let (thread, leader) = (&escalation.thread_id, &escalation.leader);
+fn chain_text(escalation: &Escalation, to: &[PersonaId], summary: &str) -> String {
+    let (thread, leader, stuck) = (&escalation.thread_id, &escalation.leader, &escalation.stuck);
     format!(
-        "[ants] Escalation on thread {thread}, level {}: {} is stuck ({}). Sent to {}; {leader} leads. The members \
+        "[ants] Escalation on thread {thread}, level {}: {stuck} is stuck ({}). Sent to {}; {leader} leads. The members \
          coordinate in the plan room of thread {thread} (read_plan, post_plan). Only {leader} resolves it, by \
-         answering {from} on thread {thread} (a reply to this message does), or escalates it further.\n\n{summary}",
+         answering {stuck} on thread {thread}, or escalates it further (escalate).\n\n{summary}",
         escalation.level,
-        escalation.stuck,
         reason_text(escalation.reason),
         join(to),
     )
+}
+
+/// What an escalation going up to `to` posts to the thread's plan room, with a fresh budget.
+fn room_text(escalation: &Escalation, to: &[PersonaId]) -> String {
+    format!(
+        "[ants] Escalation of {}'s thread, level {}: sent to {}; {} leads. The room has a fresh budget of {} turns.",
+        escalation.stuck,
+        escalation.level,
+        join(to),
+        escalation.leader,
+        DEFAULT_TURN_BUDGET
+    )
+}
+
+/// The members of `escalation`'s level: its leader and the personas sent it with the leader, in chain order.
+pub fn members_at(escalation: &Escalation) -> &[PersonaId] {
+    let from = escalation.visited.iter().position(|p| *p == escalation.leader).unwrap_or(escalation.visited.len());
+    &escalation.visited[from..]
+}
+
+/// Where a member's reply to a message carrying another persona's escalation goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// To the stuck persona: the leader resolves the escalation.
+    Stuck(PersonaId),
+    /// To the thread's plan room, for the leader: a member other than the leader does not answer the stuck persona.
+    Room,
+    /// To the sender, a fellow member of the group, as for any message.
+    Sender,
+}
+
+/// The escalation `envelope` carries, when it is another persona's on the message's thread, and where `persona`'s reply
+/// to it goes.
+pub fn route<'a>(persona: &PersonaId, envelope: &'a Envelope) -> Option<(&'a Escalation, Route)> {
+    let e = envelope.escalation.as_deref().filter(|e| e.thread_id == envelope.thread_id && e.stuck != *persona)?;
+    let route = if members_at(e).contains(&envelope.from) {
+        Route::Sender
+    } else if e.is_leader(persona) {
+        Route::Stuck(e.stuck.clone())
+    } else {
+        Route::Room
+    };
+    Some((e, route))
+}
+
+/// What `persona`'s harness is told about the escalation `envelope` carries, when it is another persona's on the
+/// message's thread: who is in the group, who leads, and where the reply goes.
+pub fn group_note(persona: &PersonaId, envelope: &Envelope) -> Option<String> {
+    let (e, route) = route(persona, envelope)?;
+    let (thread, leader, stuck) = (&e.thread_id, &e.leader, &e.stuck);
+    let role = if e.is_leader(persona) {
+        format!(
+            "{persona} leads: it alone resolves the escalation, by answering {stuck} on thread {thread}, or sends it \
+             one level higher (escalate tool) when the group cannot. The other members post to the plan room."
+        )
+    } else {
+        format!(
+            "Only {leader} resolves it (answers {stuck} on thread {thread}) or escalates it further (escalate tool)."
+        )
+    };
+    let reply = match route {
+        Route::Stuck(_) => format!("The reply to this message goes to {stuck}."),
+        Route::Room => format!("The reply to this message goes to the plan room for {leader}, not to {stuck}."),
+        Route::Sender => format!("The reply to this message goes to {}.", envelope.from),
+    };
+    Some(format!(
+        "[ants] {persona} is part of an escalation group for {stuck}'s thread {thread}, level {}; members: {}. The group \
+         shares the thread's plan room (read_plan, post_plan). {role} {reply}",
+        e.level,
+        join(members_at(e))
+    ))
+}
+
+/// Why an escalation went to the owner, for the persona that asked for it.
+fn why_text(escalation: &Escalation, because: &OwnerBecause) -> String {
+    owner_text(escalation, because)
+        .unwrap_or_else(|| format!("{} has no escalate_to chain.", escalation.leader))
+        .trim_start_matches("[ants] ")
+        .to_owned()
 }
 
 /// Why an escalation went to the owner, unless it never went up a chain for want of one, as before chains existed.
@@ -530,10 +694,25 @@ mod tests {
     }
 
     #[test]
+    fn only_the_leader_answers_the_stuck_persona() {
+        let one = level(&Escalation::new(p("dev-a"), t(), EscalationReason::Asked), &["lead", "dev-b", "dev-c"]);
+        let to = |from: &str, to: &str| {
+            let envelope = Envelope::on_thread(t(), p(from), p(to), "help").with_escalation(Some(one.clone()));
+            route(&p(to), &envelope).map(|(_, route)| route)
+        };
+        assert_eq!(to("dev-a", "lead"), Some(Route::Stuck(p("dev-a"))));
+        assert_eq!(to("dev-a", "dev-b"), Some(Route::Room));
+        assert_eq!(to("dev-b", "dev-c"), Some(Route::Sender), "between members, as any message");
+        assert_eq!(to("dev-b", "lead"), Some(Route::Sender));
+        assert_eq!(to("lead", "dev-a"), None, "the stuck persona's own escalation");
+        assert_eq!(members_at(&one), [p("lead"), p("dev-b"), p("dev-c")]);
+    }
+
+    #[test]
     fn notices_say_who_leads_and_why_the_owner_has_it() {
         let start = Escalation::new(p("dev-a"), t(), EscalationReason::TurnBudget);
         let one = level(&start, &["lead", "dev-b"]);
-        let text = chain_text(&p("dev-a"), &one, &[p("lead"), p("dev-b")], "Turn budget spent; needs a decision.");
+        let text = chain_text(&one, &[p("lead"), p("dev-b")], "Turn budget spent; needs a decision.");
         assert!(text.starts_with("[ants] Escalation on thread t1, level 1: dev-a is stuck (turn budget spent)."));
         assert!(text.contains("Sent to lead, dev-b; lead leads."), "{text}");
         assert!(text.contains("Only lead resolves it, by answering dev-a on thread t1"), "{text}");

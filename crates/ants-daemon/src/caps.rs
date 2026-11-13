@@ -201,6 +201,26 @@ impl Ledger {
         .await
     }
 
+    /// A member sent the thread's escalation up to `escalation`, a level above the thread's, with members `to`: it
+    /// becomes the thread's, waiting for its leader until `deadline`. Returns whether it did; an escalation a human
+    /// ended, or one at or below the thread's level, stays as it is.
+    pub async fn climbed(
+        &self,
+        thread: &ThreadId,
+        escalation: &Escalation,
+        to: Vec<PersonaId>,
+        deadline: Option<i64>,
+    ) -> Result<bool> {
+        self.update(thread, |spent| match &mut spent.escalation {
+            Some(p) if escalation.level > p.escalation.level => {
+                (p.escalation, p.to, p.renewed_by, p.deadline) = (escalation.clone(), to, None, deadline);
+                (true, true)
+            }
+            _ => (false, false),
+        })
+        .await
+    }
+
     /// The escalation deadlines by thread. One may be stale: [`Ledger::recheck`] drops it.
     pub async fn deadlines(&self) -> Result<BTreeMap<ThreadId, i64>> {
         let mut index = self.threads.lock().await;

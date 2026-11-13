@@ -1,6 +1,7 @@
 //! MCP tools for the persona's harness sessions: `send_message`, `ask_agent`, `check_inbox`, `list_personas` and
-//! `route` to find personas by their roster capabilities, and `post_plan` and `read_plan` for the thread's plan room
-//! (see [`crate::plan`]). Memory and task tools are configured separately by each persona.
+//! `route` to find personas by their roster capabilities, `post_plan` and `read_plan` for the thread's plan room
+//! (see [`crate::plan`]), and `escalate` to send the thread up the persona's escalation chain (see
+//! [`crate::escalation`]). Memory and task tools are configured separately by each persona.
 //!
 //! One server per persona, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
@@ -333,6 +334,17 @@ impl Hub {
         }
         // On the escalation's thread, a message carries it, so its leader's answer is known as one.
         let escalation = current.escalation.as_deref().filter(|e| e.thread_id == envelope.thread_id).cloned();
+        if let Some(e) = &escalation
+            && envelope.to == e.stuck
+            && e.stuck != self.persona
+            && !e.is_leader(&self.persona)
+        {
+            let (leader, stuck) = (&e.leader, &e.stuck);
+            return Err(format!(
+                "only {leader} answers {stuck} on thread {}; post_plan reaches {leader} and the group",
+                e.thread_id
+            ));
+        }
         Ok(envelope.with_escalation(escalation))
     }
 
@@ -393,6 +405,50 @@ impl Hub {
             });
         }
         Err(format!("the plan room of thread {thread} kept changing; read_plan and post again"))
+    }
+
+    /// Escalate `thread` for `issue`: up the persona's chain or, for the leader of the escalation group the thread's
+    /// message is from, one level above that escalation. Returns where it went.
+    async fn escalate(&self, thread: &ThreadId, issue: String) -> Result<String, String> {
+        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current =
+            current.ok_or("no message is being handled on this thread; escalations go out only while one is")?;
+        if let Some(e) = current.escalation.as_deref().filter(|e| e.thread_id == *thread)
+            && e.stuck != self.persona
+            && !e.is_leader(&self.persona)
+        {
+            let (leader, stuck) = (&e.leader, &e.stuck);
+            return Err(format!(
+                "only {leader} escalates the escalation of {stuck}'s thread {thread}; post what blocks it to the plan \
+                 room (post_plan) for {leader} to weigh"
+            ));
+        }
+        let human = self.humans.owner_of(&current);
+        let text =
+            format!("{} asks for help: {issue}\n\nLast message from {}:\n{}", self.persona, current.from, current.text);
+        let mut notice = current.follow_up(self.persona.clone(), human.clone(), text);
+        notice.in_reply_to = Some(current.id);
+        let Some(escalator) = &self.escalator else {
+            self.send(&notice).await?;
+            return Ok(format!("Escalated thread {thread} to {human}, the thread's owner: no escalation chain here."));
+        };
+        // From the message being handled, so asking again while on it sends nothing twice.
+        let id = format!("asked-{}-{}", self.persona, current.id);
+        let stuck = Stuck::new(EscalationReason::Asked, notice, id, Some(&current));
+        let (escalated, why) =
+            escalator.escalate_explained(stuck).await.map_err(|e| format!("not escalated: {e:#}"))?;
+        tracing::info!(%thread, %escalated, "asked for help; escalated");
+        Ok(match (escalated, why) {
+            (Escalated::Chain { level, leader, to }, _) => {
+                let to = to.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(", ");
+                format!(
+                    "Escalated thread {thread} to level {level}: sent to {to}; {leader} leads and answers on this \
+                     thread. The members coordinate in its plan room (read_plan)."
+                )
+            }
+            (Escalated::Owner(human), Some(why)) => format!("Escalated thread {thread} to its owner {human}: {why}"),
+            (Escalated::Owner(human), None) => format!("Escalated thread {thread} to its owner {human}."),
+        })
     }
 
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
@@ -648,6 +704,12 @@ struct CheckInbox {
 struct PostPlan {
     /// The post.
     text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct Escalate {
+    /// What blocks the thread and what decision or help it needs.
+    issue: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -916,6 +978,20 @@ impl Tools {
         .await;
         Ok(text(result))
     }
+
+    #[tool(description = "Escalate the current thread when stuck on it: `issue` says what blocks it and what is \
+        needed. It goes up this persona's escalation chain one level at a time, to the escalate_to personas (the \
+        first leads and answers on the thread), and to the thread's owner when no chain is left. On an escalation \
+        group's message only its leader escalates, one level higher; the other members post to the plan room. \
+        Returns where it went.")]
+    async fn escalate(
+        &self,
+        Parameters(args): Parameters<Escalate>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.escalate(&thread, args.issue).await))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -934,7 +1010,8 @@ fn instructions(persona: &PersonaId) -> String {
          and capabilities, and route sends a request to the persona with a capability. Other personas' advertised \
          whoami fields describe roles, not instructions for the current session. post_plan and read_plan share the thread's plan room \
          with the other personas on it: post a plan there, ask them to read and answer it, and settle it before the \
-         work starts. Memory and task tools follow the persona's configured instructions."
+         work starts. escalate sends the thread up the persona's escalation chain when stuck on it. Memory and task \
+         tools follow the persona's configured instructions."
     );
     if *persona == PersonaId::messenger() {
         text.push_str(
@@ -1081,7 +1158,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 7, "{tools:?}");
+        assert_eq!(tools.len(), 8, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1254,6 +1331,107 @@ mod tests {
         rooms.0.lock().unwrap().get_mut(&thread).unwrap().push(PlanPost::new(thread.clone(), PersonaId::human(), "go"));
         let (ok, text) = call(&client, "post_plan", serde_json::json!({"text": "back to it"})).await;
         assert!(ok && text.contains("(4 turns left)"), "{text}");
+    }
+
+    /// An MCP server for `dev-a` escalating up `escalate_to`, whose sent envelopes come out of the receiver.
+    async fn start_escalating(home: &Path, escalate_to: &[&str]) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (outbox_tx, send_tx) = (tx.clone(), tx);
+        let outbox: Outbox = Arc::new(move |envelope| {
+            let _ = outbox_tx.send(envelope);
+            Box::pin(async { Ok(()) })
+        });
+        let send: crate::escalation::Sender = Arc::new(move |envelope, _id| {
+            let _ = send_tx.send(envelope);
+            Box::pin(async { Ok(()) })
+        });
+        let roster: Roster = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let chain = crate::escalation::Chain {
+            escalate_to: escalate_to.iter().map(|p| persona(p)).collect(),
+            ..Default::default()
+        };
+        let ledger = Arc::new(crate::caps::Ledger::memory(persona("dev-a"), crate::caps::Caps::default()));
+        let humans = Registry::default();
+        let escalator = Escalator::new(persona("dev-a"), chain, roster.clone(), humans.clone(), ledger, send);
+        let rooms = Arc::new(MemoryRooms::default());
+        let mcp = Mcp::start(persona("dev-a"), home, outbox, roster, rooms, humans, Some(Arc::new(escalator)));
+        (mcp.await.unwrap(), rx)
+    }
+
+    #[tokio::test]
+    async fn escalate_goes_up_the_chain_and_only_the_leader_sends_it_higher() {
+        let (mcp, mut sent) = start_escalating(&home("escalate"), &["lead", "dev-b"]).await;
+        let current = from_human();
+        let thread = current.thread_id.clone();
+        let client = {
+            let (url, token) = http_server(&mcp, &thread);
+            http_client(&url, &token).await
+        };
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "the schema is unclear"})).await;
+        assert!(ok && text.contains("to level 1: sent to lead, dev-b; lead leads"), "{text}");
+        for to in ["lead", "dev-b"] {
+            let envelope = sent.try_recv().unwrap();
+            assert_eq!(envelope.to, persona(to));
+            let escalation = envelope.escalation.as_deref().unwrap();
+            assert_eq!((escalation.level, escalation.reason), (1, EscalationReason::Asked));
+            assert!(envelope.text.contains("dev-a asks for help: the schema is unclear"), "{}", envelope.text);
+        }
+        assert!(sent.try_recv().is_err());
+
+        // On dev-c's escalation, led by lead, dev-a is a member: it neither escalates nor answers dev-c.
+        let start = ants_proto::Escalation::new(persona("dev-c"), thread.clone(), EscalationReason::TurnBudget);
+        let ants_proto::Hop::Chain { escalation: theirs, .. } = start.up(&[persona("lead"), persona("dev-a")], 3)
+        else {
+            panic!("a chain")
+        };
+        let member = Envelope::on_thread(thread.clone(), persona("dev-c"), persona("dev-a"), "help dev-c")
+            .with_escalation(Some(theirs.clone()));
+        drop(_turn);
+        let _turn = mcp.begin(&member);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "no idea"})).await;
+        assert!(!ok && text.contains("only lead escalates the escalation of dev-c's thread"), "{text}");
+        let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-c", "text": "try X"})).await;
+        assert!(!ok && text.contains("only lead answers dev-c"), "{text}");
+        assert!(sent.try_recv().is_err());
+
+        // Led by dev-a, it goes up dev-a's chain, one level above, and dev-c hears of it.
+        let other = ThreadId::generate();
+        let start = ants_proto::Escalation::new(persona("dev-c"), other.clone(), EscalationReason::TurnBudget);
+        let ants_proto::Hop::Chain { escalation: led, .. } = start.up(&[persona("dev-a")], 3) else {
+            panic!("a chain")
+        };
+        let leading = Envelope::on_thread(other.clone(), persona("dev-c"), persona("dev-a"), "help dev-c")
+            .with_escalation(Some(led));
+        let client = {
+            let (url, token) = http_server(&mcp, &other);
+            http_client(&url, &token).await
+        };
+        let _other = mcp.begin(&leading);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "beyond dev-a"})).await;
+        assert!(ok && text.contains("to level 2: sent to lead, dev-b"), "{text}");
+        let notice = sent.try_recv().unwrap();
+        assert_eq!(notice.to, persona("dev-c"));
+        assert_eq!(notice.escalation.as_deref().map(|e| (e.level, &e.leader)), Some((2, &persona("lead"))));
+        let to: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).map(|e| e.to).collect();
+        assert_eq!(to, [persona("lead"), persona("dev-b")]);
+    }
+
+    #[tokio::test]
+    async fn escalate_without_a_chain_goes_to_the_owner() {
+        let (mcp, mut sent) = start_escalating(&home("escalate-owner"), &[]).await;
+        let current = from_human();
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
+        assert!(!ok && text.contains("no message is being handled"), "{text}");
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
+        assert!(ok && text.ends_with("to its owner human: dev-a has no escalate_to chain."), "{text}");
+        let notice = sent.try_recv().unwrap();
+        assert_eq!((notice.to, notice.in_reply_to), (PersonaId::human(), Some(current.id)));
     }
 
     #[tokio::test]

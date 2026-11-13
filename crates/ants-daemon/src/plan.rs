@@ -20,6 +20,8 @@ use crate::bus;
 const INACTIVE: Duration = Duration::from_secs(30);
 /// Messages asked for at once.
 const BATCH: u64 = 256;
+/// Reads of a busy room before [`spend`] gives up.
+const SPEND_TRIES: usize = 5;
 /// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to (nats-server 2.11).
 const EXPECTED_LAST_SUBJECT: &str = "Nats-Expected-Last-Subject-Sequence-Subject";
 
@@ -141,4 +143,25 @@ pub async fn publish(js: &jetstream::Context, post: &PlanPost, last_seq: Option<
         Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
         Err(e) => Err(e).context("waiting for JetStream to store the post"),
     }
+}
+
+/// Post `text` from `from` to the plan room of `thread`, spending one of its turns, at most `budget` left: the room is
+/// read again when another post took the turn first. None when the room has no turns left.
+pub async fn spend(
+    rooms: &dyn Rooms,
+    thread: &ThreadId,
+    from: &PersonaId,
+    text: &str,
+    budget: u32,
+) -> Result<Option<PlanPost>> {
+    for _ in 0..SPEND_TRIES {
+        let room = rooms.read(thread).await?;
+        let Ok(post) = PlanPost::spend(thread.clone(), from.clone(), text, budget, room.last()) else {
+            return Ok(None);
+        };
+        if rooms.post(&post, room.last_seq).await? {
+            return Ok(Some(post));
+        }
+    }
+    anyhow::bail!("the plan room of thread {thread} kept changing")
 }

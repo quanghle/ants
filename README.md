@@ -254,18 +254,26 @@ How flags and the file combine:
 ### Escalations
 
 What a persona cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, a plan
-room out of turns) goes up its escalation chain, in the end to the thread's owner (the envelope's `owner`, the human who
+room out of turns, or what its harness escalates with the `escalate` tool) goes up its escalation chain, in the end to the thread's owner (the envelope's `owner`, the human who
 started the thread), else to the daemon's default human, the config file key `human` (default `human`; top-level or per
 persona). Without a chain it goes to the owner at once.
 
 The chain is the persona's `escalate_to` key, a list of other personas whose first one leads; the roster publishes it,
 so any daemon can follow a chain past a persona that is offline. Every member gets the escalation in its inbox, on the
 stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level and the leader, followed by the
-notice the owner would have got. The members coordinate in the thread's plan room; only the leader resolves it, by
-answering the escalating persona on the thread (a reply to the notice does), or escalates it further. The leader's
+notice the owner would have got. The members coordinate in the thread's plan room, which each level that goes up a chain
+gives a fresh turn budget with an `[ants]` post naming the level, the members and the leader, so the group has turns
+there even when the room ran out. Each member's prompt starts with an `[ants]` note on the group: the stuck persona and
+thread, the level, the members and who leads. Only the leader resolves it, by answering the stuck persona on the thread
+(a reply to the notice goes to the stuck persona, also when a member sent the level), or escalates it further (the
+`escalate` tool). Another member's reply to the notice goes to the thread's plan room, for the leader, and the member
+cannot `send_message` or `ask_agent` the stuck persona on the thread; a reply to a fellow member's message goes to that
+member as usual. A member's reply the room has no turns left for escalates it, the unposted answer included. The leader's
 answer gives the thread a fresh turn budget and allowance, once per level: the next time the persona is stuck on the
 thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster) not visited
-yet. A chain member stuck while working on an escalation sends it one level higher the same way. A level past
+yet. A chain member stuck while working on an escalation sends it one level higher the same way, and sends the stuck
+persona an `[ants]` notice carrying the new level, which its daemon takes in without prompting: the thread's escalation
+moves to that level, waiting for its leader, so the persona stuck again sends it to that level's members. A level past
 `max_escalation_hops` (default 3), a chain leading back to a persona already visited, or a leader without a chain hands
 the thread to the owner, with the escalation and the reason. Until the leader answers, a persona stuck again on the
 thread sends the same members the new notice. Members offline are not skipped: their inboxes keep the escalation. When
@@ -541,6 +549,7 @@ speak as the persona, on the thread the session serves:
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
+| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the persona's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the plan room instead. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
 from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -615,7 +624,8 @@ persona reads the room when asked to.
 Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left: one
 less than the lower of the budget of the message its persona is handling and what the room's last post left. The post
 that spends the last turn escalates the thread (see Escalations): its persona sends a notice on the thread with the
-last post up its chain, else to the owner, and the room refuses further agent posts until a human posts there. Two personas spending the
+last post up its chain, else to the owner, and the room refuses further agent posts until a human posts there or the
+escalation goes up a level of a chain, which posts there with a fresh budget, once per level. Two personas spending the
 same turn cannot both succeed: a post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`,
 nats-server 2.11 or later), and the loser reads the room again.
 

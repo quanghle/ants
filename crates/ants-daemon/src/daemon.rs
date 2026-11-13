@@ -22,11 +22,12 @@ use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt};
-use crate::escalation::{self, Chain, Escalator, Stuck};
+use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
 use crate::permission::{Allowlist, PermissionPolicy};
+use crate::plan::{self, Rooms};
 use crate::pool::{Pool, SessionStore};
 use crate::status::{self, Status};
 use crate::{bus, roster};
@@ -143,20 +144,23 @@ pub async fn run(config: Config) -> Result<()> {
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js).await?;
     let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps));
-    let escalator = std::sync::Arc::new(Escalator::new(
-        config.persona.clone(),
-        config.escalation.clone(),
-        roster.clone(),
-        humans.clone(),
-        ledger.clone(),
-        escalation::jetstream_sender(js.clone()),
-    ));
+    let escalator = std::sync::Arc::new(
+        Escalator::new(
+            config.persona.clone(),
+            config.escalation.clone(),
+            roster.clone(),
+            humans.clone(),
+            ledger.clone(),
+            escalation::jetstream_sender(js.clone()),
+        )
+        .with_plan_room(escalation::jetstream_plan_sender(js.clone())),
+    );
     let mut mcp = Mcp::start(
         config.persona.clone(),
         &config.home,
         outbox,
         roster.clone(),
-        rooms,
+        rooms.clone(),
         humans.clone(),
         Some(escalator.clone()),
     )
@@ -219,6 +223,7 @@ pub async fn run(config: Config) -> Result<()> {
         limits: config.limits,
         ledger: &ledger,
         escalator: &escalator,
+        rooms: rooms.as_ref(),
         threads: &threads,
         roster: &roster,
         humans: &humans,
@@ -315,6 +320,8 @@ struct Inbox<'a> {
     ledger: &'a Ledger,
     /// Sends what the persona cannot settle up its chain, and notes the answers.
     escalator: &'a Escalator,
+    /// The plan rooms, where the members of an escalation group other than its leader answer.
+    rooms: &'a dyn Rooms,
     threads: &'a Threads,
     /// The roster, for the members a triage prompt shows.
     roster: &'a Roster,
@@ -560,7 +567,8 @@ impl Inbox<'_> {
         }
         let result = match marker {
             Ok(marker) => match self.arrived(&mut incoming).await {
-                Ok(()) => self.answer(&incoming, &msg, seq, marker).await,
+                Ok(true) => self.answer(&incoming, &msg, seq, marker).await,
+                Ok(false) => self.done(&msg, seq).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -604,10 +612,21 @@ impl Inbox<'_> {
 
     /// Note the message the persona is about to answer with its escalator: a human's ends the thread's escalation and
     /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
-    /// allowance once per level ([`Escalator::arrived`]).
-    async fn arrived(&self, incoming: &mut Incoming) -> Result<()> {
+    /// allowance once per level ([`Escalator::arrived`]). Returns whether to answer it: a member's notice that it sent
+    /// the persona's escalation higher is the daemon's alone ([`Escalator::took_climb`]).
+    async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
         let human = self.humans.is_human(&incoming.envelope.from);
+        if incoming.post.is_none() && !human && self.escalator.took_climb(&incoming.envelope).await? {
+            return Ok(false);
+        }
         self.escalator.arrived(&mut incoming.envelope, human).await?;
+        Ok(true)
+    }
+
+    /// Ack the message at stream sequence `seq`, which needs no reply.
+    async fn done(&self, msg: &jetstream::Message, seq: u64) -> Result<()> {
+        bus::double_ack(self.client, msg).await?;
+        self.attempts.forget(seq).await;
         Ok(())
     }
 
@@ -682,7 +701,10 @@ impl Inbox<'_> {
         };
         let text = match (&incoming.post, &read) {
             (Some(posted), Some(read)) => self.channel_prompt(posted, read, &humans).await,
-            _ => envelope.text.clone(),
+            _ => match escalation::group_note(self.persona, envelope) {
+                Some(note) => format!("{note}\n\n{}", envelope.text),
+                None => envelope.text.clone(),
+            },
         };
         let text = prompt_text(&text, cut_off, late);
         let prompt =
@@ -757,8 +779,27 @@ impl Inbox<'_> {
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
-                let reply = envelope.reply(self.persona.clone(), text, self.humans.role(&envelope.from))?;
-                Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+                let mut reply = envelope.reply(self.persona.clone(), text, self.humans.role(&envelope.from))?;
+                match escalation::route(self.persona, envelope).map(|(_, route)| route) {
+                    Some(Route::Room) => {
+                        let (room, budget) = (self.rooms, envelope.turn_budget);
+                        match plan::spend(room, thread, self.persona, &reply.text, budget).await? {
+                            Some(post) => Reply::Plan(post),
+                            None => {
+                                let why = "Plan room out of turns before the answer was posted";
+                                let reason = EscalationReason::PlanRoom;
+                                self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
+                                return self.done(msg, seq).await;
+                            }
+                        }
+                    }
+                    route => {
+                        if let Some(Route::Stuck(stuck)) = route {
+                            reply.to = stuck;
+                        }
+                        Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+                    }
+                }
             }
         };
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
@@ -796,8 +837,11 @@ impl Inbox<'_> {
     /// post it also notes that the posts on its thread up to it were shown.
     async fn deliver(&self, incoming: &Incoming, reply: &Reply, msg: &jetstream::Message, seq: u64) -> Result<()> {
         let request = &incoming.envelope;
-        // Store the reply before acking: a crash in between redelivers rather than loses the message.
-        bus::store(self.js, reply.subject(), reply, &reply_id(self.persona, request)).await?;
+        // Store the reply before acking: a crash in between redelivers rather than loses the message. A plan post is
+        // in its room already.
+        if !matches!(reply, Reply::Plan(_)) {
+            bus::store(self.js, reply.subject(), reply, &reply_id(self.persona, request)).await?;
+        }
         if incoming.post.is_some()
             && let Err(e) = self.threads.seen(&request.thread_id, seq).await
         {
@@ -1090,6 +1134,7 @@ mod tests {
             let messages = futures::stream::select(messages, posts);
             let channels = Channels::watch(self.channels.clone()).await.unwrap();
             let escalator = self.escalator();
+            let rooms = crate::plan::JetStreamRooms::new(self.js.clone(), self.dev.clone());
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
@@ -1102,6 +1147,7 @@ mod tests {
                 limits: self.limits,
                 ledger: &self.ledger,
                 escalator: &escalator,
+                rooms: &rooms,
                 threads: &self.threads,
                 roster: &self.roster,
                 humans: &self.humans,
@@ -1122,6 +1168,7 @@ mod tests {
             let send = escalation::jetstream_sender(self.js.clone());
             let (dev, chain, roster, humans) = (&self.dev, &self.chain, &self.roster, &self.humans);
             Escalator::new(dev.clone(), chain.clone(), roster.clone(), humans.clone(), self.ledger.clone(), send)
+                .with_plan_room(escalation::jetstream_plan_sender(self.js.clone()))
         }
 
         async fn until_acked(&self, seq: u64) {
@@ -1700,6 +1747,141 @@ mod tests {
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    /// `stuck`'s escalation on `thread`, gone up `chains`, one per level.
+    fn escalated(stuck: &PersonaId, thread: &ThreadId, chains: &[&[PersonaId]]) -> ants_proto::Escalation {
+        let mut escalation = ants_proto::Escalation::new(stuck.clone(), thread.clone(), EscalationReason::TurnBudget);
+        for chain in chains {
+            let ants_proto::Hop::Chain { escalation: up, .. } = escalation.up(chain, 5) else { panic!("a chain") };
+            escalation = up;
+        }
+        escalation
+    }
+
+    async fn room(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::PlanPost> {
+        crate::plan::read(&bus.js, &"reader".parse().unwrap(), thread).await.unwrap().posts
+    }
+
+    #[tokio::test]
+    async fn only_the_leader_answers_the_stuck_persona_and_members_answer_in_the_plan_room() {
+        let Some((bus, _to_human)) = Bus::start().await else { return };
+        let [lead, carol, boss] = personas(["lead", "carol", "boss"]);
+        bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+        let [mut to_carol, mut to_lead, mut to_boss] =
+            inboxes(&bus, &[carol.clone(), lead.clone(), boss.clone()]).await;
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (t1, t2, t3) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        // dev-a is a member of carol's escalation on t1 and t3, led by lead, and leads it on t2, one level up.
+        let member = escalated(&carol, &t1, &[&[lead.clone(), bus.dev.clone()]]);
+        let leader = escalated(&carol, &t2, &[std::slice::from_ref(&lead), std::slice::from_ref(&bus.dev)]);
+        let spent = escalated(&carol, &t3, &[&[lead.clone(), bus.dev.clone()]]);
+        let full = ants_proto::PlanPost::spend(t3.clone(), lead.clone(), "last turn", 1, None).unwrap();
+        crate::plan::publish(&bus.js, &full, None).await.unwrap();
+        for (from, thread, text, escalation) in
+            [(&carol, &t1, "help", member), (&lead, &t2, "help more", leader.clone()), (&carol, &t3, "x", spent)]
+        {
+            let envelope = Envelope::on_thread(thread.clone(), from.clone(), bus.dev.clone(), text)
+                .with_escalation(Some(escalation));
+            bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            // t2 and t3 run side by side: their messages to carol come in either order.
+            let (first, second) = (next_envelope(&mut to_carol).await, next_envelope(&mut to_carol).await);
+            let (answer, notice) = if first.thread_id == t2 { (first, second) } else { (second, first) };
+            assert_eq!((&answer.thread_id, answer.escalation.as_deref()), (&t2, Some(&leader)), "the leader's answer");
+            assert!(answer.text.ends_with("The reply to this message goes to carol.\n\nhelp more"), "{}", answer.text);
+            // Out of plan room turns, the member's answer goes one level up with the escalation, and carol hears.
+            let up = next_envelope(&mut to_boss).await;
+            assert_eq!(up.escalation.as_deref().map(|e| (e.level, &e.stuck)), Some((2, &carol)));
+            assert!(up.text.contains("Unposted answer from dev-a:"), "{}", up.text);
+            assert_eq!(notice.thread_id, t3);
+            timeout(WAIT, async {
+                while room(&bus, &t1).await.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the member's answer in the plan room");
+            assert!(notice.text.starts_with("[ants] dev-a escalated thread"), "{}", notice.text);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
+        assert!(timeout(Duration::from_millis(200), to_carol.next()).await.is_err(), "a member does not answer carol");
+        assert!(timeout(Duration::from_millis(50), to_lead.next()).await.is_err());
+        let posts = room(&bus, &t1).await;
+        assert_eq!(posts.len(), 1, "the member's answer");
+        assert_eq!((&posts[0].from, posts[0].turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET - 1));
+        assert!(posts[0].text.ends_with("not to carol.\n\nhelp"), "{}", posts[0].text);
+        let prompt = log.lock().unwrap().answered.iter().find(|p| p.ends_with("\n\nhelp")).cloned().unwrap();
+        assert!(
+            prompt.starts_with(&format!(
+                "[ants] dev-a is part of an escalation group for carol's thread {t1}, level 1; members: lead, dev-a."
+            )),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Only lead resolves it"), "{prompt}");
+        let grant = room(&bus, &t3).await.pop().unwrap();
+        assert_eq!((&grant.from, grant.turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET), "a fresh budget at level 2");
+    }
+
+    #[tokio::test]
+    async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_it() {
+        let Some((mut bus, _to_human)) = Bus::start().await else { return };
+        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        let after = Duration::from_secs(600);
+        bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(after), ..Chain::default() };
+        bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
+        let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send_spent(&carol, &t1, "stuck", None).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let one = next_envelope(&mut to_lead).await.escalation.expect("the escalation");
+            let grant = room(&bus, &t1).await.pop().expect("the plan room has a fresh budget");
+            assert_eq!((&grant.from, grant.turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET));
+            assert!(grant.text.contains("level 1: sent to lead; lead leads"), "{}", grant.text);
+
+            // lead sends it one level higher and says so: the thread waits for boss from then on.
+            let two = escalated(&bus.dev, &t1, &[std::slice::from_ref(&lead), std::slice::from_ref(&boss)]);
+            let climbed = Envelope::on_thread(t1.clone(), lead.clone(), bus.dev.clone(), "[ants] lead escalated")
+                .with_escalation(Some(two.clone()));
+            let seq = bus::publish_json(&bus.js, climbed.subject(), &climbed, None).await.unwrap();
+            bus.until_acked(seq).await;
+            let pending = bus.ledger.pending(&t1).await.unwrap().expect("the escalation");
+            assert_eq!((pending.escalation.level, &pending.to, pending.renewed_by), (2, &vec![boss.clone()], None));
+            assert!(pending.deadline.is_some(), "the stuck persona keeps the deadline");
+
+            // Stuck again before boss answers: boss gets it again, not lead.
+            bus.send_spent(&carol, &t1, "still stuck", None).await;
+            let again = next_envelope(&mut to_boss).await;
+            assert_eq!(again.escalation.as_deref(), Some(&two));
+            bus.send_spent(&boss, &t1, "from boss", Some(&two)).await;
+            let pending = timeout(WAIT, async {
+                loop {
+                    let pending = bus.ledger.pending(&t1).await.unwrap().unwrap();
+                    if pending.renewed_by.is_some() {
+                        break pending;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("boss renews the thread");
+            assert_eq!(pending.escalation.level, 2);
+            assert_eq!(one.level, 1);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(timeout(Duration::from_millis(100), to_lead.next()).await.is_err(), "lead got level 1 only");
+        assert_eq!(log.lock().unwrap().answered, ["from boss"], "the notice is the daemon's alone");
     }
 
     #[tokio::test]
