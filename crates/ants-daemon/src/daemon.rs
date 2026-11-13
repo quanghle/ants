@@ -462,7 +462,11 @@ impl Inbox<'_> {
         let (stop_tx, stop) = tokio::sync::oneshot::channel();
         let mut stop_tx = Some(stop_tx);
         let mut reached = None;
-        let text = if cut_off { warned(&envelope.text) } else { envelope.text.clone() };
+        let late = match self.mcp {
+            Some(mcp) => mcp.late_on(thread).await,
+            None => 0,
+        };
+        let text = prompt_text(&envelope.text, cut_off, late);
         let prompt = Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop) };
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
@@ -584,9 +588,20 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
     next
 }
 
-/// The prompt for a message whose earlier attempt was cut off.
-fn warned(text: &str) -> String {
-    format!("{CUT_OFF}\n\n{text}")
+/// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to
+/// `ask_agent` that wait on its thread for `check_inbox`.
+fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
+    let late = match late {
+        0 => None,
+        1 => {
+            Some("[ants] 1 late reply to ask_agent is waiting on this thread; call check_inbox to read it.".to_owned())
+        }
+        n => Some(format!(
+            "[ants] {n} late replies to ask_agent are waiting on this thread; call check_inbox to read them."
+        )),
+    };
+    let cut_off = cut_off.then(|| CUT_OFF.to_owned());
+    cut_off.into_iter().chain(late).chain([text.to_owned()]).collect::<Vec<_>>().join("\n\n")
 }
 
 fn stream_seq(msg: &jetstream::Message) -> Option<u64> {
@@ -632,6 +647,7 @@ mod tests {
         dev: PersonaId,
         limits: PromptLimits,
         ledger: Ledger,
+        mcp: Option<Mcp>,
     }
 
     impl Bus {
@@ -647,7 +663,8 @@ mod tests {
             client.flush().await.unwrap();
             let ledger = Ledger::memory(dev.clone(), Caps::default());
             let limits = PromptLimits::default();
-            Some((Self { _server: server, client, js, stream, attempts, markers, dev, limits, ledger }, replies))
+            let bus = Self { _server: server, client, js, stream, attempts, markers, dev, limits, ledger, mcp: None };
+            Some((bus, replies))
         }
 
         /// Send `text` from the human, returning the envelope and its stream sequence.
@@ -684,7 +701,7 @@ mod tests {
                 persona: &self.dev,
                 pool,
                 attempts: &self.attempts,
-                mcp: None,
+                mcp: self.mcp.as_ref(),
                 limits: self.limits,
                 ledger: &self.ledger,
                 retry_delay: Duration::from_millis(300),
@@ -706,6 +723,10 @@ mod tests {
                 self.stream.get_consumer(&ants_proto::inbox_consumer(&self.dev)).await.unwrap();
             consumer.info().await.unwrap().clone()
         }
+    }
+
+    fn warned(text: &str) -> String {
+        prompt_text(text, true, 0)
     }
 
     async fn next_reply(replies: &mut async_nats::Subscriber) -> (ThreadId, String) {
@@ -1063,6 +1084,44 @@ mod tests {
         let state = bus.stream.get_info().await.unwrap().state;
         assert_eq!(state.messages, 2, "the message and one copy of its reply");
         assert!(!bus.marked(seq).await);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
+        let Some((mut bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        // Two ask_agent calls on t1 that gave up, remembered across a restart.
+        let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
+        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/late");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let stored = serde_json::json!({"asks": asks.iter().map(|a| (a.id, &a.to)).collect::<Vec<_>>(), "late": []});
+        std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
+        let (outbox, roster) =
+            (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+        let rooms = Arc::new(crate::plan::JetStreamRooms::new(bus.js.clone(), bus.dev.clone()));
+        bus.mcp = Some(Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms).await.unwrap());
+        for ask in &asks {
+            let reply = ask.reply(dev_b.clone(), "late").unwrap();
+            bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
+        }
+        bus.send(&t1, "a").await;
+        bus.send(&t2, "b").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut got = [next_reply(&mut replies).await, next_reply(&mut replies).await];
+            got.sort_by_key(|(thread, _)| thread != &t1);
+            let note = "[ants] 2 late replies to ask_agent are waiting on this thread; call check_inbox to read them.";
+            assert_eq!(got, [(t1.clone(), format!("{note}\n\na")), (t2.clone(), "b".to_owned())]);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered.len(), 2, "the late replies are no prompts");
         assert_eq!(bus.unacked().await, 0);
     }
 }
