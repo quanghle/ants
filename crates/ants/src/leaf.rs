@@ -296,8 +296,8 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
-    use ants_daemon::bus;
-    use ants_proto::PersonaId;
+    use ants_daemon::{bus, plan};
+    use ants_proto::{Envelope, PersonaId, PlanPost};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
 
@@ -466,6 +466,23 @@ mod tests {
             bus::connect(&leaf_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
         a_js.set_timeout(Duration::from_secs(1));
         assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over nats-leaf://");
+        // Only dev-a is on the leaf, so the uplink allows no inbox or plan subject without a wildcard before the
+        // sender. The hub's stream interest crosses all the same: the leaf has no outbox to fall back on.
+        let to_human = Envelope::new(dev_a.clone(), human.clone(), "hi");
+        assert_eq!(bus::publish(&a_js, &to_human).await.unwrap(), bus::Stored::Hub);
+        let post = PlanPost::new("t1".parse().unwrap(), dev_a.clone(), "plan");
+        assert!(plan::publish(&a_js, &post, Some(0)).await.unwrap(), "plan post not stored directly");
+        // The interest widens nothing: dev-b, not on the uplink, still cannot reach the hub's stream from the leaf.
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let (_b, mut b_js) =
+            bus::connect(&leaf_node.url, Some(&creds(&dev_b)), Some(&domain), &dev_b, "test").await.unwrap();
+        b_js.set_timeout(Duration::from_secs(1));
+        let stray = Envelope::new(dev_b.clone(), human.clone(), "stray");
+        assert!(bus::publish(&b_js, &stray).await.is_err());
+        let stray = PlanPost::new("t1".parse().unwrap(), dev_b.clone(), "stray");
+        assert!(plan::publish(&b_js, &stray, Some(1)).await.is_err());
+        let stored = h_js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().state.messages;
+        assert_eq!(stored, 2, "only dev-a's message and post");
 
         let reload = |uplink: String| {
             configure(leaf_node.dir(), uplink);

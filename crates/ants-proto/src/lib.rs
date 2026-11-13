@@ -517,11 +517,21 @@ impl Permissions {
     /// [`Machine::source_replies`] and [`Machine::setup_inbox`] only, all of them the machine's own. nats-server
     /// carries a reply across a leaf connection only if the leaf may publish it: the interest behind it reaches the
     /// leaf only then.
+    ///
+    /// For each pattern of a persona's inbox and plan subjects, which has a wildcard before the sender, the uplink
+    /// also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
+    /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
     pub fn for_leaf<'a>(machine: &Machine, personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         for persona in personas {
             let Self { publish, subscribe } = Self::for_persona(persona);
-            for (all, new) in [(&mut leaf.publish, publish), (&mut leaf.subscribe, subscribe)] {
+            // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.plan.>`) cross the uplink only if
+            // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
+            // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
+            let found = subject::sendable(persona).map(|s| s.replace('*', persona.as_str()));
+            for (all, new) in
+                [(&mut leaf.publish, publish.into_iter().chain(found).collect()), (&mut leaf.subscribe, subscribe)]
+            {
                 for s in new {
                     if !all.contains(&s) && !s.starts_with("ants.out.") {
                         all.push(s);
@@ -969,7 +979,17 @@ mod tests {
         let only_a = Permissions::for_leaf(&m1, [&a]);
         let own = Permissions::for_persona(&a);
         let extra: Vec<_> = only_a.publish.iter().filter(|s| !own.publish.contains(s)).collect();
-        assert_eq!(extra, ["$JS.S.m1.>", "$JSC.R.m1.*.ANTS_OUT.>", "_INBOX.human.leaf.m1.>"]);
+        assert_eq!(
+            extra,
+            [
+                // Already allowed by `ants.inbox.*.dev-a` and `ants.plan.*.dev-a`.
+                "ants.inbox.dev-a.dev-a",
+                "ants.plan.dev-a.dev-a",
+                "$JS.S.m1.>",
+                "$JSC.R.m1.*.ANTS_OUT.>",
+                "_INBOX.human.leaf.m1.>"
+            ]
+        );
         let extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
         assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || s.starts_with("$JS.FC.ANTS_OUT.")), "{extra:?}");
         assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
