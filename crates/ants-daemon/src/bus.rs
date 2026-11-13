@@ -125,7 +125,8 @@ pub async fn ensure_sessions(js: &jetstream::Context) -> Result<kv::Store> {
 }
 
 /// Messages from the durable consumer of `persona`'s inbox, which is created if missing and updated if its settings
-/// changed. At most `max_ack_pending` messages are in hand at once.
+/// changed (such as the filter of a consumer from before inbox subjects named the sender). At most `max_ack_pending`
+/// messages are in hand at once.
 pub async fn inbox_consumer(
     stream: &stream::Stream,
     persona: &PersonaId,
@@ -137,7 +138,7 @@ pub async fn inbox_consumer(
     let consumer: PullConsumer = stream
         .create_consumer(pull::Config {
             durable_name: Some(name.clone()),
-            filter_subject: subject::inbox(persona),
+            filter_subject: subject::inbox_of(persona),
             ack_policy: consumer::AckPolicy::Explicit,
             ack_wait,
             max_deliver,
@@ -150,25 +151,29 @@ pub async fn inbox_consumer(
 }
 
 /// The durable consumer of the human's inbox, created if missing. A reply stays in it, unread, until acked. Any number
-/// may be outstanding and none is ever given up on, so a reply shown without being marked read never expires.
+/// may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
+/// consumer from before inbox subjects named the sender gets the current filter.
 pub async fn human_inbox_consumer(stream: &stream::Stream, ack_wait: Duration) -> Result<PullConsumer> {
     let human = PersonaId::human();
     let name = ants_proto::inbox_consumer(&human);
-    stream
-        .get_or_create_consumer(
-            &name,
-            pull::Config {
-                durable_name: Some(name.clone()),
-                filter_subject: subject::inbox(&human),
-                ack_policy: consumer::AckPolicy::Explicit,
-                ack_wait,
-                max_deliver: -1,
-                max_ack_pending: -1,
-                ..Default::default()
-            },
-        )
+    let config = pull::Config {
+        durable_name: Some(name.clone()),
+        filter_subject: subject::inbox_of(&human),
+        ack_policy: consumer::AckPolicy::Explicit,
+        ack_wait,
+        max_deliver: -1,
+        max_ack_pending: -1,
+        ..Default::default()
+    };
+    let consumer: PullConsumer = stream
+        .get_or_create_consumer(&name, config.clone())
         .await
-        .with_context(|| format!("creating consumer {name}"))
+        .with_context(|| format!("creating consumer {name}"))?;
+    if consumer.cached_info().config.filter_subject == config.filter_subject {
+        return Ok(consumer);
+    }
+    tracing::info!(consumer = name, filter = config.filter_subject, "updating the inbox filter");
+    stream.create_consumer(config).await.with_context(|| format!("updating consumer {name}"))
 }
 
 /// Publish an envelope and wait until JetStream has stored it.

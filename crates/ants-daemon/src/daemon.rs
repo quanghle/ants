@@ -70,7 +70,7 @@ pub async fn run(config: Config) -> Result<()> {
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let mut mcp = Mcp::start(config.persona.clone(), &config.home, crate::mcp::jetstream_outbox(js.clone())).await?;
-    mcp.listen(client.subscribe(subject::inbox(&config.persona)).await?);
+    mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
     let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy)
         .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
@@ -193,10 +193,15 @@ impl Inbox<'_> {
                         let envelope: Envelope = match serde_json::from_slice(&msg.payload) {
                             Ok(e) => e,
                             Err(e) => {
-                                self.bury_malformed(&msg, &e).await;
+                                self.bury_unanswerable(&msg, &format!("not an envelope: {e}")).await;
                                 continue;
                             }
                         };
+                        // A forged sender is buried without its envelope, so a replay cannot pass it on as genuine.
+                        if let Err(e) = envelope.check_subject(&msg.subject) {
+                            self.bury_unanswerable(&msg, &format!("sender mismatch: {e}")).await;
+                            continue;
+                        }
                         if self.claim(&envelope, &msg).await {
                             continue;
                         }
@@ -256,13 +261,14 @@ impl Inbox<'_> {
         }
     }
 
-    async fn bury_malformed(&self, msg: &jetstream::Message, error: &serde_json::Error) {
-        tracing::warn!(%error, subject = %msg.subject, "dead-lettering malformed message");
-        if let Err(e) = dead::bury(self.js, self.persona, msg, None, &format!("not an envelope: {error}")).await {
+    /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload.
+    async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
+        tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
+        if let Err(e) = dead::bury(self.js, self.persona, msg, None, error).await {
             // Never redelivered, dead letter or not.
             tracing::warn!(error = format!("{e:#}"), "dead-lettering");
             if let Err(e) = msg.ack_with(AckKind::Term).await {
-                tracing::warn!(error = %e, "terminating malformed message");
+                tracing::warn!(error = %e, "terminating the message");
             }
         }
     }
@@ -464,7 +470,7 @@ mod tests {
             let dev: PersonaId = "dev-a".parse().unwrap();
             let (client, js) = bus::connect(&server.url, None, &dev, "test").await.unwrap();
             let stream = bus::ensure_stream(&js).await.unwrap();
-            let replies = client.subscribe(subject::inbox(&PersonaId::human())).await.unwrap();
+            let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
             Some((Self { _server: server, client, js, stream, dev }, replies))
         }
@@ -557,6 +563,54 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().answered, ["flaky a", "b"]);
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_forged_sender_is_dead_lettered_unanswered() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let thread = ThreadId::generate();
+        // dev-b sends on its own subject, but the envelope claims the human sent it.
+        let forged = Envelope::on_thread(thread.clone(), PersonaId::human(), bus.dev.clone(), "forged");
+        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        crate::bus::publish_json(&bus.js, subject::inbox(&bus.dev, &dev_b), &forged, None).await.unwrap();
+        bus.send(&thread, "genuine").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (thread.clone(), "genuine".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered, ["genuine"]);
+        let letters = dead::list(&bus.stream).await.unwrap();
+        let [(_, letter)] = letters.as_slice() else { panic!("{letters:?}") };
+        assert!(letter.error.contains("sender mismatch"), "{}", letter.error);
+        assert_eq!(letter.envelope, None, "a forged envelope is not replayable");
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn inbox_consumers_from_before_sender_subjects_get_the_new_filter() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let human = PersonaId::human();
+        for persona in [&bus.dev, &human] {
+            let name = ants_proto::inbox_consumer(persona);
+            let old = jetstream::consumer::pull::Config {
+                durable_name: Some(name.clone()),
+                filter_subject: format!("ants.inbox.{persona}"),
+                ..Default::default()
+            };
+            bus.stream.create_consumer(old).await.unwrap();
+        }
+        drop(crate::bus::inbox_consumer(&bus.stream, &bus.dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap());
+        crate::bus::human_inbox_consumer(&bus.stream, ACK_WAIT).await.unwrap();
+        for persona in [&bus.dev, &human] {
+            let mut consumer: PullConsumer =
+                bus.stream.get_consumer(&ants_proto::inbox_consumer(persona)).await.unwrap();
+            assert_eq!(consumer.info().await.unwrap().config.filter_subject, subject::inbox_of(persona));
+        }
     }
 
     #[tokio::test]

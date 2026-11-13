@@ -87,9 +87,9 @@ pub async fn list(stream: &stream::Stream) -> Result<Vec<(u64, DeadLetter)>> {
             Err(e) => return Err(e).context("reading dead letters"),
         };
         from = msg.sequence + 1;
-        match serde_json::from_slice(&msg.payload) {
+        match letter(&msg.subject, &msg.payload) {
             Ok(dead) => letters.push((msg.sequence, dead)),
-            Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping unreadable dead letter"),
+            Err(e) => tracing::warn!(seq = msg.sequence, error = format!("{e:#}"), "skipping unreadable dead letter"),
         }
     }
 }
@@ -100,15 +100,34 @@ pub async fn get(stream: &stream::Stream, seq: u64) -> Result<DeadLetter> {
     if !msg.subject.starts_with("ants.dead.") {
         bail!("message {seq} is on {}, not a dead letter", msg.subject);
     }
-    serde_json::from_slice(&msg.payload).with_context(|| format!("dead letter {seq}"))
+    letter(&msg.subject, &msg.payload).with_context(|| format!("dead letter {seq}"))
 }
 
-/// Send the message of dead letter `seq` to its inbox again, as it was, then remove the dead letter.
+/// The dead letter stored on `subject`. Credentials pin the persona of a dead letter subject, so one naming another
+/// persona is forged.
+fn letter(subject: &str, payload: &[u8]) -> Result<DeadLetter> {
+    let dead: DeadLetter = serde_json::from_slice(payload)?;
+    if dead.subject() != subject {
+        bail!("dead letter of {} arrived on {subject}", dead.persona);
+    }
+    Ok(dead)
+}
+
+/// Send the message of dead letter `seq` to its inbox again, as it was, then remove the dead letter. The human's
+/// credentials may send under any sender, so only a message to the persona that buried it is replayed: a persona
+/// cannot have the human deliver a message of its own making to another persona.
 pub async fn replay(js: &jetstream::Context, stream: &stream::Stream, seq: u64) -> Result<Envelope> {
     let dead = get(stream, seq).await?;
     let Some(envelope) = dead.envelope else {
         bail!("dead letter {seq} holds no envelope to replay; `ants dead drop {seq}` removes it");
     };
+    if envelope.to != dead.persona {
+        bail!(
+            "dead letter {seq} of {} holds a message to {}; `ants dead drop {seq}` removes it",
+            dead.persona,
+            envelope.to
+        );
+    }
     // The message id makes a second replay after a crash before the removal store nothing.
     bus::publish_json(js, envelope.subject(), &envelope, Some(&format!("replay-{seq}"))).await?;
     stream.delete_message(seq).await.with_context(|| format!("removing dead letter {seq}"))?;

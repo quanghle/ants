@@ -145,8 +145,11 @@ impl Mcp {
         let hub = self.hub.clone();
         self.tasks.push(tokio::spawn(async move {
             while let Some(msg) = inbox.next().await {
-                if let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload) {
-                    hub.route(envelope).await;
+                let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
+                // The inbox consumer dead-letters a forged sender; it must not answer an ask meanwhile.
+                match envelope.check_subject(&msg.subject) {
+                    Ok(()) => hub.route(envelope).await,
+                    Err(e) => tracing::warn!(error = %e, "ignoring a reply with a forged sender"),
                 }
             }
         }));
