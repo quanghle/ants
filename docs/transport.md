@@ -150,9 +150,11 @@ async-nats reconnects forever by default, with a back-off capped at 4 s, and `an
 | Forwarder closing connections idle for 45 s, 20 s ping | no drops in 2 minutes |
 
 One message published during the silent period went to the consumer's pull request still registered for the dead
-connection, so the server counted it as delivered and redelivered it only after `ack_wait` (60 s in the test; the
-daemon uses 5 minutes). Nothing is lost, but a silent link can hold one message per thread for up to the daemon's ack
-wait.
+connection, so the server counted it as delivered and redelivered it only after `ack_wait` (60 s in the test, and
+the daemon's since ants-vh4; it was 5 minutes). Nothing is lost, but a silent link can hold one message per thread for
+up to the daemon's ack wait. The daemon sends progress acks every 20 s for each message in hand, so only a message
+whose daemon crashed or never received it waits out the ack wait; one whose progress acks were lost on the silent
+link comes back while still in hand, and the daemon ignores that copy.
 
 `ants daemon` fails a persona whose server is unreachable at start (async-nats `retry_on_initial_connect` is off).
 With a local leaf node that server is the local one, which is up.
@@ -196,7 +198,7 @@ tunnelled 7422:
 |---|---|
 | `ants ask` on the hub → daemon on the worker → reply in `ants inbox` on the hub | works; the daemon got the prompt about 0.3 s after the ask |
 | `ants watch` on the worker's leaf node | sees the hub's traffic |
-| `devtunnel connect` killed for 30 s, a message sent meanwhile, then restarted | the daemon reconnected at once, but the message came only 5 minutes later (`ack_wait`) |
+| `devtunnel connect` killed for 30 s, a message sent meanwhile, then restarted | the daemon reconnected at once, but the message came only 5 minutes later (`ack_wait`, since cut to 60 s) |
 | `devtunnel host` killed for 20 s, a message sent meanwhile, then restarted | `devtunnel connect` stayed up and rejoined by itself; the daemon had the message 0.2 s after reconnecting; the leaf reconnected within 1 s |
 | Every worker process frozen (`SIGSTOP`) for 3 minutes, a message sent meanwhile | the relay logged the client SSH session as disconnected, yet on resume the session carried on: the daemon handled the message within 1 s, and the leaf never dropped |
 

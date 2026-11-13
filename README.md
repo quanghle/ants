@@ -40,6 +40,11 @@ session resumes with ACP `session/load` on the next one. A harness with a prompt
 are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
 at once, and their messages are redelivered later).
 
+Every message in hand, waiting for its thread or a harness or being prompted (a tool request waiting for the human
+included), gets a progress ack every 20 s. A message held by a daemon that crashed or lost its link is redelivered
+after the 60 s ack wait; a copy redelivered to a daemon still holding the message is ignored. The daemon updates its
+inbox consumer to these settings when it starts.
+
 Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
 daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires
 30 days later, like the stream's messages.

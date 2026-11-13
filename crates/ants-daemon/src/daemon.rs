@@ -22,10 +22,12 @@ use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::{bus, roster, workspace};
 
-/// Redelivery window. The daemon extends it with progress acks while a message waits or its prompt runs, so a crash
-/// mid-task redelivers.
-const ACK_WAIT: Duration = Duration::from_secs(5 * 60);
-const PROGRESS_EVERY: Duration = Duration::from_secs(60);
+/// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
+/// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
+const PROGRESS_EVERY: Duration = Duration::from_secs(20);
+/// Redelivery window: a message in hand of a daemon that crashed, or sent into a dead link, comes back this long after
+/// its last progress ack.
+const ACK_WAIT: Duration = ack_wait(PROGRESS_EVERY);
 /// Attempts a message gets before it becomes a dead letter on `ants.dead.<persona>`.
 const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
@@ -35,6 +37,11 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
+
+/// A few progress periods, so one late or lost progress ack does not redeliver a message still in hand.
+const fn ack_wait(progress_every: Duration) -> Duration {
+    progress_every.saturating_mul(3)
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -99,6 +106,7 @@ pub async fn run(config: Config) -> Result<()> {
         pool: &pool,
         mcp: Some(&mcp),
         retry_delay: RETRY_DELAY,
+        progress_every: PROGRESS_EVERY,
     };
     let ctrl_c = || async {
         if let Err(e) = tokio::signal::ctrl_c().await {
@@ -120,6 +128,8 @@ type InHand = (Envelope, jetstream::Message);
 struct Thread {
     waiting: VecDeque<InHand>,
     busy: bool,
+    /// Stream sequence of the message in flight.
+    in_flight: Option<u64>,
     /// A failed message that is to be redelivered. Until it is back (or the deadline passes) the rest of the thread
     /// waits rather than overtake it.
     retry: Option<Retry>,
@@ -138,6 +148,7 @@ struct Inbox<'a> {
     pool: &'a Pool,
     mcp: Option<&'a Mcp>,
     retry_delay: Duration,
+    progress_every: Duration,
 }
 
 impl Inbox<'_> {
@@ -151,7 +162,7 @@ impl Inbox<'_> {
         let mut threads: HashMap<ThreadId, Thread> = HashMap::new();
         let mut running = FuturesUnordered::new();
         let mut evict = tokio::time::interval(EVICT_EVERY.min(idle_timeout).max(Duration::from_secs(1)));
-        let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY);
+        let mut progress = self.progress();
         let shutdown = stop();
         tokio::pin!(shutdown);
         loop {
@@ -182,6 +193,7 @@ impl Inbox<'_> {
                 Some((thread, retry)) = running.next(), if !running.is_empty() => {
                     if let Some(t) = threads.get_mut(&thread) {
                         t.busy = false;
+                        t.in_flight = None;
                         t.retry = retry;
                     }
                     ready = Some(vec![thread]);
@@ -202,6 +214,11 @@ impl Inbox<'_> {
                         }
                         let thread = envelope.thread_id.clone();
                         let t = threads.entry(thread.clone()).or_default();
+                        if t.holds(stream_seq(&msg)) {
+                            // The copy in hand gets the ack: the server tracks a message by its stream sequence.
+                            tracing::debug!(%thread, "ignoring a redelivery of a message in hand");
+                            continue;
+                        }
                         if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
                             t.retry = None;
                             t.waiting.push_front((envelope, msg));
@@ -321,7 +338,7 @@ impl Inbox<'_> {
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let prompt = self.pool.prompt(&envelope.thread_id, &envelope.text);
         tokio::pin!(prompt);
-        let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY);
+        let mut progress = self.progress();
         let text = loop {
             tokio::select! {
                 r = &mut prompt => break r?,
@@ -340,6 +357,18 @@ impl Inbox<'_> {
         self.client.publish(status, "idle".into()).await?;
         Ok(())
     }
+
+    fn progress(&self) -> tokio::time::Interval {
+        tokio::time::interval_at(tokio::time::Instant::now() + self.progress_every, self.progress_every)
+    }
+}
+
+impl Thread {
+    /// Whether the message with stream sequence `seq` is in flight or waiting. The server redelivers one whose progress
+    /// acks were lost, as on a link that went silent for longer than the ack wait.
+    fn holds(&self, seq: Option<u64>) -> bool {
+        seq.is_some() && (self.in_flight == seq || self.waiting.iter().any(|(_, msg)| stream_seq(msg) == seq))
+    }
 }
 
 /// The thread's next message to prompt, unless one is in flight or it waits for a redelivery. Forgets a thread with
@@ -351,8 +380,11 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
         return None;
     }
     let next = t.waiting.pop_front();
-    match next {
-        Some(_) => t.busy = true,
+    match &next {
+        Some((_, msg)) => {
+            t.busy = true;
+            t.in_flight = stream_seq(msg);
+        }
         None => {
             entry.remove();
         }
@@ -476,7 +508,17 @@ mod tests {
 
         /// Serve the inbox until a permit is added to `ctrl_c` (twice to stop mid-prompt).
         async fn serve(&self, pool: &Pool, ctrl_c: &Arc<Semaphore>) {
-            let messages = bus::inbox_consumer(&self.stream, &self.dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
+            self.serve_timed(pool, ctrl_c, PROGRESS_EVERY, ACK_WAIT).await;
+        }
+
+        async fn serve_timed(
+            &self,
+            pool: &Pool,
+            ctrl_c: &Arc<Semaphore>,
+            progress_every: Duration,
+            ack_wait: Duration,
+        ) {
+            let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
@@ -484,6 +526,7 @@ mod tests {
                 pool,
                 mcp: None,
                 retry_delay: Duration::from_millis(300),
+                progress_every,
             };
             let stop = || {
                 let ctrl_c = ctrl_c.clone();
@@ -493,9 +536,13 @@ mod tests {
         }
 
         async fn unacked(&self) -> usize {
+            self.consumer().await.num_ack_pending
+        }
+
+        async fn consumer(&self) -> jetstream::consumer::Info {
             let mut consumer: PullConsumer =
                 self.stream.get_consumer(&ants_proto::inbox_consumer(&self.dev)).await.unwrap();
-            consumer.info().await.unwrap().num_ack_pending
+            consumer.info().await.unwrap().clone()
         }
     }
 
@@ -588,5 +635,65 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().loaded, ["s1"], "the restarted daemon resumed the thread's session");
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
+        // A consumer left by an older daemon with a longer ack wait takes the new one.
+        drop(bus::inbox_consumer(&bus.stream, &bus.dev, ack_wait * 100, MAX_DELIVER, 4).await.unwrap());
+        let (launch, log, gate) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "hold a").await;
+        bus.send(&t1, "b").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+            assert_eq!(bus.consumer().await.config.ack_wait, ack_wait);
+            tokio::time::sleep(ack_wait * 4).await;
+            let consumer = bus.consumer().await;
+            assert_eq!((consumer.num_redelivered, consumer.num_ack_pending), (0, 2), "neither message came back");
+            gate.add_permits(1);
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, gate) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "hold a").await;
+        bus.send(&t1, "b").await;
+
+        // Progress acks lost, as on a silent link: both messages come back while still in hand.
+        let ack_wait = Duration::from_millis(300);
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+            timeout(WAIT, async {
+                while bus.consumer().await.num_redelivered < 2 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("no redelivery");
+            gate.add_permits(10);
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
+            assert!(timeout(ack_wait * 3, replies.next()).await.is_err(), "no duplicate reply");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, Duration::from_secs(3600), ack_wait), check);
+        assert_eq!(log.lock().unwrap().answered, ["hold a", "b"]);
+        assert_eq!(bus.unacked().await, 0, "acks of the first delivery count");
     }
 }
