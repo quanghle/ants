@@ -323,7 +323,7 @@ async fn main() -> Result<()> {
             };
             leaf::write(&config, &out)?;
             println!(
-                "{0}\nstart: nats-server -c {0}\n\
+                "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain",
                 out.display()

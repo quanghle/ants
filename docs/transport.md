@@ -312,7 +312,8 @@ The HTTPS port URL `https://<tunnel-id>-8080.<region>.devtunnels.ms` serves as
 
 ## Recommendations
 
-ants-32g.2, leaf node per machine with pluggable uplink (done: `ants leaf config`):
+ants-32g.2, leaf node per machine with pluggable uplink (done: `ants leaf config`, and the services of ants-tlp.1 in
+`contrib/`, see the README, "Services"):
 
 - `ants` processes always use `nats://127.0.0.1:4222`; the uplink is only the leaf's `remotes` entry: a `wss://` URL
   or `nats-leaf://127.0.0.1:7422` through `devtunnel connect`, plus optional `proxy { url }` and `tls { ca_file }`.

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: the machine's nats-server, its leaf node (`ants leaf config`) or, on the hub machine, the hub.
+     scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.nats.plist.
+     Reload a new uplink: launchctl kill SIGHUP gui/$(id -u)/ants.nats -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.nats</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@NATS_SERVER@</string>
+		<string>-c</string>
+		<string>@NATS_CONF@</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/nats.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/nats.log</string>
+</dict>
+</plist>

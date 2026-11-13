@@ -80,6 +80,21 @@ fn ask_gets_the_reply_of_a_daemon_harness() {
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
     assert!(!String::from_utf8_lossy(&inbox.stdout).contains("stub:"), "ask --wait marked the reply read");
 
+    // Service managers stop it with SIGTERM: a clean stop, as on Ctrl-C.
+    let mut daemon = daemon;
+    let term = Command::new("kill").arg("-TERM").arg(daemon.0.id().to_string()).status().unwrap();
+    assert!(term.success());
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < WAIT, "daemon still running after SIGTERM\ndaemon log:\n{}", daemon_log());
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "daemon after SIGTERM: {status}\ndaemon log:\n{}", daemon_log());
+    assert!(daemon_log().contains("stopped"), "daemon log:\n{}", daemon_log());
+
     drop(daemon);
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
