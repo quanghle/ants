@@ -354,15 +354,17 @@ pub(crate) mod fake {
                                 }
                                 let session = &prompt.session_id;
                                 let words: Vec<&str> = text.split_whitespace().collect();
+                                // A word followed by a number, so prose such as the redelivery warning is no command.
                                 let arg = |word: &str| {
-                                    words.iter().position(|w| *w == word).and_then(|i| words.get(i + 1).copied())
+                                    let i = words.iter().position(|w| *w == word)?;
+                                    words.get(i + 1)?.parse::<f64>().ok()
                                 };
-                                for i in 0..arg("tools").map_or(0, |n| n.parse().unwrap()) {
+                                for i in 0..arg("tools").map_or(0, |n| n as u64) {
                                     let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
                                     sender.send_notification(SessionNotification::new(session.clone(), call))?;
                                 }
                                 if let Some(total) = arg("cost") {
-                                    let cost = Cost::new(total.parse().unwrap(), "USD");
+                                    let cost = Cost::new(total, "USD");
                                     let usage = SessionUpdate::UsageUpdate(UsageUpdate::new(1, 100).cost(cost));
                                     sender.send_notification(SessionNotification::new(session.clone(), usage))?;
                                 }
@@ -375,7 +377,7 @@ pub(crate) mod fake {
                                 log.lock().unwrap().answered.push(text.clone());
                                 let reply = format!("{session}: {text}");
                                 sender.send_notification(chunk(session, &reply))?;
-                                let tokens = arg("tokens").map(|n| n.parse().unwrap());
+                                let tokens = arg("tokens").map(|n| n as u64);
                                 let usage = tokens.map(|n| Usage::new(n, n, 0));
                                 responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))
                             })

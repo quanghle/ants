@@ -24,6 +24,9 @@ pub const ROSTER_HEARTBEAT: Duration = Duration::from_secs(10);
 pub const ROSTER_TTL: Duration = Duration::from_secs(30);
 /// KV bucket mapping a thread to its harness session, for resuming after a restart.
 pub const SESSIONS_BUCKET: &str = "ants_sessions";
+/// KV bucket where a daemon marks each attempt at an inbox message it started, and the reply it stored, so a
+/// redelivery knows what an earlier attempt may already have done.
+pub const ATTEMPTS_BUCKET: &str = "ants_attempts";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to the human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 
@@ -238,6 +241,12 @@ pub fn daily_spend_key(persona: &PersonaId, day: &str) -> String {
     format!("{persona}.day.{day}")
 }
 
+/// Key of the attempt marker of the inbox message at stream sequence `seq` in [`ATTEMPTS_BUCKET`]. Keys start with the
+/// persona, so its credentials can be confined to its own.
+pub fn attempt_key(persona: &PersonaId, seq: u64) -> String {
+    format!("{persona}.{seq}")
+}
+
 /// JetStream consumer a persona reads plan rooms through, one room at a time. Its name is fixed, so its credentials
 /// need not let it pull from other consumers.
 pub fn plan_consumer(persona: &PersonaId) -> String {
@@ -262,9 +271,9 @@ impl Permissions {
     /// Any persona may write to every inbox and every plan room, but only as itself (the sender is the last token of
     /// inbox and plan subjects). It speaks only for itself on status, approvals and dead letters, reads only its own inbox
     /// (consumer and live), every plan room (live, and from the stream through its own plan consumer), its own replies and the decisions on its own approval requests, reads the roster to find
-    /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions
-    /// bucket. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and upgrade
-    /// the stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
+    /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions and
+    /// attempts buckets. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and
+    /// upgrade the stream and create the roster, sessions and attempts buckets, and reads and removes dead letters by sequence; its inbox
     /// consumer keeps the replies `ants inbox` has not shown yet. The human may send under any sender, to replay a dead
     /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
@@ -272,6 +281,7 @@ impl Permissions {
         let plan = plan_consumer(persona);
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
+        let attempts = kv_stream(ATTEMPTS_BUCKET);
         let mut publish = vec![
             if persona.is_human() { "ants.inbox.>".to_owned() } else { subject::inbox_from(persona) },
             subject::plan_from(persona),
@@ -287,6 +297,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{plan}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{plan}"),
             format!("$JS.API.STREAM.INFO.{sessions}"),
+            format!("$JS.API.STREAM.INFO.{attempts}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
@@ -300,6 +311,7 @@ impl Permissions {
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
+                format!("$JS.API.STREAM.CREATE.{attempts}"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
@@ -308,10 +320,14 @@ impl Permissions {
             subscribe.push(subject::ALL.to_owned());
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{persona}.>");
+            let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{persona}.>");
             publish.extend([
                 // Get and put of its own sessions.
                 format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
                 own_keys,
+                // Get, put and delete of the markers of its own attempts.
+                format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
+                own_attempts,
                 // Exactly its requests subject: a persona cannot answer its own requests one level below.
                 subject::approvals(persona),
                 subject::dead(persona),

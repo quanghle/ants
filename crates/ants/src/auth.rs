@@ -193,8 +193,8 @@ pub(crate) mod tests {
     use ants_daemon::plan;
     use ants_daemon::roster::Registration;
     use ants_proto::{
-        DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, plan_consumer,
-        session_key, subject,
+        DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, attempt_key, inbox_prefix,
+        plan_consumer, session_key, subject,
     };
     use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
@@ -327,6 +327,17 @@ pub(crate) mod tests {
         assert_eq!(sessions.get(session_key(&dev_a, &thread)).await.unwrap().as_deref(), Some(&b"s1"[..]));
         assert!(sessions.put(session_key(&dev_b, &thread), "s1".into()).await.is_err());
         assert!(sessions.get(session_key(&dev_b, &thread)).await.is_err());
+
+        // So it does with the markers of its attempts.
+        assert!(bus::ensure_attempts(&a_js).await.is_err(), "only the human creates the bucket");
+        bus::ensure_attempts(&h_js).await.unwrap();
+        let attempts = bus::ensure_attempts(&a_js).await.unwrap();
+        attempts.put(attempt_key(&dev_a, 1), "started".into()).await.unwrap();
+        assert_eq!(attempts.get(attempt_key(&dev_a, 1)).await.unwrap().as_deref(), Some(&b"started"[..]));
+        attempts.delete(attempt_key(&dev_a, 1)).await.unwrap();
+        assert_eq!(attempts.get(attempt_key(&dev_a, 1)).await.unwrap(), None);
+        assert!(attempts.put(attempt_key(&dev_b, 1), "started".into()).await.is_err());
+        assert!(attempts.get(attempt_key(&dev_b, 1)).await.is_err());
 
         // Nor speak for dev-b, or listen to others.
         let (a_raw, mut errors) = server.watched(&dev_a).await;
@@ -580,6 +591,7 @@ pub(crate) mod tests {
         h_js.set_timeout(Duration::from_secs(1));
         bus::init_stream(&h_js).await.unwrap();
         bus::ensure_sessions(&h_js).await.unwrap();
+        bus::ensure_attempts(&h_js).await.unwrap();
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         issue_leaf(&team, "m1", std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
@@ -628,6 +640,11 @@ pub(crate) mod tests {
         let key = session_key(&dev_a, &ask.thread_id);
         sessions.put(&key, "s1".into()).await.unwrap();
         assert_eq!(sessions.get(&key).await.unwrap().as_deref(), Some(&b"s1"[..]));
+        let attempts = bus::ensure_attempts(&a_js).await.unwrap();
+        let marker = attempt_key(&dev_a, msg.info().unwrap().stream_sequence);
+        attempts.put(&marker, "started".into()).await.unwrap();
+        assert!(attempts.get(&marker).await.unwrap().is_some());
+        attempts.delete(&marker).await.unwrap();
         let reply = ask.reply(dev_a.clone(), "hello").unwrap();
         bus::publish(&a_js, &reply).await.unwrap();
         msg.double_ack().await.unwrap();
