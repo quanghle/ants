@@ -2,14 +2,19 @@
 //! persona whose JWT carries the permissions of [`Permissions::for_persona`].
 //!
 //! The operator and account seeds stay in the team directory on the machine that issues credentials. The server
-//! needs only `server.conf`; each machine gets the `.creds` file of the personas it runs.
+//! needs only `server.conf`; each machine gets the `.creds` file of the personas it runs, and its leaf node the uplink
+//! credentials of [`issue_leaf`].
+//!
+//! When the hub has a JetStream domain, credentials are issued for it: they allow the JetStream API as
+//! `$JS.<domain>.API`, the prefix every ants process then uses, besides the plain `$JS.API` the hub maps it to
+//! ([`Permissions::with_js_domain`]).
 
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ants_proto::{Permissions, PersonaId};
+use ants_proto::{JsDomain, Permissions, PersonaId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -43,11 +48,42 @@ pub fn init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Issue a new user for `persona` and write its `.creds` file to `out`. Earlier credentials stay valid.
-pub fn issue(dir: &Path, persona: &PersonaId, out: &Path) -> Result<()> {
+/// Issue a new user for `persona`, for the hub's JetStream domain if it has one, and write its `.creds` file to `out`.
+/// Earlier credentials stay valid.
+pub fn issue(dir: &Path, persona: &PersonaId, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    write_secret(out, &creds(&user_jwt(&account, &user, persona)?, &seed(&user)?))
+    let permissions = Permissions::for_persona(persona).with_js_domain(js_domain);
+    write_secret(out, &creds(&user_jwt(&account, &user, persona.as_str(), permissions, json!({}))?, &seed(&user)?))
+}
+
+/// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
+/// `personas` may do ([`Permissions::for_leaf`]), and connect only as a leaf node, not as a client.
+///
+/// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
+/// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
+pub fn issue_leaf(
+    dir: &Path,
+    machine: &str,
+    personas: &[PersonaId],
+    js_domain: Option<&JsDomain>,
+    out: &Path,
+) -> Result<()> {
+    if machine.is_empty()
+        || machine.starts_with('.')
+        || !machine.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        bail!("invalid machine name {machine:?}: use letters, digits, '-', '_' and '.'");
+    }
+    if personas.is_empty() {
+        bail!("a leaf node needs at least one persona");
+    }
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let permissions = Permissions::for_leaf(personas).with_js_domain(js_domain);
+    let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
+    let jwt = user_jwt(&account, &user, &format!("leaf-{machine}"), permissions, only_leaf)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
 fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Result<String> {
@@ -84,20 +120,20 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
     ))
 }
 
-fn user_jwt(account: &KeyPair, user: &KeyPair, persona: &PersonaId) -> Result<String> {
-    let Permissions { publish, subscribe } = Permissions::for_persona(persona);
-    jwt(
-        account,
-        &user.public_key(),
-        persona.as_str(),
-        json!({
-            "pub": { "allow": publish },
-            "sub": { "allow": subscribe },
-            "subs": -1, "data": -1, "payload": -1,
-            "type": "user",
-            "version": 2,
-        }),
-    )
+/// A user JWT with `permissions`, plus the `extra` claims.
+fn user_jwt(account: &KeyPair, user: &KeyPair, name: &str, permissions: Permissions, extra: Value) -> Result<String> {
+    let Permissions { publish, subscribe } = permissions;
+    let mut nats = json!({
+        "pub": { "allow": publish },
+        "sub": { "allow": subscribe },
+        "subs": -1, "data": -1, "payload": -1,
+        "type": "user",
+        "version": 2,
+    });
+    if let (Value::Object(nats), Value::Object(extra)) = (&mut nats, extra) {
+        nats.extend(extra);
+    }
+    jwt(account, &user.public_key(), name, nats)
 }
 
 /// A NATS v2 JWT for `subject`, signed by `issuer`.
@@ -186,6 +222,23 @@ pub(crate) mod tests {
     impl Server {
         /// None when nats-server is not installed.
         pub(crate) fn start() -> Option<Self> {
+            Self::start_with("", "")
+        }
+
+        /// A server trusting a fresh team, with `jetstream` added to its JetStream block and `extra` to its
+        /// configuration.
+        fn start_with(jetstream: &str, extra: &str) -> Option<Self> {
+            let dir = Self::new_dir()?;
+            init(&dir.join("auth")).unwrap();
+            let store = dir.join("js");
+            Some(Self::spawn(
+                dir,
+                &format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}"),
+            ))
+        }
+
+        /// A fresh temporary directory, or None when nats-server is not installed.
+        fn new_dir() -> Option<PathBuf> {
             if Command::new("nats-server").arg("--version").output().is_err() {
                 eprintln!("nats-server not on PATH; skipping");
                 return None;
@@ -194,21 +247,18 @@ pub(crate) mod tests {
             let n = SERVERS.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!("ants-auth-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
-            init(&dir.join("auth")).unwrap();
-            let conf = dir.join("nats.conf");
-            let store = dir.join("js");
+            fs::create_dir_all(&dir).unwrap();
+            Some(dir)
+        }
+
+        /// Run nats-server in `dir` with `conf`, on a client port of its own choosing.
+        fn spawn(dir: PathBuf, conf: &str) -> Self {
+            let path = dir.join("nats.conf");
             // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
-            fs::write(
-                &conf,
-                format!(
-                    "listen: 127.0.0.1:-1\nports_file_dir: {dir:?}\njetstream {{ store_dir: {store:?} }}\n\
-                     include \"auth/{SERVER_CONF}\"\n"
-                ),
-            )
-            .unwrap();
+            fs::write(&path, format!("listen: 127.0.0.1:-1\nports_file_dir: {dir:?}\n{conf}")).unwrap();
             let child = Command::new("nats-server")
                 .arg("-c")
-                .arg(&conf)
+                .arg(&path)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -222,7 +272,7 @@ pub(crate) mod tests {
                 });
                 if let Some(url) = url {
                     server.url = url;
-                    return Some(server);
+                    return server;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -230,13 +280,20 @@ pub(crate) mod tests {
         }
 
         fn creds(&self, persona: &PersonaId) -> PathBuf {
-            let out = self.dir.join(format!("{persona}.creds"));
-            issue(&self.dir.join("auth"), persona, &out).unwrap();
+            self.creds_in(persona, None)
+        }
+
+        /// Credentials of `persona` issued for `domain`.
+        fn creds_in(&self, persona: &PersonaId, domain: Option<&JsDomain>) -> PathBuf {
+            let suffix = domain.map(|d| format!("-{d}")).unwrap_or_default();
+            let out = self.dir.join(format!("{persona}{suffix}.creds"));
+            issue(&self.dir.join("auth"), persona, domain, &out).unwrap();
             out
         }
 
         pub(crate) async fn connect(&self, persona: &PersonaId) -> (Client, jetstream::Context) {
-            let (client, mut js) = bus::connect(&self.url, Some(&self.creds(persona)), persona, "test").await.unwrap();
+            let (client, mut js) =
+                bus::connect(&self.url, Some(&self.creds(persona)), None, persona, "test").await.unwrap();
             // Denied JetStream requests only time out.
             js.set_timeout(Duration::from_secs(1));
             (client, js)
@@ -279,7 +336,7 @@ pub(crate) mod tests {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
 
-        assert!(bus::connect(&server.url, None, &human, "anonymous").await.is_err(), "credentials are required");
+        assert!(bus::connect(&server.url, None, None, &human, "anonymous").await.is_err(), "credentials are required");
 
         let (_, a_js) = server.connect(&dev_a).await;
         assert!(bus::ensure_stream(&a_js).await.is_err(), "only the human creates the stream");
@@ -455,6 +512,118 @@ pub(crate) mod tests {
         assert!(dead::replay(&h_js, &stream, *junk_seq).await.is_err(), "nothing to replay");
         dead::discard(&stream, *junk_seq).await.unwrap();
         assert!(dead::list(&stream).await.unwrap().is_empty());
+    }
+
+    /// A port nobody listens on right now (nats-server does not report its leafnode port).
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    async fn connect_to(url: &str, creds: &Path, domain: Option<&JsDomain>, persona: &PersonaId) -> jetstream::Context {
+        let (_, mut js) = bus::connect(url, Some(creds), domain, persona, "test").await.unwrap();
+        js.set_timeout(Duration::from_secs(1));
+        js
+    }
+
+    /// A hub with a JetStream domain, and a leaf node without JetStream whose uplink uses `ants auth leaf` credentials
+    /// for dev-a: dev-a reaches the hub's stream through the domain; dev-b, also valid on the leaf, gets nothing across.
+    #[tokio::test]
+    async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
+        let leaf_port = free_port();
+        let Some(hub) = Server::start_with(
+            "domain: hub",
+            &format!("leafnodes {{ listen: \"127.0.0.1:{leaf_port}\"\nno_advertise: true }}\n"),
+        ) else {
+            return;
+        };
+        let domain: JsDomain = "hub".parse().unwrap();
+        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let team = hub.dir.join("auth");
+
+        let (h_client, mut h_js) =
+            bus::connect(&hub.url, Some(&hub.creds_in(&human, Some(&domain))), Some(&domain), &human, "test")
+                .await
+                .unwrap();
+        h_js.set_timeout(Duration::from_secs(1));
+        bus::init_stream(&h_js).await.unwrap();
+        bus::ensure_sessions(&h_js).await.unwrap();
+
+        let leaf_creds = hub.dir.join("leaf-m1.creds");
+        issue_leaf(&team, "m1", std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
+        assert!(
+            async_nats::ConnectOptions::with_credentials_file(&leaf_creds)
+                .await
+                .unwrap()
+                .connect(&hub.url)
+                .await
+                .is_err(),
+            "leaf credentials do not work for clients"
+        );
+        let leaf_dir = Server::new_dir().unwrap();
+        fs::copy(team.join(SERVER_CONF), leaf_dir.join(SERVER_CONF)).unwrap();
+        let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
+        let leaf = Server::spawn(
+            leaf_dir,
+            &format!(
+                "include \"{SERVER_CONF}\"\nleafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{leaf_port}\"\n\
+                 account: {account}\ncredentials: {leaf_creds:?} }}] }}\n"
+            ),
+        );
+
+        // Without the domain the JetStream API stays on the leaf, which has none.
+        let a_plain = connect_to(&leaf.url, &hub.creds(&dev_a), None, &dev_a).await;
+        let a_js = connect_to(&leaf.url, &hub.creds_in(&dev_a, Some(&domain)), Some(&domain), &dev_a).await;
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = bus::ensure_stream(&a_js).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let stream = stream.expect("dev-a on the leaf reaches the hub stream");
+        assert!(bus::ensure_stream(&a_plain).await.is_err(), "no JetStream without the domain");
+
+        // dev-a serves its inbox from the leaf, keeps its session, and replies.
+        let mut human_inbox = h_client.subscribe(subject::inbox(&human)).await.unwrap();
+        h_client.flush().await.unwrap();
+        let ask = Envelope::new(human.clone(), dev_a.clone(), "hi");
+        bus::publish(&h_js, &ask).await.unwrap();
+        let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 2).await.unwrap();
+        let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
+        let sessions = bus::ensure_sessions(&a_js).await.unwrap();
+        let key = session_key(&dev_a, &ask.thread_id);
+        sessions.put(&key, "s1".into()).await.unwrap();
+        assert_eq!(sessions.get(&key).await.unwrap().as_deref(), Some(&b"s1"[..]));
+        let reply = ask.reply(dev_a.clone(), "hello").unwrap();
+        bus::publish(&a_js, &reply).await.unwrap();
+        msg.double_ack().await.unwrap();
+        let got = timeout(WAIT, human_inbox.next()).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&got.payload).unwrap(), reply);
+
+        // The uplink carries only what dev-a may do: the leaf accepts dev-b, but nothing of dev-b crosses either way.
+        let b_js = connect_to(&leaf.url, &hub.creds_in(&dev_b, Some(&domain)), Some(&domain), &dev_b).await;
+        assert!(bus::ensure_stream(&b_js).await.is_err(), "dev-b's JetStream requests stay on the leaf");
+        let (a_client, b_client) = (a_js.client(), b_js.client());
+        let mut a_live = a_client.subscribe(subject::inbox(&dev_a)).await.unwrap();
+        let mut b_live = b_client.subscribe(subject::inbox(&dev_b)).await.unwrap();
+        let mut statuses = h_client.subscribe("ants.status.>").await.unwrap();
+        for c in [&a_client, &b_client, &h_client] {
+            c.flush().await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let thread = &ask.thread_id;
+        b_client.publish(subject::status(&dev_b, thread), "b".into()).await.unwrap();
+        b_client.flush().await.unwrap();
+        a_client.publish(subject::status(&dev_a, thread), "a".into()).await.unwrap();
+        let got = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
+        assert_eq!(got.subject.as_str(), subject::status(&dev_a, thread), "dev-b's status stays on the leaf");
+        h_client.publish(subject::inbox(&dev_b), "to b".into()).await.unwrap();
+        h_client.publish(subject::inbox(&dev_a), "to a".into()).await.unwrap();
+        h_client.flush().await.unwrap();
+        assert_eq!(&timeout(WAIT, a_live.next()).await.unwrap().unwrap().payload[..], b"to a");
+        assert!(timeout(Duration::from_millis(300), b_live.next()).await.is_err(), "nothing for dev-b crosses");
     }
 
     /// Stream sequence of the first copy of `envelope`.

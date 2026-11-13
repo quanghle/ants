@@ -89,6 +89,9 @@ macro_rules! token_id {
 
 token_id!(PersonaId, "persona id");
 token_id!(ThreadId, "thread id");
+// The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node without JetStream reach the
+// hub's JetStream only through it, as `$JS.<domain>.API`.
+token_id!(JsDomain, "JetStream domain");
 
 impl PersonaId {
     /// The human at the terminal.
@@ -258,6 +261,46 @@ impl Permissions {
             ]);
         }
         Self { publish, subscribe }
+    }
+}
+
+impl Permissions {
+    /// The same permissions, also for clients that use the JetStream API of `domain` (`$JS.<domain>.API.…`), as every
+    /// ants process does when the hub has a domain. KV puts and deletes then go through that prefix too
+    /// (`$JS.<domain>.API.$KV.…`). The plain subjects stay allowed: the hub maps the domain prefix onto them and checks
+    /// the mapped subject against the permissions as well. Acks, flow control and ants subjects are the same in both.
+    /// Without a domain the permissions are unchanged.
+    pub fn with_js_domain(mut self, domain: Option<&JsDomain>) -> Self {
+        let Some(domain) = domain else { return self };
+        let api = format!("$JS.{domain}.API.");
+        let in_domain: Vec<String> = self
+            .publish
+            .iter()
+            .filter_map(|s| match s.strip_prefix("$JS.API.") {
+                Some(rest) => Some(format!("{api}{rest}")),
+                None if s.starts_with("$KV.") => Some(format!("{api}{s}")),
+                None => None,
+            })
+            .collect();
+        self.publish.extend(in_domain);
+        self
+    }
+
+    /// What a leaf node's uplink credentials allow: everything any of `personas` may do, since every message of a
+    /// persona on the machine crosses that one connection. Include [`PersonaId::human`] when the machine runs the CLI.
+    pub fn for_leaf<'a>(personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
+        let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
+        for persona in personas {
+            let Self { publish, subscribe } = Self::for_persona(persona);
+            for (all, new) in [(&mut leaf.publish, publish), (&mut leaf.subscribe, subscribe)] {
+                for s in new {
+                    if !all.contains(&s) {
+                        all.push(s);
+                    }
+                }
+            }
+        }
+        leaf
     }
 }
 
@@ -548,6 +591,41 @@ mod tests {
     fn generated_thread_ids_are_valid_tokens() {
         let t = ThreadId::generate();
         assert_eq!(t.as_str().parse::<ThreadId>().unwrap(), t);
+    }
+
+    #[test]
+    fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
+        let domain: JsDomain = "hub".parse().unwrap();
+        let plain = Permissions::for_persona(&p("dev-a"));
+        assert_eq!(plain.clone().with_js_domain(None), plain);
+        let Permissions { publish, subscribe } = plain.clone().with_js_domain(Some(&domain));
+        assert_eq!(subscribe, plain.subscribe);
+        assert_eq!(publish[..plain.publish.len()], plain.publish, "the hub checks the mapped subjects too");
+        for s in [
+            "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.inbox-dev-a",
+            "$JS.hub.API.DIRECT.GET.KV_ants_sessions.$KV.ants_sessions.dev-a.>",
+            "$JS.hub.API.$KV.ants_sessions.dev-a.>",
+            "$JS.hub.API.$KV.ants_roster.dev-a",
+            "$JS.ACK.ANTS.inbox-dev-a.>",
+            "ants.plan.>",
+        ] {
+            assert!(publish.iter().any(|have| have == s), "{s} missing from {publish:?}");
+        }
+        assert!("hub.x".parse::<JsDomain>().is_err());
+    }
+
+    #[test]
+    fn leaf_permissions_cover_each_persona_once() {
+        let (human, a, b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let leaf = Permissions::for_leaf([&a, &b, &human]);
+        for persona in [&a, &b, &human] {
+            let own = Permissions::for_persona(persona);
+            assert!(own.publish.iter().all(|s| leaf.publish.contains(s)), "{persona} publish");
+            assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)), "{persona} subscribe");
+        }
+        assert_eq!(leaf.publish.iter().filter(|s| *s == "ants.plan.>").count(), 1);
+        let only_a = Permissions::for_leaf([&a]);
+        assert_eq!(only_a, Permissions::for_persona(&a));
     }
 
     #[test]

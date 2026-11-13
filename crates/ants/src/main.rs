@@ -7,7 +7,7 @@ mod serve;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness};
-use ants_proto::{DeadLetter, Envelope, PersonaId, ThreadId, subject};
+use ants_proto::{DeadLetter, Envelope, JsDomain, PersonaId, ThreadId, subject};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
@@ -22,6 +22,11 @@ struct Cli {
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-persona permissions.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
+
+    /// JetStream domain of the hub (its `jetstream { domain }`), needed to reach JetStream from a leaf node without
+    /// JetStream. Set it for every ants process, and when issuing credentials with `ants auth`.
+    #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
+    js_domain: Option<JsDomain>,
 
     #[command(subcommand)]
     command: Command,
@@ -108,13 +113,29 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Issue credentials for a persona, allowing only the subjects of its role. `human` is the CLI user.
+    /// Issue credentials for a persona, allowing only the subjects of its role. `human` is the CLI user. Give the
+    /// hub's --js-domain, if it has one, so they work with it.
     User {
         persona: PersonaId,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the credentials (default: <dir>/<persona>.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
+    /// personas on the machine may do and usable only by a leaf node connection.
+    Leaf {
+        /// Machine name, for the credentials' name and file name.
+        machine: String,
+        /// Persona served on the machine (repeatable). Add `human` if the machine runs the CLI.
+        #[arg(long = "persona", value_name = "PERSONA", required = true)]
+        personas: Vec<PersonaId>,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the credentials (default: <dir>/leaf-<machine>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -145,15 +166,17 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    let domain = cli.js_domain.as_ref();
     match cli.command {
-        Command::Ask { thread, wait, words } => ask(&cli.nats, cli.creds.as_deref(), thread, wait, words).await,
+        Command::Ask { thread, wait, words } => ask(&cli.nats, cli.creds.as_deref(), domain, thread, wait, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread, limit, peek };
-            show_inbox(&cli.nats, cli.creds.as_deref(), &select, follow, json).await
+            show_inbox(&cli.nats, cli.creds.as_deref(), domain, &select, follow, json).await
         }
-        Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), subject).await,
+        Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), domain, subject).await,
         Command::Init => {
-            let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;
+            let (_, js) =
+                bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
             bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
             bus::ensure_sessions(&js).await?;
@@ -165,10 +188,10 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), command).await,
+        Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), domain, command).await,
         Command::Daemon(args) => {
             let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
-            serve::run(serve::configs(personas, &cli.nats, cli.creds)?).await
+            serve::run(serve::configs(personas, &cli.nats, cli.creds, domain.cloned())?).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { harness }) => {
@@ -194,7 +217,14 @@ async fn main() -> Result<()> {
         Command::Auth(AuthCommand::User { persona, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{persona}.creds")));
-            auth::issue(&dir, &persona, &out)?;
+            auth::issue(&dir, &persona, domain, &out)?;
+            println!("{}", out.display());
+            Ok(())
+        }
+        Command::Auth(AuthCommand::Leaf { machine, personas, dir, out }) => {
+            let dir = team_dir(dir)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
+            auth::issue_leaf(&dir, &machine, &personas, domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }
@@ -224,13 +254,20 @@ fn recipient(mut words: Vec<String>) -> Result<(PersonaId, String)> {
     Ok((to, words.join(" ")))
 }
 
-async fn ask(url: &str, creds: Option<&Path>, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
+async fn ask(
+    url: &str,
+    creds: Option<&Path>,
+    domain: Option<&JsDomain>,
+    thread: Option<ThreadId>,
+    wait: bool,
+    words: Vec<String>,
+) -> Result<()> {
     let (to, text) = recipient(words)?;
     let envelope = match thread {
         Some(thread) => Envelope::on_thread(thread, PersonaId::human(), to, text),
         None => Envelope::new(PersonaId::human(), to, text),
     };
-    let (client, js) = bus::connect(url, creds, &PersonaId::human(), "ants-cli").await?;
+    let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
     let mut replies = client.subscribe(subject::inbox(&PersonaId::human())).await?;
     bus::publish(&js, &envelope).await?;
@@ -254,8 +291,15 @@ async fn ask(url: &str, creds: Option<&Path>, thread: Option<ThreadId>, wait: bo
     bail!("connection closed before a reply arrived")
 }
 
-async fn show_inbox(url: &str, creds: Option<&Path>, select: &inbox::Select, follow: bool, json: bool) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, &PersonaId::human(), "ants-inbox").await?;
+async fn show_inbox(
+    url: &str,
+    creds: Option<&Path>,
+    domain: Option<&JsDomain>,
+    select: &inbox::Select,
+    follow: bool,
+    json: bool,
+) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-inbox").await?;
     let mut inbox = inbox::Inbox::open(&js).await?;
     let show = |e: &Envelope| -> Result<()> {
         if json {
@@ -282,8 +326,8 @@ async fn show_inbox(url: &str, creds: Option<&Path>, select: &inbox::Select, fol
     result.and(released)
 }
 
-async fn dead_letters(url: &str, creds: Option<&Path>, command: DeadCommand) -> Result<()> {
-    let (_, js) = bus::connect(url, creds, &PersonaId::human(), "ants-cli").await?;
+async fn dead_letters(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, command: DeadCommand) -> Result<()> {
+    let (_, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
     let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
     match command {
         DeadCommand::List => {
@@ -333,8 +377,8 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-async fn watch(url: &str, creds: Option<&Path>, filter: String) -> Result<()> {
-    let (client, _) = bus::connect(url, creds, &PersonaId::human(), "ants-watch").await?;
+async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filter: String) -> Result<()> {
+    let (client, _) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
     while let Some(msg) = sub.next().await {
         if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {

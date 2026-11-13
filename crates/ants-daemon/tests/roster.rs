@@ -81,7 +81,7 @@ async fn wait_gone(kv: &kv::Store, persona: &str, limit: Duration) -> Duration {
 #[tokio::test]
 async fn entries_refresh_leave_and_expire() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_roster(&js, ttl).await.unwrap();
     let beat = Duration::from_millis(300);

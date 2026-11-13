@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ants_daemon::config::{self, Persona};
 use ants_daemon::{Config, HarnessKind};
-use ants_proto::PersonaId;
+use ants_proto::{JsDomain, PersonaId};
 use anyhow::{Context as _, Result, bail};
 use tracing::Instrument as _;
 
@@ -136,9 +136,15 @@ fn pick(all: Vec<Persona>, args: &DaemonArgs, path: &Path) -> Result<Vec<Persona
     }
 }
 
-/// Daemon configs, with `nats` as the server and, for a lone persona, `creds` as the credentials where the persona
-/// sets none. Several personas cannot share one set of credentials, so `creds` is ignored for them.
-pub fn configs(personas: Vec<Persona>, nats: &str, creds: Option<PathBuf>) -> Result<Vec<Config>> {
+/// Daemon configs, with `nats` as the server, `js_domain` as the JetStream domain and, for a lone persona, `creds` as
+/// the credentials where the persona sets none. Several personas cannot share one set of credentials, so `creds` is
+/// ignored for them.
+pub fn configs(
+    personas: Vec<Persona>,
+    nats: &str,
+    creds: Option<PathBuf>,
+    js_domain: Option<JsDomain>,
+) -> Result<Vec<Config>> {
     let lone = personas.len() == 1;
     if !lone && creds.is_some() {
         tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several personas; set creds per persona instead");
@@ -148,6 +154,9 @@ pub fn configs(personas: Vec<Persona>, nats: &str, creds: Option<PathBuf>) -> Re
         .map(|mut p| {
             if lone && p.creds.is_none() {
                 p.creds.clone_from(&creds);
+            }
+            if p.js_domain.is_none() {
+                p.js_domain.clone_from(&js_domain);
             }
             p.into_config(nats)
         })
@@ -248,15 +257,20 @@ mod tests {
         bare.nats = None;
         bare.creds = None;
         let cli_creds = Some(PathBuf::from("cli.creds"));
+        let (cli_domain, own_domain): (JsDomain, JsDomain) = ("cli".parse().unwrap(), "own".parse().unwrap());
 
-        let one = configs(vec![bare.clone()], "nats://cli:4222", cli_creds.clone()).unwrap();
+        let one = configs(vec![bare.clone()], "nats://cli:4222", cli_creds.clone(), Some(cli_domain.clone())).unwrap();
         assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
+        assert_eq!(one[0].js_domain, Some(cli_domain.clone()));
 
-        let one = configs(vec![persona("dev-a")], "nats://cli:4222", cli_creds.clone()).unwrap();
+        let mut own = persona("dev-a");
+        own.js_domain = Some(own_domain.clone());
+        let one = configs(vec![own], "nats://cli:4222", cli_creds.clone(), Some(cli_domain)).unwrap();
         assert_eq!(one[0].nats_url, "nats://dev-a:4222");
         assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
+        assert_eq!(one[0].js_domain, Some(own_domain));
 
-        let two = configs(vec![bare, persona("dev-b")], "nats://cli:4222", cli_creds).unwrap();
+        let two = configs(vec![bare, persona("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
     }

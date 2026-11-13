@@ -9,7 +9,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ants_proto::{Envelope, Error as ProtoError, PersonaId, ThreadId, subject};
+use ants_proto::{Envelope, Error as ProtoError, JsDomain, PersonaId, ThreadId, subject};
 use anyhow::{Result, anyhow};
 use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
@@ -42,6 +42,8 @@ pub struct Config {
     pub nats_url: String,
     /// Credentials file of the persona, when the server requires them.
     pub creds: Option<PathBuf>,
+    /// JetStream domain of the hub, if it has one.
+    pub js_domain: Option<JsDomain>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
     /// The persona's own files, its bd workspace among them (usually `~/.ants/<persona>`).
@@ -64,9 +66,14 @@ pub struct Config {
 pub async fn run(config: Config) -> Result<()> {
     let allow = Allowlist::parse(&config.allow)?;
     let db = workspace::ensure(&config.home, &config.persona).await?;
-    let (client, js) =
-        bus::connect(&config.nats_url, config.creds.as_deref(), &config.persona, &format!("antsd-{}", config.persona))
-            .await?;
+    let (client, js) = bus::connect(
+        &config.nats_url,
+        config.creds.as_deref(),
+        config.js_domain.as_ref(),
+        &config.persona,
+        &format!("antsd-{}", config.persona),
+    )
+    .await?;
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let mut mcp = Mcp::start(config.persona.clone(), &config.home, crate::mcp::jetstream_outbox(js.clone())).await?;
@@ -462,7 +469,7 @@ mod tests {
         async fn start() -> Option<(Self, async_nats::Subscriber)> {
             let server = Server::start()?;
             let dev: PersonaId = "dev-a".parse().unwrap();
-            let (client, js) = bus::connect(&server.url, None, &dev, "test").await.unwrap();
+            let (client, js) = bus::connect(&server.url, None, None, &dev, "test").await.unwrap();
             let stream = bus::ensure_stream(&js).await.unwrap();
             let replies = client.subscribe(subject::inbox(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
