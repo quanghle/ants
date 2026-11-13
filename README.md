@@ -234,16 +234,18 @@ A tunnel the uplink depends on, such as `devtunnel connect`, needs a service of 
 ## Roster
 
 Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, harness, workdir,
-capabilities, `whoami`, start and last heartbeat time (`RosterEntry` in `ants-proto`). It refreshes the entry every 10 s and
-deletes it on a clean stop. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
+capabilities, `whoami`, start and last heartbeat time, activity (`idle`, or `working` while a message is being
+handled), the number of messages being handled and of live harnesses (`RosterEntry` in `ants-proto`). It refreshes the
+entry every 10 s, and at once when the persona turns idle or working, and deletes it on a clean stop. Entries from older
+daemons lack the activity fields. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; every persona's and the
 human's read the roster, so agents can pick whom to ask (see Messenger). Readers take the persona from the key and
 skip, with a warning, an entry that names another. Persona credentials issued before personas could read it need
 `ants auth user` again.
 
-`ants roster` lists the entries: persona, state, harness, machine, time since the last heartbeat, uptime,
-capabilities and workdir. An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
+`ants roster` lists the entries: persona, state, activity, live harnesses, harness, machine, time since the last
+heartbeat, uptime, capabilities and workdir (`-` for a field an older daemon leaves out). An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
 without one: its daemon is likely gone and the entry expires shortly. Ages come from the daemons' clocks, so skew
 between machines shifts them. `--json` prints one entry per line with its `state` added.
 
@@ -362,7 +364,7 @@ speak as the persona, on the thread the session serves:
 | `send_message(to, text, thread?)` | Sends to another persona or `human` and returns once JetStream has stored it. `thread` omitted: the current thread; `new`: a fresh one; else that thread id. |
 | `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
-| `list_personas(capability?)` | Lists the other personas in the roster with `whoami`, capabilities, harness and machine; only those advertising `capability` when given. |
+| `list_personas(capability?)` | Lists the other personas in the roster with `whoami`, capabilities, harness, machine and activity (idle or working); only those advertising `capability` when given. |
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |

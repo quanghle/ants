@@ -50,13 +50,26 @@ fn short(duration: Duration) -> String {
 
 /// The roster as a table: one row per persona under a header, columns padded to line up.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
-    let header =
-        ["PERSONA", "STATE", "HARNESS", "MACHINE", "HEARTBEAT", "UP", "CAPABILITIES", "WORKDIR"].map(str::to_owned);
-    let rows: Vec<[String; 8]> = std::iter::once(header)
+    let header = [
+        "PERSONA",
+        "STATE",
+        "ACTIVITY",
+        "HARNESSES",
+        "HARNESS",
+        "MACHINE",
+        "HEARTBEAT",
+        "UP",
+        "CAPABILITIES",
+        "WORKDIR",
+    ]
+    .map(str::to_owned);
+    let rows: Vec<[String; 10]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
                 e.persona.to_string(),
                 State::of(e, now).as_str().to_owned(),
+                e.activity.map_or("-", |a| a.as_str()).to_owned(),
+                e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
                 e.harness.clone(),
                 e.machine.clone(),
                 format!("{} ago", short(since(e.heartbeat_at, now))),
@@ -66,7 +79,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 8];
+    let mut widths = [0; 10];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -122,6 +135,7 @@ pub async fn show(
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
+    use ants_proto::Activity;
 
     use super::*;
     use crate::auth::tests::Server;
@@ -136,6 +150,9 @@ mod tests {
             workdir: Some("/src/app".to_owned()),
             started_at: now - chrono::Duration::seconds(started),
             heartbeat_at: now - chrono::Duration::seconds(beat),
+            activity: None,
+            handling: None,
+            harnesses: None,
         }
     }
 
@@ -145,12 +162,31 @@ mod tests {
         let mut quiet = entry("dev-b", 7300, 25, now);
         quiet.capabilities.clear();
         quiet.workdir = None;
-        let table = table(&[entry("dev-a", 190, 4, now), quiet], now);
+        let mut busy = entry("dev-a", 190, 4, now);
+        (busy.activity, busy.handling, busy.harnesses) = (Some(Activity::Working), Some(1), Some(2));
+        let table = table(&[busy, quiet], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
-        assert_eq!(rows[0], ["PERSONA", "STATE", "HARNESS", "MACHINE", "HEARTBEAT", "UP", "CAPABILITIES", "WORKDIR"]);
-        assert_eq!(rows[1], ["dev-a", "live", "copilot", "m1", "4s", "ago", "3m", "rust,review", "/src/app"]);
-        assert_eq!(rows[2], ["dev-b", "stale", "copilot", "m1", "25s", "ago", "2h", "-", "-"]);
-        let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS"))).collect();
+        assert_eq!(
+            rows[0],
+            [
+                "PERSONA",
+                "STATE",
+                "ACTIVITY",
+                "HARNESSES",
+                "HARNESS",
+                "MACHINE",
+                "HEARTBEAT",
+                "UP",
+                "CAPABILITIES",
+                "WORKDIR"
+            ]
+        );
+        assert_eq!(
+            rows[1],
+            ["dev-a", "live", "working", "2", "copilot", "m1", "4s", "ago", "3m", "rust,review", "/src/app"]
+        );
+        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "25s", "ago", "2h", "-", "-"]);
+        let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
 
         let json: serde_json::Value =

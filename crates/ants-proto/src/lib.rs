@@ -574,6 +574,38 @@ pub struct RosterEntry {
     pub started_at: DateTime<Utc>,
     /// When the daemon last refreshed the entry.
     pub heartbeat_at: DateTime<Utc>,
+    /// Whether the persona was handling a message at the last refresh. Missing from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
+    /// Messages being handled at the last refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handling: Option<u32>,
+    /// Live harness processes (sessions) at the last refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harnesses: Option<u32>,
+}
+
+/// What a persona is doing, as its roster entry reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Activity {
+    /// No message in hand.
+    Idle,
+    /// Handling at least one message.
+    Working,
+    /// A value from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Activity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 impl RosterEntry {
@@ -1145,10 +1177,18 @@ mod tests {
             workdir: None,
             started_at: Utc::now(),
             heartbeat_at: Utc::now(),
+            activity: None,
+            handling: None,
+            harnesses: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("workdir"));
+        assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
+        let busy =
+            RosterEntry { activity: Some(Activity::Working), handling: Some(2), harnesses: Some(1), ..entry.clone() };
+        let json = serde_json::to_string(&busy).unwrap();
+        assert!(json.contains(r#""activity":"working","handling":2,"harnesses":1"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), busy);
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -1159,6 +1199,12 @@ mod tests {
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.capabilities.is_empty());
         assert_eq!(entry.whoami, None);
+        assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
+
+        let newer = r#"{"persona":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,
+            "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
+        let entry: RosterEntry = serde_json::from_str(newer).unwrap();
+        assert_eq!((entry.activity, entry.harnesses), (Some(Activity::Unknown), Some(3)));
     }
 
     #[test]

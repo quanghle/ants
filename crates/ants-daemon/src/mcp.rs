@@ -701,7 +701,8 @@ fn describe(entries: &[&RosterEntry]) -> String {
         .map(|e| {
             let capabilities =
                 if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
-            let mut text = format!("{}: {capabilities} ({} on {})", e.persona, e.harness, e.machine);
+            let activity = e.activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default();
+            let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.persona, e.harness, e.machine);
             if let Some(whoami) = &e.whoami
                 && !whoami.trim().is_empty()
             {
@@ -798,8 +799,8 @@ impl Tools {
     }
 
     #[tool(description = "List the other personas being served, from the roster, with each persona's advertised \
-        whoami field, capabilities (such as `rust` or `billing`), harness and machine. `capability` keeps only those advertising \
-        it. Pick whom to send_message or ask_agent by these capabilities.")]
+        whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working. \
+        `capability` keeps only those advertising it. Pick whom to send_message or ask_agent by these capabilities.")]
     async fn list_personas(&self, Parameters(args): Parameters<ListPersonas>) -> Result<CallToolResult, ErrorData> {
         let result = async {
             let entries = self.hub.others().await?;
@@ -1002,6 +1003,9 @@ mod tests {
             workdir: None,
             started_at: now,
             heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
         }
     }
 
@@ -1086,7 +1090,9 @@ mod tests {
     async fn requests_are_routed_by_roster_capabilities() {
         let mut billing = listed("dev-c", &["Rust", "billing"]);
         billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
-        let roster = vec![listed("dev-a", &["rust"]), billing, listed("dev-b", &["rust"]), listed("docs", &[])];
+        let mut docs = listed("docs", &[]);
+        docs.activity = Some(ants_proto::Activity::Working);
+        let roster = vec![listed("dev-a", &["rust"]), billing, listed("dev-b", &["rust"]), docs];
         let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
         let current = from_human();
         let _turn = mcp.begin(&current);
@@ -1094,7 +1100,10 @@ mod tests {
         let client = http_client(&url, &token).await;
 
         let (ok, text) = call(&client, "list_personas", serde_json::json!({})).await;
-        assert!(ok && !text.contains("dev-a:") && text.contains("docs: no capabilities"), "{text}");
+        assert!(
+            ok && !text.contains("dev-a:") && text.contains("docs: no capabilities (copilot on m1, working)"),
+            "{text}"
+        );
         assert!(text.contains("whoami (advertised):\nMaintain billing services.\nReview invoices."), "{text}");
         let (ok, text) = call(&client, "list_personas", serde_json::json!({"capability": "billing"})).await;
         assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1)") && !text.contains("dev-b"), "{text}");
