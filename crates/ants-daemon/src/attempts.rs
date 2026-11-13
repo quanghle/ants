@@ -6,6 +6,14 @@
 //! started marker is prompted with a warning that tools may already have run; one that finds a reply stores that reply
 //! again (under the same message id, so the stream keeps one copy) and is acked without a prompt. The marker is
 //! removed once the message is acked or dead-lettered; one left behind expires with the stream's messages.
+//!
+//! The markers live on the hub, out of reach while a leaf node's uplink is down, and so is the ack. A reply stored
+//! then goes to the machine's outbox, and the message stays unacked. [`Answered`] keeps, on the machine itself, which
+//! messages have their reply stored until their ack is in, so their redelivery, even to a restarted daemon, is acked
+//! without being answered again.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use ants_proto::{Envelope, PersonaId, Uuid, attempt_key};
 use anyhow::{Context as _, Result};
@@ -81,5 +89,69 @@ impl Attempts {
     async fn put(&self, seq: u64, record: &Record) -> Result<()> {
         self.kv.put(attempt_key(&self.persona, seq), serde_json::to_vec(record)?.into()).await?;
         Ok(())
+    }
+}
+
+/// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
+/// per message, named after its envelope id, holding the reply, in `<home>/answered` of the persona.
+pub struct Answered {
+    dir: PathBuf,
+}
+
+impl Answered {
+    pub fn new(home: &Path) -> Self {
+        Self { dir: home.join("answered") }
+    }
+
+    /// Whether the reply to `request` is stored.
+    pub async fn has(&self, request: &Envelope) -> bool {
+        let path = self.path(request);
+        tokio::fs::try_exists(&path).await.unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "looking for a stored reply");
+            false
+        })
+    }
+
+    /// Note that `reply` to `request` is stored, durably, before the request is acked.
+    pub async fn add(&self, request: &Envelope, reply: &Envelope) -> Result<()> {
+        let path = self.path(request);
+        let tmp = path.with_extension("tmp");
+        let write = async {
+            tokio::fs::create_dir_all(&self.dir).await?;
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &serde_json::to_vec(reply)?).await?;
+            file.sync_all().await?;
+            tokio::fs::rename(&tmp, &path).await?;
+            anyhow::Ok(())
+        };
+        write.await.with_context(|| format!("noting the stored reply in {}", path.display()))
+    }
+
+    /// Forget `request` once it is acked. A failure only leaves the note until [`prune`](Self::prune).
+    pub async fn forget(&self, request: &Envelope) {
+        let path = self.path(request);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "removing the note of a stored reply"),
+        }
+    }
+
+    /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
+    pub async fn prune(&self, max_age: Duration) {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else { return };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let modified = entry.metadata().await.and_then(|m| m.modified());
+            let age = modified.ok().and_then(|m| SystemTime::now().duration_since(m).ok());
+            if age.is_some_and(|age| age > max_age)
+                && let Err(e) = tokio::fs::remove_file(entry.path()).await
+            {
+                tracing::warn!(path = %entry.path().display(), error = %e, "removing an old note of a stored reply");
+            }
+        }
+    }
+
+    fn path(&self, request: &Envelope) -> PathBuf {
+        self.dir.join(format!("{}.json", request.id))
     }
 }

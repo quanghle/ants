@@ -15,7 +15,7 @@ use async_nats::{ConnectErrorKind, Event};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
-const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
 /// sleep, dropped tunnel) is noticed within about a minute instead of three, and proxies with a 60 s idle timeout see
@@ -324,6 +324,14 @@ pub async fn store<T: serde::Serialize>(
     }
     tracing::warn!(%subject, "the hub's stream is out of reach ({unreachable}); kept in this machine's outbox");
     Ok(Stored::Outbox)
+}
+
+/// Ack `msg` and wait until the server confirms it. [`jetstream::Message::double_ack`] takes the "no responders"
+/// status the client gets while a leaf node's uplink is down for a confirmation; this does not.
+pub async fn double_ack(client: &async_nats::Client, msg: &jetstream::Message) -> Result<()> {
+    let reply = msg.reply.clone().context("acking a message that is not from JetStream")?;
+    client.request(reply, jetstream::AckKind::Ack.into()).await.context("acking")?;
+    Ok(())
 }
 
 /// Publish `value` as JSON and wait until JetStream has stored it, returning its stream sequence. With `msg_id`, a
