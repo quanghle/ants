@@ -1,6 +1,6 @@
 # ants: the persona daemon (antsd), serving the personas of its config file through the local nats-server.
 # User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
-# Until ants-nats listens, the daemon exits with an error and is started again.
+# Until ants-nats listens, the daemon waits, retrying the connection; Restart covers other failures.
 
 [Unit]
 Description=ants: persona daemon

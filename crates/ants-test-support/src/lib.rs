@@ -33,6 +33,11 @@ pub fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// A TCP port of 127.0.0.1 that was free a moment ago, for a server that must start after its client.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
 /// A nats-server with JetStream on a port of its choosing, its files in a scratch directory; stopped and removed on
 /// drop.
 pub struct NatsServer {
@@ -61,16 +66,25 @@ impl NatsServer {
         Self::spawn_with(|dir| format!("jetstream {{ store_dir: {:?} }}\n{}", dir.join("js"), extra(dir)))
     }
 
+    /// Like [`start`](Self::start), listening on `port` of 127.0.0.1 (see [`free_port`]), for a client started first.
+    pub fn start_on(port: u16) -> Option<Self> {
+        Self::spawn(&format!("127.0.0.1:{port}"), |dir| format!("jetstream {{ store_dir: {:?} }}\n", dir.join("js")))
+    }
+
     /// A nats-server whose whole configuration, JetStream included, comes from `conf`, which gets the server's
     /// directory; only the listen address and ports file are added. None when nats-server is not installed.
     pub fn spawn_with(conf: impl FnOnce(&Path) -> String) -> Option<Self> {
+        // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
+        Self::spawn("127.0.0.1:-1", conf)
+    }
+
+    fn spawn(listen: &str, conf: impl FnOnce(&Path) -> String) -> Option<Self> {
         if !have("nats-server") {
             return None;
         }
         let dir = scratch_dir("nats");
         let path = dir.join("nats.conf");
-        // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
-        let config = format!("listen: 127.0.0.1:-1\nports_file_dir: {dir:?}\n{}", conf(&dir));
+        let config = format!("listen: {listen}\nports_file_dir: {dir:?}\n{}", conf(&dir));
         std::fs::write(&path, config).unwrap();
         let child = Command::new("nats-server")
             .arg("-c")

@@ -69,18 +69,28 @@ pub struct Config {
     pub capabilities: Vec<String>,
 }
 
-/// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once.
+/// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
+/// the NATS server can be reached the daemon keeps trying ([`bus::connect_retrying`]).
 pub async fn run(config: Config) -> Result<()> {
     let allow = Allowlist::parse(&config.allow)?;
     let db = workspace::ensure(&config.home, &config.persona).await?;
-    let (client, js) = bus::connect(
+    let Some((client, js)) = bus::connect_retrying(
         &config.nats_url,
         config.creds.as_deref(),
         config.js_domain.as_ref(),
         &config.persona,
         &format!("antsd-{}", config.persona),
+        async {
+            if stop_signal().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        },
     )
-    .await?;
+    .await?
+    else {
+        tracing::info!("stopped before connecting");
+        return Ok(());
+    };
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
