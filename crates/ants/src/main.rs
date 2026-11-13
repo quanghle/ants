@@ -11,7 +11,9 @@ mod serve;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
-use ants_proto::{DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, ThreadId, subject};
+use ants_proto::{
+    DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, StatusEvent, StatusUpdate, ThreadId, subject,
+};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
@@ -80,11 +82,13 @@ enum Command {
         /// The post. Without it, show the room.
         words: Vec<String>,
     },
-    /// Print ants traffic as it happens.
+    /// Print ants traffic as it happens, or the live progress of a persona: state, reply text, tool calls and plan.
     Watch {
-        /// Subject filter.
+        /// Subject filter, or a persona to follow its progress on every thread.
         #[arg(default_value = subject::ALL)]
         subject: String,
+        /// With a persona, follow only this thread.
+        thread: Option<ThreadId>,
     },
     /// Create the ANTS stream and the roster and sessions buckets on the server, or add the stream subjects an older
     /// version lacks.
@@ -259,7 +263,10 @@ async fn main() -> Result<()> {
         }
         Command::Roster { json } => roster::show(&cli.nats, cli.creds.as_deref(), domain, json).await,
         Command::Plan { thread, words } => plan_room(&cli.nats, cli.creds.as_deref(), domain, thread, words).await,
-        Command::Watch { subject } => watch(&cli.nats, cli.creds.as_deref(), domain, subject).await,
+        Command::Watch { subject, thread } => {
+            let filter = watch_filter(&subject, thread.as_ref())?;
+            watch(&cli.nats, cli.creds.as_deref(), domain, filter).await
+        }
         Command::Init => {
             let (_, js) =
                 bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
@@ -557,30 +564,99 @@ async fn plan_room(
     Ok(())
 }
 
+/// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for a persona (one token), its
+/// status subjects.
+fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
+    match target.parse::<PersonaId>().ok() {
+        Some(persona) => Ok(thread.map_or_else(|| subject::status_of(&persona), |t| subject::status(&persona, t))),
+        None if thread.is_some() => bail!("a thread can only follow a persona, not the subject filter {target:?}"),
+        None => Ok(target.to_owned()),
+    }
+}
+
 async fn watch(url: &str, creds: Option<&Path>, domain: Option<&JsDomain>, filter: String) -> Result<()> {
+    use std::io::Write as _;
+
     let (client, _) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-watch").await?;
     let mut sub = client.subscribe(filter).await?;
+    let mut printer = Printer::default();
     while let Some(msg) = sub.next().await {
-        if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
-            let forged = match e.check_subject(&msg.subject) {
-                Ok(()) => String::new(),
-                Err(_) => format!(" (forged: sent on {})", msg.subject),
-            };
-            println!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text);
+        let forged = |ok: bool| if ok { String::new() } else { format!(" (forged: sent on {})", msg.subject) };
+        let out = if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload) {
+            printer.status(&event, &forged(event.check_subject(&msg.subject).is_ok()))
+        } else if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
+            let forged = forged(e.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("[{}] {} -> {}{forged}: {}", e.thread_id, e.from, e.to, e.text))
         } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
-            let forged = match post.check_subject(&msg.subject) {
-                Ok(()) => String::new(),
-                Err(_) => format!(" (forged: sent on {})", msg.subject),
-            };
+            let forged = forged(post.check_subject(&msg.subject).is_ok());
             let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
-            println!("[{thread}] {from} -> plan room ({left} turns left){forged}: {}", post.text);
+            printer.line(&format!("[{thread}] {from} -> plan room ({left} turns left){forged}: {}", post.text))
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
-            println!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error);
+            printer.line(&format!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error))
         } else {
-            println!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload));
-        }
+            printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
+        };
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(out.as_bytes())?;
+        stdout.flush()?;
     }
     Ok(())
+}
+
+/// Renders watched traffic, continuing a persona's streamed text on one line until something else arrives.
+#[derive(Default)]
+struct Printer {
+    /// Whose text the output ends with, unterminated.
+    streaming: Option<(PersonaId, ThreadId, &'static str)>,
+}
+
+impl Printer {
+    /// A whole line, after ending any streamed text.
+    fn line(&mut self, line: &str) -> String {
+        let end = if self.streaming.take().is_some() { "\n" } else { "" };
+        format!("{end}{line}\n")
+    }
+
+    fn status(&mut self, event: &StatusEvent, forged: &str) -> String {
+        let (who, thread) = (&event.persona, &event.thread_id);
+        let (verb, text) = match &event.update {
+            StatusUpdate::Message { text } => ("says", text),
+            StatusUpdate::Thought { text } => ("thinks", text),
+            StatusUpdate::State { state } => {
+                return self.line(&format!("[{thread}] {who}{forged}: {}", state.as_str()));
+            }
+            StatusUpdate::Tool { id, title, tool_kind, status } => {
+                let kind = tool_kind.as_deref().map(|k| format!(" ({k})")).unwrap_or_default();
+                let status = status.as_deref().map(|s| format!(": {s}")).unwrap_or_default();
+                let title = title.as_deref().unwrap_or(id);
+                return self.line(&format!("[{thread}] {who}{forged} tool {title}{kind}{status}"));
+            }
+            StatusUpdate::Plan { steps } => {
+                let steps: Vec<String> = steps
+                    .iter()
+                    .map(|s| {
+                        let mark = match s.status.as_str() {
+                            "completed" => "x",
+                            "in_progress" => ">",
+                            _ => " ",
+                        };
+                        format!("[{mark}] {}", s.content)
+                    })
+                    .collect();
+                return self.line(&format!("[{thread}] {who}{forged} plan: {}", steps.join("; ")));
+            }
+        };
+        let key = (who.clone(), thread.clone(), verb);
+        if !forged.is_empty() {
+            return self.line(&format!("[{thread}] {who} {verb}{forged}: {text}"));
+        }
+        if self.streaming.as_ref() == Some(&key) {
+            return text.clone();
+        }
+        let start = self.line(&format!("[{thread}] {who} {verb}: "));
+        self.streaming = Some(key);
+        format!("{}{text}", start.trim_end_matches('\n'))
+    }
 }
 
 #[cfg(test)]
@@ -614,6 +690,46 @@ mod tests {
 
         let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, "not an envelope", b"{oops");
         assert!(dead_row(13, &letter).ends_with("\tnot an envelope\t{oops"));
+    }
+
+    #[test]
+    fn watch_follows_a_persona_or_a_subject_filter() {
+        let t1: ThreadId = "t1".parse().unwrap();
+        assert_eq!(watch_filter("dev-a", None).unwrap(), "ants.status.dev-a.*");
+        assert_eq!(watch_filter("dev-a", Some(&t1)).unwrap(), "ants.status.dev-a.t1");
+        assert_eq!(watch_filter("ants.plan.>", None).unwrap(), "ants.plan.>");
+        assert_eq!(watch_filter(">", None).unwrap(), ">");
+        assert!(watch_filter("ants.>", Some(&t1)).is_err());
+    }
+
+    #[test]
+    fn streamed_text_continues_on_one_line() {
+        let (a, t1): (PersonaId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
+        let event = |update| StatusEvent::new(a.clone(), t1.clone(), update);
+        let says = |text: &str| event(StatusUpdate::Message { text: text.to_owned() });
+        let mut printer = Printer::default();
+        let out: String = [
+            printer.status(&says("Hel"), ""),
+            printer.status(&says("lo"), ""),
+            printer.status(&event(StatusUpdate::Thought { text: "hmm".to_owned() }), ""),
+            printer.status(
+                &event(StatusUpdate::Tool {
+                    id: "c1".to_owned(),
+                    title: Some("cargo test".to_owned()),
+                    tool_kind: Some("execute".to_owned()),
+                    status: Some("in_progress".to_owned()),
+                }),
+                "",
+            ),
+            printer.status(&says("done"), ""),
+            printer.status(&event(StatusUpdate::State { state: ants_proto::State::Idle }), ""),
+        ]
+        .concat();
+        assert_eq!(
+            out,
+            "[t1] dev-a says: Hello\n[t1] dev-a thinks: hmm\n[t1] dev-a tool cargo test (execute): in_progress\n\
+             [t1] dev-a says: done\n[t1] dev-a: idle\n"
+        );
     }
 
     #[test]

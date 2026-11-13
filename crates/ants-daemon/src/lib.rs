@@ -13,6 +13,7 @@ pub mod permission;
 pub mod plan;
 pub mod pool;
 pub mod roster;
+pub mod status;
 
 pub use daemon::{Config, run};
 pub use harness::{HarnessKind, Launch};

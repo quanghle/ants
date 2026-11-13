@@ -17,7 +17,7 @@ use agent_client_protocol::v1::schema::{
     TextContent, ToolCallId,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
-use ants_proto::ThreadId;
+use ants_proto::{PlanStep, StatusUpdate, ThreadId};
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
@@ -304,12 +304,15 @@ pub struct Prompt {
     pub spend: Option<mpsc::UnboundedSender<Spend>>,
     /// Cancels the prompt, with the reason sent.
     pub stop: Option<oneshot::Receiver<String>>,
+    /// Receives the reply text, thoughts, tool calls and plan as the harness streams them. An update that finds the
+    /// channel full is dropped rather than hold up the harness.
+    pub progress: Option<mpsc::Sender<StatusUpdate>>,
 }
 
 impl Prompt {
     /// `text` under the default limits.
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), limits: PromptLimits::default(), spend: None, stop: None }
+        Self { text: text.into(), limits: PromptLimits::default(), spend: None, stop: None, progress: None }
     }
 }
 
@@ -388,6 +391,7 @@ struct Current {
     max_tool_calls: Option<usize>,
     too_many: Arc<Notify>,
     spend: Option<mpsc::UnboundedSender<Spend>>,
+    progress: Option<mpsc::Sender<StatusUpdate>>,
 }
 
 #[derive(Default)]
@@ -410,6 +414,11 @@ impl Observed {
             return;
         }
         let Some(current) = self.current.as_mut() else { return };
+        if let Some(tx) = &current.progress
+            && let Some(update) = progress(&n.update)
+        {
+            let _ = tx.try_send(update);
+        }
         match n.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(t) = chunk.content {
@@ -425,6 +434,48 @@ impl Observed {
             _ => {}
         }
     }
+}
+
+/// The status update a session update streams, if any. A tool call update counts only when its title or status
+/// changes, not for every piece of output.
+fn progress(update: &SessionUpdate) -> Option<StatusUpdate> {
+    Some(match update {
+        SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(t) => StatusUpdate::Message { text: t.text.clone() },
+            _ => return None,
+        },
+        SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(t) => StatusUpdate::Thought { text: t.text.clone() },
+            _ => return None,
+        },
+        SessionUpdate::ToolCall(call) => StatusUpdate::Tool {
+            id: call.tool_call_id.to_string(),
+            title: Some(call.title.clone()),
+            tool_kind: name(&call.kind),
+            status: name(&call.status),
+        },
+        SessionUpdate::ToolCallUpdate(call) if call.fields.title.is_some() || call.fields.status.is_some() => {
+            StatusUpdate::Tool {
+                id: call.tool_call_id.to_string(),
+                title: call.fields.title.clone(),
+                tool_kind: call.fields.kind.as_ref().and_then(name),
+                status: call.fields.status.as_ref().and_then(name),
+            }
+        }
+        SessionUpdate::Plan(plan) => StatusUpdate::Plan {
+            steps: plan
+                .entries
+                .iter()
+                .map(|e| PlanStep { content: e.content.clone(), status: name(&e.status).unwrap_or_default() })
+                .collect(),
+        },
+        _ => return None,
+    })
+}
+
+/// The wire name of an ACP enum value.
+fn name(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_value(value).ok()?.as_str().map(str::to_owned)
 }
 
 /// Own the harness connection: open the session, then run turns until the session is dropped or a prompt fails.
@@ -476,7 +527,7 @@ async fn serve(
                 let _ = tx.send(Ok(id.clone()));
             }
             while let Some(Turn { prompt, reply }) = turns.recv().await {
-                let Prompt { text, limits, spend, stop } = prompt;
+                let Prompt { text, limits, spend, stop, progress } = prompt;
                 let too_many = Arc::new(Notify::new());
                 {
                     let mut observed = observed.lock().expect("observed");
@@ -490,6 +541,7 @@ async fn serve(
                         max_tool_calls: limits.max_tool_calls,
                         too_many: too_many.clone(),
                         spend: spend.clone(),
+                        progress,
                     });
                 }
                 let text =

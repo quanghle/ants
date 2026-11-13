@@ -324,9 +324,14 @@ pub mod subject {
     /// Every approval decision, of all personas.
     pub const ALL_APPROVAL_DECISIONS: &str = "ants.approvals.*.*";
 
-    /// Live progress of a persona on a thread (core NATS, not stored).
+    /// Live progress of a persona on a thread ([`StatusEvent`](super::StatusEvent)s; core NATS, not stored).
     pub fn status(persona: &PersonaId, thread: &ThreadId) -> String {
         format!("ants.status.{persona}.{thread}")
+    }
+
+    /// Live progress of a persona on every thread.
+    pub fn status_of(persona: &PersonaId) -> String {
+        format!("ants.status.{persona}.*")
     }
 
     /// The roster entry of a persona: the subject its daemon puts [`super::RosterEntry`] on.
@@ -470,7 +475,7 @@ impl Permissions {
                 // Exactly its requests subject: a persona cannot answer its own requests one level below.
                 subject::approvals(persona),
                 subject::dead(persona),
-                format!("ants.status.{persona}.*"),
+                subject::status_of(persona),
                 // Put and delete of its own roster entry.
                 subject::roster(persona),
             ]);
@@ -905,6 +910,107 @@ impl ApprovalDecision {
     }
 }
 
+/// Where a persona stands on a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    /// A prompt is running.
+    Working,
+    /// A tool request waits for the human's decision.
+    WaitingApproval,
+    /// The reply is stored; nothing runs on the thread.
+    Idle,
+    /// An attempt failed; it may be retried.
+    Failed,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::WaitingApproval => "waiting_approval",
+            State::Idle => "idle",
+            State::Failed => "failed",
+        }
+    }
+}
+
+/// One step of a harness's plan, as of its last [`StatusUpdate::Plan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub content: String,
+    /// ACP plan entry status: pending, in_progress or completed.
+    pub status: String,
+}
+
+/// What changed on a thread while a persona works on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StatusUpdate {
+    State {
+        state: State,
+    },
+    /// More of the reply text, as the harness streams it. Consecutive updates join up to the reply so far.
+    Message {
+        text: String,
+    },
+    /// More of the harness's reasoning, where it shares it.
+    Thought {
+        text: String,
+    },
+    /// A tool call started, or its title or status changed. Absent fields did not change.
+    Tool {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// ACP tool kind, as in [`ToolCall::kind`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_kind: Option<String>,
+        /// ACP tool call status: pending, in_progress, completed or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    /// The harness's whole plan, replacing the previous one.
+    Plan {
+        steps: Vec<PlanStep>,
+    },
+}
+
+/// Live progress of a persona on a thread, published on [`subject::status`] with core NATS: never stored, so a
+/// subscriber sees only what happens while it listens, and an update may be dropped. Readers should treat unknown
+/// update types as additions, not errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEvent {
+    pub persona: PersonaId,
+    pub thread_id: ThreadId,
+    #[serde(flatten)]
+    pub update: StatusUpdate,
+    pub at: DateTime<Utc>,
+}
+
+impl StatusEvent {
+    pub fn new(persona: PersonaId, thread_id: ThreadId, update: StatusUpdate) -> Self {
+        Self { persona, thread_id, update, at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::status(&self.persona, &self.thread_id)
+    }
+
+    /// Check that the update arrived on its own [`StatusEvent::subject`]. Credentials pin each persona to its own
+    /// status subjects, so an update naming another persona or thread is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona {
+            kind: "status update",
+            persona: self.persona.clone(),
+            at: format!("{subject} (thread {})", self.thread_id),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1059,6 +1165,34 @@ mod tests {
         assert_eq!(ask.check_subject("ants.approvals.dev-a"), Ok(()));
         let forged = ask.check_subject("ants.approvals.dev-b").unwrap_err();
         assert_eq!(forged.to_string(), "approval request of dev-a found at ants.approvals.dev-b");
+    }
+
+    #[test]
+    fn status_events_round_trip_flat_and_name_their_subject() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let state = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::State { state: State::WaitingApproval });
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!((json["type"].as_str(), json["state"].as_str()), (Some("state"), Some("waiting_approval")));
+        assert_eq!(json["thread_id"], "t1");
+        let tool = StatusEvent::new(
+            p("dev-a"),
+            t.clone(),
+            StatusUpdate::Tool { id: "c1".into(), title: None, tool_kind: None, status: Some("completed".into()) },
+        );
+        let json = serde_json::to_string(&tool).unwrap();
+        assert!(json.contains(r#""type":"tool""#) && !json.contains("title"), "{json}");
+        for event in [state, tool] {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
+        }
+
+        let chunk = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Message { text: "hi".into() });
+        assert_eq!(chunk.subject(), "ants.status.dev-a.t1");
+        assert_eq!(chunk.check_subject("ants.status.dev-a.t1"), Ok(()));
+        assert!(chunk.check_subject("ants.status.dev-a.t2").is_err(), "another thread");
+        let forged = chunk.check_subject("ants.status.dev-b.t1").unwrap_err();
+        assert_eq!(forged.to_string(), "status update of dev-a found at ants.status.dev-b.t1 (thread t1)");
+        assert!(Permissions::for_persona(&p("dev-a")).publish.contains(&subject::status_of(&p("dev-a"))));
     }
 
     #[test]

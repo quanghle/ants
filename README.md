@@ -34,6 +34,7 @@ ants roster                                         # personas being served
 ants approve                                        # tool requests waiting for an answer
 ants plan <thread>                                  # a thread's plan room
 ants watch                                          # live traffic
+ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, plan
 ```
 
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`.
@@ -69,6 +70,12 @@ after that sends the recorded reply without prompting again. Replies carry a mes
 stream sequence, so JetStream keeps one copy of a reply sent twice within its duplicate window (2 min). A mark is
 removed when the message is acked or dead-lettered; one left behind expires after 30 days. A daemon needs the bucket: `ants init`
 as the human creates it, and persona and leaf credentials issued before it existed must be issued again.
+
+While prompting, the daemon streams progress to `ants.status.<persona>.<thread>` as JSON `StatusEvent`s: the thread's
+state (`working`, `waiting_approval`, `idle`, `failed`), the reply text and reasoning as the harness streams them,
+joined for up to 250 ms, tool calls as they start or change status, and the harness's plan. Status is core NATS only:
+nothing keeps it, so `ants watch dev-a` shows only what happens while it runs, and an update the daemon cannot send at
+once is dropped rather than hold up the harness.
 
 Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
 daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires
@@ -329,7 +336,7 @@ run of characters:
 | `other:send_message` | the daemon's own messaging tool (see MCP tools) |
 
 Allowed requests are answered "allow once". Every other request goes to the human: the daemon publishes an
-`ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting-approval`, and
+`ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting_approval`, and
 waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<persona>.<request id>`.
 Only the human's credentials may publish decisions. The verdict is `allow_once`, `allow_always` (the harness remembers
 it for the session) or `reject`; no decision in time rejects the request. `--allow-tools` is `--allow '*'`, for
