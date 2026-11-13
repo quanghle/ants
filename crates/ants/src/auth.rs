@@ -25,6 +25,8 @@ const ACCOUNT_SEED: &str = "account.nk";
 const SYSTEM_SEED: &str = "system.nk";
 pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
+/// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike.
+const MAX_CONTROL_LINE: u32 = 16 * 1024;
 
 /// The default team directory, `~/.config/ants/auth`.
 pub fn default_dir() -> Result<PathBuf> {
@@ -109,6 +111,8 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
     )?;
     Ok(format!(
         "# Written by `ants auth init`. Include it from the server configuration: include \"{SERVER_CONF}\"\n\
+         # Credentials carry their permissions in the CONNECT line, longer than the 4 KB nats-server allows by default.\n\
+         max_control_line: {MAX_CONTROL_LINE}\n\
          operator: {operator_jwt}\n\
          system_account: {system}\n\
          resolver: MEMORY\n\
@@ -191,8 +195,8 @@ pub(crate) mod tests {
     use ants_daemon::plan;
     use ants_daemon::roster::Registration;
     use ants_proto::{
-        DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, attempt_key, inbox_prefix,
-        plan_consumer, session_key, subject,
+        ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS,
+        ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, plan_consumer, session_key, subject,
     };
     use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
@@ -472,6 +476,73 @@ pub(crate) mod tests {
 
         registration.deregister().await;
         assert!(h_kv.get("dev-a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn personas_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let ops: ChannelId = "ops".parse().unwrap();
+        let (_h, h_js) = server.connect(&human).await;
+        let stream = bus::init_stream(&h_js).await.unwrap();
+        assert!(stream.cached_info().config.subjects.iter().any(|s| s == subject::ALL_CHANNELS));
+        let (_a, a_js) = server.connect(&dev_a).await;
+
+        // Only the human creates and writes the bucket; personas read and watch it.
+        assert!(bus::ensure_channels(&a_js).await.is_err(), "only the human creates the bucket");
+        let h_kv = bus::ensure_channels(&h_js).await.unwrap();
+        let mut entry = ChannelEntry::new(ops.clone());
+        entry.add_member(dev_a.clone());
+        h_kv.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let a_kv = bus::ensure_channels(&a_js).await.unwrap();
+        let read: ChannelEntry = serde_json::from_slice(&a_kv.get("ops").await.unwrap().unwrap()).unwrap();
+        assert_eq!(read.check_key("ops"), Ok(()));
+        assert_eq!(read, entry);
+        let mut watch = a_kv.watch_with_history(">").await.unwrap();
+        assert_eq!(timeout(WAIT, watch.next()).await.unwrap().unwrap().unwrap().key, "ops");
+        entry.add_member(dev_b.clone());
+        assert!(a_kv.put("ops", serde_json::to_vec(&entry).unwrap().into()).await.is_err(), "personas never write");
+        assert!(a_kv.delete("ops").await.is_err());
+        h_kv.delete("ops").await.unwrap();
+
+        // Posts go on the poster's own subject only, in the hub's stream or its outbox form.
+        let post = ChannelPost::new(ops.clone(), dev_a.clone(), "@dev-b ready?");
+        bus::publish_json(&a_js, post.subject(), &post, None).await.unwrap();
+        let (a_raw, mut errors) = server.watched(&dev_a).await;
+        let _live = a_raw.subscribe(subject::ALL_CHANNELS).await.unwrap();
+        a_raw.publish(subject::outbox(&subject::chan(&ops, &dev_a)).unwrap(), "ok".into()).await.unwrap();
+        for spoof in [subject::chan(&ops, &dev_b), subject::chan(&ops, &human), "ants.out.chan.ops.dev-b".to_owned()] {
+            a_raw.publish(spoof.clone(), "spoof".into()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
+        }
+
+        // dev-a's channel consumer and reader filter channel subjects only, as one filter: several would hide it.
+        let consumer = |name: String, filter: &str| jetstream::consumer::pull::Config {
+            durable_name: Some(name),
+            filter_subject: filter.to_owned(),
+            ..Default::default()
+        };
+        let a_stream = bus::ensure_stream(&a_js).await.unwrap();
+        let chan: jetstream::consumer::PullConsumer =
+            a_stream.create_consumer(consumer(chan_consumer(&dev_a), subject::ALL_CHANNELS)).await.unwrap();
+        let msg = chan.messages().await.unwrap().next().await.unwrap().unwrap();
+        let got: ChannelPost = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!((got.check_subject(&msg.subject), got), (Ok(()), post));
+        msg.double_ack().await.unwrap();
+        let room = consumer(chan_reader(&dev_a), &subject::chan_room(&ops));
+        a_js.create_consumer_on_stream(room, STREAM).await.unwrap();
+        a_js.delete_consumer_from_stream(chan_reader(&dev_a), STREAM).await.unwrap();
+        for name in [chan_consumer(&dev_a), chan_reader(&dev_a)] {
+            assert!(a_stream.create_consumer(consumer(name.clone(), &subject::inbox_of(&dev_b))).await.is_err());
+            let several = jetstream::consumer::pull::Config {
+                durable_name: Some(name),
+                filter_subjects: vec![subject::chan_room(&ops), subject::inbox_of(&dev_b)],
+                ..Default::default()
+            };
+            assert!(a_stream.create_consumer(several).await.is_err());
+        }
+        assert!(a_stream.create_consumer(consumer(chan_consumer(&dev_b), subject::ALL_CHANNELS)).await.is_err());
     }
 
     #[tokio::test]

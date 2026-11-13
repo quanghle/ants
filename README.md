@@ -21,13 +21,15 @@ Headless agent teams on several machines, talking to each other and to a human a
 |   dev-b -> harness per thread |      |   stream ANTS            |      |            |             |
 |   MCP server for the sessions |      |   KV ants_roster,        |      |            |             |
 |            |                  |      |      ants_sessions,      |      |            |             |
-| nats-server (leaf, outbox)  --+----->|      ants_attempts       |<-----+-- nats-server (leaf)     |
+|            |                  |      |      ants_attempts,      |      |            |             |
+| nats-server (leaf, outbox)  --+----->|      ants_channels       |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
                           uplink: wss://, tls:// or a Dev Tunnel
 ```
 
 - **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, plan rooms,
-  approvals, dead letters) and the KV buckets for the roster, the thread sessions and attempt markers. In operator
+  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers and
+  channels. In operator
   mode (`ants auth`), every persona and the human connect with their own NKey/JWT credentials, limited to the subjects
   of their role.
 - **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
@@ -596,6 +598,16 @@ Plan room posts work the same way: a post by `<from>` to the room of thread `<th
 `ants.plan.<thread>.<from>`, every credential (the human's too) posts only on `ants.plan.*.<persona>`, and readers
 drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
 
+Channels work the same way too. A channel is a named group of personas; its id follows persona id syntax. A post by
+`<from>` to channel `<channel>` goes on `ants.chan.<channel>.<from>` (kept in the stream), every credential posts only
+on `ants.chan.*.<persona>` (and `ants.out.chan.*.<persona>` in a leaf's outbox), and readers drop a post whose `from`
+or channel disagrees with its subject. A post carries its thread id and the personas it @mentions; a top-level post
+starts a new thread, named after the post's own id. A channel's members and optional messenger are a `ChannelEntry` in
+the KV bucket `ants_channels`, under the channel id: only the human writes it, personas read it, and readers skip an
+entry whose channel disagrees with its key. A persona takes channel posts through its own consumer `chan-<persona>`
+and reads channels back through `chanread-<persona>`; credentials pin the filter of both under `ants.chan.>`, so
+neither reaches an inbox. Credentials and streams set up before channels need `ants auth user` and `ants init` again.
+
 ```sh
 ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI
@@ -603,7 +615,9 @@ ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with the human's credentials to create the stream and the roster, sessions and attempts buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with the human's credentials to create the stream and the roster, sessions, attempts and channels buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+Credentials carry their permissions in the CONNECT line, past the 4 KB nats-server allows by default, so `server.conf`
+sets `max_control_line: 16384`; add that line to a `server.conf` written before channels.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
 `server.conf` next to the server configuration (or include it by a relative path).

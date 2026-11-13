@@ -254,15 +254,16 @@ server restarts):
    (`external.api: $JS.<machine>.API`, `deliver: $JS.S.<machine>`) and stores each message under
    `ants.in.<machine>.`, so nothing a machine sends can pass for another machine or land in `ANTS` directly.
 2. `ANTS` sources from `ANTS_IN`, for each machine and persona, only what the persona may publish itself
-   (`ants.in.<machine>.ants.out.inbox.*.<persona>` and `...plan.*.<persona>`, the human's `inbox.>`), and transforms
+   (`ants.in.<machine>.ants.out.inbox.*.<persona>`, `...plan.*.<persona>` and `...chan.*.<persona>`, the human's
+   `inbox.>`), and transforms
    it back to the usual subject. The rest stays in the intake, where only the human can read it.
 
 Source filters of one stream must not overlap, so when the human is on a machine its `inbox.>` covers the other
-personas' inbox subjects there, and they get only their plan subjects. Every message keeps its `Nats-Msg-Id` (the
+personas' inbox subjects there, and they get only their plan and channel subjects. Every message keeps its `Nats-Msg-Id` (the
 envelope or post id): a sourced copy of a message `ANTS` already took within its duplicate window (2 minutes) is
 dropped.
 
-Clients (`bus::store`): an inbox message, reply or plan post goes to the hub's stream as before; when that fails with
+Clients (`bus::store`): an inbox message, reply, plan post or channel post goes to the hub's stream as before; when that fails with
 "no stream" (no responders across a down uplink) or times out, the same message, with the same id, goes to
 `ants.out.<rest of the subject>` on the leaf. The CLI says so (`ants ask`: "kept in this machine's outbox"); a daemon
 logs a warning. Everything else needs the hub at once and is not buffered: consumers and their acks, KV (sessions,
@@ -293,14 +294,15 @@ Found while building it (nats-server 2.15.3, source reading and verified):
     the flag the hub never gets an answer from the leaf and the source stalls.
   - The source's deliveries and flow control use `$JS.S.<machine>.>` (leaf to hub) and `$JS.FC.ANTS_OUT.>` (hub to
     leaf); the uplink credentials allow those and the outbox's stream and consumer API under `$JS.<machine>.API`.
-- **Stream interest crosses only allowances `ReverseMatch` finds.** The hub's stream listens on `ants.inbox.>` and
-  `ants.plan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
+- **Stream interest crosses only allowances `ReverseMatch` finds.** The hub's stream listens on `ants.inbox.>`,
+  `ants.plan.>` and `ants.chan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
   allowance of the uplink under it (`canSubscribeInternal`), and `ReverseMatch` (`sublist.go`, `getAllNodes`) skips an
   allowance with `*` before its last token, such as dev-a's `ants.inbox.*.dev-a`. Only the human's `ants.inbox.>`
-  would match, and no persona's plan subjects. So the uplink credentials also carry one literal subject of each
-  persona's inbox and plan pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`), which the pattern allows
+  would match, and no persona's plan or channel subjects. So the uplink credentials also carry one literal subject of each
+  persona's inbox, plan and channel pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`,
+  `ants.chan.dev-a.dev-a`), which the pattern allows
   anyway (uplink credentials issued without them need `ants auth leaf` again). With that, a persona's messages,
-  replies and plan posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; a
+  replies, plan and channel posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; a
   persona not on the uplink still gets "no stream" at once, since the leaf forwards only what the uplink may publish
   (`a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload` in `crates/ants/src/leaf.rs`).
 - **The leaf's domain must differ from the hub's**, or the leaf would answer the hub's API itself.

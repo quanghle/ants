@@ -92,8 +92,8 @@ enum Command {
         /// With a persona, follow only this thread.
         thread: Option<ThreadId>,
     },
-    /// Create the ANTS stream and the roster and sessions buckets on the server, or add the stream subjects an older
-    /// version lacks.
+    /// Create the ANTS stream and the roster, sessions, attempts and channels buckets on the server, or add the stream
+    /// subjects an older version lacks.
     Init,
     /// Tool requests personas escalate: list the pending ones, show one, or answer it.
     Approve {
@@ -318,12 +318,14 @@ async fn main() -> Result<()> {
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
             bus::ensure_sessions(&js).await?;
             bus::ensure_attempts(&js).await?;
+            bus::ensure_channels(&js).await?;
             println!(
-                "stream {} and buckets {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
-                ants_proto::ATTEMPTS_BUCKET
+                ants_proto::ATTEMPTS_BUCKET,
+                ants_proto::CHANNELS_BUCKET
             );
             Ok(())
         }
