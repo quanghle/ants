@@ -375,8 +375,9 @@ pub(crate) mod fake {
                                     return responder.respond(PromptResponse::new(StopReason::Cancelled));
                                 }
                                 log.lock().unwrap().answered.push(text.clone());
-                                let reply = format!("{session}: {text}");
-                                sender.send_notification(chunk(session, &reply))?;
+                                // In two chunks, as harnesses stream a reply.
+                                sender.send_notification(chunk(session, &format!("{session}: ")))?;
+                                sender.send_notification(chunk(session, &text))?;
                                 let tokens = arg("tokens").map(|n| n as u64);
                                 let usage = tokens.map(|n| Usage::new(n, n, 0));
                                 responder.respond(PromptResponse::new(StopReason::EndTurn).usage(usage))

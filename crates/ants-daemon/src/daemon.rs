@@ -9,7 +9,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ants_proto::{Envelope, Error as ProtoError, JsDomain, PersonaId, ThreadId, subject};
+use ants_proto::{Envelope, Error as ProtoError, JsDomain, PersonaId, State, ThreadId, subject};
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
@@ -22,6 +22,7 @@ use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, S
 use crate::mcp::Mcp;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
+use crate::status::{self, Status};
 use crate::{bus, roster};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
@@ -407,9 +408,7 @@ impl Inbox<'_> {
         };
         let Err(e) = result else { return (thread, None) };
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
-        if let Err(e) = self.client.publish(subject::status(self.persona, &thread), "failed".into()).await {
-            tracing::warn!(error = %e, "publishing status");
-        }
+        status::state(self.client, self.persona, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
         if attempt != Attempt::Early {
             match dead::bury(self.js, self.persona, &msg, Some(&envelope), &format!("{e:#}")).await {
@@ -475,27 +474,33 @@ impl Inbox<'_> {
             self.attempts.start(seq, envelope).await?;
         }
 
-        let status = subject::status(self.persona, thread);
         tracing::info!(%thread, from = %envelope.from, cut_off, "prompting");
-        self.client.publish(status, "working".into()).await?;
+        status::state(self.client, self.persona, thread, State::Working);
 
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, stop) = tokio::sync::oneshot::channel();
         let mut stop_tx = Some(stop_tx);
         let mut reached = None;
+        let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
+        let mut status = Status::new(self.client, self.persona, thread);
+        let mut flush =
+            tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let late = match self.mcp {
             Some(mcp) => mcp.late_on(thread).await,
             None => 0,
         };
         let text = prompt_text(&envelope.text, cut_off, late);
-        let prompt = Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop) };
+        let prompt =
+            Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
         let reply = loop {
             tokio::select! {
-                r = &mut prompt => break r?,
+                r = &mut prompt => break r,
+                Some(update) = streamed.recv() => status.push(update),
+                _ = flush.tick() => status.flush(),
                 Some(spent) = spend.recv() => {
                     if let Some(cap) = self.record(thread, &spent).await {
                         if let Some(stop) = stop_tx.take() {
@@ -511,6 +516,11 @@ impl Inbox<'_> {
                 }
             }
         };
+        while let Ok(update) = streamed.try_recv() {
+            status.push(update);
+        }
+        status.flush();
+        let reply = reply?;
         // Spend reported as the prompt ended, such as its tokens.
         while let Ok(spent) = spend.try_recv() {
             if let Some(cap) = self.record(thread, &spent).await {
@@ -566,7 +576,7 @@ impl Inbox<'_> {
             }
             Err(e) => return Err(e),
         }
-        self.client.publish(subject::status(self.persona, &reply.thread_id), "idle".into()).await?;
+        status::state(self.client, self.persona, &reply.thread_id, State::Idle);
         Ok(())
     }
 
@@ -670,6 +680,7 @@ async fn nak(msg: &jetstream::Message, delay: Option<Duration>) {
 mod tests {
     use std::sync::Arc;
 
+    use ants_proto::{StatusEvent, StatusUpdate};
     use ants_test_support::{NatsServer as Server, free_port};
     use async_nats::jetstream::consumer::PullConsumer;
     use tokio::sync::Semaphore;
@@ -863,6 +874,52 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn progress_streams_to_the_status_subject() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        bus.send(&t1, "tools 1").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "tools 1".to_owned()));
+            let mut updates = Vec::new();
+            while !matches!(updates.last(), Some(StatusUpdate::State { state: State::Idle })) {
+                let msg = timeout(WAIT, statuses.next()).await.expect("no status").unwrap();
+                let event: StatusEvent = serde_json::from_slice(&msg.payload).unwrap();
+                assert_eq!(event.check_subject(&msg.subject), Ok(()));
+                // A flush may fall between the chunks of the reply.
+                match (updates.last_mut(), event.update) {
+                    (Some(StatusUpdate::Message { text }), StatusUpdate::Message { text: more }) => {
+                        text.push_str(&more)
+                    }
+                    (_, update) => updates.push(update),
+                }
+            }
+            let tool = StatusUpdate::Tool {
+                id: "call-0".to_owned(),
+                title: Some("tool".to_owned()),
+                tool_kind: Some("other".to_owned()),
+                status: Some("pending".to_owned()),
+            };
+            assert_eq!(
+                updates,
+                [
+                    StatusUpdate::State { state: State::Working },
+                    tool,
+                    StatusUpdate::Message { text: "s1: tools 1".to_owned() },
+                    StatusUpdate::State { state: State::Idle },
+                ]
+            );
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]

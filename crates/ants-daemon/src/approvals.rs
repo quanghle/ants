@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{ApprovalDecision, ApprovalRequest, PersonaId, ThreadId, ToolCall, Verdict, subject};
+use ants_proto::{ApprovalDecision, ApprovalRequest, PersonaId, State, ThreadId, ToolCall, Verdict};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use futures::StreamExt as _;
@@ -43,8 +43,7 @@ impl NatsApprover {
             .await
             .context("waiting for JetStream to store the approval request")?;
         tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
-        let status = subject::status(&self.persona, &request.thread_id);
-        self.status(&status, "waiting-approval").await;
+        crate::status::state(&self.client, &self.persona, &request.thread_id, State::WaitingApproval);
         let wait = async {
             while let Some(msg) = decisions.next().await {
                 match serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
@@ -62,14 +61,8 @@ impl NatsApprover {
             tracing::info!(request = %request.id, "approval request expired; rejecting");
             Verdict::Reject
         });
-        self.status(&status, "working").await;
+        crate::status::state(&self.client, &self.persona, &request.thread_id, State::Working);
         Ok(verdict)
-    }
-
-    async fn status(&self, subject: &str, status: &'static str) {
-        if let Err(e) = self.client.publish(subject.to_owned(), status.into()).await {
-            tracing::warn!(error = %e, "publishing status");
-        }
     }
 }
 
@@ -87,6 +80,7 @@ impl Approver for NatsApprover {
 
 #[cfg(test)]
 mod tests {
+    use ants_proto::subject;
     use ants_test_support::NatsServer as Server;
     use tokio::time::timeout;
 
@@ -117,7 +111,8 @@ mod tests {
         assert_eq!((&request.persona, &request.thread_id, &request.tool), (&persona, &thread, &tool()));
         assert_eq!(request.options, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
         let status = timeout(Duration::from_secs(5), statuses.next()).await.unwrap().unwrap();
-        assert_eq!(&status.payload[..], b"waiting-approval");
+        let status: ants_proto::StatusEvent = serde_json::from_slice(&status.payload).unwrap();
+        assert_eq!(status.update, ants_proto::StatusUpdate::State { state: State::WaitingApproval });
 
         let decision = request.decide(Verdict::AllowAlways);
         human_js
