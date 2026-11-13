@@ -1,5 +1,6 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the persona daemon.
 
+mod approve;
 mod auth;
 mod inbox;
 mod serve;
@@ -68,6 +69,20 @@ enum Command {
     /// Create the ANTS stream and the roster and sessions buckets on the server, or add the stream subjects an older
     /// version lacks.
     Init,
+    /// Tool requests personas escalate: list the pending ones, show one, or answer it.
+    Approve {
+        /// Request id, or a unique start of it. Without it, list the pending requests.
+        id: Option<String>,
+        /// Answer the request. Without it, show the request.
+        #[arg(requires = "id")]
+        verdict: Option<approve::Answer>,
+        /// After listing, keep printing new requests until Ctrl-C.
+        #[arg(long, short, conflicts_with = "id")]
+        follow: bool,
+        /// One JSON request per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Messages personas gave up on: inspect, replay or drop them.
     #[command(subcommand)]
     Dead(DeadCommand),
@@ -164,6 +179,10 @@ async fn main() -> Result<()> {
                 ants_proto::SESSIONS_BUCKET
             );
             Ok(())
+        }
+        Command::Approve { id, verdict, follow, json } => {
+            let args = approve::Args { id, answer: verdict, follow, json };
+            approve::run(&cli.nats, cli.creds.as_deref(), args).await
         }
         Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), command).await,
         Command::Daemon(args) => {
