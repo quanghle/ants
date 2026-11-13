@@ -6,7 +6,8 @@ Headless agent teams on several machines, talking to each other and to a human a
   attempt markers.
 - **Transport:** any uplink that carries NATS. Options are a Dev Tunnel (TCP), `ws://`/`wss://`, or an HTTPS fallback
   bridge. Tested setups and their limits are in [docs/transport.md](docs/transport.md).
-- **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio. Copilot CLI (`copilot --acp`) comes first.
+- **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default)
+  or Claude Code through its ACP adapter (`claude-agent-acp`). See [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, runs as the CLI, the persona daemon and its MCP server.
 
 ## Build
@@ -85,7 +86,7 @@ js_domain = "hub"                          # the hub's JetStream domain, if it h
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "copilot"                        # default
+harness = "copilot"                        # default; or "claude"
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
 allow = ["read", "search"]                 # tool allowlist, see Tool permissions
 approval_timeout_secs = 300                # default
@@ -225,6 +226,21 @@ ants dead drop 42       # remove it without replaying
 Reading and removing dead letters by sequence needs the human's credentials. A stream created before dead letters
 existed lacks `ants.dead.>`; `ants init` adds it.
 
+## Harnesses
+
+| `--harness` / `harness =` | Runs | Sign-in |
+|---|---|---|
+| `copilot` (default) | `copilot --acp` | `copilot login` |
+| `claude` | `claude-agent-acp`, from `npm install -g @agentclientprotocol/claude-agent-acp` | `claude login`, or `ANTHROPIC_API_KEY` |
+
+The command must be on the daemon's `PATH`. `ants harness check --harness claude` tests the handshake.
+
+Claude Code sessions are switched to its `default` permission mode when they open, since its `auto` mode approves
+tools without asking the client; a Claude Code that does not offer `default` fails the session. Claude Code still
+decides some requests on its own before ants sees them: read-only tools and commands (such as `Read`, `Grep`, `ls`,
+`echo`), and anything its own settings allow (`permissions.allow` in `~/.claude/settings.json` and the workdir's
+`.claude/settings*.json`). It also reads `CLAUDE.md` and runs its own hooks from those settings.
+
 ## Tool permissions
 
 When a harness asks to run a tool, the daemon answers from the persona's allowlist (`--allow RULE`, repeatable, or
@@ -357,7 +373,8 @@ plan rooms need `ants auth user` again.
 Each persona keeps its to-dos and memories in its own bd workspace, `~/.ants/<persona>/.bd/bd.db` on its machine
 (`--home` moves it). The daemon creates it on first start and runs every harness session with `BD_DB` pointing at it,
 so `bd remember`, `bd ready` and the session-start `bd prime` hook all see the persona's workspace, not the workdir's.
-`bd` must be on the daemon's `PATH`, and the harness needs the bd session-start hooks (`bd setup copilot` in the workdir, or user-level hooks).
+`bd` must be on the daemon's `PATH`, and the harness needs the bd session-start hooks (`bd setup copilot` or
+`bd setup claude` in the workdir, or user-level hooks.
 
 ## Credentials
 

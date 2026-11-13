@@ -14,7 +14,8 @@
 //!   and all of them must match. A pattern starting with `/` matches the absolute path; any other pattern matches the
 //!   path relative to the workdir, and never a file outside it. `edit:*` allows edits anywhere in the workdir.
 //! - `fetch`: the URL (`raw_input.url`), else the title.
-//! - anything else: the title the harness shows, such as an MCP tool's name.
+//! - anything else: the title the harness shows, such as an MCP tool's name. Claude Code titles MCP tools
+//!   `mcp__<server>__<tool>`; the pattern may match that or just the tool.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -78,9 +79,19 @@ impl Rule {
                 let url = tool.fields.raw_input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
                 url.or(tool.fields.title.as_deref()).is_some_and(|t| glob(pattern, t))
             }
-            _ => tool.fields.title.as_deref().is_some_and(|t| glob(pattern, t)),
+            _ => tool
+                .fields
+                .title
+                .as_deref()
+                .is_some_and(|t| glob(pattern, t) || mcp_tool(t).is_some_and(|t| glob(pattern, t))),
         }
     }
+}
+
+/// The tool of a Claude Code MCP tool title, `mcp__<server>__<tool>`.
+fn mcp_tool(title: &str) -> Option<&str> {
+    let (server, tool) = title.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some(tool)
 }
 
 /// Tool requests a persona may run without asking; see the [module docs](self) for the rules.
@@ -413,6 +424,9 @@ mod tests {
         let mcp = request(ToolKind::Other, "bd-ready", json!({}), &[]);
         assert!(allows(&["other:bd-*"], &mcp));
         assert!(!allows(&["other:gh-*"], &mcp));
+        let claude = request(ToolKind::Other, "mcp__ants__send_message", json!({}), &[]);
+        assert!(allows(&["other:send_message"], &claude) && allows(&["other:mcp__ants__*"], &claude));
+        assert!(!allows(&["other:ants"], &claude));
         let fetch = request(ToolKind::Fetch, "Fetch", json!({ "url": "https://docs.rs/tokio" }), &[]);
         assert!(allows(&["fetch:https://docs.rs/*"], &fetch));
         assert!(!allows(&["fetch:https://evil/*"], &fetch));

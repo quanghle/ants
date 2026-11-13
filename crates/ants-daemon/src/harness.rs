@@ -12,7 +12,7 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionId, SessionNotification, SessionUpdate, TextContent, ToolCallId,
+    SessionId, SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest, TextContent, ToolCallId,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::ThreadId;
@@ -27,20 +27,34 @@ pub enum HarnessKind {
     /// GitHub Copilot CLI, `copilot --acp`. Uses the sign-in from `copilot login`.
     #[default]
     Copilot,
+    /// Claude Code through its ACP adapter, `claude-agent-acp` (npm `@agentclientprotocol/claude-agent-acp`). Uses
+    /// the sign-in from `claude login`, or `ANTHROPIC_API_KEY`.
+    Claude,
 }
 
 impl HarnessKind {
-    pub const ALL: [HarnessKind; 1] = [HarnessKind::Copilot];
+    pub const ALL: [HarnessKind; 2] = [HarnessKind::Copilot, HarnessKind::Claude];
 
     pub fn name(self) -> &'static str {
         match self {
             HarnessKind::Copilot => "copilot",
+            HarnessKind::Claude => "claude",
         }
     }
 
     fn command(self) -> (&'static str, &'static [&'static str]) {
         match self {
             HarnessKind::Copilot => ("copilot", &["--acp"]),
+            HarnessKind::Claude => ("claude-agent-acp", &[]),
+        }
+    }
+
+    /// The ACP session mode every session must run in, so tool requests reach the client instead of being approved
+    /// by the harness itself. Claude Code starts in its `auto` mode, where a classifier approves tools.
+    fn mode(self) -> Option<&'static str> {
+        match self {
+            HarnessKind::Copilot => None,
+            HarnessKind::Claude => Some("default"),
         }
     }
 
@@ -60,7 +74,10 @@ impl fmt::Display for HarnessKind {
 impl FromStr for HarnessKind {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
-        Self::ALL.into_iter().find(|h| h.name() == s).ok_or_else(|| anyhow!("unknown harness {s:?}"))
+        Self::ALL.into_iter().find(|h| h.name() == s).ok_or_else(|| {
+            let known: Vec<_> = Self::ALL.iter().map(|h| h.name()).collect();
+            anyhow!("unknown harness {s:?}, expected one of {}", known.join(", "))
+        })
     }
 }
 
@@ -88,6 +105,8 @@ pub type McpServers = Arc<dyn Fn(&ThreadId, bool) -> Vec<McpServer> + Send + Syn
 pub struct Launch {
     name: String,
     connect: Connector,
+    /// See [`HarnessKind::mode`].
+    mode: Option<&'static str>,
     cwd: PathBuf,
     policy: PermissionPolicy,
     /// The thread the sessions serve, so a permission request can be escalated on it.
@@ -99,7 +118,7 @@ impl Launch {
     /// `kind` working in `cwd`, with `env` added to the daemon's environment.
     pub fn new(kind: HarnessKind, cwd: PathBuf, env: Vec<(String, String)>, policy: PermissionPolicy) -> Self {
         let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env)));
-        Self { name: kind.name().to_owned(), connect, cwd, policy, thread: None, mcp: None }
+        Self { name: kind.name().to_owned(), connect, mode: kind.mode(), cwd, policy, thread: None, mcp: None }
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -121,7 +140,12 @@ impl Launch {
 
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
-        Self { name: "test".to_owned(), connect, cwd, policy, thread: None, mcp: None }
+        Self { name: "test".to_owned(), connect, mode: None, cwd, policy, thread: None, mcp: None }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mode(self, mode: &'static str) -> Self {
+        Self { mode: Some(mode), ..self }
     }
 }
 
@@ -129,6 +153,7 @@ impl fmt::Debug for Launch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launch")
             .field("name", &self.name)
+            .field("mode", &self.mode)
             .field("cwd", &self.cwd)
             .field("policy", &self.policy)
             .field("thread", &self.thread)
@@ -457,10 +482,96 @@ async fn open(
         } else {
             let load = LoadSessionRequest::new(id.clone(), launch.cwd.clone()).mcp_servers(mcp.clone());
             match cx.send_request(load).block_task().await {
-                Ok(_) => return Ok(id),
+                Ok(loaded) => {
+                    set_mode(cx, launch, &id, loaded.modes).await?;
+                    return Ok(id);
+                }
                 Err(e) => tracing::warn!(session = %id, error = %e, "session/load failed; starting a new session"),
             }
         }
     }
-    Ok(cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?.session_id)
+    let new = cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?;
+    set_mode(cx, launch, &new.session_id, new.modes).await?;
+    Ok(new.session_id)
+}
+
+/// Put the session in the launch's mode, if it has one; a harness that does not offer it fails the session.
+async fn set_mode(
+    cx: &ConnectionTo<Agent>,
+    launch: &Launch,
+    id: &SessionId,
+    modes: Option<SessionModeState>,
+) -> Result<(), agent_client_protocol::Error> {
+    let Some(want) = launch.mode else { return Ok(()) };
+    let offered = modes.as_ref().is_some_and(|m| m.available_modes.iter().any(|mode| &*mode.id.0 == want));
+    if !offered {
+        return Err(agent_client_protocol::Error::internal_error()
+            .data(format!("{} does not offer session mode {want}", launch.name)));
+    }
+    if modes.is_some_and(|m| &*m.current_mode_id.0 == want) {
+        return Ok(());
+    }
+    cx.send_request(SetSessionModeRequest::new(id.clone(), want)).block_task().await?;
+    tracing::debug!(session = %id, mode = want, "session mode set");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::v1::schema::{
+        InitializeResponse, NewSessionResponse, SessionMode, SetSessionModeResponse,
+    };
+
+    use super::*;
+
+    /// A fake harness starting its sessions in `auto`, offering `modes`; returns the modes it was switched to.
+    fn launch(modes: &'static [&'static str]) -> (Launch, Arc<Mutex<Vec<String>>>) {
+        let set = Arc::new(Mutex::new(Vec::new()));
+        let log = set.clone();
+        let connect: Connector = Arc::new(move || {
+            let log = log.clone();
+            DynConnectTo::new(
+                Agent
+                    .v1()
+                    .name("fake")
+                    .on_receive_request(
+                        async move |init: InitializeRequest, responder, _cx| {
+                            responder.respond(InitializeResponse::new(init.protocol_version))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: NewSessionRequest, responder, _cx| {
+                            let offered = modes.iter().map(|m| SessionMode::new(*m, *m)).collect();
+                            responder
+                                .respond(NewSessionResponse::new("s1").modes(SessionModeState::new("auto", offered)))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |req: SetSessionModeRequest, responder, _cx| {
+                            log.lock().unwrap().push(req.mode_id.0.to_string());
+                            responder.respond(SetSessionModeResponse::new())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    ),
+            )
+        });
+        (Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_mode("default"), set)
+    }
+
+    #[tokio::test]
+    async fn sessions_are_switched_to_the_harness_mode() {
+        let (launch, set) = launch(&["auto", "default"]);
+        Session::start(&launch, None).await.unwrap().close().await;
+        assert_eq!(*set.lock().unwrap(), ["default"]);
+    }
+
+    #[tokio::test]
+    async fn a_harness_without_the_mode_fails_the_session() {
+        let (launch, set) = launch(&["auto"]);
+        let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
+        assert!(err.contains("does not offer session mode default"), "{err}");
+        assert!(set.lock().unwrap().is_empty());
+    }
 }
