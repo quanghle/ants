@@ -222,6 +222,12 @@ pub fn session_key(persona: &PersonaId, thread: &ThreadId) -> String {
     format!("{persona}.{thread}")
 }
 
+/// JetStream consumer a persona reads plan rooms through, one room at a time. Its name is fixed, so its credentials
+/// need not let it pull from other consumers.
+pub fn plan_consumer(persona: &PersonaId) -> String {
+    format!("plan-{persona}")
+}
+
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
@@ -239,7 +245,7 @@ impl Permissions {
     ///
     /// Any persona may write to every inbox and every plan room, but only as itself (the sender is the last token of
     /// inbox and plan subjects). It speaks only for itself on status, approvals and dead letters, reads only its own inbox
-    /// (consumer and live), its own replies and the decisions on its own approval requests, reads the roster to find
+    /// (consumer and live), every plan room (live, and from the stream through its own plan consumer), its own replies and the decisions on its own approval requests, reads the roster to find
     /// personas by capability but writes only its own entry, and reads and writes only its own keys in the sessions
     /// bucket. The human (the CLI user) also watches all ants traffic, decides approval requests, may create and upgrade
     /// the stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
@@ -247,6 +253,7 @@ impl Permissions {
     /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
+        let plan = plan_consumer(persona);
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let mut publish = vec![
@@ -259,6 +266,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox_of(persona)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.ACK.{STREAM}.{consumer}.>"),
+            // Reading plan rooms back through its own consumer, which only ever filters plan subjects.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{plan}.{}", subject::ALL_PLANS),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{plan}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{plan}"),
             format!("$JS.API.STREAM.INFO.{sessions}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
@@ -405,18 +416,46 @@ impl Envelope {
 
 /// A post to the planning room of a thread, on [`subject::plan`]. Personas on a thread plan there together; every one
 /// of them reads the whole room.
+///
+/// Posts spend the thread's turn budget like messages between agents do, and each carries what is left. The post that
+/// spends the last turn hands the thread to the human, and the room takes no more agent posts until the human posts
+/// there with a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPost {
     pub id: Uuid,
     pub thread_id: ThreadId,
     pub from: PersonaId,
     pub text: String,
+    /// Turns left in the room after this post.
+    pub turn_budget: u32,
     pub sent_at: DateTime<Utc>,
 }
 
 impl PlanPost {
+    /// A post with a fresh budget, as the human posts.
     pub fn new(thread_id: ThreadId, from: PersonaId, text: impl Into<String>) -> Self {
-        Self { id: Uuid::now_v7(), thread_id, from, text: text.into(), sent_at: Utc::now() }
+        Self {
+            id: Uuid::now_v7(),
+            thread_id,
+            from,
+            text: text.into(),
+            turn_budget: DEFAULT_TURN_BUDGET,
+            sent_at: Utc::now(),
+        }
+    }
+
+    /// An agent's post, spending one turn of what is left: the lower of `budget`, the turns of the message the agent
+    /// is handling, and those the room's `last` post left. Fails when none are left.
+    pub fn spend(
+        thread_id: ThreadId,
+        from: PersonaId,
+        text: impl Into<String>,
+        budget: u32,
+        last: Option<&PlanPost>,
+    ) -> Result<Self, Error> {
+        let left = last.map_or(budget, |last| last.turn_budget.min(budget));
+        let turn_budget = left.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(thread_id.clone()))?;
+        Ok(Self { turn_budget, ..Self::new(thread_id, from, text) })
     }
 
     pub fn subject(&self) -> String {
@@ -712,6 +751,24 @@ mod tests {
         for bad in ["ants.plan.t1", "ants.plan.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.plan.t1.*"] {
             assert_eq!(subject::parse_plan(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn plan_posts_spend_the_lower_of_the_message_and_the_room_budget() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let first = PlanPost::spend(t.clone(), p("dev-a"), "draft", 3, None).unwrap();
+        assert_eq!(first.turn_budget, 2, "an empty room starts from the message's budget");
+        let second = PlanPost::spend(t.clone(), p("dev-b"), "agreed", 8, Some(&first)).unwrap();
+        assert_eq!(second.turn_budget, 1, "the room's budget is lower");
+        let last = PlanPost::spend(t.clone(), p("dev-a"), "done", 1, Some(&second)).unwrap();
+        assert_eq!(last.turn_budget, 0);
+        let refused = PlanPost::spend(t.clone(), p("dev-b"), "more", 8, Some(&last));
+        assert_eq!(refused, Err(Error::BudgetExhausted(t.clone())));
+        let human = PlanPost::new(t.clone(), PersonaId::human(), "go on");
+        assert_eq!(
+            PlanPost::spend(t, p("dev-b"), "more", 8, Some(&human)).unwrap().turn_budget,
+            DEFAULT_TURN_BUDGET - 1
+        );
     }
 
     #[test]

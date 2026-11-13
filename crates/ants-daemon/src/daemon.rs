@@ -70,7 +70,8 @@ pub async fn run(config: Config) -> Result<()> {
     let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout);
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver)));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
-    let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster).await?;
+    let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
+    let mut mcp = Mcp::start(config.persona.clone(), &config.home, outbox, roster, rooms).await?;
     mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
     let launch = Launch::new(config.harness, config.workdir.clone(), workspace::harness_env(&db)?, policy)
         .with_mcp(mcp.servers());

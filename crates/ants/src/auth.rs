@@ -156,9 +156,11 @@ pub(crate) mod tests {
 
     use ants_daemon::bus;
     use ants_daemon::dead::{self, Attempt};
+    use ants_daemon::plan;
     use ants_daemon::roster::Registration;
     use ants_proto::{
-        DeadLetter, Envelope, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, session_key, subject,
+        DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, plan_consumer,
+        session_key, subject,
     };
     use async_nats::jetstream::AckKind;
     use async_nats::{Client, Event, jetstream};
@@ -361,6 +363,45 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
         }
+    }
+
+    #[tokio::test]
+    async fn plan_rooms_are_read_back_through_each_reader_own_consumer() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let (_h, h_js) = server.connect(&human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        let (_a, a_js) = server.connect(&dev_a).await;
+        let (_b, b_js) = server.connect(&dev_b).await;
+        let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
+
+        let first = PlanPost::spend(thread.clone(), dev_a.clone(), "draft", 8, None).unwrap();
+        assert!(plan::publish(&a_js, &first, Some(0)).await.unwrap());
+        // dev-b spends the same turn without having seen dev-a's post: refused, the room moved on.
+        let stale = PlanPost::spend(thread.clone(), dev_b.clone(), "me first", 8, None).unwrap();
+        assert!(!plan::publish(&b_js, &stale, Some(0)).await.unwrap());
+        // dev-a may only post on its own subject, so a post naming dev-b as its author is dropped by readers.
+        let forged = PlanPost::new(thread.clone(), dev_b.clone(), "dev-b agrees");
+        bus::publish_json(&a_js, subject::plan(&thread, &dev_a), &forged, None).await.unwrap();
+        plan::publish(&a_js, &PlanPost::new(other, dev_a.clone(), "elsewhere"), None).await.unwrap();
+
+        let room = plan::read(&b_js, &dev_b, &thread).await.unwrap();
+        assert_eq!(room.posts, std::slice::from_ref(&first));
+        let answer = PlanPost::spend(thread.clone(), dev_b.clone(), "agreed", 8, room.last()).unwrap();
+        assert!(plan::publish(&b_js, &answer, Some(room.last_seq)).await.unwrap());
+        assert_eq!(plan::read(&h_js, &human, &thread).await.unwrap().posts, [first, answer]);
+
+        // dev-a's plan consumer filters plan rooms only, and dev-b's is not dev-a's to use.
+        let consumer = |name: String, filter: String| jetstream::consumer::pull::Config {
+            name: Some(name),
+            filter_subject: filter,
+            ..Default::default()
+        };
+        let into_inbox = consumer(plan_consumer(&dev_a), subject::inbox_of(&dev_b));
+        assert!(a_js.create_consumer_on_stream(into_inbox, STREAM).await.is_err());
+        let not_its_own = consumer(plan_consumer(&dev_b), subject::plan_room(&thread));
+        assert!(a_js.create_consumer_on_stream(not_its_own, STREAM).await.is_err());
+        assert!(plan::read(&a_js, &dev_a, &thread).await.is_ok(), "its own works");
     }
 
     #[tokio::test]
