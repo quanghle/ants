@@ -188,6 +188,7 @@ A fuller file:
 provider = "copilot"                       # default harness of every persona; serves the built-in messenger
 nats = "wss://hub.example/nats"            # server for every persona that sets none
 js_domain = "hub"                          # the hub's JetStream domain, if it has one (see Leaf nodes)
+human = "alice"                            # default human, see Escalations; default "human"; also per persona
 
 [[persona]]
 name = "dev-a"
@@ -235,7 +236,17 @@ How flags and the file combine:
 - `ants daemon --config FILE --persona messenger` serves only the built-in messenger of a file with `provider`.
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
   `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one persona is served.
-  `nats` and `js_domain` may also be set per persona.
+  `nats`, `js_domain` and `human` may also be set per persona.
+
+### Escalations
+
+What needs a human goes to the thread's owner (the envelope's `owner`, the human who started the thread), else to the
+daemon's default human, the config file key `human` (default `human`; top-level or per persona): a spent turn budget, a
+reached limit or cap, a dead letter's notice, a plan room out of turns. The daemon tells humans by the KV bucket
+`ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
+looks again every 30 s, knowing only `human` and the default human meanwhile. A reply to any human spends no turn, a
+message from any human renews the thread's allowance, and `send_message` to a human spends no turn either; `ask_agent`
+refuses a human.
 
 ## Limits and caps
 
@@ -275,14 +286,14 @@ and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spend
 
 A prompt that passes a limit or a cap is cancelled with ACP `session/cancel` (a harness that does not stop within 30 s
 is restarted, and its session resumes on the next message). The reply carries what the harness wrote so far and an
-`[ants]` notice naming the limit. When the message came from another agent, the thread then goes to the human like a
-spent turn budget: the human gets the notice, "needs a decision", and the last message. While a cap is reached, later
-messages on the thread are not prompted; each goes to the human the same way.
+`[ants]` notice naming the limit. When the message came from another agent, the thread then goes to its owner (see
+Escalations) like a spent turn budget: the owner gets the notice, "needs a decision", and the last message. While a cap
+is reached, later messages on the thread are not prompted; each goes to the owner the same way.
 
 - Per-prompt limits start afresh with every prompt.
-- A thread's allowance starts afresh with every message from the human on it.
+- A thread's allowance starts afresh with every message from a human on it.
 - A persona's daily allowance starts afresh at 00:00 UTC (or when the daemon restarts with a higher cap); a message
-  from the human does not lift it.
+  from a human does not lift it.
 
 Spending counts what the harness reports: the session cost of ACP `usage_update` and the tokens of each prompt
 response. Claude's ACP adapter reports both, at the end of each turn, so a cap usually takes effect after the turn that
@@ -389,10 +400,10 @@ Memory and task instructions remain separate and are not published in the roster
 ## Dead letters
 
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
-`ants.dead.<persona>` (with the error and delivery count), sends a notice to the human on the same thread, and only
-then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran out), the consumer's
-one extra delivery dead-letters it without another prompt (or, when that attempt recorded its reply, sends the reply). A payload that is not an envelope becomes a dead letter at
-once.
+`ants.dead.<persona>` (with the error and delivery count), sends a notice to the thread's owner (see Escalations) on the
+same thread, and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
+out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
+reply, sends the reply). A payload that is not an envelope becomes a dead letter at once.
 
 ```sh
 ants dead list          # seq, persona, thread, from, deliveries, time, error, text
@@ -451,12 +462,12 @@ run of characters:
 | `other:bd-*` | other tools, such as MCP tools, by title |
 | `other:send_message` | the daemon's own messaging tool (see MCP tools) |
 
-Allowed requests are answered "allow once". Every other request goes to the human: the daemon publishes an
-`ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting_approval`, and
-waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<persona>.<request id>`.
-Only the human's credentials may publish decisions. The verdict is `allow_once`, `allow_always` (the harness remembers
-it for the session) or `reject`; no decision in time rejects the request. `--allow-tools` is `--allow '*'`, for
-trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
+Allowed requests are answered "allow once". Every other request goes to the humans: the daemon publishes an
+`ApprovalRequest` to `ants.approvals.<persona>` (kept in the stream), sets the thread's status to `waiting_approval`,
+and waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<persona>.<request id>`.
+Only human credentials may publish decisions, and the first one wins. The verdict is `allow_once`, `allow_always` (the
+harness remembers it for the session) or `reject`; no decision in time rejects the request.
+`--allow-tools` is `--allow '*'`, for trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ```sh
 ants approve                              # pending requests: persona/id, thread, tool, files, options, time left
@@ -490,10 +501,10 @@ speak as the persona, on the thread the session serves:
 | `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
 | `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
 
-Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a
-message from the human, one turn after a message from an agent, refused when none is left (a new thread inherits the
-same budget). `ask_agent` also needs a turn left for the reply, and a session may not message its own persona. The
-tools work only while a message is in progress on the thread.
+Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
+from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
+same budget and owner). `ask_agent` also needs a turn left for the reply, and a session may not message its own persona.
+The tools work only while a message is in progress on the thread.
 
 A reply to `ask_agent` reaches the waiting call through a live subscription to the persona's inbox, while the inbox
 consumer still holds it back behind the prompt that asked. When the consumer delivers it later, the daemon acks it
@@ -560,12 +571,12 @@ Each thread has a plan room, where the personas on it plan together before the w
 Posts go on `ants.plan.<thread>.<from>` and are kept in the stream like messages. Nobody is prompted by a post; a
 persona reads the room when asked to.
 
-Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left:
-one less than the lower of the budget of the message its persona is handling and what the room's last post left.
-The post that spends the last turn hands the thread to the human: its persona sends the human a notice on the thread
-with the last post, and the room refuses further posts. Two personas spending the same turn cannot both succeed: a
-post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`, nats-server 2.11 or later), and
-the loser reads the room again.
+Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left: one
+less than the lower of the budget of the message its persona is handling and what the room's last post left. The post
+that spends the last turn hands the thread to its owner (see Escalations): its persona sends the owner a notice on the
+thread with the last post, and the room refuses further agent posts until a human posts there. Two personas spending the
+same turn cannot both succeed: a post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`,
+nats-server 2.11 or later), and the loser reads the room again.
 
 ```sh
 ants plan <thread>                      # the room's posts: time, author, turns left, text
@@ -753,7 +764,7 @@ writing `ants_humans`. Each human reads its replies only through its own inbox c
 credentials only read `ants_humans`. The holder of the team directory (`ants auth init`) is the first human and
 issues its own credentials with `ants auth user NAME --human`. A human joins `ants_humans` on its first CLI connection, not when its
 credentials are issued: until then daemons take its messages for an agent's. For now the CLI acts as `human` whatever
-its credentials, and daemons do not read the bucket yet. An envelope may carry `owner`, the human who started its
+its credentials; daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid. Credentials issued before `ants_humans` need `ants auth user` again.
 

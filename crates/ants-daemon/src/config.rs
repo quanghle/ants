@@ -4,6 +4,7 @@
 //! provider = "copilot"              # default harness of every persona; also serves the built-in messenger
 //! nats = "wss://hub.example/nats"   # default server for every persona
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per persona
+//! human = "alice"                   # default human, for escalations of threads with no owner; also per persona
 //!
 //! [[persona]]
 //! name = "dev-a"
@@ -54,6 +55,7 @@ struct File {
     provider: Option<HarnessKind>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
+    human: Option<PersonaId>,
     #[serde(default, rename = "persona")]
     personas: Vec<Persona>,
 }
@@ -68,6 +70,9 @@ pub struct Persona {
     pub creds: Option<PathBuf>,
     /// JetStream domain of the hub; the file's top-level `js_domain`, then `--js-domain`, when absent.
     pub js_domain: Option<JsDomain>,
+    /// The default human, who gets what is meant for the owner of a thread that has none: escalations, dead-letter
+    /// notices. The file's top-level `human`, then `human`, when absent.
+    pub human: Option<PersonaId>,
     pub workdir: PathBuf,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
@@ -106,9 +111,9 @@ pub struct Persona {
     /// Tool calls a prompt may start before it is cancelled; 0 for no limit.
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
-    /// Tokens a thread may spend between messages from the human.
+    /// Tokens a thread may spend between messages from a human.
     pub max_thread_tokens: Option<u64>,
-    /// Cost a thread may spend between messages from the human, in the harness's unit.
+    /// Cost a thread may spend between messages from a human, in the harness's unit.
     pub max_thread_cost: Option<f64>,
     /// Tokens the persona may spend in a UTC day.
     pub max_daily_tokens: Option<u64>,
@@ -151,6 +156,7 @@ impl Persona {
             nats: None,
             creds: None,
             js_domain: None,
+            human: None,
             workdir,
             home: None,
             whoami: None,
@@ -201,6 +207,7 @@ impl Persona {
             nats_url: self.nats.unwrap_or_else(|| default_nats.to_owned()),
             creds: self.creds,
             js_domain: self.js_domain,
+            human: self.human.unwrap_or_else(PersonaId::human),
             workdir,
             home,
             instructions,
@@ -276,7 +283,7 @@ pub fn load(path: &Path) -> Result<Vec<Persona>> {
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `provider`, `nats` and `js_domain`, check that names are unique and workdirs exist,
+/// directory, apply the top-level `provider`, `nats`, `js_domain` and `human`, check that names are unique and workdirs exist,
 /// and add the built-in messenger when `provider` is set and no persona is named `messenger`.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
@@ -313,6 +320,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
         if p.js_domain.is_none() {
             p.js_domain.clone_from(&file.js_domain);
         }
+        if p.human.is_none() {
+            p.human.clone_from(&file.human);
+        }
         personas.push(p);
     }
     Ok(personas)
@@ -345,6 +355,7 @@ mod tests {
             r#"
             nats = "wss://hub.example/nats"
             js_domain = "hub"
+            human = "alice"
 
             [[persona]]
             name = "dev-a"
@@ -372,6 +383,7 @@ Review changes for correctness."""
             [[persona]]
             name = "dev-b"
             nats = "nats://127.0.0.1:4222"
+            human = "bob"
             workdir = "src"
             "#,
         )
@@ -381,6 +393,7 @@ Review changes for correctness."""
         assert_eq!(a.name.as_str(), "dev-a");
         assert_eq!(a.nats.as_deref(), Some("wss://hub.example/nats"));
         assert_eq!(a.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
+        assert_eq!(a.human.as_ref().map(PersonaId::as_str), Some("alice"));
         assert_eq!(a.workdir, root.join("crates/ants").canonicalize().unwrap());
         assert_eq!(a.creds, Some(root.join("auth/dev-a.creds")));
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
@@ -410,10 +423,14 @@ Review changes for correctness."""
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
         assert_eq!(b.workdir, manifest_dir().join("src").canonicalize().unwrap());
         let defaults = Persona::new(b.name.clone(), b.workdir.clone());
-        assert_eq!(b, Persona { nats: b.nats.clone(), js_domain: b.js_domain.clone(), ..defaults });
+        assert_eq!(
+            b,
+            Persona { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults }
+        );
 
         let config = b.into_config("nats://unused").unwrap();
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
+        assert_eq!(config.human.as_str(), "bob", "a persona's own default human comes first");
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
         assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
         assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
@@ -478,10 +495,13 @@ Review changes for correctness."""
     }
 
     #[test]
-    fn falls_back_to_the_default_server() {
+    fn falls_back_to_the_default_server_and_human() {
         let personas = parse_here("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-        assert_eq!(personas[0].nats, None);
-        assert_eq!(personas[0].clone().into_config("nats://leaf:4222").unwrap().nats_url, "nats://leaf:4222");
+        assert_eq!((&personas[0].nats, &personas[0].human), (&None, &None));
+        let config = personas[0].clone().into_config("nats://leaf:4222").unwrap();
+        assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", PersonaId::human()));
+        let err = parse_here("human = \"Not A Name\"\nprovider = \"copilot\"").unwrap_err();
+        assert!(format!("{err:#}").contains("human"), "{err:#}");
     }
 
     #[test]

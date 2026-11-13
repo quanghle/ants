@@ -38,6 +38,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::harness::McpServers;
+use crate::humans::Registry;
 use crate::plan::Rooms;
 use crate::{bus, roster};
 
@@ -102,13 +103,14 @@ impl Drop for Mcp {
 
 impl Mcp {
     /// Listen on a loopback port and on `<home>/mcp.sock`. What must survive a restart (asks waiting for a reply, late
-    /// replies) lives in `<home>/mcp.json`.
+    /// replies) lives in `<home>/mcp.json`. `humans` tells the humans the tools reach.
     pub async fn start(
         persona: PersonaId,
         home: &Path,
         outbox: Outbox,
         roster: Roster,
         rooms: Arc<dyn Rooms>,
+        humans: Registry,
     ) -> Result<Self> {
         let state_path = home.join("mcp.json");
         let stored = match tokio::fs::read(&state_path).await {
@@ -121,6 +123,7 @@ impl Mcp {
             outbox,
             roster,
             rooms,
+            humans,
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -279,6 +282,7 @@ struct Hub {
     outbox: Outbox,
     roster: Roster,
     rooms: Arc<dyn Rooms>,
+    humans: Registry,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -301,8 +305,9 @@ impl Hub {
         self.sessions.lock().expect("sessions").tokens.get(token).cloned()
     }
 
-    /// A message from the persona, following on from the one `thread` is handling: on the same thread unless `on`
-    /// names another (`new` for a fresh one), and with one turn less unless it answers the human.
+    /// A message from the persona, following on from the one `thread` is handling and keeping its owner: on the same
+    /// thread unless `on` names another (`new` for a fresh one), and with one turn less unless it answers a human or
+    /// goes to one.
     fn outgoing(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<Envelope, String> {
         let to: PersonaId = to.trim().trim_start_matches('@').parse().map_err(|e| format!("{e}"))?;
         if to == self.persona {
@@ -310,8 +315,9 @@ impl Hub {
         }
         let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
+        let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.role(&current.from) };
         let mut envelope = current
-            .reply(self.persona.clone(), text, Role::by_default(&current.from))
+            .reply(self.persona.clone(), text, role)
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?;
         envelope.to = to;
         envelope.in_reply_to = None;
@@ -324,17 +330,22 @@ impl Hub {
     }
 
     /// Post `text` to the plan room of `thread`, spending one of its turns. The post that spends the last one tells the
-    /// human, who has the thread from then on.
+    /// thread's owner, else the default human, who has the thread from then on.
     async fn post_plan(&self, thread: &ThreadId, text: String) -> Result<String, String> {
-        let current =
-            self.sessions.lock().expect("sessions").current.get(thread).map(|e| (e.turn_budget, e.owner.clone()));
-        let (budget, owner) =
+        let current = self
+            .sessions
+            .lock()
+            .expect("sessions")
+            .current
+            .get(thread)
+            .map(|e| (e.turn_budget, e.owner.clone(), self.humans.owner_of(e)));
+        let (budget, owner, human) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let room = self.rooms.read(thread).await.map_err(|e| format!("cannot read the plan room: {e:#}"))?;
             let post = PlanPost::spend(thread.clone(), self.persona.clone(), text.clone(), budget, room.last())
                 .map_err(|_| {
-                    format!("the plan room of thread {thread} has no turns left; the thread is the human's to decide")
+                    format!("the plan room of thread {thread} has no turns left; the thread is {human}'s to decide")
                 })?;
             if !self.rooms.post(&post, room.last_seq).await.map_err(|e| format!("not posted: {e:#}"))? {
                 continue;
@@ -342,11 +353,11 @@ impl Hub {
             if post.turn_budget > 0 {
                 return Ok(format!("Posted to the plan room of thread {thread} ({} turns left).", post.turn_budget));
             }
-            tracing::info!(%thread, "plan room out of turns; handing the thread to the human");
+            tracing::info!(%thread, %human, "plan room out of turns; handing the thread to its owner");
             let notice = Envelope::on_thread(
                 thread.clone(),
                 self.persona.clone(),
-                PersonaId::human(),
+                human.clone(),
                 format!(
                     "Plan room of thread {thread} spent its turn budget; needs a decision. Last post from {}:\n{}\n\
                      `ants plan {thread}` shows the room; `ants plan {thread} TEXT` posts there with a fresh budget.",
@@ -354,11 +365,11 @@ impl Hub {
                 ),
             )
             .with_owner(owner.clone());
-            self.send(&notice).await.map_err(|e| {
-                format!("posted the room's last turn, but the human was not told ({e}); message the human")
-            })?;
+            self.send(&notice)
+                .await
+                .map_err(|e| format!("posted the room's last turn, but {human} was not told ({e}); message {human}"))?;
             return Ok(format!(
-                "Posted the last turn of the plan room of thread {thread}; the human has the thread now."
+                "Posted the last turn of the plan room of thread {thread}; {human} has the thread now."
             ));
         }
         Err(format!("the plan room of thread {thread} kept changing; read_plan and post again"))
@@ -692,8 +703,8 @@ impl Tools {
     ) -> Result<Envelope, String> {
         let wait = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_ASK_SECS).clamp(1, MAX_ASK_SECS));
         let envelope = self.hub.outgoing(thread, to, text, None)?;
-        if envelope.to.is_human() {
-            return Err("ask_agent is for agents; send_message reaches the human".to_owned());
+        if self.hub.humans.is_human(&envelope.to) {
+            return Err(format!("ask_agent is for agents; send_message reaches {}", envelope.to));
         }
         if envelope.turn_budget == 0 {
             return Err(format!("thread {thread} has no turns left for a reply; ask the human instead"));
@@ -760,7 +771,7 @@ fn text(result: Result<String, String>) -> CallToolResult {
 impl Tools {
     #[tool(description = "Send a message to another persona, or to `human`, and return at once. It goes on the \
         current thread unless `thread` says otherwise. A message between agents spends one turn of the thread's \
-        budget; with none left it is refused and the thread is the human's to decide. A reply comes later as a new \
+        budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
         message.")]
     async fn send_message(
         &self,
@@ -855,7 +866,7 @@ impl Tools {
 
     #[tool(description = "Post to the plan room of the current thread, where the personas on the thread plan \
         together; read_plan shows what they posted. A post spends one turn of the thread's budget, and the post that \
-        spends the last one hands the thread to the human: the room then takes no more posts until the human posts \
+        spends the last one hands the thread to its owner: the room then takes no more posts until a human posts \
         there.")]
     async fn post_plan(
         &self,
@@ -958,7 +969,7 @@ mod tests {
 
     /// Like [`start`], with `roster` as the roster.
     async fn start_with_roster(home: &Path, roster: Vec<RosterEntry>) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
-        start_with(home, roster, Arc::default()).await
+        start_with(home, roster, Arc::default(), Registry::default()).await
     }
 
     /// Plan rooms in memory; a message's sequence is its place in its room.
@@ -982,11 +993,12 @@ mod tests {
         }
     }
 
-    /// Like [`start_with_roster`], with `rooms` as the plan rooms.
+    /// Like [`start_with_roster`], with `rooms` as the plan rooms and `humans` as the humans.
     async fn start_with(
         home: &Path,
         roster: Vec<RosterEntry>,
         rooms: Arc<MemoryRooms>,
+        humans: Registry,
     ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let outbox: Outbox = Arc::new(move |envelope| {
@@ -997,7 +1009,7 @@ mod tests {
             let roster = roster.clone();
             Box::pin(async move { Ok(roster) })
         });
-        (Mcp::start(persona("dev-a"), home, outbox, roster, rooms).await.unwrap(), rx)
+        (Mcp::start(persona("dev-a"), home, outbox, roster, rooms, humans).await.unwrap(), rx)
     }
 
     fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
@@ -1095,6 +1107,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registered_humans_are_humans_to_the_tools() {
+        let humans = Registry::with(PersonaId::human(), &["alice"]);
+        let (mcp, mut sent) = start_with(&home("humans"), Vec::new(), Arc::default(), humans).await;
+        let mut current = Envelope::new(persona("dev-b"), persona("dev-a"), "q").with_owner(Some(persona("alice")));
+        current.turn_budget = 0;
+        let _turn = mcp.begin(&current);
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let (ok, text) = call(&client, "ask_agent", serde_json::json!({"to": "alice", "text": "?"})).await;
+        assert!(!ok && text.contains("send_message reaches alice"), "{text}");
+        let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "alice", "text": "stuck"})).await;
+        assert!(ok, "a message to a human spends no turn: {text}");
+        let out = sent.recv().await.unwrap();
+        assert_eq!((out.to.as_str(), out.turn_budget, &out.owner), ("alice", 0, &current.owner));
+
+        // A registered human's message makes messages to agents free, and its owner goes on to threads started from it.
+        let mut current = Envelope::new(persona("alice"), persona("dev-a"), "go").with_owner(Some(persona("alice")));
+        current.turn_budget = 1;
+        let _turn = mcp.begin(&current);
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let (ok, text) =
+            call(&client, "send_message", serde_json::json!({"to": "dev-c", "text": "x", "thread": "new"})).await;
+        assert!(ok, "{text}");
+        let out = sent.recv().await.unwrap();
+        assert_ne!(out.thread_id, current.thread_id);
+        assert_eq!((out.turn_budget, &out.owner), (1, &current.owner));
+    }
+
+    #[tokio::test]
     async fn requests_are_routed_by_roster_capabilities() {
         let mut billing = listed("dev-c", &["Rust", "billing"]);
         billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
@@ -1141,10 +1187,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_posts_spend_the_budget_then_the_thread_goes_to_the_human() {
+    async fn plan_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
         let rooms = Arc::new(MemoryRooms::default());
-        let (mcp, mut sent) = start_with(&home("plan"), Vec::new(), rooms.clone()).await;
-        let mut current = Envelope::new(persona("dev-b"), persona("dev-a"), "plan the release with me");
+        let (mcp, mut sent) = start_with(&home("plan"), Vec::new(), rooms.clone(), Registry::default()).await;
+        let mut current = Envelope::new(persona("dev-b"), persona("dev-a"), "plan the release with me")
+            .with_owner(Some(persona("alice")));
         current.turn_budget = 5;
         let thread = current.thread_id.clone();
         let client = {
@@ -1163,9 +1210,10 @@ mod tests {
         let (ok, text) = call(&client, "post_plan", serde_json::json!({"text": "I take the code"})).await;
         assert!(ok && text.contains("(1 turns left)"), "{text}");
         let (ok, text) = call(&client, "post_plan", serde_json::json!({"text": "ship friday?"})).await;
-        assert!(ok && text.contains("the human has the thread now"), "{text}");
+        assert!(ok && text.contains("; alice has the thread now"), "{text}");
         let notice = sent.try_recv().unwrap();
-        assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&persona("dev-a"), &PersonaId::human(), &thread));
+        assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&persona("dev-a"), &persona("alice"), &thread));
+        assert_eq!(notice.owner, Some(persona("alice")));
         assert!(
             notice.text.contains("spent its turn budget") && notice.text.ends_with("a fresh budget."),
             "{}",
@@ -1175,7 +1223,7 @@ mod tests {
 
         let (ok, text) = call(&client, "post_plan", serde_json::json!({"text": "one more"})).await;
         assert!(!ok && text.contains("no turns left"), "{text}");
-        assert!(sent.try_recv().is_err(), "the human is told once");
+        assert!(sent.try_recv().is_err(), "the owner is told once");
         let (ok, text) = call(&client, "read_plan", serde_json::json!({"thread": thread.as_str()})).await;
         assert!(ok && text.starts_with(&format!("Plan room of thread {thread}: 3 posts; 0 turns left.")), "{text}");
         assert!(text.contains("dev-b at ") && text.ends_with("ship friday?"), "{text}");

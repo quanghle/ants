@@ -5,9 +5,9 @@
 //! session, means the harness counts from zero again, so all of it is new. Tokens come from the usage in ACP prompt
 //! responses, one prompt's worth each. A harness that reports neither, such as Copilot CLI, is never capped.
 //!
-//! What a thread spent since the human's last message on it is kept in the KV bucket `ants_sessions` under
+//! What a thread spent since a human's last message on it is kept in the KV bucket `ants_sessions` under
 //! `<persona>.<thread>.spend`, and what the persona spent in a UTC day under `<persona>.day.<YYYY-MM-DD>`, so both
-//! survive harness and daemon restarts. A message from the human gives the thread a fresh allowance; the persona's
+//! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the persona's
 //! allowance comes back at 00:00 UTC.
 
 use std::collections::HashMap;
@@ -24,9 +24,9 @@ use crate::harness::Spend;
 /// Spend caps; None is no cap.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Caps {
-    /// Tokens a thread may spend between messages from the human.
+    /// Tokens a thread may spend between messages from a human.
     pub thread_tokens: Option<u64>,
-    /// Cost a thread may spend between messages from the human, in the harness's unit (USD for Claude).
+    /// Cost a thread may spend between messages from a human, in the harness's unit (USD for Claude).
     pub thread_cost: Option<f64>,
     /// Tokens the persona may spend in a UTC day.
     pub daily_tokens: Option<u64>,
@@ -114,7 +114,7 @@ impl Ledger {
         Self { caps, persona, store, day: tokio::sync::Mutex::default() }
     }
 
-    /// A message from the human: the thread starts over from nothing spent.
+    /// A message from a human: the thread starts over from nothing spent.
     pub async fn fresh_allowance(&self, thread: &ThreadId) -> Result<()> {
         if !self.caps.any() {
             return Ok(());
@@ -183,7 +183,7 @@ impl Ledger {
 
     fn check(&self, thread: &ThreadSpend, day: &DaySpend) -> Option<String> {
         let caps = &self.caps;
-        let since = "since the human's last message";
+        let since = "since a human's last message";
         let resets = "today; resets at 00:00 UTC";
         let persona = &self.persona;
         if let Some(cap) = caps.thread_tokens.filter(|cap| thread.tokens >= *cap) {
