@@ -198,11 +198,11 @@ impl Permissions {
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status, approvals and dead
     /// letters, reads only its own inbox (consumer and live), its own replies and the decisions on its own approval requests,
-    /// writes only its own roster entry, and reads and writes only its own keys in the sessions bucket. The human (the
-    /// CLI user) also watches all ants traffic, reads the roster, decides approval requests, may create and upgrade the
-    /// stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
-    /// consumer keeps the replies `ants inbox` has not shown yet. A persona gets no `STREAM.MSG.GET`: it takes any
-    /// sequence, so it would expose every inbox.
+    /// reads the roster to find personas by capability but writes only its own entry, and reads and writes only its own
+    /// keys in the sessions bucket. The human (the CLI user) also watches all ants traffic, decides approval requests,
+    /// may create and upgrade the stream and create the roster and sessions buckets, and reads and removes dead letters
+    /// by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A persona gets no
+    /// `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
         let roster_stream = kv_stream(ROSTER_BUCKET);
@@ -218,6 +218,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.ACK.{STREAM}.{consumer}.>"),
             format!("$JS.API.STREAM.INFO.{sessions}"),
+            // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
+            format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
+            format!("$JS.FC.{roster_stream}.>"),
         ];
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
@@ -227,10 +231,6 @@ impl Permissions {
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
-                // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
-                format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
-                format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
-                format!("$JS.FC.{roster_stream}.>"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),

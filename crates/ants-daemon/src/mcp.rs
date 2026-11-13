@@ -1,5 +1,6 @@
-//! MCP tools for the persona's harness sessions: `send_message`, `ask_agent` and `check_inbox`. To-dos and memories go
-//! through the persona's bd workspace instead (see [`crate::workspace`]).
+//! MCP tools for the persona's harness sessions: `send_message`, `ask_agent`, `check_inbox`, and `list_personas` and
+//! `route` to find personas by their roster capabilities. To-dos and memories go through the persona's bd workspace
+//! instead (see [`crate::workspace`]).
 //!
 //! One server per persona, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
-use ants_proto::{Envelope, PersonaId, ThreadId, Uuid};
+use ants_proto::{Envelope, PersonaId, ROSTER_BUCKET, RosterEntry, ThreadId, Uuid};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -36,8 +37,8 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::bus;
 use crate::harness::McpServers;
+use crate::{bus, roster};
 
 /// Environment variable carrying the session's token to `ants mcp`.
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
@@ -63,6 +64,20 @@ pub fn jetstream_outbox(js: async_nats::jetstream::Context) -> Outbox {
     })
 }
 
+/// Reads the personas in the roster.
+pub type Roster = Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<RosterEntry>>> + Send + Sync>;
+
+/// Reads the roster bucket.
+pub fn jetstream_roster(js: async_nats::jetstream::Context) -> Roster {
+    Arc::new(move || {
+        let js = js.clone();
+        Box::pin(async move {
+            let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
+            roster::list_entries(&kv).await
+        })
+    })
+}
+
 /// The MCP server of one persona. Dropping it stops the listeners.
 pub struct Mcp {
     hub: Arc<Hub>,
@@ -83,7 +98,7 @@ impl Drop for Mcp {
 impl Mcp {
     /// Listen on a loopback port and on `<home>/mcp.sock`. What must survive a restart (asks waiting for a reply, late
     /// replies) lives in `<home>/mcp.json`.
-    pub async fn start(persona: PersonaId, home: &Path, outbox: Outbox) -> Result<Self> {
+    pub async fn start(persona: PersonaId, home: &Path, outbox: Outbox, roster: Roster) -> Result<Self> {
         let state_path = home.join("mcp.json");
         let stored = match tokio::fs::read(&state_path).await {
             Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("reading {}", state_path.display()))?,
@@ -93,6 +108,7 @@ impl Mcp {
         let hub = Arc::new(Hub {
             persona,
             outbox,
+            roster,
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -241,6 +257,7 @@ struct Asks {
 struct Hub {
     persona: PersonaId,
     outbox: Outbox,
+    roster: Roster,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -287,6 +304,15 @@ impl Hub {
 
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
         (self.outbox)(envelope.clone()).await.map_err(|e| format!("not sent: {e:#}"))
+    }
+
+    /// The roster without this persona, by persona id.
+    async fn others(&self) -> Result<Vec<RosterEntry>, String> {
+        let mut entries = (self.roster)().await.map_err(|e| {
+            format!("cannot read the roster: {e:#} (credentials issued before personas could read it need `ants auth user` again)")
+        })?;
+        entries.retain(|e| e.persona != self.persona);
+        Ok(entries)
     }
 
     /// Send `envelope` and wait up to `wait` (or until `cancelled`) for its reply.
@@ -525,6 +551,31 @@ struct CheckInbox {
     all_threads: bool,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ListPersonas {
+    /// Only the personas advertising this capability, such as `rust`.
+    #[serde(default)]
+    capability: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct Route {
+    /// Capability the request needs, as personas advertise it in the roster, such as `rust`.
+    capability: String,
+    /// The request.
+    text: String,
+    /// Wait for the reply and return it (the default); false sends the request and returns at once.
+    #[serde(default = "default_wait")]
+    wait: bool,
+    /// Seconds to wait for the reply (default 300, at most 1800).
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+fn default_wait() -> bool {
+    true
+}
+
 /// The tools, served to one MCP connection. Over HTTP the caller's thread comes with each request instead.
 #[derive(Clone)]
 struct Tools {
@@ -547,6 +598,58 @@ impl Tools {
             })
             .ok_or_else(|| ErrorData::invalid_request("no ants session behind this connection", None))
     }
+
+    /// Send `text` to `to` as `send_message` does.
+    async fn send_to(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<String, String> {
+        let envelope = self.hub.outgoing(thread, to, text, on)?;
+        self.hub.send(&envelope).await?;
+        Ok(format!("Sent to {} on thread {} ({} turns left).", envelope.to, envelope.thread_id, envelope.turn_budget))
+    }
+
+    /// Ask `to` as `ask_agent` does, and return the reply.
+    async fn ask(
+        &self,
+        thread: &ThreadId,
+        to: &str,
+        text: String,
+        timeout_secs: Option<u64>,
+        cx: &RequestContext<RoleServer>,
+    ) -> Result<Envelope, String> {
+        let wait = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_ASK_SECS).clamp(1, MAX_ASK_SECS));
+        let envelope = self.hub.outgoing(thread, to, text, None)?;
+        if envelope.to.is_human() {
+            return Err("ask_agent is for agents; send_message reaches the human".to_owned());
+        }
+        if envelope.turn_budget == 0 {
+            return Err(format!("thread {thread} has no turns left for a reply; ask the human instead"));
+        }
+        self.hub.ask(envelope, wait, cx.ct.cancelled()).await
+    }
+}
+
+/// One line per entry: persona, capabilities, harness and machine.
+fn describe(entries: &[&RosterEntry]) -> String {
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let capabilities =
+                if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
+            format!("{}: {capabilities} ({} on {})", e.persona, e.harness, e.machine)
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Why nobody matches `capability`, and what there is instead.
+fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
+    let mut known: Vec<String> =
+        entries.iter().flat_map(|e| e.capabilities.iter().map(|c| c.trim().to_lowercase())).collect();
+    known.sort();
+    known.dedup();
+    if known.is_empty() {
+        return format!("No other persona in the roster has capability {capability:?}; none advertises any.");
+    }
+    format!("No other persona in the roster has capability {capability:?}. Capabilities there: {}.", known.join(", "))
 }
 
 fn text(result: Result<String, String>) -> CallToolResult {
@@ -568,16 +671,7 @@ impl Tools {
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        let result = async {
-            let envelope = self.hub.outgoing(&thread, &args.to, args.text, args.thread.as_deref())?;
-            self.hub.send(&envelope).await?;
-            Ok(format!(
-                "Sent to {} on thread {} ({} turns left).",
-                envelope.to, envelope.thread_id, envelope.turn_budget
-            ))
-        }
-        .await;
-        Ok(text(result))
+        Ok(text(self.send_to(&thread, &args.to, args.text, args.thread.as_deref()).await))
     }
 
     #[tool(description = "Ask another persona and wait for its reply, which is returned. The question goes on the \
@@ -589,20 +683,8 @@ impl Tools {
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        let wait = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_ASK_SECS).clamp(1, MAX_ASK_SECS));
-        let result = async {
-            let envelope = self.hub.outgoing(&thread, &args.to, args.text, None)?;
-            if envelope.to.is_human() {
-                return Err("ask_agent is for agents; send_message reaches the human".to_owned());
-            }
-            if envelope.turn_budget == 0 {
-                return Err(format!("thread {thread} has no turns left for a reply; ask the human instead"));
-            }
-            let reply = self.hub.ask(envelope, wait, cx.ct.cancelled()).await?;
-            Ok(format!("{} replied:\n{}", reply.from, reply.text))
-        }
-        .await;
-        Ok(text(result))
+        let result = self.ask(&thread, &args.to, args.text, args.timeout_secs, &cx).await;
+        Ok(text(result.map(|reply| format!("{} replied:\n{}", reply.from, reply.text))))
     }
 
     #[tool(description = "Take the messages kept for this persona outside of any prompt: replies to ask_agent calls \
@@ -626,6 +708,53 @@ impl Tools {
             .collect();
         Ok(text(Ok(shown.join("\n\n"))))
     }
+
+    #[tool(description = "List the other personas being served, from the roster, with the capabilities each \
+        advertises (such as `rust` or `billing`), its harness and machine. `capability` keeps only those advertising \
+        it. Pick whom to send_message or ask_agent by these capabilities.")]
+    async fn list_personas(&self, Parameters(args): Parameters<ListPersonas>) -> Result<CallToolResult, ErrorData> {
+        let result = async {
+            let entries = self.hub.others().await?;
+            let capability = args.capability.as_deref().map(str::trim).filter(|c| !c.is_empty());
+            let shown: Vec<&RosterEntry> =
+                entries.iter().filter(|e| capability.is_none_or(|c| roster::has_capability(e, c))).collect();
+            match (capability, shown.is_empty()) {
+                (Some(c), true) => Err(nobody_has(c, &entries)),
+                (None, true) => Ok("No other persona is in the roster.".to_owned()),
+                (_, false) => Ok(describe(&shown)),
+            }
+        }
+        .await;
+        Ok(text(result))
+    }
+
+    #[tool(description = "Route a request to the persona whose roster capabilities include `capability`: the first \
+        such persona by name, other than this one. By default it waits for the reply and returns it, like ask_agent; \
+        with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
+        and follows its turn budget, as those do.")]
+    async fn route(
+        &self,
+        Parameters(args): Parameters<Route>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        let result = async {
+            let entries = self.hub.others().await?;
+            let capability = args.capability.trim();
+            let to = roster::pick(&entries, capability, &self.hub.persona)
+                .ok_or_else(|| nobody_has(capability, &entries))?
+                .persona
+                .to_string();
+            if !args.wait {
+                let sent = self.send_to(&thread, &to, args.text, None).await?;
+                return Ok(format!("Routed to {to} for {capability}. {sent}"));
+            }
+            let reply = self.ask(&thread, &to, args.text, args.timeout_secs, &cx).await?;
+            Ok(format!("Routed to {to} for {capability}. {} replied:\n{}", reply.from, reply.text))
+        }
+        .await;
+        Ok(text(result))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -633,12 +762,24 @@ impl ServerHandler for Tools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions(format!(
-                "Messaging between ants personas; this session speaks as {}. send_message and ask_agent reach other \
-                 personas, check_inbox collects late replies. To-dos and memories go through bd.",
-                self.hub.persona
-            ))
+            .with_instructions(instructions(&self.hub.persona))
     }
+}
+
+fn instructions(persona: &PersonaId) -> String {
+    let mut text = format!(
+        "Messaging between ants personas; this session speaks as {persona}. send_message and ask_agent reach other \
+         personas, check_inbox collects late replies, list_personas shows who is there with their capabilities and \
+         route sends a request to the persona with a capability. To-dos and memories go through bd."
+    );
+    if *persona == PersonaId::messenger() {
+        text.push_str(
+            " As the messenger, answer each request by routing it: pick the capability it needs from list_personas, \
+             route it there and reply with the answer. Split a request that needs several capabilities into one \
+             route per capability. When no persona has what it needs, say so instead of answering it yourself.",
+        );
+    }
+    text
 }
 
 #[cfg(test)]
@@ -679,12 +820,34 @@ mod tests {
 
     /// An MCP server for `dev-a` whose sent envelopes come out of the receiver.
     async fn start(home: &Path) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
+        start_with_roster(home, Vec::new()).await
+    }
+
+    /// Like [`start`], with `roster` as the roster.
+    async fn start_with_roster(home: &Path, roster: Vec<RosterEntry>) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let outbox: Outbox = Arc::new(move |envelope| {
             let _ = tx.send(envelope);
             Box::pin(async { Ok(()) })
         });
-        (Mcp::start(persona("dev-a"), home, outbox).await.unwrap(), rx)
+        let roster: Roster = Arc::new(move || {
+            let roster = roster.clone();
+            Box::pin(async move { Ok(roster) })
+        });
+        (Mcp::start(persona("dev-a"), home, outbox, roster).await.unwrap(), rx)
+    }
+
+    fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
+        let now = chrono::Utc::now();
+        RosterEntry {
+            persona: persona(name),
+            machine: "m1".to_owned(),
+            harness: "copilot".to_owned(),
+            capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+        }
     }
 
     /// The human's message `dev-a` is handling on a fresh thread.
@@ -718,7 +881,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 3, "{tools:?}");
+        assert_eq!(tools.len(), 5, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -762,6 +925,48 @@ mod tests {
         let _turn = mcp.begin(&current);
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-c", "text": "more"})).await;
         assert!(!ok && text.contains("no turns left"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn requests_are_routed_by_roster_capabilities() {
+        let roster = vec![
+            listed("dev-a", &["rust"]),
+            listed("dev-c", &["Rust", "billing"]),
+            listed("dev-b", &["rust"]),
+            listed("docs", &[]),
+        ];
+        let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
+        let current = from_human();
+        let _turn = mcp.begin(&current);
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+
+        let (ok, text) = call(&client, "list_personas", serde_json::json!({})).await;
+        assert!(ok && !text.contains("dev-a:") && text.contains("docs: no capabilities"), "{text}");
+        let (ok, text) = call(&client, "list_personas", serde_json::json!({"capability": "billing"})).await;
+        assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1)") && !text.contains("dev-b"), "{text}");
+
+        // dev-a has the capability too, but does not route to itself; dev-b comes before dev-c.
+        let (ok, text) =
+            call(&client, "route", serde_json::json!({"capability": "RUST", "text": "fix it", "wait": false})).await;
+        assert!(ok && text.starts_with("Routed to dev-b for RUST."), "{text}");
+        let out = sent.recv().await.unwrap();
+        assert_eq!((&out.to, out.text.as_str(), &out.thread_id), (&persona("dev-b"), "fix it", &current.thread_id));
+
+        let asking = tokio::spawn(async move {
+            call(&client, "route", serde_json::json!({"capability": "billing", "text": "invoice?"})).await
+        });
+        let ask = sent.recv().await.unwrap();
+        assert_eq!(ask.to, persona("dev-c"));
+        let reply = ask.reply(persona("dev-c"), "paid").unwrap();
+        mcp.hub.route(reply).await;
+        let (ok, text) = asking.await.unwrap();
+        assert!(ok && text == "Routed to dev-c for billing. dev-c replied:\npaid", "{text}");
+
+        let client = http_client(&url, &token).await;
+        let (ok, text) = call(&client, "route", serde_json::json!({"capability": "go", "text": "?"})).await;
+        assert!(!ok && text.contains("Capabilities there: billing, rust."), "{text}");
+        assert!(sent.try_recv().is_err(), "nothing is sent without a persona to take it");
     }
 
     #[tokio::test]

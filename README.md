@@ -91,8 +91,9 @@ Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona i
 capabilities, start and last heartbeat time (`RosterEntry` in `ants-proto`). It refreshes the entry every 10 s and
 deletes it on a clean stop. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
-`--capability rust --capability billing`. A persona's credentials write only its own entry; the human's read the
-roster.
+`--capability rust --capability billing`. A persona's credentials write only its own entry; every persona's and the
+human's read the roster, so agents can pick whom to ask (see Messenger). Persona credentials issued before personas
+could read it need `ants auth user` again.
 ## Dead letters
 
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
@@ -144,6 +145,8 @@ speak as the persona, on the thread the session serves:
 | `send_message(to, text, thread?)` | Sends to another persona or `human` and returns once JetStream has stored it. `thread` omitted: the current thread; `new`: a fresh one; else that thread id. |
 | `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
+| `list_personas(capability?)` | Lists the other personas in the roster with their capabilities, harness and machine; only those advertising `capability` when given. |
+| `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a
 message from the human, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -161,8 +164,36 @@ The server listens on `127.0.0.1` on a free port (streamable HTTP, stateless) an
 calling thread; requests without a known token get 401. Harnesses whose ACP `mcpCapabilities` lack `http` get a stdio
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the persona's allowlist like
-any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, or `other`). Persona credentials issued
+any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_personas`, `other:route`, or
+`other`). Persona credentials issued
 before the MCP tools existed lack the subscription to the persona's own inbox; issue them again with `ants auth user`.
+
+## Messenger
+
+`ants ask` without `@persona` goes to the persona `messenger`. The messenger is a persona like any other, served by
+`ants daemon`, whose job is to route: it finds the persona for a request by the capabilities in the roster, with
+`list_personas` and `route`, and answers with that persona's reply. Its MCP server instructions say so; a workdir with
+an `AGENTS.md` (or the harness's own instructions file) along these lines makes it firmer:
+
+```toml
+[[persona]]
+name = "messenger"
+workdir = "~/.ants/messenger-work"          # holds AGENTS.md below
+creds = "~/.config/ants/auth/messenger.creds"
+allow = ["other:list_personas", "other:route", "other:ask_agent", "other:send_message", "other:check_inbox"]
+```
+
+```markdown
+This agent is the messenger of an ants team. It routes each request instead of doing the work itself.
+1. Decide which capability the request needs; `list_personas` shows who advertises what.
+2. Call `route` with that capability and the request, and answer with the reply.
+3. A request needing several capabilities gets one `route` per capability; combine the replies.
+4. When no persona has the capability, say so and name the capabilities there are.
+```
+
+`route` picks deterministically: the first persona by name with the tag, so the same roster always routes the same
+way; `list_personas` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
+and `send_message`. Every persona gets these tools, not only the messenger.
 
 ## Persona memory
 

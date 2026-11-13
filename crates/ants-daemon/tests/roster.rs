@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
-use ants_daemon::roster::Registration;
+use ants_daemon::roster::{self, Registration};
 use ants_proto::{PersonaId, RosterEntry};
 use async_nats::jetstream::kv;
 
@@ -107,4 +107,19 @@ async fn entries_refresh_leave_and_expire() {
     // An existing bucket keeps its max age.
     let reopened = bus::ensure_roster(&js, Duration::from_secs(60)).await.unwrap();
     assert_eq!(reopened.status().await.unwrap().max_age(), ttl);
+}
+
+#[tokio::test]
+async fn listing_gives_every_entry_by_persona() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, &PersonaId::human(), "test").await.unwrap();
+    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    assert!(roster::list_entries(&kv).await.unwrap().is_empty());
+
+    let beat = Duration::from_secs(10);
+    let _b = Registration::start(kv.clone(), entry("dev-b"), beat).await.unwrap();
+    let _a = Registration::start(kv.clone(), entry("dev-a"), beat).await.unwrap();
+    kv.put("junk", "not an entry".into()).await.unwrap();
+    let listed: Vec<_> = roster::list_entries(&kv).await.unwrap().into_iter().map(|e| e.persona.to_string()).collect();
+    assert_eq!(listed, ["dev-a", "dev-b"]);
 }
