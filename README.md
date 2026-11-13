@@ -105,6 +105,13 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
 `--js-domain` (`ANTS_JS_DOMAIN`). `ants <command> --help` lists the rest.
 
+### Agent skill
+
+`contrib/skills/ants/SKILL.md` teaches a coding agent outside ants (an interactive Copilot CLI session, say) to
+message personas as the human through this CLI: `ants roster`, `ants ask`, `ants inbox --thread`, `ants watch`. Install
+it as a personal skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the directory into another
+agent's skills directory.
+
 ## Delivery
 
 Replies to the human wait in the durable JetStream consumer `inbox-human` until read, so those that arrive while no
@@ -758,7 +765,7 @@ allow-list in `deny.toml`, a security advisory, a yanked crate or a source other
 | `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, inbox loop, tool permissions, MCP server |
 | `crates/ants` | The `ants` binary: CLI, `ants daemon`, `ants auth`, `ants leaf` |
 | `crates/ants-test-support` | Test helpers (dev-only): tools on PATH, a throwaway nats-server |
-| `contrib/` | launchd and systemd unit templates |
+| `contrib/` | launchd and systemd unit templates, the agent skill for the CLI |
 | `scripts/` | `install-units.sh` (services), `footprint.sh` (memory check) |
 | `docs/transport.md` | Transport spikes: hub, reverse proxy, leaf nodes, Dev Tunnels |
 
