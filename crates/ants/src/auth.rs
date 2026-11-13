@@ -157,7 +157,7 @@ pub(crate) mod tests {
     use ants_daemon::bus;
     use ants_daemon::dead::{self, Attempt};
     use ants_daemon::roster::Registration;
-    use ants_proto::{Envelope, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, subject};
+    use ants_proto::{Envelope, RosterEntry, STREAM, STREAM_SUBJECTS, ThreadId, inbox_prefix, session_key, subject};
     use async_nats::jetstream::AckKind;
     use async_nats::{Client, Event, jetstream};
     use futures::{StreamExt as _, TryStreamExt as _};
@@ -293,7 +293,7 @@ pub(crate) mod tests {
 
         // dev-a serves its inbox the way the daemon does, and replies.
         let stream = bus::ensure_stream(&a_js).await.unwrap();
-        let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5).await.unwrap();
+        let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 2).await.unwrap();
         let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
         let reply = ask.reply(dev_a.clone(), "hello").unwrap();
@@ -303,12 +303,21 @@ pub(crate) mod tests {
         assert_eq!(serde_json::from_slice::<Envelope>(&got.payload).unwrap(), reply);
 
         // dev-a cannot read dev-b's inbox, through a consumer or the stream.
-        assert!(bus::inbox_consumer(&stream, &dev_b, WAIT, 5).await.is_err());
+        assert!(bus::inbox_consumer(&stream, &dev_b, WAIT, 5, 2).await.is_err());
         assert!(stream.get_raw_message(1).await.is_err());
+
+        // dev-a keeps its sessions under its own keys, and cannot touch dev-b's.
+        let thread: ThreadId = "t1".parse().unwrap();
+        assert!(bus::ensure_sessions(&a_js).await.is_err(), "only the human creates the bucket");
+        bus::ensure_sessions(&h_js).await.unwrap();
+        let sessions = bus::ensure_sessions(&a_js).await.unwrap();
+        sessions.put(session_key(&dev_a, &thread), "s1".into()).await.unwrap();
+        assert_eq!(sessions.get(session_key(&dev_a, &thread)).await.unwrap().as_deref(), Some(&b"s1"[..]));
+        assert!(sessions.put(session_key(&dev_b, &thread), "s1".into()).await.is_err());
+        assert!(sessions.get(session_key(&dev_b, &thread)).await.is_err());
 
         // Nor speak for dev-b, or listen to others.
         let (a_raw, mut errors) = server.watched(&dev_a).await;
-        let thread: ThreadId = "t1".parse().unwrap();
         a_raw.publish(subject::status(&dev_a, &thread), "ok".into()).await.unwrap();
         a_raw.publish(subject::status(&dev_b, &thread), "spoof".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
@@ -398,7 +407,7 @@ pub(crate) mod tests {
 
         // dev-a fails every attempt, as the daemon does when the harness errors.
         let a_stream = bus::ensure_stream(&a_js).await.unwrap();
-        let mut inbox = bus::inbox_consumer(&a_stream, &dev_a, WAIT, 3).await.unwrap();
+        let mut inbox = bus::inbox_consumer(&a_stream, &dev_a, WAIT, 3, 1).await.unwrap();
         loop {
             let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
             assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);

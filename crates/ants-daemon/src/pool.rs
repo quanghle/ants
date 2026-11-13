@@ -1,119 +1,292 @@
 //! Live harness sessions, one per active thread: capped, stopped when idle, and resumed with session/load.
+//!
+//! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
+//! cap is reached and every live harness is busy, a new thread waits for one to finish.
 
 use std::collections::HashMap;
+use std::pin::pin;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::SessionId;
-use ants_proto::ThreadId;
-use anyhow::Result;
+use ants_proto::{PersonaId, ThreadId, session_key};
+use anyhow::{Context as _, Result};
+use async_nats::jetstream::kv;
+use tokio::sync::Notify;
 
 use crate::harness::{Launch, Session};
 
+/// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
+#[derive(Clone)]
+pub enum SessionStore {
+    /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the persona's own keys.
+    Kv { kv: Box<kv::Store>, persona: PersonaId },
+    /// In this process only, shared by clones.
+    Memory(Arc<Mutex<HashMap<ThreadId, SessionId>>>),
+}
+
+impl SessionStore {
+    pub fn kv(kv: kv::Store, persona: PersonaId) -> Self {
+        Self::Kv { kv: Box::new(kv), persona }
+    }
+
+    pub fn memory() -> Self {
+        Self::Memory(Arc::default())
+    }
+
+    /// The session the thread last ran in, if any.
+    pub async fn get(&self, thread: &ThreadId) -> Result<Option<SessionId>> {
+        match self {
+            Self::Kv { kv, persona } => {
+                let value = kv.get(session_key(persona, thread)).await.context("reading the session of the thread")?;
+                Ok(value.and_then(|v| String::from_utf8(v.to_vec()).ok()).map(SessionId::new))
+            }
+            Self::Memory(map) => Ok(map.lock().expect("session store").get(thread).cloned()),
+        }
+    }
+
+    pub async fn put(&self, thread: &ThreadId, session: &SessionId) -> Result<()> {
+        match self {
+            Self::Kv { kv, persona } => {
+                kv.put(session_key(persona, thread), session.to_string().into())
+                    .await
+                    .context("storing the session of the thread")?;
+            }
+            Self::Memory(map) => {
+                map.lock().expect("session store").insert(thread.clone(), session.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
 struct Live {
-    session: Session,
+    session: Arc<Session>,
     last_used: Instant,
+    /// Prompts in flight. A busy harness is never stopped.
+    busy: usize,
+}
+
+enum Slot {
+    /// The harness is starting; it already counts against the cap.
+    Starting,
+    Ready(Live),
+}
+
+enum Claim {
+    Live(Arc<Session>),
+    Start,
+    Wait,
 }
 
 pub struct Pool {
     launch: Launch,
+    store: SessionStore,
     max_live: usize,
     idle_after: Duration,
-    live: HashMap<ThreadId, Live>,
-    /// Session of every thread seen, live or not, so a stopped one resumes where it left off.
-    sessions: HashMap<ThreadId, SessionId>,
+    slots: Mutex<HashMap<ThreadId, Slot>>,
+    /// Signalled when a harness becomes free, starts or stops.
+    changed: Notify,
 }
 
 impl Pool {
-    /// At most `max_live` harnesses (at least one); each stops after `idle_after` without a prompt.
-    pub fn new(launch: Launch, max_live: usize, idle_after: Duration) -> Self {
-        Self { launch, max_live: max_live.max(1), idle_after, live: HashMap::new(), sessions: HashMap::new() }
+    /// At most `max_live` harnesses (at least one); each stops after `idle_after` without a prompt. Sessions are
+    /// looked up in `store` when a thread's harness starts, so only live threads are held in memory.
+    pub fn new(launch: Launch, store: SessionStore, max_live: usize, idle_after: Duration) -> Self {
+        Self { launch, store, max_live: max_live.max(1), idle_after, slots: Mutex::default(), changed: Notify::new() }
     }
 
-    /// Run a prompt in the thread's session, starting or resuming its harness when none is live.
-    pub async fn prompt(&mut self, thread: &ThreadId, text: &str) -> Result<String> {
-        if !self.live.get(thread).is_some_and(|l| l.session.is_alive()) {
-            self.live.remove(thread);
-            self.make_room();
-            let resume = self.sessions.get(thread).cloned();
-            let session = Session::start(&self.launch.for_thread(thread), resume.clone()).await?;
-            match &resume {
-                Some(old) if old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
-                _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
-            }
-            self.sessions.insert(thread.clone(), session.id().clone());
-            self.live.insert(thread.clone(), Live { session, last_used: Instant::now() });
-        }
-        let live = self.live.get_mut(thread).expect("live session");
-        let reply = live.session.prompt(text).await;
-        live.last_used = Instant::now();
-        reply
+    /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap
+    /// is reached and every live harness is busy.
+    pub async fn prompt(&self, thread: &ThreadId, text: &str) -> Result<String> {
+        let lease = self.checkout(thread).await?;
+        lease.session.prompt(text).await
     }
 
     /// Stop harnesses idle since before `now - idle_after`. Returns how many stopped.
-    pub fn evict_idle(&mut self, now: Instant) -> usize {
-        let before = self.live.len();
-        let idle_after = self.idle_after;
-        self.live.retain(|thread, live| {
-            let keep = now.saturating_duration_since(live.last_used) < idle_after;
+    pub fn evict_idle(&self, now: Instant) -> usize {
+        let mut slots = self.slots();
+        let before = slots.len();
+        slots.retain(|thread, slot| {
+            let Slot::Ready(live) = slot else { return true };
+            let keep = live.busy > 0 || now.saturating_duration_since(live.last_used) < self.idle_after;
             if !keep {
                 tracing::info!(%thread, "stopping idle harness");
             }
             keep
         });
-        before - self.live.len()
+        let stopped = before - slots.len();
+        drop(slots);
+        if stopped > 0 {
+            self.changed.notify_waiters();
+        }
+        stopped
     }
 
-    /// Stop every harness and wait for them to exit.
+    /// Stop every harness and wait for them to exit. Prompts still in flight end with an error.
     pub async fn shutdown(self) {
-        futures::future::join_all(self.live.into_values().map(|l| l.session.close())).await;
+        let slots = self.slots.into_inner().expect("pool");
+        let sessions = slots.into_values().filter_map(|slot| match slot {
+            Slot::Ready(live) => Arc::into_inner(live.session),
+            Slot::Starting => None,
+        });
+        futures::future::join_all(sessions.map(Session::close)).await;
     }
 
     pub fn live(&self) -> usize {
-        self.live.len()
+        self.slots().values().filter(|slot| matches!(slot, Slot::Ready(_))).count()
     }
 
-    /// Stop least recently used harnesses until one more fits.
-    fn make_room(&mut self) {
-        while self.live.len() >= self.max_live {
-            let Some(oldest) = self.live.iter().min_by_key(|(_, l)| l.last_used).map(|(t, _)| t.clone()) else {
-                return;
-            };
-            tracing::info!(thread = %oldest, "stopping harness to stay within the cap");
-            self.live.remove(&oldest);
+    fn slots(&self) -> MutexGuard<'_, HashMap<ThreadId, Slot>> {
+        self.slots.lock().expect("pool")
+    }
+
+    /// The thread's live session, marked busy until the lease drops.
+    async fn checkout(&self, thread: &ThreadId) -> Result<Lease<'_>> {
+        loop {
+            let mut changed = pin!(self.changed.notified());
+            changed.as_mut().enable();
+            match self.claim(thread) {
+                Claim::Live(session) => return Ok(Lease { pool: self, thread: thread.clone(), session }),
+                Claim::Start => return self.start(thread).await,
+                Claim::Wait => changed.await,
+            }
         }
+    }
+
+    fn claim(&self, thread: &ThreadId) -> Claim {
+        let mut slots = self.slots();
+        match slots.get_mut(thread) {
+            Some(Slot::Ready(live)) if live.session.is_alive() => {
+                live.busy += 1;
+                return Claim::Live(live.session.clone());
+            }
+            // A dead harness with a prompt in flight is about to fail it; take over once it has.
+            Some(Slot::Ready(Live { busy: 1.., .. }) | Slot::Starting) => return Claim::Wait,
+            Some(Slot::Ready(_)) => {
+                slots.remove(thread);
+            }
+            None => {}
+        }
+        if slots.len() >= self.max_live && !evict_least_recently_used(&mut slots) {
+            return Claim::Wait;
+        }
+        slots.insert(thread.clone(), Slot::Starting);
+        Claim::Start
+    }
+
+    /// Start the harness of a thread claimed as [`Slot::Starting`], resuming its stored session.
+    async fn start(&self, thread: &ThreadId) -> Result<Lease<'_>> {
+        let mut starting = Starting { pool: self, thread, done: false };
+        let resume = self.store.get(thread).await?;
+        let session = Session::start(&self.launch.for_thread(thread), resume.clone()).await?;
+        match &resume {
+            Some(old) if old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
+            _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
+        }
+        // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
+        // thread its history after the next stop, so the prompt goes ahead.
+        if let Err(e) = self.store.put(thread, session.id()).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
+        }
+        let session = Arc::new(session);
+        let live = Live { session: session.clone(), last_used: Instant::now(), busy: 1 };
+        self.slots().insert(thread.clone(), Slot::Ready(live));
+        starting.done = true;
+        Ok(Lease { pool: self, thread: thread.clone(), session })
+    }
+}
+
+/// Stop the least recently used harness that has no prompt in flight. False when every one is busy.
+fn evict_least_recently_used(slots: &mut HashMap<ThreadId, Slot>) -> bool {
+    let oldest = slots
+        .iter()
+        .filter_map(|(thread, slot)| match slot {
+            Slot::Ready(live) if live.busy == 0 => Some((thread, live.last_used)),
+            _ => None,
+        })
+        .min_by_key(|(_, last_used)| *last_used)
+        .map(|(thread, _)| thread.clone());
+    let Some(oldest) = oldest else { return false };
+    tracing::info!(thread = %oldest, "stopping harness to stay within the cap");
+    slots.remove(&oldest);
+    true
+}
+
+/// A prompt in flight on a thread's session.
+struct Lease<'a> {
+    pool: &'a Pool,
+    thread: ThreadId,
+    session: Arc<Session>,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if let Some(Slot::Ready(live)) = self.pool.slots().get_mut(&self.thread)
+            && Arc::ptr_eq(&live.session, &self.session)
+        {
+            live.busy -= 1;
+            live.last_used = Instant::now();
+        }
+        self.pool.changed.notify_waiters();
+    }
+}
+
+/// Frees the slot of a harness that failed to start, or whose start was cancelled.
+struct Starting<'a> {
+    pool: &'a Pool,
+    thread: &'a ThreadId,
+    done: bool,
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut slots = self.pool.slots();
+            if matches!(slots.get(self.thread), Some(Slot::Starting)) {
+                slots.remove(self.thread);
+            }
+        }
+        self.pool.changed.notify_waiters();
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::v1::schema::{
         AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse, LoadSessionRequest,
-        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionNotification,
-        SessionUpdate, StopReason, TextContent,
+        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
+        SessionNotification, SessionUpdate, StopReason, TextContent,
     };
     use agent_client_protocol::{Agent, DynConnectTo};
+    use tokio::sync::Semaphore;
 
-    use super::*;
+    use crate::harness::Launch;
 
     /// What the fake harnesses were asked to do, across all their "processes".
     #[derive(Default, Debug)]
-    struct Log {
-        starts: usize,
-        new_sessions: usize,
-        loaded: Vec<String>,
+    pub struct Log {
+        pub starts: usize,
+        pub new_sessions: usize,
+        pub loaded: Vec<String>,
+        /// Prompts in the order they were answered.
+        pub answered: Vec<String>,
+        flaky_failed: Vec<String>,
     }
 
-    /// A pool over in-process fake harnesses that answer each prompt with `<session>: <text>`.
-    fn fake_pool(max_live: usize, can_load: bool) -> (Pool, Arc<Mutex<Log>>) {
+    /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
+    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time.
+    pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
-        let shared = log.clone();
+        let gate = Arc::new(Semaphore::new(0));
+        let (shared, held) = (log.clone(), gate.clone());
         let connect = Arc::new(move || {
             let log = shared.clone();
             log.lock().unwrap().starts += 1;
-            let (on_new, on_load) = (log.clone(), log);
+            let (on_new, on_load, on_prompt, gate) = (log.clone(), log.clone(), log, held.clone());
             DynConnectTo::new(
                 Agent
                     .v1()
@@ -147,24 +320,31 @@ mod tests {
                     .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| {
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
-                            cx.send_notification(chunk(
-                                &prompt.session_id,
-                                &format!("{}: {}", prompt.session_id, t.text),
-                            ))?;
-                            responder.respond(PromptResponse::new(StopReason::EndTurn))
+                            let (text, gate, sender, log) =
+                                (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone());
+                            // Answer from a task, so a held prompt does not stall the connection.
+                            cx.spawn(async move {
+                                if text.starts_with("hold") {
+                                    gate.acquire().await.unwrap().forget();
+                                }
+                                if text.starts_with("flaky") {
+                                    let mut log = log.lock().unwrap();
+                                    if !log.flaky_failed.contains(&text) {
+                                        log.flaky_failed.push(text);
+                                        return responder.respond_with_internal_error("flaky");
+                                    }
+                                }
+                                log.lock().unwrap().answered.push(text.clone());
+                                let reply = format!("{}: {text}", prompt.session_id);
+                                sender.send_notification(chunk(&prompt.session_id, &reply))?;
+                                responder.respond(PromptResponse::new(StopReason::EndTurn))
+                            })
                         },
                         agent_client_protocol::on_receive_request!(),
                     ),
             )
         });
-        (
-            Pool::new(
-                Launch::with_transport(connect, PathBuf::from("/"), Default::default()),
-                max_live,
-                Duration::from_secs(60),
-            ),
-            log,
-        )
+        (Launch::with_transport(connect, PathBuf::from("/"), Default::default()), log, gate)
     }
 
     fn chunk(session: &SessionId, text: &str) -> SessionNotification {
@@ -173,14 +353,37 @@ mod tests {
             SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(text)))),
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use tokio::sync::Semaphore;
+
+    use super::*;
+
+    const IDLE: Duration = Duration::from_secs(60);
+
+    fn fake_pool(max_live: usize, can_load: bool) -> (Pool, Arc<Mutex<fake::Log>>, Arc<Semaphore>) {
+        let (launch, log, gate) = fake::launch(can_load);
+        (Pool::new(launch, SessionStore::memory(), max_live, IDLE), log, gate)
+    }
 
     fn thread(n: u8) -> ThreadId {
         format!("t{n}").parse().unwrap()
     }
 
+    /// Let spawned harness tasks run until they block.
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
     #[tokio::test]
     async fn a_thread_keeps_its_harness_between_messages() {
-        let (mut pool, log) = fake_pool(4, true);
+        let (pool, log, _) = fake_pool(4, true);
         assert_eq!(pool.prompt(&thread(1), "one").await.unwrap(), "s1: one");
         assert_eq!(pool.prompt(&thread(1), "two").await.unwrap(), "s1: two");
         assert_eq!(pool.prompt(&thread(2), "three").await.unwrap(), "s2: three");
@@ -190,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_cap_stops_the_least_recently_used_and_it_resumes() {
-        let (mut pool, log) = fake_pool(1, true);
+        let (pool, log, _) = fake_pool(1, true);
         pool.prompt(&thread(1), "a").await.unwrap();
         pool.prompt(&thread(2), "b").await.unwrap();
         assert_eq!(pool.live(), 1);
@@ -201,20 +404,70 @@ mod tests {
 
     #[tokio::test]
     async fn idle_harnesses_stop_and_resume_on_the_next_message() {
-        let (mut pool, log) = fake_pool(4, true);
+        let (pool, log, _) = fake_pool(4, true);
         pool.prompt(&thread(1), "a").await.unwrap();
         assert_eq!(pool.evict_idle(Instant::now()), 0);
-        assert_eq!(pool.evict_idle(Instant::now() + Duration::from_secs(61)), 1);
+        assert_eq!(pool.evict_idle(Instant::now() + IDLE + Duration::from_secs(1)), 1);
         assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
         assert_eq!(log.lock().unwrap().loaded, ["s1"]);
     }
 
     #[tokio::test]
     async fn a_harness_without_session_load_starts_over() {
-        let (mut pool, log) = fake_pool(1, false);
+        let (pool, log, _) = fake_pool(1, false);
         pool.prompt(&thread(1), "a").await.unwrap();
         pool.prompt(&thread(2), "b").await.unwrap();
         assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), "s3: c");
         assert!(log.lock().unwrap().loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn threads_run_concurrently_up_to_the_cap() {
+        let (pool, log, gate) = fake_pool(2, true);
+        let (t1, t2) = (thread(1), thread(2));
+        let (a, b) = (pool.prompt(&t1, "hold a"), pool.prompt(&t2, "hold b"));
+        let release = async {
+            settle().await;
+            assert_eq!(log.lock().unwrap().starts, 2, "both threads started before either finished");
+            gate.add_permits(2);
+        };
+        let (a, b, ()) = tokio::join!(a, b, release);
+        assert_eq!((a.unwrap(), b.unwrap()), ("s1: hold a".to_owned(), "s2: hold b".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_busy_harness_is_never_stopped() {
+        let (pool, log, gate) = fake_pool(1, true);
+        let (t1, t2) = (thread(1), thread(2));
+        let busy = pool.prompt(&t1, "hold a");
+        let others = async {
+            settle().await;
+            assert_eq!(pool.evict_idle(Instant::now() + IDLE * 2), 0, "idle eviction skips a busy harness");
+            let waiting = pool.prompt(&t2, "b");
+            let release = async {
+                settle().await;
+                assert_eq!(log.lock().unwrap().starts, 1, "a new thread waits instead of stopping a busy harness");
+                gate.add_permits(1);
+            };
+            let (reply, ()) = tokio::join!(waiting, release);
+            reply.unwrap()
+        };
+        let (a, b) = tokio::join!(busy, others);
+        assert_eq!((a.unwrap().as_str(), b.as_str()), ("s1: hold a", "s2: b"));
+        assert_eq!(pool.live(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_pool_resumes_the_stored_session() {
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
+        pool.prompt(&thread(1), "a").await.unwrap();
+        pool.shutdown().await;
+
+        let pool = Pool::new(launch, store, 4, IDLE);
+        assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
+        let log = log.lock().unwrap();
+        assert_eq!((log.new_sessions, log.loaded.as_slice()), (1, &["s1".to_owned()][..]));
     }
 }

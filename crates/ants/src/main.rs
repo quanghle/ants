@@ -65,7 +65,8 @@ enum Command {
         #[arg(default_value = subject::ALL)]
         subject: String,
     },
-    /// Create the ANTS stream and the roster bucket on the server, or add the stream subjects an older version lacks.
+    /// Create the ANTS stream and the roster and sessions buckets on the server, or add the stream subjects an older
+    /// version lacks.
     Init,
     /// Messages personas gave up on: inspect, replay or drop them.
     #[command(subcommand)]
@@ -144,7 +145,13 @@ async fn main() -> Result<()> {
             let (_, js) = bus::connect(&cli.nats, cli.creds.as_deref(), &PersonaId::human(), "ants-cli").await?;
             bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
-            println!("stream {} and roster bucket {} ready", ants_proto::STREAM, ants_proto::ROSTER_BUCKET);
+            bus::ensure_sessions(&js).await?;
+            println!(
+                "stream {} and buckets {} and {} ready",
+                ants_proto::STREAM,
+                ants_proto::ROSTER_BUCKET,
+                ants_proto::SESSIONS_BUCKET
+            );
             Ok(())
         }
         Command::Dead(command) => dead_letters(&cli.nats, cli.creds.as_deref(), command).await,

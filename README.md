@@ -32,9 +32,16 @@ CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--p
 and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new ones and `--json` prints one
 envelope per line. `ants ask --wait` marks only the reply it prints read.
 
-The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). A thread's harness
-stops after `--idle-timeout-secs` (default 600) without a message, and its session resumes with ACP `session/load` on
-the next one.
+The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
+prompted concurrently; messages on one thread are handled one at a time, in order, and a failed one is retried before
+the rest of its thread. A thread's harness stops after `--idle-timeout-secs` (default 600) without a message, and its
+session resumes with ACP `session/load` on the next one. A harness with a prompt in flight is never stopped: when all
+are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
+at once, and their messages are redelivered later).
+
+Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<persona>.<thread>`, so a restarted
+daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires
+30 days later, like the stream's messages.
 
 ## Config file
 
@@ -144,7 +151,7 @@ ants auth user dev-a                   # copy to the machine that runs dev-a
 ```
 
 Add `include "/path/to/server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with the human's credentials to create the stream and the roster bucket, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with the human's credentials to create the stream and the roster and sessions buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 
 ## Footprint

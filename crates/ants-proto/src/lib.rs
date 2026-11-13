@@ -175,6 +175,17 @@ pub fn inbox_prefix(persona: &PersonaId) -> String {
     format!("_INBOX.{persona}")
 }
 
+/// Key of a thread's harness session in [`SESSIONS_BUCKET`]. Keys start with the persona, so its credentials can be
+/// confined to its own.
+pub fn session_key(persona: &PersonaId, thread: &ThreadId) -> String {
+    format!("{persona}.{thread}")
+}
+
+/// JetStream stream backing a KV bucket.
+fn kv_stream(bucket: &str) -> String {
+    format!("KV_{bucket}")
+}
+
 /// Subjects a set of credentials may publish and subscribe to. Everything else is denied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permissions {
@@ -186,14 +197,16 @@ impl Permissions {
     /// What the credentials of `persona` allow.
     ///
     /// Any persona may write to every inbox and plan room, but speaks only for itself on status, approvals and dead
-    /// letters, reads only its own inbox consumer, its own replies and the decisions on its own approval requests, and
-    /// writes only its own roster entry. The human (the CLI user) also watches all ants traffic, reads the roster,
-    /// decides approval requests, may create and upgrade the stream and create the roster bucket, and reads and removes
-    /// dead letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A persona gets no
-    /// `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
+    /// letters, reads only its own inbox consumer, its own replies and the decisions on its own approval requests,
+    /// writes only its own roster entry, and reads and writes only its own keys in the sessions bucket. The human (the
+    /// CLI user) also watches all ants traffic, reads the roster, decides approval requests, may create and upgrade the
+    /// stream and create the roster and sessions buckets, and reads and removes dead letters by sequence; its inbox
+    /// consumer keeps the replies `ants inbox` has not shown yet. A persona gets no `STREAM.MSG.GET`: it takes any
+    /// sequence, so it would expose every inbox.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
-        let roster_stream = format!("KV_{ROSTER_BUCKET}");
+        let roster_stream = kv_stream(ROSTER_BUCKET);
+        let sessions = kv_stream(SESSIONS_BUCKET);
         let mut publish = vec![
             "ants.inbox.*".to_owned(),
             "ants.plan.>".to_owned(),
@@ -204,6 +217,7 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox(persona)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.ACK.{STREAM}.{consumer}.>"),
+            format!("$JS.API.STREAM.INFO.{sessions}"),
         ];
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
@@ -212,6 +226,7 @@ impl Permissions {
                 // Creating a KV bucket first looks up the account's JetStream limits.
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+                format!("$JS.API.STREAM.CREATE.{sessions}"),
                 // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
                 format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
                 format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
@@ -223,7 +238,11 @@ impl Permissions {
             ]);
             subscribe.push(subject::ALL.to_owned());
         } else {
+            let own_keys = format!("$KV.{SESSIONS_BUCKET}.{persona}.>");
             publish.extend([
+                // Get and put of its own sessions.
+                format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
+                own_keys,
                 // Exactly its requests subject: a persona cannot answer its own requests one level below.
                 subject::approvals(persona),
                 subject::dead(persona),
@@ -538,6 +557,7 @@ mod tests {
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
         let id = Uuid::now_v7();
         assert_eq!(subject::approval_decision(&p("dev-a"), &id), format!("ants.approvals.dev-a.{id}"));
+        assert_eq!(session_key(&p("dev-a"), &t), "dev-a.t1");
     }
 
     #[test]

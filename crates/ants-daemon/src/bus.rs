@@ -3,13 +3,13 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{Envelope, PersonaId, ROSTER_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject};
+use ants_proto::{Envelope, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, inbox_prefix, subject};
 use anyhow::{Context as _, Result};
 use async_nats::Event;
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::{self, kv, stream};
 
-/// How long the stream keeps messages.
+/// How long the stream keeps messages, and the sessions bucket a thread's session.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Connect to NATS as `persona`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
@@ -100,13 +100,32 @@ pub fn missing_subjects(subjects: &[String]) -> Vec<String> {
     STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
 }
 
+/// The KV bucket mapping threads to harness sessions, created when missing and the credentials allow it.
+pub async fn ensure_sessions(js: &jetstream::Context) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(SESSIONS_BUCKET).await {
+        return Ok(store);
+    }
+    js.create_key_value(kv::Config {
+        bucket: SESSIONS_BUCKET.to_owned(),
+        history: 1,
+        max_age: RETENTION,
+        storage: stream::StorageType::File,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| {
+        format!("creating the {SESSIONS_BUCKET} bucket (with credentials, `ants init` as the human creates it)")
+    })
+}
+
 /// Messages from the durable consumer of `persona`'s inbox, which is created if missing and updated if its settings
-/// changed.
+/// changed. At most `max_ack_pending` messages are in hand at once.
 pub async fn inbox_consumer(
     stream: &stream::Stream,
     persona: &PersonaId,
     ack_wait: Duration,
     max_deliver: i64,
+    max_ack_pending: i64,
 ) -> Result<pull::Stream> {
     let name = ants_proto::inbox_consumer(persona);
     let consumer: PullConsumer = stream
@@ -116,8 +135,7 @@ pub async fn inbox_consumer(
             ack_policy: consumer::AckPolicy::Explicit,
             ack_wait,
             max_deliver,
-            // One message at a time keeps one harness alive at most; per-thread concurrency comes later.
-            max_ack_pending: 1,
+            max_ack_pending,
             ..Default::default()
         })
         .await
