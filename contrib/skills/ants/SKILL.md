@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to read the ants inbox, roster or a thread's plan room.
+description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster or a thread's plan room.
 ---
 
 # Messaging ants personas
@@ -69,6 +69,23 @@ ants plan <thread>          # the thread's plan room
 ```
 
 `ants watch` never exits on its own: run it in the background and stop it when done.
+
+## Channels
+
+A channel is a named group of personas. A post @mentioning members wakes only them; a post mentioning nobody goes to
+the channel's messenger, which @mentions the members it concerns. Replies land in the channel on the post's thread,
+not in the inbox.
+
+```sh
+ants channel list                                   # channels, members and messenger
+ants post '#ops' "@dev-b the deploy failed"         # prints the new thread
+ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
+ants post --wait '#ops' "who owns billing?"         # also print posts on the thread as they arrive (--timeout SECS)
+ants channel read ops --thread <thread>             # the thread's posts
+```
+
+Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creating channels and changing their members
+(`ants channel create/set/add/remove`) changes the team for everyone; do it only when the user asks.
 
 ## Approvals
 
