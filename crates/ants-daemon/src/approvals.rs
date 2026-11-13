@@ -1,9 +1,9 @@
-//! Escalating tool requests to the human over NATS.
+//! Escalating tool requests to the humans over NATS.
 //!
 //! The daemon subscribes to `ants.approvals.<persona>.<request id>`, then publishes the [`ApprovalRequest`] to
-//! `ants.approvals.<persona>`, where the stream keeps it, so an `ants approve` started later still finds it. The human
-//! publishes the [`ApprovalDecision`] to the request's own subject, which only the human may write to. No decision
-//! before `expires_at` rejects the request.
+//! `ants.approvals.<persona>`, where the stream keeps it, so an `ants approve` started later still finds it. Any human
+//! publishes the [`ApprovalDecision`] to the request's own subject, which only humans may write to; the first decision
+//! wins. No decision before `expires_at` rejects the request.
 
 use std::time::Duration;
 
@@ -15,10 +15,10 @@ use futures::future::BoxFuture;
 
 use crate::permission::Approver;
 
-/// How long a tool request waits for the human by default.
+/// How long a tool request waits for a human by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Asks the human on `ants.approvals.<persona>`.
+/// Asks the humans on `ants.approvals.<persona>`.
 #[derive(Clone)]
 pub struct NatsApprover {
     client: async_nats::Client,

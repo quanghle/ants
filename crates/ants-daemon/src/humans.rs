@@ -1,0 +1,207 @@
+//! The team's humans as a daemon sees them.
+//!
+//! A human is a persona listed in the [`HUMANS_BUCKET`], which only humans write; `human` and the daemon's default
+//! human (config `human`) are humans without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept
+//! current by a watch ([`Registry::watch`]). Until the bucket exists only the humans without an entry are known; the
+//! daemon looks for the bucket again every little while, since a persona may read it but not create it.
+
+use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
+
+use ants_proto::{Envelope, HUMANS_BUCKET, HumanEntry, Humans, PersonaId, Role};
+use anyhow::{Context as _, Result};
+use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
+use futures::{StreamExt as _, TryStreamExt as _};
+use tokio::task::JoinHandle;
+
+/// How long the daemon waits to look for the bucket again, when it is missing or its watch ended.
+pub const RETRY: Duration = Duration::from_secs(30);
+
+/// The humans of the team, shared by the inbox loop and the MCP server.
+#[derive(Debug, Clone)]
+pub struct Registry {
+    humans: Arc<RwLock<Humans>>,
+    default: PersonaId,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new(PersonaId::human())
+    }
+}
+
+impl Registry {
+    /// A registry knowing only the humans without an entry: `human` and `default`, the default human.
+    pub fn new(default: PersonaId) -> Self {
+        let registry = Self { humans: Arc::default(), default };
+        registry.replace(registry.base());
+        registry
+    }
+
+    /// The human who gets what is meant for the owner of a thread that has none.
+    pub fn default_human(&self) -> &PersonaId {
+        &self.default
+    }
+
+    /// The human who gets the escalations of `envelope`'s thread: its owner, else the default human.
+    pub fn owner_of(&self, envelope: &Envelope) -> PersonaId {
+        envelope.owner.clone().unwrap_or_else(|| self.default.clone())
+    }
+
+    pub fn role(&self, persona: &PersonaId) -> Role {
+        self.read().role(persona)
+    }
+
+    pub fn is_human(&self, persona: &PersonaId) -> bool {
+        self.role(persona).is_human()
+    }
+
+    /// Keep the registry current with the bucket, until the returned handle drops: the bucket is opened (never
+    /// created), read and watched; when it is missing or its watch ends, it is looked for again after `retry`.
+    pub fn watch(&self, js: jetstream::Context, retry: Duration) -> Watching {
+        let registry = self.clone();
+        Watching(tokio::spawn(async move {
+            loop {
+                match js.get_key_value(HUMANS_BUCKET).await {
+                    Ok(kv) => match registry.follow(&kv).await {
+                        Ok(()) => tracing::warn!("the watch of the humans ended; watching again"),
+                        Err(e) => tracing::warn!(error = format!("{e:#}"), "watching the humans"),
+                    },
+                    Err(e) if e.kind() == KeyValueErrorKind::GetBucket => {
+                        tracing::debug!(error = %e, "no humans bucket; only the humans without an entry are known");
+                    }
+                    Err(e) => tracing::warn!(error = %e, "opening the humans bucket"),
+                }
+                tokio::time::sleep(retry).await;
+            }
+        }))
+    }
+
+    /// Read the humans of `kv` in place of the known ones, then apply its changes until the watch ends. The watch
+    /// starts first, so no change made while the entries are read is missed.
+    async fn follow(&self, kv: &kv::Store) -> Result<()> {
+        let mut updates = kv.watch_all().await.context("watching the humans")?;
+        let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
+        let mut humans = self.base();
+        for key in keys {
+            let value = kv.get(&key).await.with_context(|| format!("reading human {key}"))?;
+            self.set(&mut humans, &key, value.as_deref());
+        }
+        self.replace(humans);
+        while let Some(entry) = updates.next().await {
+            let entry = entry.context("watching the humans")?;
+            let value = (entry.operation == kv::Operation::Put).then_some(&entry.value[..]);
+            let mut humans = self.humans.write().unwrap_or_else(PoisonError::into_inner);
+            self.set(&mut humans, &entry.key, value);
+        }
+        Ok(())
+    }
+
+    /// Set the human of `key` in `humans` to `value`, or remove it. A malformed entry, or one naming another persona
+    /// than its key, is skipped and names no human.
+    fn set(&self, humans: &mut Humans, key: &str, value: Option<&[u8]>) {
+        let Ok(persona) = key.parse::<PersonaId>() else {
+            tracing::warn!(key, "skipping a human entry under a key that is no persona id");
+            return;
+        };
+        let added = value.map(|value| {
+            serde_json::from_slice::<HumanEntry>(value)
+                .map_err(|e| e.to_string())
+                .and_then(|entry| humans.add(key, entry).map_err(|e| e.to_string()))
+        });
+        match added {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                tracing::warn!(key, error, "skipping a human entry");
+                self.remove(humans, &persona);
+            }
+            None => self.remove(humans, &persona),
+        }
+    }
+
+    fn remove(&self, humans: &mut Humans, persona: &PersonaId) {
+        if *persona != self.default {
+            humans.remove(persona);
+        }
+    }
+
+    /// The humans without an entry.
+    fn base(&self) -> Humans {
+        let mut humans = Humans::default();
+        let _ = humans.add(self.default.as_str(), HumanEntry { persona: self.default.clone(), registered_at: None });
+        humans
+    }
+
+    fn replace(&self, humans: Humans) {
+        *self.humans.write().unwrap_or_else(PoisonError::into_inner) = humans;
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Humans> {
+        self.humans.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A registry of `default` and `humans`, as if the bucket listed them.
+    #[cfg(test)]
+    pub fn with(default: PersonaId, humans: &[&str]) -> Self {
+        let registry = Self::new(default);
+        let mut known = registry.base();
+        for name in humans {
+            let entry = HumanEntry::new(name.parse().unwrap());
+            known.add(name, entry).unwrap();
+        }
+        registry.replace(known);
+        registry
+    }
+}
+
+/// The watch of [`Registry::watch`], stopped when dropped.
+pub struct Watching(JoinHandle<()>);
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persona(name: &str) -> PersonaId {
+        name.parse().unwrap()
+    }
+
+    #[test]
+    fn humans_without_an_entry() {
+        let registry = Registry::new(persona("alice"));
+        assert!(registry.is_human(&PersonaId::human()));
+        assert!(registry.is_human(&persona("alice")));
+        assert!(!registry.is_human(&persona("bob")));
+    }
+
+    #[test]
+    fn escalations_go_to_the_owner_else_the_default_human() {
+        let registry = Registry::new(persona("alice"));
+        let envelope = Envelope::new(persona("bob"), persona("coder"), "hi");
+        assert_eq!(registry.owner_of(&envelope), persona("alice"));
+        let owned = envelope.with_owner(Some(persona("carol")));
+        assert_eq!(registry.owner_of(&owned), persona("carol"));
+    }
+
+    #[test]
+    fn entries_add_and_remove_humans() {
+        let registry = Registry::new(persona("alice"));
+        let mut humans = registry.base();
+        let entry = |name: &str| serde_json::to_vec(&HumanEntry::new(persona(name))).unwrap();
+        registry.set(&mut humans, "carol", Some(&entry("carol")));
+        registry.set(&mut humans, "dave", Some(&entry("carol")));
+        registry.set(&mut humans, "erin", Some(b"not json"));
+        assert!(humans.contains(&persona("carol")));
+        assert!(!humans.contains(&persona("dave")), "an entry naming another persona is forged");
+        assert!(!humans.contains(&persona("erin")));
+        registry.set(&mut humans, "carol", None);
+        registry.set(&mut humans, "alice", None);
+        assert!(!humans.contains(&persona("carol")));
+        assert!(humans.contains(&persona("alice")), "the default human stays a human");
+    }
+}
