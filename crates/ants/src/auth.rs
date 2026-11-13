@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ants_proto::{JsDomain, Permissions, PersonaId};
+use ants_proto::{JsDomain, Machine, Permissions, PersonaId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -58,29 +58,27 @@ pub fn issue(dir: &Path, persona: &PersonaId, js_domain: Option<&JsDomain>, out:
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
-/// `personas` may do ([`Permissions::for_leaf`]), and connect only as a leaf node, not as a client.
+/// `personas` may do and the sourcing of the machine's outbox ([`Permissions::for_leaf`]), and connect only as a leaf
+/// node, not as a client.
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
 pub fn issue_leaf(
     dir: &Path,
-    machine: &str,
+    machine: &Machine,
     personas: &[PersonaId],
     js_domain: Option<&JsDomain>,
     out: &Path,
 ) -> Result<()> {
-    if machine.is_empty()
-        || machine.starts_with('.')
-        || !machine.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    {
-        bail!("invalid machine name {machine:?}: use letters, digits, '-', '_' and '.'");
-    }
     if personas.is_empty() {
         bail!("a leaf node needs at least one persona");
     }
+    if js_domain.is_some_and(|domain| domain.as_str() == machine.as_str()) {
+        bail!("machine {machine} would take the hub's JetStream domain; name it otherwise");
+    }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let permissions = Permissions::for_leaf(personas).with_js_domain(js_domain);
+    let permissions = Permissions::for_leaf(machine, personas).with_js_domain(js_domain);
     let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
     let jwt = user_jwt(&account, &user, &format!("leaf-{machine}"), permissions, only_leaf)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))
@@ -594,7 +592,7 @@ pub(crate) mod tests {
         bus::ensure_attempts(&h_js).await.unwrap();
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        issue_leaf(&team, "m1", std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
+        issue_leaf(&team, &"m1".parse().unwrap(), std::slice::from_ref(&dev_a), Some(&domain), &leaf_creds).unwrap();
         assert!(
             async_nats::ConnectOptions::with_credentials_file(&leaf_creds)
                 .await

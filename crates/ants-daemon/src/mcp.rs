@@ -66,7 +66,7 @@ pub type Outbox = Arc<dyn Fn(Envelope) -> BoxFuture<'static, Result<()>> + Send 
 pub fn jetstream_outbox(js: async_nats::jetstream::Context) -> Outbox {
     Arc::new(move |envelope| {
         let js = js.clone();
-        Box::pin(async move { bus::publish(&js, &envelope).await })
+        Box::pin(async move { bus::publish(&js, &envelope).await.map(drop) })
     })
 }
 

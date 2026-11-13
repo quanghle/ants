@@ -9,6 +9,7 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
+use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 
@@ -270,10 +271,59 @@ pub async fn human_inbox_consumer(stream: &stream::Stream, ack_wait: Duration) -
     stream.create_consumer(config).await.with_context(|| format!("updating consumer {name}"))
 }
 
-/// Publish an envelope and wait until JetStream has stored it.
-pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<()> {
-    publish_json(js, envelope.subject(), envelope, None).await?;
-    Ok(())
+/// Where [`store`] put a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    /// In the hub's stream.
+    Hub,
+    /// In the outbox of the machine's leaf node, which the hub's stream takes it from once the uplink is back.
+    Outbox,
+}
+
+/// Publish an envelope and wait until JetStream has stored it, in the hub's stream or, out of its reach, in the
+/// machine's outbox ([`store`]).
+pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<Stored> {
+    store(js, envelope.subject(), envelope, &envelope.id.to_string()).await
+}
+
+/// Publish `value` as JSON to `subject` in the hub's stream and wait until it is stored. When no stream answers (the
+/// leaf node's uplink is down) or none answers in time, store it in the leaf node's outbox instead, under
+/// [`subject::outbox`], for the hub to source once the uplink is back. Both copies carry `msg_id`, so the hub's stream
+/// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window.
+pub async fn store<T: serde::Serialize>(
+    js: &jetstream::Context,
+    subject: String,
+    value: &T,
+    msg_id: &str,
+) -> Result<Stored> {
+    let payload = serde_json::to_vec(value)?;
+    let message = || jetstream::message::PublishMessage::build().payload(payload.clone().into()).message_id(msg_id);
+    let hub = match js.send_publish(subject.clone(), message()).await {
+        Ok(ack) => ack.await,
+        Err(e) => Err(e),
+    };
+    let unreachable = match hub {
+        Ok(_) => return Ok(Stored::Hub),
+        Err(e) if matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut) => e,
+        Err(e) => return Err(e).context("waiting for JetStream to store the message"),
+    };
+    let Some(outbox) = subject::outbox(&subject) else {
+        return Err(unreachable).context("waiting for JetStream to store the message");
+    };
+    let kept = match js.send_publish(outbox, message()).await {
+        Ok(ack) => ack.await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = kept {
+        return Err(anyhow::anyhow!(e)).with_context(|| {
+            format!(
+                "the hub's stream did not store {subject} ({unreachable}), nor did this machine's outbox \
+                 (`ants leaf outbox` sets it up on a leaf node)"
+            )
+        });
+    }
+    tracing::warn!(%subject, "the hub's stream is out of reach ({unreachable}); kept in this machine's outbox");
+    Ok(Stored::Outbox)
 }
 
 /// Publish `value` as JSON and wait until JetStream has stored it, returning its stream sequence. With `msg_id`, a

@@ -15,6 +15,15 @@ pub use uuid::Uuid;
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
 pub const STREAM_SUBJECTS: [&str; 4] = ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>"];
+/// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
+/// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
+pub const OUTBOX_STREAM: &str = "ANTS_OUT";
+/// Subjects captured by [`OUTBOX_STREAM`]. The leaf's uplink credentials never carry them to the hub.
+pub const OUTBOX_SUBJECTS: &str = "ants.out.>";
+/// Hub stream every leaf's [`OUTBOX_STREAM`] is sourced into, each under its machine's prefix
+/// ([`subject::intake`]), whatever subjects the leaf claims. [`STREAM`] sources from it only the subjects the personas of
+/// each machine may publish ([`Machine::admitted`]).
+pub const INTAKE_STREAM: &str = "ANTS_IN";
 /// KV bucket where each daemon registers its personas: one [`RosterEntry`] per persona, keyed by the persona id.
 pub const ROSTER_BUCKET: &str = "ants_roster";
 /// How often a daemon re-puts its roster entry.
@@ -44,6 +53,8 @@ pub enum Error {
     ForeignPersona { kind: &'static str, persona: PersonaId, at: String },
     #[error("plan post from {from} on thread {thread} arrived on {subject}")]
     WrongPlanSubject { subject: String, from: PersonaId, thread: ThreadId },
+    #[error("invalid machine name {0:?}: use 1-64 of letters, digits, '-' and '_', starting with a letter or digit")]
+    InvalidMachine(String),
 }
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -99,8 +110,8 @@ macro_rules! token_id {
 
 token_id!(PersonaId, "persona id");
 token_id!(ThreadId, "thread id");
-// The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node without JetStream reach the
-// hub's JetStream only through it, as `$JS.<domain>.API`.
+// The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node reach the hub's JetStream only
+// through it, as `$JS.<domain>.API`: the plain `$JS.API` stays on the leaf.
 token_id!(JsDomain, "JetStream domain");
 
 impl PersonaId {
@@ -116,6 +127,97 @@ impl PersonaId {
 
     pub fn is_human(&self) -> bool {
         self.0 == "human"
+    }
+}
+
+/// A machine's name: the `server_name` and JetStream domain of its leaf node, which keeps the machine's outbox
+/// ([`OUTBOX_STREAM`]), and the name of its uplink credentials. One subject token, so it can name a domain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Machine(String);
+
+impl Machine {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The JetStream API prefix of the machine's leaf node, as the hub reaches it.
+    pub fn api_prefix(&self) -> String {
+        format!("$JS.{self}.API")
+    }
+
+    /// Prefix of the subjects the leaf node delivers its outbox to the hub on. Each machine has its own, so its uplink
+    /// credentials can feed only its own source.
+    pub fn deliver_prefix(&self) -> String {
+        format!("$JS.S.{self}")
+    }
+
+    /// Reply prefix of the hub's own requests for the machine's outbox, with nats-server's `js_api_reply_v2` feature
+    /// flag on the hub: `$JSC.R.<domain>.<account hash>.<stream>.`, then the consumer and a unique token.
+    pub fn source_replies(&self) -> String {
+        format!("$JSC.R.{self}.*.{OUTBOX_STREAM}")
+    }
+
+    /// Inbox prefix of the human's connection that sets up the machine's outbox (`ants leaf outbox`): the leaf node
+    /// answers on it, so it is the machine's own, apart from the replies of any other request of the human.
+    pub fn setup_inbox(&self) -> String {
+        format!("{}.leaf.{self}", inbox_prefix(&PersonaId::human()))
+    }
+
+    /// What the hub's [`STREAM`] admits from the machine's outbox for `persona`, as pairs of an [`INTAKE_STREAM`]
+    /// subject filter and the subject it is stored under: exactly the inbox and plan subjects the persona may publish
+    /// itself ([`subject::sendable`]). With `inbox` false, only its plan posts: the human's admission takes every
+    /// inbox subject of a machine it is on, and the filters of one stream's sources may not overlap.
+    pub fn admitted(&self, persona: &PersonaId, inbox: bool) -> Vec<(String, String)> {
+        let [own_inbox, own_plan] = subject::sendable(persona);
+        let patterns = if inbox { vec![own_inbox, own_plan] } else { vec![own_plan] };
+        patterns
+            .into_iter()
+            .map(|pattern| {
+                let filter = format!("ants.in.{self}.{}", subject::outbox(&pattern).expect("an outbox subject"));
+                let mut n = 0;
+                let destination: Vec<String> = pattern
+                    .split('.')
+                    .map(|token| match token {
+                        "*" => {
+                            n += 1;
+                            format!("{{{{wildcard({n})}}}}")
+                        }
+                        token => token.to_owned(),
+                    })
+                    .collect();
+                (filter, destination.join("."))
+            })
+            .collect()
+    }
+}
+
+impl FromStr for Machine {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Error> {
+        let valid = (1..=64).contains(&s.len())
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric());
+        if valid { Ok(Self(s.to_owned())) } else { Err(Error::InvalidMachine(s.to_owned())) }
+    }
+}
+
+impl TryFrom<String> for Machine {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self, Error> {
+        s.parse()
+    }
+}
+
+impl From<Machine> for String {
+    fn from(machine: Machine) -> String {
+        machine.0
+    }
+}
+
+impl fmt::Display for Machine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -189,6 +291,27 @@ pub mod subject {
 
     /// Every persona's dead letters.
     pub const DEAD_ALL: &str = "ants.dead.>";
+
+    /// The inbox and plan subjects `persona` may publish on: every inbox for the human (to replay dead letters as they
+    /// were), else [`inbox_from`]; and [`plan_from`].
+    pub fn sendable(persona: &PersonaId) -> [String; 2] {
+        let inbox = if persona.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(persona) };
+        [inbox, plan_from(persona)]
+    }
+
+    /// Where a client on a leaf node puts an inbox or plan subject (or pattern) while the hub's stream is out of
+    /// reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]). `None` for other
+    /// subjects, which are not buffered.
+    pub fn outbox(subject: &str) -> Option<String> {
+        let rest = subject.strip_prefix("ants.")?;
+        (rest.starts_with("inbox.") || rest.starts_with("plan.")).then(|| format!("ants.out.{rest}"))
+    }
+
+    /// Everything the hub's intake ([`super::INTAKE_STREAM`]) took from the outbox of `machine`: the leaf's subjects,
+    /// whatever they are, under the machine's prefix.
+    pub fn intake(machine: &super::Machine) -> String {
+        format!("ants.in.{machine}.>")
+    }
 
     /// The human's answer to one approval request ([`ApprovalDecision`](super::ApprovalDecision)). Only the human may
     /// publish here; the persona that asked subscribes before it publishes the request.
@@ -276,15 +399,22 @@ impl Permissions {
     /// upgrade the stream and create the roster, sessions and attempts buckets, and reads and removes dead letters by sequence; its inbox
     /// consumer keeps the replies `ants inbox` has not shown yet. The human may send under any sender, to replay a dead
     /// letter as it was. A persona gets no `STREAM.MSG.GET`: it takes any sequence, so it would expose every inbox.
+    ///
+    /// Each inbox and plan subject a persona may publish it may also publish in its outbox form
+    /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only the human sets up leaf outboxes and the hub's
+    /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no persona
+    /// may create or change one.
     pub fn for_persona(persona: &PersonaId) -> Self {
         let consumer = inbox_consumer(persona);
         let plan = plan_consumer(persona);
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
-        let mut publish = vec![
-            if persona.is_human() { "ants.inbox.>".to_owned() } else { subject::inbox_from(persona) },
-            subject::plan_from(persona),
+        let sendable = subject::sendable(persona);
+        // The same subjects in the leaf's outbox, for when the hub is out of reach.
+        let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
+        let mut publish: Vec<String> = sendable.iter().cloned().chain(outbox).collect();
+        publish.extend([
             format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.STREAM.INFO.{roster_stream}"),
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
@@ -302,7 +432,7 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
             format!("$JS.FC.{roster_stream}.>"),
-        ];
+        ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(persona))];
         if persona.is_human() {
             publish.extend([
@@ -316,7 +446,16 @@ impl Permissions {
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
                 subject::ALL_APPROVAL_DECISIONS.to_owned(),
+                // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
+                // leaf's own domain (the plain form is what a leaf maps its own domain to).
+                format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
+                format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
+                format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
             ]);
+            for op in ["CREATE", "UPDATE", "INFO"] {
+                publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
+                publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
+            }
             subscribe.push(subject::ALL.to_owned());
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{persona}.>");
@@ -368,20 +507,44 @@ impl Permissions {
         self
     }
 
-    /// What a leaf node's uplink credentials allow: everything any of `personas` may do, since every message of a
-    /// persona on the machine crosses that one connection. Include [`PersonaId::human`] when the machine runs the CLI.
-    pub fn for_leaf<'a>(personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
+    /// What the uplink credentials of `machine`'s leaf node allow: everything any of `personas` may do, since every
+    /// message of a persona on the machine crosses that one connection, except the outbox subjects, which stay on the
+    /// leaf. Include [`PersonaId::human`] when the machine runs the CLI.
+    ///
+    /// Besides, the hub's intake may source the leaf's outbox through the machine's own JetStream domain: the hub
+    /// sends the leaf requests to create, update and look up the outbox and to create and delete the consumers that
+    /// read it, and flow control. The leaf delivers the outbox under [`Machine::deliver_prefix`] and answers under
+    /// [`Machine::source_replies`] and [`Machine::setup_inbox`] only, all of them the machine's own. nats-server
+    /// carries a reply across a leaf connection only if the leaf may publish it: the interest behind it reaches the
+    /// leaf only then.
+    pub fn for_leaf<'a>(machine: &Machine, personas: impl IntoIterator<Item = &'a PersonaId>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         for persona in personas {
             let Self { publish, subscribe } = Self::for_persona(persona);
             for (all, new) in [(&mut leaf.publish, publish), (&mut leaf.subscribe, subscribe)] {
                 for s in new {
-                    if !all.contains(&s) {
+                    if !all.contains(&s) && !s.starts_with("ants.out.") {
                         all.push(s);
                     }
                 }
             }
         }
+        let api = machine.api_prefix();
+        leaf.publish.extend([
+            format!("{}.>", machine.deliver_prefix()),
+            format!("{}.>", machine.source_replies()),
+            format!("{}.>", machine.setup_inbox()),
+        ]);
+        leaf.subscribe.extend([
+            format!("{api}.STREAM.CREATE.{OUTBOX_STREAM}"),
+            format!("{api}.STREAM.UPDATE.{OUTBOX_STREAM}"),
+            format!("{api}.STREAM.INFO.{OUTBOX_STREAM}"),
+            // One filter puts the consumer's name and filter in the subject, several leave them out.
+            format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}"),
+            format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}.>"),
+            format!("{api}.CONSUMER.DELETE.{OUTBOX_STREAM}.>"),
+            format!("$JS.FC.{OUTBOX_STREAM}.>"),
+        ]);
         leaf
     }
 }
@@ -789,15 +952,66 @@ mod tests {
     #[test]
     fn leaf_permissions_cover_each_persona_once() {
         let (human, a, b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
-        let leaf = Permissions::for_leaf([&a, &b, &human]);
+        let m1: Machine = "m1".parse().unwrap();
+        let leaf = Permissions::for_leaf(&m1, [&a, &b, &human]);
         for persona in [&a, &b, &human] {
             let own = Permissions::for_persona(persona);
-            assert!(own.publish.iter().all(|s| leaf.publish.contains(s)), "{persona} publish");
+            let crossing = own.publish.iter().filter(|s| !s.starts_with("ants.out."));
+            assert!(crossing.into_iter().all(|s| leaf.publish.contains(s)), "{persona} publish");
             assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)), "{persona} subscribe");
         }
         assert_eq!(leaf.publish.iter().filter(|s| *s == "$JS.API.STREAM.INFO.ANTS").count(), 1);
-        let only_a = Permissions::for_leaf([&a]);
-        assert_eq!(only_a, Permissions::for_persona(&a));
+        assert!(leaf.publish.iter().all(|s| !s.starts_with("ants.out.")), "the outbox stays on the leaf");
+        // The hub may source the outbox of m1, and the leaf deliver it on m1's subjects only.
+        let only_a = Permissions::for_leaf(&m1, [&a]);
+        let own = Permissions::for_persona(&a);
+        let extra: Vec<_> = only_a.publish.iter().filter(|s| !own.publish.contains(s)).collect();
+        assert_eq!(extra, ["$JS.S.m1.>", "$JSC.R.m1.*.ANTS_OUT.>", "_INBOX.human.leaf.m1.>"]);
+        let extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
+        assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || s.starts_with("$JS.FC.ANTS_OUT.")), "{extra:?}");
+        assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
+    }
+
+    #[test]
+    fn machine_names_are_one_token() {
+        for bad in ["", "a.b", "m*", ">", "dev a", "-m", "_m", &"x".repeat(65)] {
+            assert!(bad.parse::<Machine>().is_err(), "{bad:?} should be rejected");
+        }
+        assert_eq!("Mac_mini-2".parse::<Machine>().unwrap().as_str(), "Mac_mini-2");
+    }
+
+    #[test]
+    fn outboxes_take_inbox_and_plan_subjects_only() {
+        let t: ThreadId = "t1".parse().unwrap();
+        assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
+        assert_eq!(subject::outbox(&subject::plan(&t, &p("dev-a"))).unwrap(), "ants.out.plan.t1.dev-a");
+        for other in [subject::dead(&p("dev-a")), subject::approvals(&p("dev-a")), "ants.outbox.x".to_owned()] {
+            assert_eq!(subject::outbox(&other), None, "{other}");
+        }
+        let a = Permissions::for_persona(&p("dev-a"));
+        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a"] {
+            assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
+        }
+        let human = Permissions::for_persona(&PersonaId::human());
+        assert!(human.publish.iter().any(|s| s == "ants.out.inbox.>"));
+    }
+
+    #[test]
+    fn the_hub_admits_from_a_machine_what_its_personas_may_send() {
+        let m1: Machine = "m1".parse().unwrap();
+        assert_eq!(
+            m1.admitted(&p("dev-a"), true),
+            [
+                ("ants.in.m1.ants.out.inbox.*.dev-a".to_owned(), "ants.inbox.{{wildcard(1)}}.dev-a".to_owned()),
+                ("ants.in.m1.ants.out.plan.*.dev-a".to_owned(), "ants.plan.{{wildcard(1)}}.dev-a".to_owned()),
+            ]
+        );
+        assert_eq!(
+            m1.admitted(&PersonaId::human(), true)[0],
+            ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned())
+        );
+        assert_eq!(m1.admitted(&p("dev-a"), false).len(), 1, "plan posts only");
+        assert_eq!(subject::intake(&m1), "ants.in.m1.>");
     }
 
     #[test]

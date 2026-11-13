@@ -4,13 +4,14 @@ mod approve;
 mod auth;
 mod inbox;
 mod leaf;
+mod outbox;
 mod roster;
 mod serve;
 
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
-use ants_proto::{DeadLetter, Envelope, JsDomain, PersonaId, PlanPost, ThreadId, subject};
+use ants_proto::{DeadLetter, Envelope, JsDomain, Machine, PersonaId, PlanPost, ThreadId, subject};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt as _;
@@ -160,8 +161,9 @@ enum AuthCommand {
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// personas on the machine may do and usable only by a leaf node connection.
     Leaf {
-        /// Machine name, for the credentials' name and file name.
-        machine: String,
+        /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
+        /// '-' and '_'.
+        machine: Machine,
         /// Persona served on the machine (repeatable). Add `human` if the machine runs the CLI.
         #[arg(long = "persona", value_name = "PERSONA", required = true)]
         personas: Vec<PersonaId>,
@@ -176,11 +178,12 @@ enum AuthCommand {
 
 #[derive(Subcommand)]
 enum LeafCommand {
-    /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, without
-    /// JetStream, with one uplink to the hub. Run it again to switch the uplink, then reload the leaf (SIGHUP).
+    /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, with one uplink
+    /// to the hub, and a JetStream of its own (domain: the machine name) for the outbox. Run it again to switch the
+    /// uplink, then reload the leaf (SIGHUP).
     Config {
         /// Machine name, as given to `ants auth leaf`.
-        machine: String,
+        machine: Machine,
         /// Hub URL: nats-leaf:// or tls:// for its leafnode port (also through `devtunnel connect`), ws:// or wss://
         /// for its websocket listener (a leaf node asks for <path>/leafnode). Repeatable, all of one scheme.
         #[arg(long = "uplink", value_name = "URL", required = true)]
@@ -206,6 +209,19 @@ enum LeafCommand {
         /// Where to write the configuration (default: ~/.config/ants/leaf.conf).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// As the human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
+    /// what its personas send while the hub is out of reach, and have the hub's stream take from it what those
+    /// personas may send once the uplink is back. Run it again when the machine's personas change.
+    Outbox {
+        /// Machine name, as given to `ants leaf config`.
+        machine: Machine,
+        /// Persona served on the machine (repeatable), as given to `ants auth leaf`.
+        #[arg(long = "persona", value_name = "PERSONA", required_unless_present = "remove")]
+        personas: Vec<PersonaId>,
+        /// Stop taking anything from the machine's outbox instead.
+        #[arg(long, conflicts_with = "personas")]
+        remove: bool,
     },
 }
 
@@ -324,6 +340,7 @@ async fn main() -> Result<()> {
             };
             let config = leaf::Leaf {
                 machine: &machine,
+                hub_domain: domain,
                 uplinks: &uplinks,
                 creds: &creds,
                 server_conf: &server_conf,
@@ -335,9 +352,23 @@ async fn main() -> Result<()> {
             println!(
                 "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
-                 clients on this machine: nats://{listen} (the default) with the hub's --js-domain",
+                 clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
+                 once the leaf is up: ants leaf outbox {machine} --persona ...",
                 out.display()
             );
+            Ok(())
+        }
+        Command::Leaf(LeafCommand::Outbox { machine, personas, remove }) => {
+            let (_, js) =
+                bus::connect(&cli.nats, cli.creds.as_deref(), domain, &PersonaId::human(), "ants-cli").await?;
+            if remove {
+                outbox::remove(&js, &machine).await?;
+                println!("the hub no longer takes anything from the outbox of {machine}");
+            } else {
+                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &machine).await?;
+                outbox::admit(&leaf, &js, &machine, &personas).await?;
+                println!("outbox of {machine} ready; the hub takes from it what its personas send");
+            }
             Ok(())
         }
     }
@@ -382,7 +413,9 @@ async fn ask(
     let (client, js) = bus::connect(url, creds, domain, &PersonaId::human(), "ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
     let mut replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await?;
-    bus::publish(&js, &envelope).await?;
+    if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
+        println!("kept in this machine's outbox until the hub is reachable");
+    }
     println!("thread {}", envelope.thread_id);
     if !wait {
         return Ok(());
