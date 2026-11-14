@@ -100,6 +100,8 @@ ants notes <thread>                                 # passive thread notes
 ants thread list                                    # threads active in the last 24h
 ants thread list --escalated --since 7d             # escalations no human answered yet
 ants thread show <thread>                           # one thread's whole history
+ants thread search --from dev-a --grep deploy       # messages dev-a sent mentioning deploy, last 24h
+ants thread search --type escalation,dead --since 7d   # escalations and dead letters of the past week
 ants react <message> eyes                           # react to a message (ids from ask, post, inbox, thread show)
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a; prints thread ID
@@ -129,6 +131,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests; it puts the version of ants it runs at `channel-manager.serve` in `ants_webhooks` hourly. |
 | `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--escalated] [--since DUR] [--limit N] [--json]` | List threads with messages stored within `--since` (default `24h`, `0` for all kept): id, owner, users and channels, first/last time, message count, opening line; most recently active last, up to `--limit` (default 50). `--grep` keeps threads with a message containing `TEXT` (case-insensitive) and prints the matching line. `--escalated` keeps threads whose escalation (other than a tool request's) reached a human with no human message on the thread since, and prints when it first did, to whom, and the escalation. |
 | `ants thread show THREAD [--since DUR] [--json]` | Print a thread's history in stored order: inbox messages both ways, channel posts, notes, escalations, tool requests and decisions, dead letters, with message IDs and the reactions to each message (`id` and `reactions` in `--json`; see [Thread overview](#thread-overview)). |
+| `ants thread search [--grep TEXT] [--from USER] [--to USER] [--channel NAME] [--type KIND,...] [--since TIME] [--until TIME] [--limit N] [--json]` | Print the messages stored on any thread that match every filter given, the latest `--limit` (default 50) of them, oldest first: time, thread, kind, sender and recipient, message ID and the first line matching `--grep` (else the first line). `--since` (inclusive, default 24h before `--until`) and `--until` (exclusive, default now) take a duration back from now, an RFC 3339 time, or a UTC date or date and time (see [History search](#history-search)). `--json` prints one entry per line, as `thread show --json`. |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations and decisions, or live harness progress for `ANT`. With human credentials, watching `ants.>` or `>` also prints reactions added and removed. |
 | `ants cancel ANT THREAD` | Stop the prompt `ANT` runs on `THREAD` (see [Prompt limits](#prompt-limits-and-spending-caps)); fails when no daemon of `ANT` runs one there or none answers within 5s. Requires human credentials. |
 | `ants tools list [-f] [--json]` | List pending tool requests (`<ant>/<id>`, thread, tool, files, options, time remaining; `-f` streams them, and the device counts as reading tool requests, see [Notifications](#notifications)). |
@@ -635,6 +638,29 @@ Agent posts spend 1 turn from the lower of the active message's budget and the l
 ## Thread overview
 
 `ants thread list` and `ants thread show` read the `ANTS` stream back with human credentials by message gets (as `ants channel read`, `ants notes`, `ants inbox` and the `--wait` polls do), so they consume, ack and mark read nothing and create no consumer; ant credentials are refused. Message gets are batched direct gets (`$JS.API.DIRECT.GET.ANTS`, nats-server 2.11 or later), one request per 256 messages; on a connection whose credentials or leaf uplink predate permissions version 3 (the request goes unanswered for 2 s), or whose server lacks batches, reads take one `STREAM.MSG.GET` per message instead, for the rest of that connection. Human credentials that themselves predate version 3 (by the `ants-perms` tag of their user JWT) go straight to `STREAM.MSG.GET`, without the 2 s wait. Only notes subjects name their thread, so each read goes through every message stored in its window: `--since` bounds it (`list` defaults to `24h`; `show` starts at the thread's start when its id is a time-ordered UUID, as generated ids are, else reads all the stream keeps). Entries are kinds `message`, `escalation` (with level, reason, leader and ants visited), `mention`, `post`, `note`, `approval`, `decision` (a human's, which names no human, or a chain agent's) and `dead`; a human's decision is placed on its request's thread only when the request is in the window. A message stored on a subject naming another sender is marked `(forged)`. A thread's owner is the one its first message naming one gives; `list` counts only what was stored within `--since`, so a thread older than that shows its first message in the window as the opening.
+
+### History search
+
+`ants thread search` finds single messages across every thread, reading the stream as `ants thread list` does (human credentials, message gets, nothing consumed, acked or marked read). Filters combine: a message is printed only when it matches all of them.
+
+- `--from USER`: the ant or human that sent it (a dead letter's sender is its message's; a human's decision on a tool request names no sender, so `--from` never finds one).
+- `--to USER`: the recipient of an inbox message, or the ant a decision or dead letter is for; posts, notes and tool requests have none.
+- `--channel NAME`: posts to the channel and the mentions telling human members of them.
+- `--type KIND` (repeat or separate with commas): `message` (inbox messages both ways, replies included), `escalation`, `mention`, `post`, `note`, `approval` (a tool request), `decision` and `dead`, the kinds `ants thread show` prints. Reactions are no messages: they live in the `ants_reactions` bucket and `ants thread show` prints them under each message.
+- `--grep TEXT`: the message's text contains `TEXT`, whatever the case, as with `ants thread list --grep`.
+- `--since TIME` and `--until TIME`: stored at or after `--since` and before `--until`. Each takes a duration back from now (`90m`, `2h`, `3d`; `0` for no bound, so `--since 0` reads all the stream keeps), an RFC 3339 time (`2026-11-14T09:30:00+09:00`), or a date or date and time without an offset (`2026-11-14`, `2026-11-14 09:30`), taken in UTC as `ants thread` prints times, whatever the machine's or the config file's `timezone`. A date is its midnight, so `--since 2026-11-14 --until 2026-11-15` is that UTC day. Without `--since`, the 24h before `--until` (or now).
+- `--limit N` (default 50) keeps the latest N matches, printed oldest first; how many earlier ones it left out goes to stderr.
+
+Each match carries its thread ID, kind, stream sequence, message ID (none for a tool request or dead letter) and stored time; with `--json` one object per line with the fields of `ants thread show --json` (`seq`, `id`, `stored_at`, `kind`, `thread_id`, `from`, `to`, `channel`, `owner`, `note`, `text`, `forged`), without reactions.
+
+Cost: the filters pick the subjects read (`ants.inbox.<to>.<from>`, `ants.chan.<channel>.<from>`, `ants.notes.*.<from>`, `ants.approvals.<ant>[.<request>]`, `ants.dead.<ant>`), each read once from `--since` (a start time, so earlier messages are skipped by the server) to `--until`, one batched direct get per 256 messages on it. The server skips the messages on other subjects, so `--from`, `--to` and `--type` narrow what is read, while `--grep` and the `--channel` of a mention are matched on the messages read: `--channel ops` alone reads every inbox message in the window to find mentions, `--channel ops --type post` only the channel's posts. A human's decision is found only when its request is in the window, as with `ants thread show`.
+
+```sh
+ants thread search --from dev-a --grep "deploy failed"                # what dev-a said about it, last 24h
+ants thread search --to alice --type message --since 2026-11-14 --until 2026-11-15
+ants thread search --channel ops --type post --since 3d --json | jq -r .thread_id | sort -u
+ants thread search --type escalation,dead --since 0 --limit 200      # every escalation and dead letter kept
+```
 
 ## Reactions
 
