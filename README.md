@@ -239,7 +239,9 @@ creds = "~/.config/ants/auth/dev-b.creds"
 keys are errors. A file needs `provider` or at least one `[[persona]]`. A persona that fails to start (a missing credentials file, credentials the server rejects) is logged and
 the others keep running; the daemon exits with an error only when none could start. A persona whose server cannot be
 reached yet waits for it: the connection is retried after 1 s, then twice as long each time up to 30 s, with a warning
-naming the URL. Ctrl-C stops them all, waiting or not.
+naming the URL. Once connected it waits the same way for JetStream to answer, as a leaf node whose uplink has not joined
+the hub yet; a JetStream request the credentials do not permit fails the persona at once. Ctrl-C stops them all,
+waiting or not.
 
 How flags and the file combine:
 

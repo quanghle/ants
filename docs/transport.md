@@ -409,7 +409,11 @@ link comes back while still in hand, and the daemon ignores that copy.
 `ants daemon` waits for a persona's server that is unreachable at start, as the local leaf node when launchd starts
 both services at once (ants-lz9): a refused, timed-out or unresolved connection is retried after 1 s, then twice as
 long each time up to 30 s, with a warning naming the URL (user and password masked), until it connects or the daemon
-is stopped. Rejected credentials, an unreadable credentials file, a malformed URL and TLS errors fail the persona at
+is stopped. Once connected it waits the same way for JetStream (ants-84b): the local leaf listens before its uplink
+has joined the hub, and until then a `$JS.<domain>.API` request gets no responders (or times out while the link comes
+up), so the daemon asks for stream `ANTS`'s info until JetStream answers, even that the stream is missing. Rejected
+credentials, an unreadable credentials file, a malformed URL, TLS errors and a JetStream request the credentials do
+not permit (the server's permissions violation, which the request itself only sees as a timeout) fail the persona at
 once. The loop is explicit rather than async-nats `retry_on_initial_connect`, which returns a client before it has
 connected, so the JetStream calls that follow would wait out their timeouts, and which keeps retrying rejected
 credentials as well. The other `ants` commands still fail at once.

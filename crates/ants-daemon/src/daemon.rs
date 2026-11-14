@@ -101,7 +101,7 @@ pub struct Config {
 }
 
 /// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
-/// the NATS server can be reached the daemon keeps trying ([`bus::connect_retrying`]).
+/// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]).
 pub async fn run(config: Config) -> Result<()> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = bus::connect_retrying(
