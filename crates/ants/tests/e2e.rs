@@ -24,7 +24,7 @@ const WAIT: Duration = Duration::from_secs(60);
 
 fn main() {
     let me = std::env::args().next().unwrap_or_default();
-    if Path::new(&me).file_name().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
+    if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
     let tests: [(&str, fn()); 6] = [
@@ -47,6 +47,15 @@ fn main() {
     }
 }
 
+/// Make this test binary, the stub harness, available as `name` in `bin`.
+fn link_self(bin: &Path, name: &str) {
+    let exe = std::env::current_exe().unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(exe, bin.join(name)).unwrap();
+    #[cfg(not(unix))]
+    std::fs::copy(exe, bin.join(name).with_extension(std::env::consts::EXE_EXTENSION)).unwrap();
+}
+
 fn ask_gets_the_reply_of_a_daemon_harness() {
     exercise_daemon(false);
 }
@@ -60,7 +69,7 @@ fn exercise_daemon(custom_tools: bool) {
     let dir = scratch_dir("e2e");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    link_self(&bin, "copilot");
     let ants = |args: &[&str]| {
         let mut command = Command::new(ANTS);
         command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
@@ -281,7 +290,7 @@ fn a_daemon_exits_once_its_executable_was_replaced() {
     let dir = scratch_dir("upgrade");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    link_self(&bin, "copilot");
     let installed = bin.join("ants");
     std::fs::copy(ANTS, &installed).unwrap();
     let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
@@ -330,7 +339,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let dir = scratch_dir("handover");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    link_self(&bin, "copilot");
     let ants = |args: &[&str]| {
         let mut command = Command::new(ANTS);
         command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
@@ -390,7 +399,7 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let dir = scratch_dir("adapter");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("stub-adapter")).unwrap();
+    link_self(&bin, "stub-adapter");
     let (user_home, home) = (dir.join("user"), dir.join("dev-a"));
     std::fs::create_dir_all(&user_home).unwrap();
     let config = dir.join("config.toml");
