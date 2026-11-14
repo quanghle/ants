@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId,
-    ThreadOrigin, UserId, Uuid, chan_reader, channel_seen_key, subject,
+    ThreadOrigin, UserId, Uuid, chan_reader, channel_seen_key, mention_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -31,8 +31,8 @@ pub const TRIAGE_RULES: &str = "[ants] Triage this post; do not answer or act on
 2. Decide which members of the channel below the post is relevant to, by their roles and capabilities.
 3. Answer with a short post that @mentions exactly the relevant members, each with a few words on why.
 4. When no member is relevant, answer with a short post saying so, mentioning nobody.
-Only @mentions of members wake anyone: mention no one else. A member not in the roster is offline and gets the post \
-when its daemon starts again.";
+Only @mentions of members reach anyone: mention no one else. A mention wakes an ant and notifies a human in its \
+inbox. An ant not in the roster is offline and gets the post when its daemon starts again.";
 
 /// Most earlier posts a prompt shows; older unseen ones are counted instead.
 pub const MAX_CONTEXT: usize = 50;
@@ -221,6 +221,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         escalation: None,
         approval: None,
         webhook: post.webhook,
+        mention: None,
         sent_at: post.sent_at,
     }
 }
@@ -392,8 +393,8 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) ->
     text.push_str(&format!("[ants] Post from {} mentioning {ant}:\n{}\n\n", post.from, post.text));
     text.push_str(&format!(
         "[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
-         ({left} left after it). An @ant mention in it wakes that member of the channel; mentioning nobody wakes \
-         nobody."
+         ({left} left after it). An @mention in it wakes that member of the channel, or notifies it if a human; \
+         mentioning nobody wakes nobody."
     ));
     text
 }
@@ -404,7 +405,7 @@ pub fn resume_note(channel: &ChannelId, thread: &ThreadId, left: u32) -> String 
     format!(
         "[ants] The escalation's leader answered with fresh turns for thread {thread} of #{channel}. The final answer \
          of this turn is posted to #{channel} on that thread and spends one of its turns ({left} left after it). An \
-         @ant mention in it wakes that member of the channel; mentioning nobody wakes nobody."
+         @mention in it wakes that member of the channel, or notifies it if a human; mentioning nobody wakes nobody."
     )
 }
 
@@ -415,6 +416,7 @@ pub fn triage_prompt(
     post: &ChannelPost,
     entry: &ChannelEntry,
     roster: &[RosterEntry],
+    humans: &Humans,
     context: &Context,
     left: u32,
 ) -> String {
@@ -429,7 +431,7 @@ pub fn triage_prompt(
         text.push_str("(none)\n");
     }
     for member in &entry.members {
-        text.push_str(&format!("- {}\n", member_line(member, roster)));
+        text.push_str(&format!("- {}\n", member_line(member, roster, humans)));
     }
     text.push_str(&format!(
         "\n[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
@@ -438,8 +440,12 @@ pub fn triage_prompt(
     text
 }
 
-/// `member` with its role and capabilities from the roster, or as offline when the roster lacks it.
-fn member_line(member: &UserId, roster: &[RosterEntry]) -> String {
+/// `member` with its role and capabilities from the roster, as a human when it is one of the `humans`, or as offline
+/// when the roster lacks it.
+fn member_line(member: &UserId, roster: &[RosterEntry], humans: &Humans) -> String {
+    if humans.contains(member) {
+        return format!("@{member} (a human)");
+    }
     let Some(entry) = roster.iter().find(|e| e.ant == *member) else {
         return format!("@{member} (offline: not in the roster)");
     };
@@ -664,6 +670,35 @@ impl Threads {
     }
 }
 
+impl Threads {
+    /// Put the [`ChannelPost::mention_notice`] of `post`, the ant's own at stream sequence `seq`, in the inbox of each
+    /// human member of `entry` it @mentions, once each: its msg id makes JetStream drop a copy stored again soon after,
+    /// and a marker in the ant's sessions keys ([`mention_key`]) one stored again later, as on a redelivery after a
+    /// restart. Returns the humans notified now.
+    pub async fn notify_mentioned(
+        &self,
+        post: &ChannelPost,
+        seq: u64,
+        entry: Option<&ChannelEntry>,
+        humans: &Humans,
+    ) -> Result<Vec<UserId>> {
+        let mut notified = Vec::new();
+        for human in entry.map(|entry| entry.notified(post, humans)).unwrap_or_default() {
+            let key = mention_key(&self.ant, seq, &human);
+            if self.seen.get(&key).await.context("reading a mention marker")?.is_some() {
+                continue;
+            }
+            let notice = post.mention_notice(&human);
+            crate::bus::store(&self.js, notice.subject(), &notice, &post.mention_msg_id(&human))
+                .await
+                .with_context(|| format!("notifying {human} of the mention"))?;
+            self.seen.put(key, post.id.to_string().into()).await.context("storing a mention marker")?;
+            notified.push(human);
+        }
+        Ok(notified)
+    }
+}
+
 async fn read(consumer: &consumer::PullConsumer, sink: &mut impl Sink) -> Result<()> {
     let mut left = consumer.cached_info().num_pending;
     while left > 0 {
@@ -773,7 +808,8 @@ mod tests {
 
     #[test]
     fn the_triage_prompt_has_the_rules_and_the_members_with_their_roles() {
-        let (entry, root) = (ops(), post("human", "the build is red"));
+        let (mut entry, root) = (ops(), post("human", "the build is red"));
+        entry.add_member(p("alice"));
         let now = chrono::Utc::now();
         let a = RosterEntry {
             ant: p("dev-a"),
@@ -791,7 +827,7 @@ mod tests {
             escalate_to: Vec::new(),
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
-        let text = triage_prompt(&root, &entry, &[a], &context, 7);
+        let text = triage_prompt(&root, &entry, &[a], &humans(), &context, 7);
         let expected = format!(
             "[ants] Channel #ops, thread {}.\n\n\
              [ants] Earlier posts on the thread not shown before, oldest first:\ndev-b: earlier\n\n\
@@ -799,7 +835,8 @@ mod tests {
              {TRIAGE_RULES}\n\n\
              [ants] Members of #ops:\n\
              - @dev-a [rust, ci]: Keeps the build green.\n\
-             - @dev-b (offline: not in the roster)\n\n\
+             - @dev-b (offline: not in the roster)\n\
+             - @alice (a human)\n\n\
              [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (7 \
              left after it).",
             root.thread_id
@@ -874,8 +911,8 @@ mod tests {
              human: deploy friday?\n\n\
              [ants] Post from dev-b mentioning dev-a:\n@dev-a agree?\n\n\
              [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (6 \
-             left after it). An @ant mention in it wakes that member of the channel; mentioning nobody wakes \
-             nobody.",
+             left after it). An @mention in it wakes that member of the channel, or notifies it if a human; \
+             mentioning nobody wakes nobody.",
             root.thread_id
         );
         assert_eq!(text, expected);

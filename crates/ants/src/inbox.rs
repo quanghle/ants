@@ -172,11 +172,22 @@ pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope
     Ok(found)
 }
 
-/// A message for the terminal: a header line, then the text indented.
+/// A message for the terminal: a header line, then the text indented. A mention notice names its channel, and how to
+/// answer there.
 pub fn render(e: &Envelope) -> String {
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let text: Vec<String> = e.text.lines().map(|line| format!("  {line}")).collect();
-    format!("{at}  {} on thread {}\n{}\n", e.from, e.thread_id, text.join("\n"))
+    let Some(mention) = &e.mention else {
+        return format!("{at}  {} on thread {}\n{}\n", e.from, e.thread_id, text.join("\n"));
+    };
+    let (channel, thread) = (&mention.channel, &e.thread_id);
+    format!(
+        "{at}  {} mentioned {} in #{channel} on thread {thread}\n{}\n  (`ants post {channel} --thread {thread} ...` \
+         answers on the thread)\n",
+        e.from,
+        e.to,
+        text.join("\n")
+    )
 }
 
 #[cfg(test)]

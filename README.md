@@ -105,8 +105,8 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
 | `ants notes THREAD [TEXT]` | Shows a thread's notes, or posts TEXT to them as the CLI's human, which gives them a fresh turn budget; a post wakes nobody (see [Thread notes](#thread-notes)). Distinct from the execution plan `ants watch <ant>` shows. |
-| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread (with an ant's credentials, as that ant, which creates the thread it starts; see Channels); `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
-| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`), messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`) and owner (`--owner ANT`, or `--no-owner`; see [Channel owners](#channel-owners)). |
+| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread (with an ant's credentials, as that ant, which creates the thread it starts; see Channels); `@ant` wakes that member only, and `@human` puts a notice in a human member's inbox. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
+| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members, ants or humans (`--member`), messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`) and owner (`--owner ANT`, or `--no-owner`; see [Channel owners](#channel-owners)). |
 | `ants channel serve` | Runs the channel manager, which applies the changes channel owners ask for, with the credentials of `ants auth channel-manager`; on the hub, say, where no ant runs. |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
@@ -685,8 +685,8 @@ speak as the ant, on the thread the session serves:
 | `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
 | `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
-| `post_channel(channel, text)` | Posts to `channel` (`ops` or `#ops`) a top-level post starting a new thread, which the ant creates (see Channels): it has no owner and the turns the message being handled leaves, one fewer unless that message is a human's, refused when none are left. `@ant` wakes that member only. Only a member or the messenger of the channel may post. Returns the new thread and whom the post wakes. |
-| `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | Changes a channel the ant owns through the channel manager (see [Channel owners](#channel-owners)): `add` and `remove` list ants (each added one must be in the roster), `messenger` sets the messenger, `clear_messenger` gives back the default one. Returns the changes and the channel, or why the channel manager refused. With only `channel` it shows the channel; with nothing it lists the channels the ant owns. |
+| `post_channel(channel, text)` | Posts to `channel` (`ops` or `#ops`) a top-level post starting a new thread, which the ant creates (see Channels): it has no owner and the turns the message being handled leaves, one fewer unless that message is a human's, refused when none are left. `@ant` wakes that member only; a mention of a human member notifies that human's inbox. Only a member or the messenger of the channel may post. Returns the new thread and whom the post wakes or notifies. |
+| `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | Changes a channel the ant owns through the channel manager (see [Channel owners](#channel-owners)): `add` and `remove` list members, ants or humans (each ant added must be in the roster), `messenger` sets the messenger, an ant in the roster, `clear_messenger` gives back the default one. Returns the changes and the channel, or why the channel manager refused. With only `channel` it shows the channel; with nothing it lists the channels the ant owns. |
 | `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the thread's origin chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
@@ -797,12 +797,14 @@ thread notes need `ants auth user` again.
 
 ## Channels
 
-A channel is a named group of ants, like a Slack channel: humans post to it, each as the CLI's human (see
-[CLI](#cli)), and the members a post concerns wake up and answer in the channel, on the post's thread.
+A channel is a named group of ants and humans, like a Slack channel: humans post to it, each as the CLI's human (see
+[CLI](#cli)), and the ant members a post concerns wake up and answer in the channel, on the post's thread; the human
+members it @mentions find it in their inbox.
 
 ```sh
 ants channel create ops --member dev-a,dev-b --messenger triage   # fails if #ops exists
 ants channel add ops dev-c                     # more members
+ants channel add ops alice                     # a human member: its @mentions reach alice's inbox
 ants channel remove ops dev-a
 ants channel set ops --member dev-b,dev-c      # replace the members; --messenger ANT sets the messenger
 ants channel set ops --default-messenger       # the default messenger `messenger` triages again
@@ -821,9 +823,10 @@ ants watch 'ants.chan.>'                       # every channel, live
 
 `#` before the channel name is optional; quote it, as shells take an unquoted `#` for the start of a comment.
 
-**Mentions.** A post that @mentions ants wakes only those of them that are members of the channel; `ants post`
-warns about a mention of an ant that is not a member, which wakes nobody. An agent's post that @mentions nobody wakes
-nobody.
+**Mentions.** A post that @mentions ants wakes only those of them that are members of the channel. A post that
+@mentions a human member other than its author puts a notice in that human's inbox, from the post's author with its
+text, channel and thread (see [Human members](#human-members)); it prompts no agent. `ants post` warns about a mention
+of a user that is not a member, which reaches nobody. An agent's post that @mentions nobody wakes nobody.
 
 **Messenger triage.** A post of any human or webhook (see [Webhooks](#webhooks)) that mentions nobody goes to the
 channel's messenger: the ant
@@ -871,7 +874,7 @@ channel manager's write (see [Channel owners](#channel-owners)):
 `create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else changed it
 since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a warning (`set`,
 `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning rather than a
-refusal, as their daemon may start later; a human cannot be a member, the messenger or the owner.
+refusal, as their daemon may start later. A registered human may be a member, never the messenger or the owner.
 
 ### Channel owners
 
@@ -890,7 +893,8 @@ escalations stay as they are.
 Ants never write `ants_channels`. The owner's daemon sends each change as a request on
 `ants.chanadm.<channel>.<ant>`, which an ant's credentials publish only under its own name, to the channel manager,
 `ants channel serve`. The channel manager reads the channel's entry, refuses the request unless the requesting ant is
-its owner, checks that each ant added as a member or messenger is in the roster and no human, and stores the change
+its owner, checks that each member added is a human or an ant in the roster and that the messenger is an ant in the
+roster, never a human, and stores the change
 only if the entry has not changed since it was read, checking the owner again on each retry. It answers only on the
 requester's own reply subjects (`_INBOX.<ant>.`), drops requests older than 60 s, and gives a request it has already
 answered the same answer again. `manage_channel` asks again every 2 s, for 10 s at most; when no channel manager
@@ -959,7 +963,27 @@ rules of ants and lists the channel's members with their capabilities and `whoam
 the roster as offline; the messenger's own instructions add to the rules. It answers on the post's thread with a short
 post that @mentions the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it
 does not answer the request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any
-agent's post. Its mentions wake members only: a mention of a non-member stays in the post's `mentions` but wakes nobody.
+agent's post. Its mentions wake ant members and notify human members only: a mention of a non-member stays in the
+post's `mentions` but reaches nobody. Triage takes only posts that mention nobody: a post that mentions anyone, a human
+only included, goes to no messenger.
+
+### Human members
+
+A human member has no daemon and no channel consumer: a post that @mentions it, other than its own, puts one envelope
+in its inbox (`ants.inbox.<human>.<author>`), kept until `ants inbox` reads it, with no CLI running meanwhile. The
+envelope is from the post's author, on the post's thread, with the post's text and `mention: {channel, post}`;
+`ants inbox` shows it as `<author> mentioned <human> in #<channel> on thread <thread>`, with the `ants post` that
+answers on the thread. It spends no turn and names no owner or creator. A mention of a human who is not a member, or of
+a human by a post to another channel, notifies nobody.
+
+The author's side sends the notices. An ant's daemon sends those of the ant's own posts (from `post_channel`, its
+answers on a thread, `ants post` under the ant's credentials) when its consumer `chan-<ant>` takes the post, before
+acking it, re-reading the channel's entry when a mentioned human is not a member yet; a failure naks the post, which is
+taken again, so an offline hub or a restart loses no notice. Each notice has the JetStream msg id
+`mention.<post>.<human>`, and once stored the daemon keeps a marker under `<ant>.mention.<seq>.<human>` in
+`ants_sessions` (expiring with the stream), so a post taken again, within JetStream's duplicate window or after it,
+notifies each human once. A human's `ants post` sends the notices of its post after storing it, with the same msg ids.
+A webhook's post notifies nobody: its credentials publish only to its destination.
 
 ## Webhooks
 
@@ -1109,10 +1133,10 @@ Posts to thread notes work the same way: a post by `<from>` to the notes of thre
 `ants.notes.<thread>.<from>`, every credential (a human's too) posts only on `ants.notes.*.<own name>`, and readers
 drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
 
-Channels work the same way too. A channel is a named group of ants; its id follows user id syntax. A post by
+Channels work the same way too. A channel is a named group of ants and humans; its id follows user id syntax. A post by
 `<from>` to channel `<channel>` goes on `ants.chan.<channel>.<from>` (kept in the stream), every credential posts only
 on `ants.chan.*.<own name>` (and `ants.out.chan.*.<own name>` in a leaf's outbox), and readers drop a post whose `from` or
-channel disagrees with its subject. A post carries its thread id and the ants it @mentions; a top-level post starts
+channel disagrees with its subject. A post carries its thread id and the users it @mentions; a top-level post starts
 a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it,
 and its `creator`, the ant whose top-level post started it: readers take the creator of a top-level post from its
 subject-checked sender, ignore a human, a webhook post and the channel manager, and posts without one stay valid.
@@ -1165,7 +1189,9 @@ within 5 minutes of the time in it), it takes both from the thread's posts as in
 it keeps `owner` unchecked, as nothing stored names a message thread's owner, and drops `creator` unless the envelope's
 `origin_thread` names a channel thread the sender takes part in, whose creator it takes (see Channels). An envelope
 carries `origin_thread` only with a `creator`, and envelopes without one stay valid. A daemon or
-CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. Credentials
+CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. An envelope to
+a human member of a channel may carry `mention: {channel, post}`, the channel post that @mentioned it (see [Human
+members](#human-members)); a CLI from before `mention` shows it as a message from the post's author. Credentials
 issued before `ants_humans` need `ants auth user` again.
 
 Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
