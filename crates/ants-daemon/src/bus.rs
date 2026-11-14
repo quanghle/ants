@@ -9,7 +9,7 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
-use async_nats::jetstream::context::PublishErrorKind;
+use async_nats::jetstream::context::{GetStreamErrorKind, PublishErrorKind, RequestErrorKind};
 use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 
@@ -46,9 +46,11 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Like [`connect`], but waits for a server that cannot be reached yet, as the local nats-server when a service manager
 /// starts the daemon first: a refused, timed-out or unresolved connection is retried for as long as it takes, after
-/// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. What another attempt
-/// cannot cure fails at once: an unreadable credentials file, a malformed URL, credentials the server rejects, a TLS
-/// error. None when `stop` completes first.
+/// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. Once connected it
+/// waits the same way for JetStream to answer, as a leaf node that listens before its uplink has joined the hub
+/// answers JetStream requests with no responders or not at all. What another attempt cannot cure fails at once: an
+/// unreadable credentials file, a malformed URL, credentials the server rejects, a TLS error, a JetStream request the
+/// credentials do not permit. None when `stop` completes first.
 pub async fn connect_retrying(
     url: &str,
     creds: Option<&Path>,
@@ -57,13 +59,25 @@ pub async fn connect_retrying(
     name: &str,
     stop: impl Future<Output = ()>,
 ) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
-    let options = options(creds, persona, name).await?;
+    // A denied request just times out; the server's error naming it arrives through the event callback.
+    let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
+    let options = options(creds, persona, name).await?.event_callback(move |event| {
+        let denied_tx = denied_tx.clone();
+        async move {
+            if let Event::ServerError(async_nats::ServerError::Other(e)) = &event
+                && e.to_lowercase().contains("permissions violation")
+            {
+                let _ = denied_tx.send(e.clone());
+            }
+            log_event(event);
+        }
+    });
     let shown = redacted(url);
     let attempts = async {
         let mut delay = RETRY_FIRST;
-        loop {
+        let client = loop {
             match options.clone().connect(url).await {
-                Ok(client) => return Ok(client),
+                Ok(client) => break client,
                 Err(e) if worth_retrying(&e) => {
                     tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "NATS server not reachable yet");
                     tokio::time::sleep(delay).await;
@@ -71,13 +85,30 @@ pub async fn connect_retrying(
                 }
                 Err(e) => return Err(e).with_context(|| format!("connecting to NATS at {shown}")),
             }
+        };
+        let js = jetstream(client.clone(), js_domain);
+        let mut delay = RETRY_FIRST;
+        loop {
+            let reached = tokio::select! {
+                biased;
+                Some(e) = denied.recv() => return Err(anyhow::anyhow!(e)).context("reaching JetStream"),
+                reached = js.get_stream(STREAM) => reached,
+            };
+            match reached {
+                Ok(_) => return Ok((client, js)),
+                // JetStream answered, if only that the stream is missing; creating it is up to the caller.
+                Err(e) if matches!(e.kind(), GetStreamErrorKind::JetStream(_)) => return Ok((client, js)),
+                Err(e) if jetstream_not_answering(&e) => {
+                    tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "JetStream not reachable yet");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_MAX);
+                }
+                Err(e) => return Err(e).context("reaching JetStream"),
+            }
         }
     };
     tokio::select! {
-        client = attempts => {
-            let client = client?;
-            Ok(Some((client.clone(), jetstream(client, js_domain))))
-        }
+        connected = attempts => connected.map(Some),
         () = stop => Ok(None),
     }
 }
@@ -87,13 +118,7 @@ async fn options(creds: Option<&Path>, persona: &PersonaId, name: &str) -> Resul
         .name(name)
         .ping_interval(PING_INTERVAL)
         .custom_inbox_prefix(inbox_prefix(persona))
-        .event_callback(|event| async move {
-            match event {
-                // Permission violations arrive only here; the denied request itself just times out.
-                Event::ServerError(e) => tracing::warn!("{e}"),
-                event => tracing::debug!("{event}"),
-            }
-        });
+        .event_callback(|event| async move { log_event(event) });
     match creds {
         Some(path) => {
             options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))
@@ -102,9 +127,25 @@ async fn options(creds: Option<&Path>, persona: &PersonaId, name: &str) -> Resul
     }
 }
 
+fn log_event(event: Event) {
+    match event {
+        // Permission violations arrive only here; the denied request itself just times out.
+        Event::ServerError(e) => tracing::warn!("{e}"),
+        event => tracing::debug!("{event}"),
+    }
+}
+
 /// Whether the server may answer a later attempt: it is not listening yet, or not reachable.
 fn worth_retrying(e: &async_nats::ConnectError) -> bool {
     matches!(e.kind(), ConnectErrorKind::Io | ConnectErrorKind::TimedOut | ConnectErrorKind::Dns)
+}
+
+/// Whether a JetStream request got no answer: nothing serves it (yet), or the answer did not come in time.
+fn jetstream_not_answering(e: &jetstream::context::GetStreamError) -> bool {
+    e.kind() == GetStreamErrorKind::Request
+        && std::error::Error::source(e)
+            .and_then(|source| source.downcast_ref::<jetstream::context::RequestError>())
+            .is_some_and(|e| matches!(e.kind(), RequestErrorKind::TimedOut | RequestErrorKind::NoResponders))
 }
 
 /// `url`, a comma-separated list of server URLs too, with any user and password masked, for logs and errors.
@@ -453,6 +494,57 @@ mod tests {
         let (connected, _server) = tokio::join!(tokio::time::timeout(Duration::from_secs(20), connecting), later);
         let (_client, js) = connected.expect("still waiting for the server").unwrap().unwrap();
         ensure_stream(&js).await.unwrap();
+    }
+
+    /// A leaf node listens before its uplink joins the hub, whose JetStream it reaches through the hub's domain.
+    #[tokio::test]
+    async fn waits_for_jetstream_behind_a_leaf_whose_uplink_joins_later() {
+        let uplink_port = free_port();
+        let Some(leaf) = NatsServer::spawn_with(|_| {
+            format!("leafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{uplink_port}\" }}] }}\n")
+        }) else {
+            return;
+        };
+        let later = async {
+            // After the first JetStream request has gone unanswered.
+            tokio::time::sleep(RETRY_FIRST / 2).await;
+            tokio::task::spawn_blocking(move || {
+                NatsServer::spawn_with(|dir| {
+                    format!(
+                        "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+                        dir.join("js")
+                    )
+                })
+                .unwrap()
+            })
+            .await
+            .unwrap()
+        };
+        let (dev, hub) = (dev(), "hub".parse().unwrap());
+        let connecting = connect_retrying(&leaf.url, None, Some(&hub), &dev, "test", std::future::pending());
+        let (connected, _hub) = tokio::join!(tokio::time::timeout(Duration::from_secs(20), connecting), later);
+        let (_client, js) = connected.expect("still waiting for JetStream").unwrap().unwrap();
+        ensure_stream(&js).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fails_at_once_on_a_denied_jetstream_request() {
+        let Some(server) = NatsServer::start_with(|_| {
+            "authorization { users: [{ user: dev, password: pw, permissions: { publish: { deny: \"$JS.API.>\" } } }] }\n\
+             no_auth_user: dev\n"
+                .to_owned()
+        }) else {
+            return;
+        };
+        // Sooner than the JetStream request's own timeout.
+        let failed = tokio::time::timeout(
+            RETRY_FIRST * 3,
+            connect_retrying(&server.url, None, None, &dev(), "test", std::future::pending()),
+        )
+        .await
+        .expect("retried the denied request");
+        let err = format!("{:#}", failed.err().unwrap());
+        assert!(err.to_lowercase().contains("permissions violation"), "{err}");
     }
 
     #[tokio::test]
