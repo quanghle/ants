@@ -225,6 +225,7 @@ impl Ant {
         harness::validate_env(&self.env)?;
         self.validate_chain()?;
         let instructions = self.prompt_instructions();
+        let caps = self.caps();
         let harness = harnesses
             .get(self.harness.as_deref().unwrap_or(DEFAULT_HARNESS))
             .with_context(|| format!("ant {}", self.name))?;
@@ -266,12 +267,7 @@ impl Ant {
                 timeout: Some(self.prompt_timeout).filter(|t| !t.is_zero()),
                 max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
             },
-            caps: Caps {
-                thread_tokens: self.max_thread_tokens,
-                thread_cost: self.max_thread_cost,
-                daily_tokens: self.max_daily_tokens,
-                daily_cost: self.max_daily_cost,
-            },
+            caps,
             escalation: Chain {
                 escalate_to: self.escalate_to,
                 max_hops: self.max_escalation_hops,
@@ -280,6 +276,16 @@ impl Ant {
             ant: self.name,
             defer_to_others: self.builtin,
         })
+    }
+
+    /// Its spend caps.
+    pub fn caps(&self) -> Caps {
+        Caps {
+            thread_tokens: self.max_thread_tokens,
+            thread_cost: self.max_thread_cost,
+            daily_tokens: self.max_daily_tokens,
+            daily_cost: self.max_daily_cost,
+        }
     }
 
     /// The escalation chain names other ants, each once.
@@ -408,9 +414,9 @@ fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     }
 }
 
-/// What adding an ant or running a harness directly needs to know of a config file: its top-level `nats`,
-/// `js_domain` and `harness`, its harnesses, and the ants it lists with their credentials, resolved as [`parse`]
-/// does. Nothing else is checked.
+/// What adding an ant, running a harness directly or reporting spend needs to know of a config file: its top-level
+/// `nats`, `js_domain` and `harness`, its harnesses, and the ants it lists with their credentials, resolved as
+/// [`parse`] does, and their spend caps. Nothing else is checked.
 #[derive(Debug, Default, PartialEq)]
 pub struct Summary {
     pub nats: Option<String>,
@@ -418,6 +424,7 @@ pub struct Summary {
     pub harness: Option<String>,
     pub harnesses: Harnesses,
     pub ants: Vec<(UserId, Option<PathBuf>)>,
+    pub caps: BTreeMap<UserId, Caps>,
 }
 
 impl Summary {
@@ -434,8 +441,9 @@ impl Summary {
         let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
         let harnesses = define(file.harnesses, base, home).with_context(|| format!("config {}", path.display()))?;
+        let caps = file.ants.iter().map(|ant| (ant.name.clone(), ant.caps())).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants })
+        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps })
     }
 
     /// The harness named `name`, else the file's top-level `harness`, else [`DEFAULT_HARNESS`].
@@ -942,6 +950,14 @@ Review changes for correctness."""
         assert_eq!(summary.harness(Some("claude")).unwrap().name(), "claude");
         assert!(summary.harness(Some("vim")).is_err());
         assert_eq!(Summary::default().harness(None).unwrap().name(), DEFAULT_HARNESS);
+    }
+
+    #[test]
+    fn the_summary_keeps_each_ant_s_caps() {
+        let text = "[[ant]]\nname = \"dev-a\"\nworkdir = \"/nowhere\"\nmax_daily_cost = 2.5\nmax_thread_tokens = 900";
+        let summary = Summary::parse(text, Path::new("/c/config.toml"), Path::new("/h")).unwrap();
+        let caps = Caps { daily_cost: Some(2.5), thread_tokens: Some(900), ..Caps::default() };
+        assert_eq!(summary.caps.get(&"dev-a".parse().unwrap()), Some(&caps));
     }
 
     #[test]

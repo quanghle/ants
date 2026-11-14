@@ -745,7 +745,9 @@ impl Permissions {
     /// ants): it reads single keys by direct gets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
-    /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
+    /// name) also watches all ants traffic, decides approval requests, reads every ant's thread and daily spend in the
+    /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create and
+    /// upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), and reads and removes dead
     /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
@@ -831,6 +833,9 @@ impl Permissions {
                 format!("$JS.API.STREAM.INFO.{sessions}"),
                 format!("$JS.API.STREAM.INFO.{attempts}"),
                 format!("$JS.API.STREAM.INFO.{owners}"),
+                // Reading what each ant spent, for `ants spend`: its thread and daily spend keys, not its sessions.
+                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.*.spend"),
+                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
                 format!("$JS.API.STREAM.CREATE.{attempts}"),
                 format!("$JS.API.STREAM.CREATE.{channels}"),
