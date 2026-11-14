@@ -122,50 +122,96 @@ impl Attempts {
 
 /// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
 /// per message, named after its envelope id, holding the reply, in `<home>/answered` of the persona.
-pub struct Answered {
-    dir: PathBuf,
-}
+pub struct Answered(Notes);
 
 impl Answered {
     pub fn new(home: &Path) -> Self {
-        Self { dir: home.join("answered") }
+        Self(Notes::new(home, "answered"))
     }
 
     /// Whether the reply to `request` is stored.
     pub async fn has(&self, request: &Envelope) -> bool {
-        let path = self.path(request);
-        tokio::fs::try_exists(&path).await.unwrap_or_else(|e| {
-            tracing::warn!(path = %path.display(), error = %e, "looking for a stored reply");
-            false
-        })
+        self.0.has(request).await
     }
 
     /// Note that `reply` to `request` is stored, durably, before the request is acked.
     pub async fn add(&self, request: &Envelope, reply: &Reply) -> Result<()> {
-        let path = self.path(request);
-        let tmp = path.with_extension("tmp");
-        let write = async {
-            tokio::fs::create_dir_all(&self.dir).await?;
-            let mut file = tokio::fs::File::create(&tmp).await?;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &serde_json::to_vec(reply)?).await?;
-            file.sync_all().await?;
-            tokio::fs::rename(&tmp, &path).await?;
-            anyhow::Ok(())
-        };
-        write.await.with_context(|| format!("noting the stored reply in {}", path.display()))
+        self.0.add(request, reply).await.context("noting the stored reply")
     }
 
     /// Forget `request` once it is acked. A failure only leaves the note until [`prune`](Self::prune).
     pub async fn forget(&self, request: &Envelope) {
-        let path = self.path(request);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(path = %path.display(), error = %e, "removing the note of a stored reply"),
-        }
+        self.0.forget(request).await
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
+    pub async fn prune(&self, max_age: Duration) {
+        self.0.prune(max_age).await
+    }
+}
+
+/// Notes a daemon keeps on the machine itself about messages it could not ack: one JSON file per message, named after
+/// its envelope id, in a directory of the persona's home.
+pub struct Notes {
+    dir: PathBuf,
+}
+
+impl Notes {
+    pub fn new(home: &Path, name: &str) -> Self {
+        Self { dir: home.join(name) }
+    }
+
+    /// Whether `message` has a note.
+    pub async fn has(&self, message: &Envelope) -> bool {
+        let path = self.path(message);
+        tokio::fs::try_exists(&path).await.unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "looking for a note");
+            false
+        })
+    }
+
+    /// The note of `message`, if it has a readable one.
+    pub async fn get<T: serde::de::DeserializeOwned>(&self, message: &Envelope) -> Option<T> {
+        let path = self.path(message);
+        let read = async { anyhow::Ok(serde_json::from_slice(&tokio::fs::read(&path).await?)?) };
+        match read.await {
+            Ok(note) => Some(note),
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {
+                None
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = format!("{e:#}"), "reading a note");
+                None
+            }
+        }
+    }
+
+    /// Note `note` about `message`, durably.
+    pub async fn add<T: Serialize>(&self, message: &Envelope, note: &T) -> Result<()> {
+        let path = self.path(message);
+        let tmp = path.with_extension("tmp");
+        let write = async {
+            tokio::fs::create_dir_all(&self.dir).await?;
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &serde_json::to_vec(note)?).await?;
+            file.sync_all().await?;
+            tokio::fs::rename(&tmp, &path).await?;
+            anyhow::Ok(())
+        };
+        write.await.with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Remove the note of `message`. A failure only leaves it until [`prune`](Self::prune).
+    pub async fn forget(&self, message: &Envelope) {
+        let path = self.path(message);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "removing a note"),
+        }
+    }
+
+    /// Remove notes older than `max_age`.
     pub async fn prune(&self, max_age: Duration) {
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else { return };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -174,12 +220,12 @@ impl Answered {
             if age.is_some_and(|age| age > max_age)
                 && let Err(e) = tokio::fs::remove_file(entry.path()).await
             {
-                tracing::warn!(path = %entry.path().display(), error = %e, "removing an old note of a stored reply");
+                tracing::warn!(path = %entry.path().display(), error = %e, "removing an old note");
             }
         }
     }
 
-    fn path(&self, request: &Envelope) -> PathBuf {
-        self.dir.join(format!("{}.json", request.id))
+    fn path(&self, message: &Envelope) -> PathBuf {
+        self.dir.join(format!("{}.json", message.id))
     }
 }

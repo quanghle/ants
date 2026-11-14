@@ -381,9 +381,12 @@ pub(crate) mod tests {
         a_raw.publish(subject::approvals(&dev_b), "spoof".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains("Publish to \"ants.approvals.dev-b\""), "{v}");
-        a_raw.publish(subject::dead(&dev_b), "spoof".into()).await.unwrap();
-        let v = next_violation(&a_raw, &mut errors).await;
-        assert!(v.contains("Publish to \"ants.dead.dev-b\""), "{v}");
+        a_raw.publish(subject::outbox(&subject::dead(&dev_a)).unwrap(), "ok".into()).await.unwrap();
+        for spoof in [subject::dead(&dev_b), subject::outbox(&subject::dead(&dev_b)).unwrap()] {
+            a_raw.publish(spoof.clone(), "spoof".into()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
+        }
         // It sends only under its own name: not as the human, nor as dev-b to the human.
         a_raw.publish(subject::inbox(&dev_a, &dev_a), "ok".into()).await.unwrap();
         for spoof in [subject::inbox(&dev_b, &human), subject::inbox(&human, &dev_b)] {

@@ -464,7 +464,9 @@ A message gets five attempts. When the last one fails, the daemon stores the mes
 `ants.dead.<persona>` (with the error and delivery count), escalates a notice on the same thread (see
 Escalations: up the persona's chain, else to the thread's owner), and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
 out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
-reply, sends the reply). A payload that is not an envelope becomes a dead letter at once.
+reply, sends the reply). A payload that is not an envelope becomes a dead letter at once. While a leaf node's uplink
+is down the dead letter waits in the machine's outbox, and the notice and termination wait for the message's next
+delivery (see [Leaf nodes](#leaf-nodes)).
 
 ```sh
 ants dead list          # seq, persona, thread, from, deliveries, time, error, text
@@ -864,6 +866,9 @@ channel posts through its own consumer `chan-<persona>` and reads channels back 
 credentials pin the filter of both under `ants.chan.>`, so neither reaches an inbox. Credentials and streams set up
 before channels need `ants auth user` and `ants init` again.
 
+A persona's credentials publish dead letters only on its own `ants.dead.<persona>` (and `ants.out.dead.<persona>` in a
+leaf's outbox); credentials issued before the outbox took dead letters need `ants auth user` again.
+
 Approval decisions go on `ants.approvals.<persona>.<request id>`, which only humans publish to. A persona hears the
 decisions on its own requests and reads back the one the stream stored with a direct get
 (`$JS.API.DIRECT.GET.ANTS.ants.approvals.<persona>.*`, which returns only the last message on that subject), so it
@@ -961,8 +966,8 @@ the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the crede
 run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
 (`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
 
-While the uplink is down, inbox messages, replies and plan posts wait in the machine's outbox, a stream on the leaf,
-and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
+While the uplink is down, inbox messages, replies, plan and channel posts and the personas' dead letters wait in the
+machine's outbox, a stream on the leaf, and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
 the human sets it up once per machine, with the leaf connected:
 
 ```sh
@@ -976,8 +981,11 @@ the flag. Running it again checks again.
 
 The hub's stream takes from a machine's outbox only what the listed personas and humans may send themselves, so issue
 the leaf's uplink credentials for the same personas and humans. Whatever needs an answer from the hub at once still
-fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters,
-approvals and replays. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
+fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_plan` (its expected sequence
+needs the hub's answer), approvals and replays. A dead letter kept in the outbox gets its notice, and its message
+terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
+Machines set up before dead letters were buffered need `ants leaf outbox` again, and persona credentials issued before
+need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
 whose request could not be acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
 ## Transport options

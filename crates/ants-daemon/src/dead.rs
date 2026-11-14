@@ -12,10 +12,19 @@
 //! out). Watching JetStream's max-deliveries advisory instead would mean fetching the message by sequence, and
 //! `STREAM.MSG.GET` takes any sequence, so a persona allowed it could read every inbox.
 //!
+//! While a leaf node's uplink is down, the daemon's dead letter goes to the machine's outbox, which the hub's stream
+//! takes it from once the uplink is back ([`Burial::Outbox`]). Its notice, which may climb the escalation chain kept in
+//! `ants_sessions`, and the message's termination need the hub: they wait for the message's redelivery, which buries the
+//! same dead letter, noted on the machine ([`Buried`]), again. The human's side writes dead letters only from what the
+//! hub holds, so straight into its stream.
+//!
 //! When storing the dead letter fails on that extra delivery too, JetStream delivers the message no more and only
 //! publishes a max-deliveries advisory. As a backstop, the human's side ([`watch`]) turns those advisories into dead
 //! letters. Advisories are core NATS: one published while no watcher runs is lost, and its message stays in the
 //! stream unnoticed until it expires.
+
+use std::path::Path;
+use std::time::Duration;
 
 use ants_proto::{
     ChannelPost, DeadLetter, Envelope, EscalationReason, PersonaId, STREAM, chan_consumer, inbox_consumer, subject,
@@ -27,6 +36,7 @@ use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
 use serde::Deserialize;
 
+use crate::attempts::Notes;
 use crate::bus;
 use crate::escalation::{Escalator, Stuck};
 use crate::humans::Registry;
@@ -53,6 +63,48 @@ impl Attempt {
     }
 }
 
+/// What became of a dead letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Burial {
+    /// Stored in the hub's stream at this sequence, its notice sent, and the message terminated.
+    Hub(u64),
+    /// Kept in the outbox of the machine's leaf node, whose uplink is down; the hub's stream takes it from there. The
+    /// notice and the message's termination need the hub: the message stays unacked and comes back once the uplink is.
+    Outbox,
+}
+
+/// Dead letters a daemon kept in the machine's outbox ([`Burial::Outbox`]) for messages it could not terminate: one
+/// file per message, named after its envelope id, holding the dead letter, in `<home>/buried` of the persona. The
+/// redelivery after the uplink is back, even to a restarted daemon, buries that same dead letter again, with the error
+/// of the attempt that failed, without another prompt.
+pub struct Buried(Notes);
+
+impl Buried {
+    pub fn new(home: &Path) -> Self {
+        Self(Notes::new(home, "buried"))
+    }
+
+    /// The dead letter kept for `message`, if any.
+    pub async fn get(&self, message: &Envelope) -> Option<DeadLetter> {
+        self.0.get(message).await
+    }
+
+    /// Note that `dead`, the dead letter of `message`, waits in the machine's outbox.
+    pub async fn add(&self, message: &Envelope, dead: &DeadLetter) -> Result<()> {
+        self.0.add(message, dead).await.context("noting the dead letter kept in the outbox")
+    }
+
+    /// Forget `message` once its dead letter is in the hub's stream and the message terminated.
+    pub async fn forget(&self, message: &Envelope) {
+        self.0.forget(message).await
+    }
+
+    /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
+    pub async fn prune(&self, max_age: Duration) {
+        self.0.prune(max_age).await
+    }
+}
+
 /// [`bury_to`], with `human` as the only human.
 pub async fn bury(
     js: &jetstream::Context,
@@ -60,13 +112,12 @@ pub async fn bury(
     msg: &jetstream::Message,
     envelope: Option<&Envelope>,
     error: &str,
-) -> Result<u64> {
+) -> Result<Burial> {
     bury_to(js, persona, msg, envelope, error, &Registry::default(), None).await
 }
 
-/// Store `msg` as a dead letter of `persona`, tell the thread's owner (else the default human of `humans`) when it was
-/// an envelope, through `escalator` when there is one, then terminate it. Returns the stream sequence of the dead
-/// letter. `envelope` is `None` for a payload that is not an envelope.
+/// Store `msg` as a dead letter of `persona` ([`letter_for`]) and finish its burial ([`bury_letter`]). `envelope` is `None`
+/// for a payload that is not an envelope.
 pub async fn bury_to(
     js: &jetstream::Context,
     persona: &PersonaId,
@@ -75,36 +126,52 @@ pub async fn bury_to(
     error: &str,
     humans: &Registry,
     escalator: Option<&Escalator>,
-) -> Result<u64> {
-    let info = msg.info().map_err(|e| anyhow!(e))?;
-    let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
-    let dead = letter_of(persona, seq, deliveries, error, &msg.payload, envelope);
-    let (dead_seq, _) = store(js, &dead, None, humans, escalator).await?;
-    // Only now: a crash before this redelivers the message, and the message ids in `store` keep the copies single.
-    msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
-    tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered");
-    Ok(dead_seq)
+) -> Result<Burial> {
+    let dead = letter_for(persona, msg, envelope, error)?;
+    bury_letter(js, msg, &dead, None, humans, escalator).await
 }
 
-/// Store channel post `msg` (`post`, checked against its subject) as a dead letter of `persona`, keeping its payload,
-/// tell the owner of the post's thread, else the default human of `humans`, on that thread, through `escalator` when
-/// there is one, then terminate it. Returns the stream sequence of the dead letter.
-pub async fn bury_post(
-    js: &jetstream::Context,
+/// The dead letter of `persona` for `msg`, failed with `error`: of `envelope`, or of the message's payload when there is
+/// none (not an envelope, or a channel post).
+pub fn letter_for(
     persona: &PersonaId,
     msg: &jetstream::Message,
-    post: &ChannelPost,
+    envelope: Option<&Envelope>,
     error: &str,
-    humans: &Registry,
-    escalator: Option<&Escalator>,
-) -> Result<u64> {
+) -> Result<DeadLetter> {
     let info = msg.info().map_err(|e| anyhow!(e))?;
     let (seq, deliveries) = (info.stream_sequence, info.delivered.max(0) as u64);
-    let dead = DeadLetter::of_payload(persona.clone(), seq, deliveries, error, &msg.payload);
-    let (dead_seq, _) = store(js, &dead, Some(post), humans, escalator).await?;
+    Ok(letter_of(persona, seq, deliveries, error, &msg.payload, envelope))
+}
+
+/// Store `dead`, the dead letter of `msg`, in the hub's stream, tell the thread's owner (else the default human of
+/// `humans`) when it holds an envelope or is of channel post `post` (checked against its subject), through `escalator`
+/// when there is one, then terminate `msg`. Out of the hub's reach, as while a leaf node's uplink is down, the dead
+/// letter goes to the machine's outbox instead ([`bus::store`]) and the rest waits for the redelivery
+/// ([`Burial::Outbox`]); the dead letter's message id keeps one copy in the hub's stream.
+pub async fn bury_letter(
+    js: &jetstream::Context,
+    msg: &jetstream::Message,
+    dead: &DeadLetter,
+    post: Option<&ChannelPost>,
+    humans: &Registry,
+    escalator: Option<&Escalator>,
+) -> Result<Burial> {
+    let Some(ack) = bus::store_acked(js, dead.subject(), dead, &dead.msg_id()).await? else {
+        tracing::warn!(stream_seq = dead.stream_seq, error = dead.error, "dead letter kept in this machine's outbox");
+        return Ok(Burial::Outbox);
+    };
+    tell(js, dead, ack.sequence, post, humans, escalator).await?;
+    // Only now: a crash before this redelivers the message, and the message ids keep the copies single.
     msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
-    tracing::warn!(stream_seq = seq, dead_seq, deliveries, error, "dead-lettered a channel post");
-    Ok(dead_seq)
+    tracing::warn!(
+        stream_seq = dead.stream_seq,
+        dead_seq = ack.sequence,
+        deliveries = dead.deliveries,
+        error = dead.error,
+        "dead-lettered"
+    );
+    Ok(Burial::Hub(ack.sequence))
 }
 
 fn letter_of(
@@ -121,28 +188,21 @@ fn letter_of(
     }
 }
 
-/// Store `dead`, then tell the thread's owner, else the default human of `humans`, when it holds an envelope or is of
-/// channel post `post`: up the persona's chain first when there is an `escalator`. Returns the stream sequence of the
-/// dead letter, and whether it was stored already: the message ids make a second store within the duplicate window
-/// store nothing.
-async fn store(
+/// Tell the thread's owner, else the default human of `humans`, that `dead`, stored at stream sequence `dead_seq`,
+/// died, when it holds an envelope or is of channel post `post`: up the persona's chain first when there is an
+/// `escalator`. The notice's message id keeps a second one out of the stream.
+async fn tell(
     js: &jetstream::Context,
     dead: &DeadLetter,
+    dead_seq: u64,
     post: Option<&ChannelPost>,
     humans: &Registry,
     escalator: Option<&Escalator>,
-) -> Result<(u64, bool)> {
-    let message = PublishMessage::build().payload(serde_json::to_vec(dead)?.into()).message_id(dead.msg_id());
-    let ack = js
-        .send_publish(dead.subject(), message)
-        .await
-        .context("publishing")?
-        .await
-        .context("waiting for JetStream to store the message")?;
+) -> Result<()> {
     let (notice, about) = match (&dead.envelope, post) {
-        (Some(e), _) => (notice(&dead.persona, e, dead, ack.sequence, humans), Some(e)),
+        (Some(e), _) => (notice(&dead.persona, e, dead, dead_seq, humans), Some(e)),
         (None, Some(post)) => (post_notice(&dead.persona, post, dead, humans), None),
-        (None, None) => return Ok((ack.sequence, ack.duplicate)),
+        (None, None) => return Ok(()),
     };
     let id = format!("dead-notice-{}", dead.stream_seq);
     match escalator {
@@ -154,7 +214,7 @@ async fn store(
             bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
         }
     }
-    Ok((ack.sequence, ack.duplicate))
+    Ok(())
 }
 
 /// What a max-deliveries advisory of JetStream says (`io.nats.jetstream.advisory.v1.max_deliver`).
@@ -276,12 +336,20 @@ pub async fn bury_undelivered(
             (DeadLetter::of_payload(persona.clone(), seq, advisory.deliveries, &error, &msg.payload), post)
         }
     };
-    let (dead_seq, duplicate) = store(js, &dead, post.as_ref(), humans, None).await?;
-    if duplicate {
+    // Straight to the hub's stream: the message to bury came from there.
+    let message = PublishMessage::build().payload(serde_json::to_vec(&dead)?.into()).message_id(dead.msg_id());
+    let ack = js
+        .send_publish(dead.subject(), message)
+        .await
+        .context("publishing")?
+        .await
+        .context("waiting for JetStream to store the message")?;
+    tell(js, &dead, ack.sequence, post.as_ref(), humans, None).await?;
+    if ack.duplicate {
         return Ok(None);
     }
-    tracing::warn!(stream_seq = seq, dead_seq, %persona, "dead-lettered from a max-deliveries advisory");
-    Ok(Some((dead_seq, dead)))
+    tracing::warn!(stream_seq = seq, dead_seq = ack.sequence, %persona, "dead-lettered from a max-deliveries advisory");
+    Ok(Some((ack.sequence, dead)))
 }
 
 /// The sequence of the dead letter of `persona` kept for stream sequence `seq`, if there is one.

@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, PersonaId,
-    State, ThreadId, subject,
+    ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans,
+    JsDomain, PersonaId, State, ThreadId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -21,7 +21,7 @@ use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Context, Threads, Wake};
-use crate::dead::{self, Attempt};
+use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::humans::Registry;
@@ -185,6 +185,8 @@ pub async fn run(config: Config) -> Result<()> {
     let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.persona.clone());
     let answered = Answered::new(&config.home);
     answered.prune(bus::RETENTION).await;
+    let buried = Buried::new(&config.home);
+    buried.prune(bus::RETENTION).await;
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
@@ -222,6 +224,7 @@ pub async fn run(config: Config) -> Result<()> {
         pool: &pool,
         attempts: &attempts,
         answered: &answered,
+        buried: &buried,
         mcp: Some(&mcp),
         approvals: Some(&approver),
         workload: &workload,
@@ -321,6 +324,8 @@ struct Inbox<'a> {
     pool: &'a Pool,
     attempts: &'a Attempts,
     answered: &'a Answered,
+    /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
+    buried: &'a Buried,
     mcp: Option<&'a Mcp>,
     /// Takes the decisions agents of the persona's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
@@ -575,6 +580,15 @@ impl Inbox<'_> {
             }
             return (thread, None);
         }
+        if let Some(dead) = self.buried.get(envelope).await {
+            // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
+            tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
+            match self.bury_letter(&incoming, &msg, &dead).await {
+                Ok(()) => self.attempts.forget(seq).await,
+                Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
+            }
+            return (thread, None);
+        }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         let marker = self.attempts.get(seq, envelope).await;
         if attempt == Attempt::Overdue && !matches!(marker, Ok(Some(Marker::Replied(_)))) {
@@ -618,16 +632,28 @@ impl Inbox<'_> {
 
     /// Store `msg` as a dead letter, escalating it up the persona's chain (in the end to the thread's owner, else the
     /// default human), and terminate it. A channel post names its thread's owner ([`Inbox::admit_post`]), and its
-    /// envelope does too.
-    async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<u64> {
-        let (humans, escalator) = (self.humans, Some(self.escalator));
-        match &incoming.post {
-            Some(posted) => dead::bury_post(self.js, self.persona, msg, &posted.post, error, humans, escalator).await,
-            None => {
-                let envelope = Some(&incoming.envelope);
-                dead::bury_to(self.js, self.persona, msg, envelope, error, humans, escalator).await
+    /// envelope does too. The dead letter of a channel post keeps its payload.
+    async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
+        let envelope = incoming.post.is_none().then_some(&incoming.envelope);
+        let dead = dead::letter_for(self.persona, msg, envelope, error)?;
+        self.bury_letter(incoming, msg, &dead).await
+    }
+
+    /// Bury `msg` as `dead` ([`dead::bury_letter`]). A dead letter kept in the machine's outbox is noted in `buried`,
+    /// so the redelivery buries it again, even in a restarted daemon.
+    async fn bury_letter(&self, incoming: &Incoming, msg: &jetstream::Message, dead: &DeadLetter) -> Result<()> {
+        let post = incoming.post.as_ref().map(|posted| &posted.post);
+        let escalator = Some(self.escalator);
+        match dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await? {
+            Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
+            Burial::Outbox => {
+                if let Err(e) = self.buried.add(&incoming.envelope, dead).await {
+                    // The redelivery buries it with an error of its own, under the same message id.
+                    tracing::warn!(error = format!("{e:#}"), "noting the dead letter");
+                }
             }
         }
+        Ok(())
     }
 
     /// Note the message the persona is about to answer with its escalator: a human's ends the thread's escalation and
@@ -1045,6 +1071,7 @@ mod tests {
         stream: jetstream::stream::Stream,
         attempts: Attempts,
         answered: Answered,
+        buried: Buried,
         markers: jetstream::kv::Store,
         dev: PersonaId,
         limits: PromptLimits,
@@ -1075,6 +1102,7 @@ mod tests {
             let markers = bus::ensure_attempts(&js).await.unwrap();
             let attempts = Attempts::new(markers.clone(), dev.clone());
             let answered = Answered::new(&server.dir().join("dev-a"));
+            let buried = Buried::new(&server.dir().join("dev-a"));
             let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
             client.flush().await.unwrap();
             let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
@@ -1092,6 +1120,7 @@ mod tests {
                 stream,
                 attempts,
                 answered,
+                buried,
                 markers,
                 dev,
                 limits,
@@ -1182,6 +1211,7 @@ mod tests {
                 pool,
                 attempts: &self.attempts,
                 answered: &self.answered,
+                buried: &self.buried,
                 mcp: self.mcp.as_ref(),
                 approvals: None,
                 workload: &self.workload,
@@ -2099,72 +2129,101 @@ mod tests {
         assert_eq!(bus.unacked().await, 0);
     }
 
-    /// dev-a's daemon on a leaf node replies while the leaf's uplink is down: the reply goes to the machine's outbox
-    /// and the ack fails. Once the uplink is back, the redelivery to a restarted daemon is acked, not answered again.
-    #[tokio::test]
-    async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
-        let (uplink_port, dead_port) = (free_port(), free_port());
-        let Some(hub) = Server::spawn_with(|dir| {
-            format!(
-                "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
-                dir.join("js")
-            )
-        }) else {
-            return;
-        };
-        let uplink = |dir: &std::path::Path, port: u16| {
+    /// A hub (JetStream domain `hub`) and a leaf node (domain `m1`) with an outbox, whose uplink can be cut.
+    struct Uplinked {
+        leaf: Server,
+        uplink_port: u16,
+        dead_port: u16,
+        /// The human on the hub.
+        hub_js: jetstream::Context,
+        /// The hub's JetStream through the leaf.
+        through_leaf: jetstream::Context,
+        outbox: jetstream::stream::Stream,
+    }
+
+    impl Uplinked {
+        /// The hub, for [`Bus::connect`] through [`Uplinked::url`], and its leaf node with the uplink up.
+        async fn start() -> Option<(Server, Self)> {
+            let (uplink_port, dead_port) = (free_port(), free_port());
+            let hub = Server::spawn_with(|dir| {
+                format!(
+                    "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+                    dir.join("js")
+                )
+            })?;
+            let leaf = Server::spawn_with(|dir| {
+                Self::write_uplink(dir, uplink_port);
+                format!("jetstream {{ store_dir: {:?}, domain: m1 }}\ninclude \"uplink.conf\"\n", dir.join("js"))
+            })
+            .unwrap();
+            let human = PersonaId::human();
+            let (_, hub_js) = bus::connect(&hub.url, None, None, &human, "test").await.unwrap();
+            bus::ensure_stream(&hub_js).await.unwrap();
+            let (local, local_js) = bus::connect(&leaf.url, None, None, &human, "test").await.unwrap();
+            let outbox = local_js
+                .create_stream(jetstream::stream::Config {
+                    name: ants_proto::OUTBOX_STREAM.to_owned(),
+                    subjects: vec![ants_proto::OUTBOX_SUBJECTS.to_owned()],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let mut through_leaf = bus::jetstream(local, Some(&"hub".parse().unwrap()));
+            through_leaf.set_timeout(Duration::from_secs(1));
+            let uplinked = Self { leaf, uplink_port, dead_port, hub_js, through_leaf, outbox };
+            uplinked.until(true).await;
+            Some((hub, uplinked))
+        }
+
+        fn write_uplink(dir: &std::path::Path, port: u16) {
             let remote = format!("leafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{port}\" }}] }}\n");
             std::fs::write(dir.join("uplink.conf"), remote).unwrap();
-        };
-        let leaf = Server::spawn_with(|dir| {
-            uplink(dir, uplink_port);
-            format!("jetstream {{ store_dir: {:?}, domain: m1 }}\ninclude \"uplink.conf\"\n", dir.join("js"))
-        })
-        .unwrap();
-        let switch_uplink = |port: u16| {
-            uplink(leaf.dir(), port);
-            let reload = std::process::Command::new("kill").arg("-HUP").arg(leaf.pid().to_string()).status();
+        }
+
+        fn url(&self) -> String {
+            self.leaf.url.clone()
+        }
+
+        /// Point the uplink at the hub, or at a dead port, and wait until it is so.
+        async fn switch(&self, up: bool) {
+            Self::write_uplink(self.leaf.dir(), if up { self.uplink_port } else { self.dead_port });
+            let reload = std::process::Command::new("kill").arg("-HUP").arg(self.leaf.pid().to_string()).status();
             assert!(reload.unwrap().success());
-        };
-        let human = PersonaId::human();
-        let (_h, h_js) = bus::connect(&hub.url, None, None, &human, "test").await.unwrap();
-        bus::ensure_stream(&h_js).await.unwrap();
-        let (local, local_js) = bus::connect(&leaf.url, None, None, &human, "test").await.unwrap();
-        let mut outbox = local_js
-            .create_stream(jetstream::stream::Config {
-                name: ants_proto::OUTBOX_STREAM.to_owned(),
-                subjects: vec![ants_proto::OUTBOX_SUBJECTS.to_owned()],
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let hub_domain: JsDomain = "hub".parse().unwrap();
-        let mut through_leaf = bus::jetstream(local, Some(&hub_domain));
-        through_leaf.set_timeout(Duration::from_secs(1));
-        let uplink_is = async |up: bool| {
+            self.until(up).await;
+        }
+
+        async fn until(&self, up: bool) {
             timeout(WAIT * 2, async {
-                while bus::ensure_stream(&through_leaf).await.is_ok() != up {
+                while bus::ensure_stream(&self.through_leaf).await.is_ok() != up {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             })
             .await
             .unwrap_or_else(|_| panic!("the uplink is not {}", if up { "up" } else { "down" }));
-        };
-        uplink_is(true).await;
-        let leaf_url = leaf.url.clone();
-        let (bus, _) = Bus::connect(hub, &leaf_url, Some(&hub_domain)).await;
+        }
+
+        async fn kept(&self) -> u64 {
+            self.outbox.clone().info().await.unwrap().state.messages
+        }
+    }
+
+    /// dev-a's daemon on a leaf node replies while the leaf's uplink is down: the reply goes to the machine's outbox
+    /// and the ack fails. Once the uplink is back, the redelivery to a restarted daemon is acked, not answered again.
+    #[tokio::test]
+    async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
+        let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
-        let ask = Envelope::on_thread(t1.clone(), human.clone(), bus.dev.clone(), "hold a");
-        let seq = bus::publish_json(&h_js, ask.subject(), &ask, None).await.unwrap();
+        let ask = Envelope::on_thread(t1.clone(), PersonaId::human(), bus.dev.clone(), "hold a");
+        let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
         let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
 
         let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
         let ctrl_c = Arc::new(Semaphore::new(0));
         let down = async {
             until("the prompt to start", || log.lock().unwrap().starts == 1).await;
-            switch_uplink(dead_port);
-            uplink_is(false).await;
+            uplinked.switch(false).await;
             gate.add_permits(1);
             until("the answer", || log.lock().unwrap().answered.len() == 1).await;
             // Stopped, as for a restart, after the prompt in flight is handled.
@@ -2172,10 +2231,9 @@ mod tests {
         };
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
         drop(pool);
-        assert_eq!(outbox.info().await.unwrap().state.messages, 1, "the reply is kept in the outbox");
+        assert_eq!(uplinked.kept().await, 1, "the reply is kept in the outbox");
 
-        switch_uplink(uplink_port);
-        uplink_is(true).await;
+        uplinked.switch(true).await;
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let check = async {
             bus.until_acked(seq).await;
@@ -2184,12 +2242,69 @@ mod tests {
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
         assert_eq!(log.lock().unwrap().answered, ["hold a"], "answered once");
         assert_eq!(
-            h_js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().state.messages,
+            uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().state.messages,
             1,
             "no second reply"
         );
         assert_eq!(bus.unacked().await, 0);
         assert!(!bus.answered.has(&ask).await, "forgotten once acked");
+    }
+
+    /// dev-a's daemon on a leaf node gives up on a message while the leaf's uplink is down: the dead letter goes to the
+    /// machine's outbox, and the message can be neither terminated nor its owner told. Once the uplink is back, the
+    /// redelivery to a restarted daemon stores that same dead letter, with the error of the last attempt, tells the
+    /// human and terminates the message, without another prompt.
+    #[tokio::test]
+    async fn a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back() {
+        let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+        let (launch, log, gate) = fake::launch(true);
+        let t1 = ThreadId::generate();
+        let ask = Envelope::on_thread(t1.clone(), PersonaId::human(), bus.dev.clone(), "doomed a");
+        let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
+        let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
+        let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+        let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let attempts = MAX_ATTEMPTS as usize;
+        gate.add_permits(attempts - 1);
+        let down = async {
+            until("the last attempt", || log.lock().unwrap().doomed == attempts).await;
+            uplinked.switch(false).await;
+            gate.add_permits(1);
+            timeout(WAIT, async {
+                while uplinked.kept().await == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the dead letter is kept in the outbox");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
+        drop(pool);
+        let kept = bus.buried.get(&ask).await.expect("noted on the machine");
+        assert!(kept.error.contains("doomed"), "{}", kept.error);
+        assert!(dead::list(&stream).await.unwrap().is_empty(), "not in the hub's stream yet");
+
+        uplinked.switch(true).await;
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let check = async {
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+        assert_eq!(log.lock().unwrap().doomed, attempts, "not prompted again");
+        let letters = dead::list(&stream).await.unwrap();
+        assert_eq!(letters.len(), 1, "{letters:?}");
+        assert_eq!(letters[0].1, kept, "the dead letter of the last attempt");
+        let notice = stream.get_last_raw_message_by_subject(&subject::inbox(&PersonaId::human(), &bus.dev)).await;
+        let notice: Envelope = serde_json::from_slice(&notice.unwrap().payload).unwrap();
+        assert_eq!((&notice.thread_id, notice.in_reply_to), (&t1, Some(ask.id)));
+        assert!(notice.text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notice.text);
+        assert_eq!(bus.unacked().await, 0);
+        assert!(bus.buried.get(&ask).await.is_none(), "forgotten once terminated");
     }
 
     #[tokio::test]

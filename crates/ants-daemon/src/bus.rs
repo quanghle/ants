@@ -409,6 +409,17 @@ pub async fn store<T: serde::Serialize>(
     value: &T,
     msg_id: &str,
 ) -> Result<Stored> {
+    let ack = store_acked(js, subject, value, msg_id).await?;
+    Ok(if ack.is_some() { Stored::Hub } else { Stored::Outbox })
+}
+
+/// [`store`], returning the hub stream's ack, or `None` when the message went to the machine's outbox.
+pub async fn store_acked<T: serde::Serialize>(
+    js: &jetstream::Context,
+    subject: String,
+    value: &T,
+    msg_id: &str,
+) -> Result<Option<jetstream::publish::PublishAck>> {
     let payload = serde_json::to_vec(value)?;
     let message = || jetstream::message::PublishMessage::build().payload(payload.clone().into()).message_id(msg_id);
     let hub = match js.send_publish(subject.clone(), message()).await {
@@ -416,7 +427,7 @@ pub async fn store<T: serde::Serialize>(
         Err(e) => Err(e),
     };
     let unreachable = match hub {
-        Ok(_) => return Ok(Stored::Hub),
+        Ok(ack) => return Ok(Some(ack)),
         Err(e) if matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut) => e,
         Err(e) => return Err(e).context("waiting for JetStream to store the message"),
     };
@@ -436,7 +447,7 @@ pub async fn store<T: serde::Serialize>(
         });
     }
     tracing::warn!(%subject, "the hub's stream is out of reach ({unreachable}); kept in this machine's outbox");
-    Ok(Stored::Outbox)
+    Ok(None)
 }
 
 /// Ack `msg` and wait until the server confirms it. [`jetstream::Message::double_ack`] takes the "no responders"
