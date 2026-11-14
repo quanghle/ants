@@ -1978,8 +1978,8 @@ mod tests {
             why.starts_with("the harness of dev-q (copilot on m1) is out of quota: messages to dev-q wait"),
             "{why}"
         );
-        assert!(why_unserved(&ant, Some(&entry), now, Duration::from_secs(5 * 60)).is_some(), "past a 5m ask");
-        assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::from_secs(30 * 60)), None, "over within a 30m ask");
+        assert!(why_unserved(&ant, Some(&entry), now, Duration::from_mins(5)).is_some(), "past a 5m ask");
+        assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::from_mins(30)), None, "over within a 30m ask");
         entry.limited = None;
         assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::ZERO), None);
     }
