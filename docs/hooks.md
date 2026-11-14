@@ -31,8 +31,8 @@ They publish no message, answer no tool request, cancel no prompt and write no b
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, so no
 conversation as stored: hooks get events about the work, not the work. Stream info of `ANTS`, which lists every subject
 stored (who messages whom), and message gets, which take any sequence, are denied too. So are every other bucket:
-sessions and attempts (thread ids, spend), owners, links, chains, humans, channels, webhooks, read markers, and
-presence, where humans' devices are, which not even other humans may read; an ant's own whereabouts are in its roster
+sessions and attempts (thread ids, spend), owners, links, chains, humans, channels, webhooks, read markers, reactions
+to messages, and presence, where humans' devices are, which not even other humans may read; an ant's own whereabouts are in its roster
 entry.
 
 Some of what they read still carries text from the work, which a hook should treat as such:

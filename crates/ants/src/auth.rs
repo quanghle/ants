@@ -1809,6 +1809,53 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn each_reactor_adds_and_removes_only_its_own_reactions_and_only_humans_read_them() {
+        use ants_daemon::reactions::{self, Reacted};
+
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+        let (eyes, check): (ants_proto::Reaction, ants_proto::Reaction) =
+            ("eyes".parse().unwrap(), "check".parse().unwrap());
+        let message = ants_proto::Uuid::now_v7();
+        let (_a, a_js) = server.connect(&dev_a).await;
+        assert!(a_js.create_stream(ants_daemon::hub::reactions_config()).await.is_err(), "only a human creates it");
+        let (h_client, h_js) = server.connect(&human).await;
+        h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+        let mut heard = h_client.subscribe(subject::ALL).await.unwrap();
+        h_client.flush().await.unwrap();
+
+        assert!(reactions::add(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
+        assert!(reactions::add(&a_js, None, &dev_a, &message, &check).await.unwrap());
+        assert!(reactions::add(&h_js, None, &human, &message, &eyes).await.unwrap());
+        // dev-a can neither read nor remove the human's reaction, nor react as dev-b.
+        assert!(reactions::remove(&a_js, None, &human, &message, &eyes).await.is_err());
+        assert!(reactions::add(&a_js, None, &dev_b, &message, &eyes).await.is_err());
+        assert!(reactions::load(&a_js, &[message]).await.is_err(), "an ant reads no one else's reactions");
+        let (raw, mut errors) = server.watched(&dev_a).await;
+        let forged = format!("$KV.ants_reactions.dev-b.{message}.x");
+        raw.publish(forged.clone(), "{}".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&forged), "a forged reaction is denied");
+        let theirs = format!("$KV.ants_reactions.{human}.{message}.eyes");
+        let mut delete = async_nats::HeaderMap::new();
+        delete.insert("KV-Operation", "DEL");
+        raw.publish_with_headers(theirs.clone(), delete, "".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&theirs), "removing another's reaction is denied");
+
+        let all = reactions::load(&h_js, &[message]).await.unwrap();
+        let expected = vec![
+            Reacted { reaction: check.clone(), by: vec![dev_a.clone()] },
+            Reacted { reaction: eyes.clone(), by: vec![dev_a.clone(), human.clone()] },
+        ];
+        assert_eq!(all[&message], expected);
+        assert!(reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap());
+        assert!(!reactions::remove(&a_js, None, &dev_a, &message, &eyes).await.unwrap(), "removed already");
+        let all = reactions::load(&h_js, &[message]).await.unwrap();
+        assert_eq!(all[&message][1], Reacted { reaction: eyes, by: vec![human] });
+        let quiet = timeout(Duration::from_millis(300), heard.next()).await;
+        assert!(quiet.is_err(), "a reaction is no message: {quiet:?}");
+    }
+
+    #[tokio::test]
     async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_record_stays() {
         let Some(server) = Server::start() else { return };
         let (human, alice, dev_a, hook, alerts) = (UserId::human(), p("alice"), p("dev-a"), p("github"), p("alerts"));

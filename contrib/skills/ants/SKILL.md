@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, or inspect the ants inbox, roster, escalations, tool approvals or thread notes.
+description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, or inspect the ants inbox, roster, escalations, tool approvals or thread notes.
 ---
 
 # Messaging ants
@@ -35,7 +35,7 @@ ants ask "which ant knows the transport layer?"       # goes to messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
 ```
 
-`ants ask` prints `thread <id>`; keep that id to read replies and follow up (`--thread` still prompts only `@ant`, or
+`ants ask` prints `thread <id>`, then `message <id>`; keep the thread id to read replies and follow up (`--thread` still prompts only `@ant`, or
 `messenger` when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
 reconnected.
 
@@ -47,7 +47,7 @@ context nor files outside its own `workdir`.
 Option 1, block on the thread:
 
 ```sh
-ants ask --wait @dev-a "..."                 # prints thread <id>, then "<ant>: <reply>", and exits
+ants ask --wait @dev-a "..."                 # prints thread <id>, message <id>, then "<ant>: <reply>", and exits
 ants ask --wait --timeout 10m @dev-a "..."   # exits 1 after 10m if unanswered ("no reply on thread ...")
 ants ask --follow @dev-a "..."               # prints every reply on the thread until --timeout or Ctrl-C
 ```
@@ -60,7 +60,7 @@ Option 2, send now and collect later:
 ```sh
 ants inbox --thread <thread>           # unread replies on <thread>, then marks them read
 ants inbox --thread <thread> --peek    # inspect without marking read
-ants inbox --thread <thread> --json    # one JSON envelope per line (from, thread_id, text, sent_at, ...)
+ants inbox --thread <thread> --json    # one JSON envelope per line (id, from, thread_id, text, sent_at, reactions, ...)
 ```
 
 `ants inbox` also takes `--limit <n>` and `--follow`. `no unread replies` (or empty output with `--json`) means none
@@ -82,6 +82,20 @@ ants thread list --grep foo # threads of the last 24h with a message mentioning 
 `ants watch` never exits on its own: start it in the background and stop it when done. `ants notes <thread> "<text>"`
 posts to the board as the CLI's human and renews its turn budget; do not post unasked.
 
+## React
+
+A reaction marks a message as seen or done without replying: it wakes nobody, marks nothing read and ends no wait.
+
+```sh
+ants react <message> eyes            # react as the CLI's human; <message> is a message id
+ants react <message> --remove eyes   # take the reaction back
+```
+
+Message ids come from `ants ask` and `ants post` (`message <id>`), `ants inbox` and `ants thread show` (`message <id>`
+in each header, `id` in `--json`), which also list the reactions beneath each message (`reacted eyes: alice, dev-a`).
+A reaction is 1-64 of lowercase letters, digits and `-`, such as `eyes`, `check`, `thumbsup`, `x`, `heart` or
+`rocket`. React only when the user asks.
+
 ## Channels
 
 A channel is a named group of ant and human members. A post `@mention`ing members wakes only mentioned ant members and
@@ -96,7 +110,7 @@ escalations reach the inbox.
 
 ```sh
 ants channel list                                   # channels, members (ants and humans), messenger and owner
-ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread <id>
+ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread and message <id>
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
 ants post --wait '#ops' "who owns billing?"         # print the first post by another user and exit
 ants post --follow --timeout 10m '#ops' "status?"   # print each later post on the thread for 10m

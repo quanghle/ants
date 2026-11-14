@@ -12,6 +12,7 @@ use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::channel::CLOCK_SLACK;
+use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans,
@@ -76,6 +77,9 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Entry {
     pub seq: u64,
+    /// The message's id, which `ants react` takes: none for a tool request or a dead letter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
     /// When the stream stored it.
     pub stored_at: DateTime<Utc>,
     pub kind: Kind,
@@ -99,6 +103,9 @@ pub struct Entry {
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
+    /// The reactions to the message, each with who reacted so.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reacted>,
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
@@ -108,6 +115,7 @@ impl Entry {
     fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
         Self {
             seq,
+            id: None,
             stored_at,
             kind,
             thread_id,
@@ -118,6 +126,7 @@ impl Entry {
             note: None,
             text: String::new(),
             forged: false,
+            reactions: Vec::new(),
             reason: None,
         }
     }
@@ -166,6 +175,7 @@ impl Parser {
             };
             let channel = e.mention.map(|m| m.channel);
             return Some(Entry {
+                id: Some(e.id),
                 from: Some(e.from),
                 to: Some(e.to),
                 channel,
@@ -182,6 +192,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
                 owner: post.owner,
@@ -196,6 +207,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
+                id: Some(post.id),
                 from: Some(post.from),
                 note,
                 text: post.text,
@@ -403,8 +415,8 @@ pub fn table(threads: &[Summary]) -> String {
     lines.join("\n")
 }
 
-/// The entries of a thread as `ants thread show` prints them: time, kind, route, note and text, one entry per line,
-/// its text's further lines indented under it.
+/// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
+/// line, its text's further lines and the reactions to it indented under it.
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
@@ -413,10 +425,12 @@ pub fn render(entries: &[Entry]) -> String {
         let mut lines = e.text.lines();
         let first = lines.next().unwrap_or("");
         let kind = e.kind.as_str();
-        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}: {first}", time(e.stored_at), e.route());
+        let id = e.id.map(|id| format!(" (message {id})")).unwrap_or_default();
+        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{id}: {first}", time(e.stored_at), e.route());
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
+        out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out
 }
@@ -728,6 +742,13 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
         }
     })
     .await?;
+    let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
+    let mut reactions = crate::inbox::reactions_or_none(&js, &ids).await;
+    for entry in &mut entries {
+        if let Some(id) = entry.id {
+            entry.reactions = reactions.remove(&id).unwrap_or_default();
+        }
+    }
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
@@ -832,9 +853,15 @@ mod tests {
         assert!(entries[6].text.starts_with("allow-once on dev-a/"), "{}", entries[6].text);
         assert_eq!(entries[7].note.as_deref(), Some("after 5 deliveries: harness died"));
 
+        assert_eq!(entries[0].id, Some(ask.id));
+        assert_eq!((entries[2].id, entries[3].id), (Some(post.id), Some(note.id)));
+        assert_eq!((entries[5].id, entries[7].id), (None, None), "a tool request and a dead letter");
+        let mut entries = entries;
+        let eyes = Reacted { reaction: "eyes".parse().unwrap(), by: vec![p("alice"), p("dev-a")] };
+        entries[1].reactions = vec![eyes];
         let shown = render(&entries[..2]);
-        assert!(shown.contains("message     alice -> dev-a: fix it\n"), "{shown}");
-        assert!(shown.ends_with("dev-a -> alice: done\n    see the diff\n"), "{shown}");
+        assert!(shown.contains(&format!("message     alice -> dev-a (message {}): fix it\n", ask.id)), "{shown}");
+        assert!(shown.ends_with(": done\n    see the diff\n    reacted eyes: alice, dev-a\n"), "{shown}");
     }
 
     #[test]
@@ -842,7 +869,7 @@ mod tests {
         let e = Envelope::on_thread(t("t1"), p("alice"), p("dev-a"), "hi");
         let entries = entries(&[("ants.inbox.dev-a.mallory".to_owned(), json(&e))]);
         assert!(entries[0].forged);
-        assert!(render(&entries).contains("alice -> dev-a (forged): hi"));
+        assert!(render(&entries).contains(&format!("alice -> dev-a (forged) (message {}): hi", e.id)));
     }
 
     #[test]

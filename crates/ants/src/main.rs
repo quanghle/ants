@@ -44,11 +44,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_daemon::reading::Reading;
-use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, hub, notes, owners};
+use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, hub, notes, owners, reactions};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
-    Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId,
-    UserId, Verdict, subject,
+    Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, Reaction, StatusEvent, StatusUpdate,
+    ThreadId, UserId, Uuid, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -184,6 +184,20 @@ enum Command {
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
     },
+    /// React to a message as the CLI's user, such as `eyes` for seen or `check` for done, or remove the reaction with
+    /// --remove. A reaction is no message: it wakes nobody, marks nothing read and ends no wait for a reply. Humans see
+    /// reactions beneath the messages in `ants inbox`, `ants thread show` and `ants watch`. Message ids come from
+    /// `ants ask`, `ants post`, `ants inbox` and `ants thread show`.
+    React {
+        /// The message's id.
+        message: Uuid,
+        /// The reaction: 1-64 of lowercase letters, digits and '-', such as eyes, check, thumbsup, x, heart or rocket.
+        #[arg(add = ArgValueCandidates::new(completions::reactions))]
+        reaction: Reaction,
+        /// Remove the reaction instead of adding it.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
     /// and decisions, and dead letters: list the recent ones, find those mentioning a text, or show one's whole
     /// history. Nothing is consumed or marked read. Needs a human's credentials.
@@ -210,7 +224,7 @@ enum Command {
         thread: thread::Pick,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
-    /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
+    /// reactions, read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
     /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
     /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
@@ -1100,6 +1114,7 @@ async fn run() -> Result<()> {
         }
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
+        Command::React { message, reaction, remove } => react(&nats()?, message, reaction, remove).await,
         Command::Thread(ThreadCommand::List { ant, owner, grep, escalated, since, limit, json }) => {
             let select = thread::Select { ant, owner, grep, limit: Some(limit), escalated };
             thread::list(&nats()?, since, &select, json).await
@@ -1730,7 +1745,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let mut lines: Vec<String> = fixed.iter().map(|finding| finding.fixed()).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
-        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -1741,6 +1756,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::LINKS_BUCKET,
         ants_proto::OWNERS_BUCKET,
         ants_proto::WEBHOOKS_BUCKET,
+        ants_proto::REACTIONS_BUCKET,
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET
     ));
@@ -1897,6 +1913,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
         println!("kept in this machine's outbox until the hub is reachable");
     }
     println!("thread {}", envelope.thread_id);
+    println!("message {}", envelope.id);
     if !replies.wait && !replies.follow {
         return Ok(());
     }
@@ -1997,6 +2014,7 @@ async fn post(
         }
     }
     println!("thread {}", post.thread_id);
+    println!("message {}", post.id);
     let Some(room) = room else { return Ok(()) };
     let _shown = status.map(|sub| progress::start(sub, progress::Status::new(vec![post.id]), replies.wait));
     // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all. What
@@ -2147,19 +2165,22 @@ async fn show_inbox(
     select.thread = thread::resolve(thread, &js, &nats.me).await?;
     let select = &select;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
-    let show = |e: &Envelope| -> Result<()> {
+    let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string(e)?);
+            println!("{}", serde_json::to_string(&inbox::Shown { envelope: e, reactions })?);
         } else {
-            println!("{}", inbox::render(e));
+            println!("{}", inbox::render(e, reactions));
         }
         Ok(())
     };
+    let show = |e: &Envelope| show_with(e, &[]);
     let unread = inbox.unread(select).await?;
     if unread.is_empty() && !follow && !json {
         println!("no unread replies");
     }
-    unread.iter().try_for_each(show)?;
+    let ids: Vec<Uuid> = unread.iter().map(|e| e.id).collect();
+    let reactions = inbox::reactions_or_none(&js, &ids).await;
+    unread.iter().try_for_each(|e| show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice)))?;
     if follow {
         // A dead letter stored here tells the human through the inbox, like one the daemon stores.
         let watch = async {
@@ -2294,6 +2315,24 @@ async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Vec<String>) 
     Ok(())
 }
 
+async fn react(nats: &Nats<'_>, message: Uuid, reaction: Reaction, remove: bool) -> Result<()> {
+    let (_, js) = nats.connect("ants-cli").await?;
+    let me = &nats.me.id;
+    let line = if remove {
+        match reactions::remove(&js, nats.domain, me, &message, &reaction).await? {
+            true => format!("removed {reaction} from message {message}"),
+            false => format!("no {reaction} reaction to message {message} to remove"),
+        }
+    } else {
+        match reactions::add(&js, nats.domain, me, &message, &reaction).await? {
+            true => format!("reacted {reaction} to message {message}"),
+            false => format!("already reacted {reaction} to message {message}"),
+        }
+    };
+    println!("{line}");
+    Ok(())
+}
+
 /// How long `ants cancel` waits for a daemon of the ant to answer.
 const CANCEL_WAIT: Duration = Duration::from_secs(5);
 /// How long `ants cancel` waits on, after a daemon of the ant runs no prompt on the thread, for another daemon of the
@@ -2373,7 +2412,20 @@ async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::Pick>) -> R
     let filter = watch_filter(target, thread::resolve(thread, &js, &nats.me).await?.as_ref())?;
     let mut sub = client.subscribe(filter).await?;
     let mut printer = Printer::default();
-    while let Some(msg) = sub.next().await {
+    let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
+    loop {
+        let msg = tokio::select! {
+            msg = sub.next() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+            Some(change) = reacted.next() => {
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(printer.line(&reaction_line(&change)).as_bytes())?;
+                stdout.flush()?;
+                continue;
+            }
+        };
         let forged = |ok: bool| if ok { String::new() } else { format!(" (forged: sent on {})", msg.subject) };
         let out = if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload) {
             printer.status(&event, &forged(event.check_subject(&msg.subject).is_ok()))
@@ -2408,6 +2460,32 @@ async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::Pick>) -> R
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// The reactions `ants watch` follows besides `target`: all of them for a human taking every message (`ants.>` or
+/// `>`), else none, as when the bucket cannot be read.
+async fn watched_reactions(
+    js: &async_nats::jetstream::Context,
+    target: &str,
+    human: bool,
+) -> futures::stream::BoxStream<'static, reactions::Change> {
+    let none = || futures::stream::pending().boxed();
+    if !human || ![subject::ALL, ">"].contains(&target) {
+        return none();
+    }
+    match reactions::watch(js).await {
+        Ok(changes) => changes.chain(futures::stream::pending()).boxed(),
+        Err(e) => {
+            tracing::warn!("not showing reactions: {e:#}");
+            none()
+        }
+    }
+}
+
+/// A reaction added or removed as `ants watch` prints it.
+fn reaction_line(change: &reactions::Change) -> String {
+    let verb = if change.removed { "removed the reaction" } else { "reacted" };
+    format!("{} {verb} {} to message {}", change.by, change.reaction, change.message)
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
@@ -2708,6 +2786,16 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
         assert_matches!(cli.command, Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
+    }
+
+    #[test]
+    fn react_takes_a_message_id_a_reaction_and_remove() {
+        let id = Uuid::now_v7().to_string();
+        let cli = Cli::try_parse_from(["ants", "react", &id, "--remove", "eyes"]).unwrap();
+        assert_matches!(cli.command, Command::React { message, reaction, remove: true }
+            if message.to_string() == id && reaction.as_str() == "eyes");
+        assert!(Cli::try_parse_from(["ants", "react", &id, "Eyes!"]).is_err(), "no subject token");
+        assert!(Cli::try_parse_from(["ants", "react", "t1", "eyes"]).is_err(), "no message id");
     }
 
     #[test]

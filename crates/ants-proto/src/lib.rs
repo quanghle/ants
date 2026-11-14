@@ -97,6 +97,12 @@ pub const READ_BUCKET: &str = "ants_read";
 /// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
 /// webhook serve` reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
+/// KV bucket of the reactions to messages: one [`ReactionEntry`] per reactor, message and reaction, keyed by
+/// [`reaction_key`]. Each user writes, and deletes, only its own keys ([`Permissions::for_user`]), a human's devices sharing
+/// the human's; only humans read the others'. Its stream denies deletes, purges and rollups, so no one wipes the others'
+/// reactions, and drops each after the stream's retention, as it does messages. Reactions never reach an inbox: no ant
+/// wakes for one, and no reply wait ends with one.
+pub const REACTIONS_BUCKET: &str = "ants_reactions";
 /// How often a following CLI re-puts its device's [`Presence`].
 pub const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(10);
 /// Max age of [`PRESENCE_BUCKET`]: a presence not renewed for this long is gone.
@@ -188,6 +194,8 @@ token_id!(UserId, "user id");
 token_id!(ThreadId, "thread id");
 // A channel: a named group of ants, with the same syntax as a user id.
 token_id!(ChannelId, "channel id");
+// A reaction to a message, such as `eyes` or `check`: one subject token, with the same syntax as a user id.
+token_id!(Reaction, "reaction");
 // The JetStream domain of the hub (`jetstream { domain: ... }`). Clients on a leaf node reach the hub's JetStream only
 // through it, as `$JS.<domain>.API`: the plain `$JS.API` stays on the leaf.
 token_id!(JsDomain, "JetStream domain");
@@ -743,6 +751,27 @@ pub fn owner_outbox(thread: &ThreadId, to: &UserId) -> String {
     format!("ants.out.owners.{}", owner_key(thread, to))
 }
 
+/// Key in [`REACTIONS_BUCKET`] of `by`'s `reaction` to message `message` ([`Envelope::id`]). Keys start with the
+/// reactor, so its credentials can be confined to its own.
+pub fn reaction_key(by: &UserId, message: &Uuid, reaction: &Reaction) -> String {
+    format!("{by}.{message}.{reaction}")
+}
+
+/// Every key in [`REACTIONS_BUCKET`] of a reaction to `message`, whoever reacted.
+pub fn reactions_to(message: &Uuid) -> String {
+    format!("*.{message}.*")
+}
+
+/// Who reacted how to which message, as a [`reaction_key`] names them, or `None` when the key is no reaction.
+pub fn parse_reaction_key(key: &str) -> Option<(UserId, Uuid, Reaction)> {
+    let mut tokens = key.split('.');
+    let (by, message, reaction) = (tokens.next()?, tokens.next()?, tokens.next()?);
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some((by.parse().ok()?, message.parse().ok()?, reaction.parse().ok()?))
+}
+
 /// Every key in [`LINKS_BUCKET`] of a link to `thread` passed on, whoever passed it on to whom.
 pub fn links_to(thread: &ThreadId) -> String {
     format!("*.{thread}.*")
@@ -940,6 +969,26 @@ fn presence_rights(human: &UserId) -> [String; 3] {
     [format!("$JS.API.STREAM.CREATE.{presence}"), format!("$JS.API.DIRECT.GET.{presence}.{own}"), own]
 }
 
+/// What a user's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
+/// gets its own keys only, so no one forges or removes another's reaction; and for a human, creating the bucket and
+/// reading every reaction, singly and through the ordered consumers behind listing and watching them. An ant reads no
+/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read.
+fn reaction_rights(user: &UserId, role: Role) -> Vec<String> {
+    let reactions = kv_stream(REACTIONS_BUCKET);
+    let own = format!("$KV.{REACTIONS_BUCKET}.{user}.>");
+    let mut rights = vec![format!("$JS.API.DIRECT.GET.{reactions}.{own}"), own];
+    if role.is_human() {
+        rights.extend([
+            format!("$JS.API.STREAM.INFO.{reactions}"),
+            format!("$JS.API.STREAM.CREATE.{reactions}"),
+            format!("$JS.API.DIRECT.GET.{reactions}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{reactions}"),
+        ]);
+        rights.extend(flow_control_subjects("*", &reactions));
+    }
+    rights
+}
+
 /// Where a webhook delivers its events: an ant's inbox, or a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {
@@ -994,7 +1043,8 @@ impl Permissions {
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
-    /// ([`presence_rights`]). A human may send under
+    /// ([`presence_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
+    /// puts and removes only its own ([`reaction_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
@@ -1078,6 +1128,7 @@ impl Permissions {
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
+        publish.extend(reaction_rights(user, role));
         let mut subscribe = vec![format!("{}.>", inbox_prefix(user))];
         if role.is_human() {
             let notify = notify_consumer(user);
@@ -1702,6 +1753,29 @@ impl HumanEntry {
             return Ok(());
         }
         Err(Error::ForeignUser { kind: "human entry", user: self.human.clone(), at: format!("key {key}") })
+    }
+}
+
+/// A reaction in [`REACTIONS_BUCKET`], under its [`reaction_key`]: `by` reacted `reaction` to message `message`
+/// ([`Envelope::id`]). Readers take the reactor, message and reaction from the key, which credentials pin to the
+/// reactor, not from the entry, which says when as well.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionEntry {
+    pub message: Uuid,
+    pub by: UserId,
+    pub reaction: Reaction,
+    pub at: DateTime<Utc>,
+}
+
+impl ReactionEntry {
+    /// `by`'s `reaction` to `message`, made now.
+    pub fn new(by: UserId, message: Uuid, reaction: Reaction) -> Self {
+        Self { message, by, reaction, at: Utc::now() }
+    }
+
+    /// The KV key of the entry.
+    pub fn key(&self) -> String {
+        reaction_key(&self.by, &self.message, &self.reaction)
     }
 }
 
@@ -4949,6 +5023,39 @@ mod tests {
         for malformed in [format!("dev-a.{thread}"), format!("dev-a.{thread}.dev-b.x"), format!("{thread}.dev-b")] {
             assert_eq!(parse_link_key(&malformed, &thread), None, "{malformed}");
         }
+    }
+
+    #[test]
+    fn a_reaction_key_names_the_reactor_first_then_the_message_and_reaction() {
+        let message = Uuid::now_v7();
+        let eyes: Reaction = "eyes".parse().unwrap();
+        let key = reaction_key(&p("dev-a"), &message, &eyes);
+        assert_eq!(key, format!("dev-a.{message}.eyes"), "credentials confine a reactor to its own keys");
+        assert_eq!(ReactionEntry::new(p("dev-a"), message, eyes.clone()).key(), key);
+        assert_eq!(parse_reaction_key(&key), Some((p("dev-a"), message, eyes)));
+        for malformed in [format!("dev-a.{message}"), format!("dev-a.{message}.eyes.x"), "dev-a.t1.eyes".to_owned()] {
+            assert_eq!(parse_reaction_key(&malformed), None, "{malformed}");
+        }
+        assert!("Eyes".parse::<Reaction>().is_err() && "a.b".parse::<Reaction>().is_err());
+    }
+
+    #[test]
+    fn everyone_writes_only_their_own_reactions_and_only_humans_read_others() {
+        let own = "$KV.ants_reactions.dev-a.>";
+        let others = ["$JS.API.DIRECT.GET.KV_ants_reactions.>", "$JS.API.CONSUMER.CREATE.KV_ants_reactions"];
+        let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+        assert!(ant.publish.iter().any(|s| s == own), "{:?}", ant.publish);
+        assert!(ant.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_reactions.$KV.ants_reactions.dev-a.>"));
+        let reactions: Vec<&String> = ant.publish.iter().filter(|s| s.contains("ants_reactions")).collect();
+        assert_eq!(reactions.len(), 2, "nothing of others' reactions: {reactions:?}");
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        assert!(human.publish.iter().any(|s| s == "$KV.ants_reactions.alice.>"));
+        assert!(!human.publish.iter().any(|s| s == "$KV.ants_reactions.>" || s == "$KV.ants_reactions.*.>"));
+        for s in others.into_iter().chain(["$JS.API.STREAM.CREATE.KV_ants_reactions"]) {
+            assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+        }
+        let observer = Permissions::for_observer(&p("watcher"));
+        assert!(!observer.publish.iter().chain(&observer.subscribe).any(|s| s.contains("ants_reactions")));
     }
 
     #[test]
