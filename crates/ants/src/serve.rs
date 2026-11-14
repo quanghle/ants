@@ -488,7 +488,7 @@ impl Drop for Schedules {
 
 /// The contents of the credentials file at `path`, to tell when it changed (`ants renew`): a NATS connection reads it
 /// only when it connects.
-fn creds_snapshot(path: Option<&Path>) -> Option<Vec<u8>> {
+pub(crate) fn creds_snapshot(path: Option<&Path>) -> Option<Vec<u8>> {
     std::fs::read(path?).ok()
 }
 

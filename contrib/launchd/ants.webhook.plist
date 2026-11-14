@@ -4,6 +4,7 @@
      scripts/install-units.sh --webhook fills in the @...@ placeholders and installs it as
      ~/Library/LaunchAgents/ants.webhook.plist. Until ants.nats listens, requests answer 503 and the ingress retries
      the connection. Secrets come from secret_file entries of the config file.
+     The ingress reloads an edited config file within seconds; to reload at once: launchctl kill SIGHUP gui/$(id -u)/ants.webhook
      A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
 <plist version="1.0">
 <dict>

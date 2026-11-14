@@ -21,7 +21,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use ants_daemon::direct_kv::DirectKv;
@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{OnceCell, Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 
 use crate::notify;
 
@@ -151,6 +151,7 @@ pub struct Config {
 }
 
 /// One `[[webhook]]`.
+#[derive(PartialEq)]
 pub struct Webhook {
     pub name: UserId,
     pub creds: Option<PathBuf>,
@@ -162,14 +163,15 @@ pub struct Webhook {
     text: Vec<Piece>,
 }
 
+#[derive(PartialEq)]
 enum Auth {
-    /// `sha256=<hex>` of the body's HMAC-SHA256 in the header.
-    Hmac { key: hmac::Key, header: HeaderName },
+    /// `sha256=<hex>` of the body's HMAC-SHA256, keyed with the secret, in the header.
+    Hmac { secret: String, header: HeaderName },
     /// `Authorization: Bearer <token>`.
     Bearer(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum IdSource {
     Header(HeaderName),
     Json(String),
@@ -294,7 +296,7 @@ impl Webhook {
                 let header = entry.signature_header.as_deref().unwrap_or(DEFAULT_SIGNATURE_HEADER);
                 let header = HeaderName::from_bytes(header.as_bytes())
                     .with_context(|| format!("signature_header {header:?}"))?;
-                Auth::Hmac { key: hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()), header }
+                Auth::Hmac { secret, header }
             }
             AuthKind::Bearer if entry.signature_header.is_some() => {
                 bail!("signature_header goes with auth = \"hmac-sha256\" only")
@@ -452,13 +454,14 @@ impl Webhook {
 
     fn authorized(&self, headers: &HeaderMap, body: &[u8]) -> bool {
         match &self.auth {
-            Auth::Hmac { key, header } => {
+            Auth::Hmac { secret, header } => {
+                let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
                 let signature = headers
                     .get(header)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.trim().strip_prefix("sha256="))
                     .and_then(|hex| HEXLOWER_PERMISSIVE.decode(hex.as_bytes()).ok());
-                signature.is_some_and(|signature| hmac::verify(key, body, &signature).is_ok())
+                signature.is_some_and(|signature| hmac::verify(&key, body, &signature).is_ok())
             }
             Auth::Bearer(_) => true,
         }
@@ -571,7 +574,8 @@ struct Hook {
     config: Webhook,
     bus: OnceCell<Bus>,
     last_warned: Mutex<Option<Instant>>,
-    outcomes: Outcomes,
+    /// Kept across reloads that restart the webhook.
+    outcomes: Arc<Outcomes>,
 }
 
 /// How a webhook's requests ended, for the metrics.
@@ -584,64 +588,78 @@ struct Outcomes {
 }
 
 struct Server {
+    /// Swapped whole on a reload; requests under way finish with the routes they started with.
+    routes: RwLock<Arc<Routes>>,
+    in_flight: Arc<Semaphore>,
+}
+
+/// Where requests go, as of the config last loaded.
+struct Routes {
     /// `<path>/`, before each webhook's name.
     prefix: String,
     hooks: HashMap<String, Arc<Hook>>,
     /// Answers approval links, at `<path>/_approval`.
     answers: Option<notify::Answers>,
-    in_flight: Arc<Semaphore>,
     humans: Vec<Arc<notify::Notified>>,
 }
 
+impl Server {
+    fn routes(&self) -> Arc<Routes> {
+        self.routes.read().unwrap().clone()
+    }
+}
+
+/// How [`serve`] reloads its config: on each trigger, with `load`.
+pub struct Reload<L> {
+    pub triggers: crate::reload::Triggers,
+    pub load: L,
+}
+
 /// Serve the webhooks of `config` on `listener`, and notify its humans, until a webhook's or a human's credentials
-/// fail. Each webhook and human connects to `nats` as itself; until it is connected, its requests answer 503. Health
-/// and metrics are served on `config.metrics`, if given.
-pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
+/// fail. Each webhook and human connects as itself to the config's `nats`, else to `nats`; until it is connected, its
+/// requests answer 503. Health and metrics are served on `config.metrics`, if given.
+///
+/// On each trigger of `reload` the config is loaded again: webhooks and humans newly listed start, those no longer
+/// listed stop, those whose entry or credentials file changed start again, and the others carry on untouched, as
+/// does the listener. A config that fails to load is logged and the one served stays.
+pub async fn serve<L: FnMut() -> Result<Config>>(
+    config: Config,
+    nats: &str,
+    js_domain: Option<&JsDomain>,
+    listener: TcpListener,
+    mut reload: Reload<L>,
+) -> Result<()> {
     bus::check_url(nats)?;
-    let hooks = config.webhooks.into_iter().map(|config| {
-        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default(), outcomes: Outcomes::default() };
-        (hook.config.name.to_string(), Arc::new(hook))
-    });
-    let humans: Vec<_> = config.humans.into_iter().map(|human| Arc::new(notify::Notified::new(human))).collect();
-    let links = config.links.map(Arc::new);
-    let answers = links.clone().map(|links| notify::Answers {
-        humans: humans.iter().map(|human| (human.config.name.clone(), human.clone())).collect(),
-        links,
-    });
-    let server = Arc::new(Server {
-        prefix: format!("{}/", config.path),
-        hooks: hooks.collect(),
-        answers,
-        in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
-        humans: humans.clone(),
-    });
-    let _metrics = match config.metrics {
+    let mut tasks = JoinSet::new();
+    let (failed_tx, mut failed) = mpsc::unbounded_channel();
+    let mut running = Running::new(nats, js_domain, &config);
+    let metrics_addr = config.metrics;
+    let routes = running.apply(config, &mut tasks, &failed_tx);
+    let server =
+        Arc::new(Server { routes: RwLock::new(Arc::new(routes)), in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)) });
+    let _metrics = match metrics_addr {
         Some(addr) => Some(metrics::start(addr, server.clone()).await?),
         None => None,
     };
-    let mut tasks = JoinSet::new();
-    let (failed_tx, mut failed) = mpsc::unbounded_channel();
-    for hook in server.hooks.values() {
-        let (hook, nats, domain, failed_tx) = (hook.clone(), nats.to_owned(), js_domain.cloned(), failed_tx.clone());
-        tasks.spawn(async move {
-            if let Err(e) = connect(&hook, &nats, domain.as_ref()).await {
-                let _ = failed_tx.send(e.context(format!("webhook {}", hook.config.name)));
-            }
-        });
-    }
-    for human in humans {
-        let (links, nats, domain, failed_tx) = (links.clone(), nats.to_owned(), js_domain.cloned(), failed_tx.clone());
-        tasks.spawn(async move {
-            let name = human.config.name.clone();
-            if let Err(e) = notify::run(human, links, nats, domain).await {
-                let _ = failed_tx.send(e.context(format!("human {name}")));
-            }
-        });
-    }
     loop {
         while tasks.try_join_next().is_some() {}
         let stream = tokio::select! {
             Some(e) = failed.recv() => return Err(e),
+            trigger = reload.triggers.next() => {
+                match (reload.load)() {
+                    Ok(config) => {
+                        let routes = running.apply(config, &mut tasks, &failed_tx);
+                        *server.routes.write().unwrap() = Arc::new(routes);
+                        tracing::info!(on = trigger.describe(), "reloaded the webhook config");
+                    }
+                    Err(e) => tracing::error!(
+                        on = trigger.describe(),
+                        error = format!("{e:#}"),
+                        "reloading the webhook config failed; still serving the one loaded before"
+                    ),
+                }
+                continue;
+            }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => stream,
                 Err(e) => {
@@ -665,6 +683,146 @@ pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, lis
                 tracing::debug!(error = %e, "webhook connection");
             }
         });
+    }
+}
+
+/// The webhooks and humans served, each with the task connecting it and the contents of its credentials file when
+/// it started ([`crate::serve::creds_snapshot`]).
+struct Running {
+    default_nats: String,
+    default_js_domain: Option<JsDomain>,
+    nats: String,
+    js_domain: Option<JsDomain>,
+    listen: Option<String>,
+    metrics: Option<SocketAddr>,
+    path: String,
+    links: Option<Arc<notify::Links>>,
+    hooks: HashMap<UserId, Started<Hook>>,
+    humans: HashMap<UserId, Started<notify::Notified>>,
+}
+
+struct Started<T> {
+    served: Arc<T>,
+    creds: Option<Vec<u8>>,
+    task: AbortHandle,
+}
+
+impl Running {
+    fn new(nats: &str, js_domain: Option<&JsDomain>, config: &Config) -> Self {
+        Self {
+            default_nats: nats.to_owned(),
+            default_js_domain: js_domain.cloned(),
+            nats: String::new(),
+            js_domain: None,
+            listen: config.listen.clone(),
+            metrics: config.metrics,
+            path: config.path.clone(),
+            links: None,
+            hooks: HashMap::new(),
+            humans: HashMap::new(),
+        }
+    }
+
+    /// Serve `config`: start what is new, stop what is gone, start again what changed (all of it with another hub or
+    /// domain, every human with other links), and return the routes to it.
+    fn apply(
+        &mut self,
+        config: Config,
+        tasks: &mut JoinSet<()>,
+        failed: &mpsc::UnboundedSender<anyhow::Error>,
+    ) -> Routes {
+        if config.listen != self.listen || config.metrics != self.metrics {
+            tracing::warn!("listen and metrics of the webhook config take effect on a restart only");
+        }
+        if config.path != self.path {
+            tracing::info!("webhooks now at {}/<webhook>", config.path);
+            self.path = config.path.clone();
+        }
+        let nats = config.nats.clone().unwrap_or_else(|| self.default_nats.clone());
+        let js_domain = config.js_domain.clone().or_else(|| self.default_js_domain.clone());
+        let hub_changed = (&nats, &js_domain) != (&self.nats, &self.js_domain);
+        (self.nats, self.js_domain) = (nats, js_domain);
+        let links = config.links.map(Arc::new);
+        let links_changed = links != self.links;
+        self.links = links;
+
+        let mut hooks = HashMap::new();
+        for webhook in config.webhooks {
+            let name = webhook.name.clone();
+            let creds = crate::serve::creds_snapshot(webhook.creds.as_deref());
+            let outcomes = match self.hooks.remove(&name) {
+                Some(old) if !hub_changed && old.served.config == webhook && old.creds == creds => {
+                    hooks.insert(name, old);
+                    continue;
+                }
+                Some(old) => {
+                    tracing::info!(webhook = %name, "restarting the webhook: its entry, credentials or hub changed");
+                    old.task.abort();
+                    old.served.outcomes.clone()
+                }
+                None => Arc::default(),
+            };
+            let hook =
+                Arc::new(Hook { config: webhook, bus: OnceCell::new(), last_warned: Mutex::default(), outcomes });
+            let (served, nats, domain, failed) =
+                (hook.clone(), self.nats.clone(), self.js_domain.clone(), failed.clone());
+            let task = tasks.spawn(async move {
+                if let Err(e) = connect(&served, &nats, domain.as_ref()).await {
+                    let _ = failed.send(e.context(format!("webhook {}", served.config.name)));
+                }
+            });
+            hooks.insert(name, Started { served: hook, creds, task });
+        }
+        for (name, old) in self.hooks.drain() {
+            tracing::info!(webhook = %name, "stopping the webhook no longer listed");
+            old.task.abort();
+        }
+        self.hooks = hooks;
+
+        let mut humans = HashMap::new();
+        for human in config.humans {
+            let name = human.name.clone();
+            let creds = crate::serve::creds_snapshot(human.creds.as_deref());
+            match self.humans.remove(&name) {
+                Some(old) if !hub_changed && !links_changed && old.served.config == human && old.creds == creds => {
+                    humans.insert(name, old);
+                    continue;
+                }
+                Some(old) => {
+                    tracing::info!(human = %name, "restarting the human's notifications: its entry, credentials, links or hub changed");
+                    old.task.abort();
+                }
+                None => {}
+            }
+            let notified = Arc::new(notify::Notified::new(human));
+            let (served, links, nats, domain, failed) =
+                (notified.clone(), self.links.clone(), self.nats.clone(), self.js_domain.clone(), failed.clone());
+            let task = tasks.spawn(async move {
+                let name = served.config.name.clone();
+                if let Err(e) = notify::run(served, links, nats, domain).await {
+                    let _ = failed.send(e.context(format!("human {name}")));
+                }
+            });
+            humans.insert(name, Started { served: notified, creds, task });
+        }
+        for (name, old) in self.humans.drain() {
+            tracing::info!(human = %name, "stopping the notifications of the human no longer listed");
+            old.task.abort();
+        }
+        self.humans = humans;
+
+        let mut notified: Vec<_> = self.humans.values().map(|h| h.served.clone()).collect();
+        notified.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+        let answers = self.links.clone().map(|links| notify::Answers {
+            humans: notified.iter().map(|human| (human.config.name.clone(), human.clone())).collect(),
+            links,
+        });
+        Routes {
+            prefix: format!("{}/", config.path),
+            hooks: self.hooks.iter().map(|(name, hook)| (name.to_string(), hook.served.clone())).collect(),
+            answers,
+            humans: notified,
+        }
     }
 }
 
@@ -800,14 +958,15 @@ impl Server {
 
     async fn accept(&self, request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Refusal> {
         let (parts, body) = request.into_parts();
-        let name = parts.uri.path().strip_prefix(&self.prefix);
-        if let Some(answers) = self.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
+        let routes = self.routes();
+        let name = parts.uri.path().strip_prefix(&routes.prefix);
+        if let Some(answers) = routes.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
             if let Err(e) = read_body(body, false).await {
                 return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
             }
             return Ok(answers.answer(&parts.method, parts.uri.query()).await);
         }
-        let Some(hook) = name.and_then(|name| self.hooks.get(name)) else {
+        let Some(hook) = name.and_then(|name| routes.hooks.get(name)) else {
             let _ = read_body(body, false).await;
             return refuse(StatusCode::NOT_FOUND, "no such webhook");
         };
@@ -820,17 +979,19 @@ impl Server {
 /// Healthy while every webhook and human is connected to the hub.
 impl metrics::Source for Server {
     fn healthy(&self) -> bool {
-        self.hooks.values().all(|hook| hook.connected()) && self.humans.iter().all(|human| human.connected())
+        let routes = self.routes();
+        routes.hooks.values().all(|hook| hook.connected()) && routes.humans.iter().all(|human| human.connected())
     }
 
     fn render(&self, out: &mut Exposition) {
-        let mut hooks: Vec<_> = self.hooks.values().collect();
+        let routes = self.routes();
+        let mut hooks: Vec<_> = routes.hooks.values().collect();
         hooks.sort_by(|a, b| a.config.name.cmp(&b.config.name));
         out.family("ants_nats_connected", Kind::Gauge, "Whether the user's connection to NATS is up (1) or not (0).");
         for hook in &hooks {
             out.sample("ants_nats_connected", &[("user", hook.config.name.as_str())], metrics::flag(hook.connected()));
         }
-        for human in &self.humans {
+        for human in &routes.humans {
             let name = human.config.name.as_str();
             out.sample("ants_nats_connected", &[("user", name)], metrics::flag(human.connected()));
         }
@@ -1108,6 +1269,41 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_reload_starts_new_webhooks_and_humans_stops_removed_ones_and_restarts_changed_ones() {
+        const ALICE: &str = "[[human]]\nname = \"alice\"\n[[human.notify]]\nkind = \"ntfy\"\ntopic = \"a\"\n";
+        let hook =
+            |name: &str, text: &str| HOOK.replace("github", name) + &format!("ant = \"dev-a\"\ntext = \"{text}\"\n");
+        let (mut tasks, (failed, _failed)) = (JoinSet::new(), mpsc::unbounded_channel());
+        let first = parse(&format!("{}{}{ALICE}", hook("kept", "{body}"), hook("changed", "{body}"))).unwrap();
+        let mut running = Running::new("nats://127.0.0.1:1", None, &first);
+        let before = running.apply(first, &mut tasks, &failed);
+        let stopped = running.hooks[&p("changed")].task.clone();
+
+        let second =
+            format!("path = \"/in\"\n{}{}{}{ALICE}", hook("kept", "{body}"), hook("changed", "{id}"), hook("new", "x"));
+        let after = running.apply(parse(&second).unwrap(), &mut tasks, &failed);
+        assert_eq!(after.prefix, "/in/");
+        assert!(Arc::ptr_eq(&before.hooks["kept"], &after.hooks["kept"]), "an unchanged webhook carries on");
+        assert!(!Arc::ptr_eq(&before.hooks["changed"], &after.hooks["changed"]), "a changed one starts again");
+        assert!(Arc::ptr_eq(&before.hooks["changed"].outcomes, &after.hooks["changed"].outcomes), "its counts stay");
+        assert!(after.hooks.contains_key("new") && Arc::ptr_eq(&before.humans[0], &after.humans[0]));
+        tokio::task::yield_now().await;
+        assert!(stopped.is_finished());
+
+        let human = running.humans[&p("alice")].task.clone();
+        let third = parse(&hook("new", "x")).unwrap();
+        let removed = running.apply(third, &mut tasks, &failed);
+        assert_eq!(removed.hooks.keys().collect::<Vec<_>>(), ["new"]);
+        assert!(removed.humans.is_empty() && running.humans.is_empty());
+        tokio::task::yield_now().await;
+        assert!(human.is_finished(), "a human no longer listed stops");
+
+        let other_hub = parse(&format!("nats = \"nats://127.0.0.1:2\"\n{}", hook("new", "x"))).unwrap();
+        let moved = running.apply(other_hub, &mut tasks, &failed);
+        assert!(!Arc::ptr_eq(&removed.hooks["new"], &moved.hooks["new"]), "another hub restarts every webhook");
+    }
+
     #[test]
     fn a_secret_file_must_be_private() {
         let dir = ants_test_support::scratch_dir("webhook-secret");
@@ -1189,13 +1385,15 @@ pub(crate) mod tests {
         format!("sha256={}", HEXLOWER.encode(hmac::sign(&key, body).as_ref()))
     }
 
-    /// `ants webhook serve` with the config at `path`, and where it listens.
+    /// `ants webhook serve` with the config at `path`, checked for changes every 50 ms, and where it listens.
     async fn start(path: &Path, nats: &str) -> (JoinHandle<Result<()>>, SocketAddr) {
         let config = Config::load(path).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let nats = nats.to_owned();
-        (tokio::spawn(async move { serve(config, &nats, None, listener).await }), addr)
+        let (nats, path) = (nats.to_owned(), path.to_owned());
+        let triggers = crate::reload::Triggers::new(path.clone(), Duration::from_millis(50)).unwrap();
+        let reload = Reload { triggers, load: move || Config::load(&path) };
+        (tokio::spawn(async move { serve(config, &nats, None, listener, reload).await }), addr)
     }
 
     /// Send until the webhook is connected: 503 until then.
@@ -1386,6 +1584,41 @@ pub(crate) mod tests {
         assert!(mentions("news").await.is_empty(), "never parsed from the event");
         assert_eq!(mentions("alerts").await, [p("dev-b"), p("carol")]);
         assert_eq!(mentions("ci").await, [p("dev-a"), p("dev-b")]);
+    }
+
+    #[tokio::test]
+    async fn an_edited_config_is_served_on_the_same_listener_and_a_bad_one_is_not() {
+        let Some((server, _, secret)) = hub().await else { return };
+        let entry = |name: &str| {
+            let creds = creds(&server, &p(name), Destination::Ant(p("dev-a")));
+            format!(
+                "[[webhook]]\nname = \"{name}\"\ncreds = {creds:?}\nauth = \"bearer\"\nsecret_file = {secret:?}\n\
+                 ant = \"dev-a\"\n"
+            )
+        };
+        let path = server.dir().join("webhooks.toml");
+        std::fs::write(&path, entry("github")).unwrap();
+        let (ingress, addr) = start(&path, &server.url).await;
+        let token = [("Authorization", "Bearer s3cret")];
+        assert_eq!(deliver(addr, "/hooks/github", &token, b"one").await.status, 202);
+        assert_eq!(request(addr, "POST", "/hooks/gitlab", &token, b"two").await.status, 404);
+
+        std::fs::write(&path, entry("gitlab")).unwrap();
+        let mut answer = request(addr, "POST", "/hooks/gitlab", &token, b"two").await;
+        for _ in 0..100 {
+            if answer.status != 404 && answer.status != 503 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            answer = request(addr, "POST", "/hooks/gitlab", &token, b"two").await;
+        }
+        assert_eq!(answer.status, 202, "{}", answer.body);
+        assert_eq!(request(addr, "POST", "/hooks/github", &token, b"one").await.status, 404, "removed");
+
+        std::fs::write(&path, "[[webhook]]\nname = \"broken\"\n").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(request(addr, "POST", "/hooks/gitlab", &token, b"three").await.status, 202, "still served");
+        assert!(!ingress.is_finished());
     }
 
     #[tokio::test]

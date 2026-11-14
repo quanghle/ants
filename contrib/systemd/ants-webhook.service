@@ -2,6 +2,7 @@
 # User unit: scripts/install-units.sh --webhook fills in the @...@ placeholders and installs it in
 # ~/.config/systemd/user. Until ants-nats listens, requests answer 503 and the ingress retries the connection.
 # Secrets come from secret_file entries of the config file.
+# The ingress reloads an edited config file within seconds; to reload at once: systemctl --user reload ants-webhook
 
 [Unit]
 Description=ants: webhook ingress
@@ -10,6 +11,7 @@ After=ants-nats.service
 
 [Service]
 ExecStart="@ANTS@" webhook serve --config "@WEBHOOK_CONFIG@"
+ExecReload=kill -HUP $MAINPID
 Environment=NO_COLOR=1
 Restart=on-failure
 RestartSec=10

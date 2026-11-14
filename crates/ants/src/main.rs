@@ -1353,18 +1353,22 @@ async fn main() -> Result<()> {
                 Some(path) => path,
                 None => webhook::default_path()?,
             };
-            let mut config = webhook::Config::load(&path)?;
-            config.metrics = metrics.or(config.metrics);
-            let listen = listen.or_else(|| config.listen.clone()).unwrap_or_else(|| webhook::DEFAULT_LISTEN.to_owned());
-            let addr = bridge::listen_addr(&listen, false)?;
+            let load = || {
+                let mut config = webhook::Config::load(&path)?;
+                config.metrics = metrics.or(config.metrics);
+                config.listen = listen.clone().or(config.listen);
+                Ok(config)
+            };
+            let config = load()?;
+            let addr = config.listen.as_deref().unwrap_or(webhook::DEFAULT_LISTEN);
+            let addr = bridge::listen_addr(addr, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
-            let nats = config.nats.clone().unwrap_or_else(|| cli.nats.clone());
-            let domain = config.js_domain.clone().or_else(|| domain.cloned());
             tracing::info!("webhooks on http://{addr}{}/<webhook>", config.path);
             if config.links.is_some() {
                 tracing::info!("approval links on http://{addr}{}/_approval", config.path);
             }
-            upgrade::or_exit(webhook::serve(config, &nats, domain.as_ref(), listener), &upgrade).await
+            let reload = webhook::Reload { triggers: reload::Triggers::new(path.clone(), reload::CHECK_EVERY)?, load };
+            upgrade::or_exit(webhook::serve(config, &cli.nats, domain, listener, reload), &upgrade).await
         }
         Command::Bridge(BridgeCommand::Connect {
             url,
