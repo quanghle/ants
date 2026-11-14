@@ -97,6 +97,11 @@ pub const READ_BUCKET: &str = "ants_read";
 /// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
 /// webhook serve` reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
+/// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
+/// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
+/// webhook serve` before each notice. Each human reads and writes only its own key ([`Permissions::for_user`]); entries
+/// never expire, what they hold ends at the deadlines it carries.
+pub const NOTIFY_BUCKET: &str = "ants_notify";
 /// KV bucket of the reactions to messages: one [`ReactionEntry`] per reactor, message and reaction, keyed by
 /// [`reaction_key`]. Each user writes, and deletes, only its own keys ([`Permissions::for_user`]), a human's devices sharing
 /// the human's; only humans read the others'. Its stream denies deletes, purges and rollups, so no one wipes the others'
@@ -653,6 +658,11 @@ pub mod subject {
         format!("$KV.{}.{human}", super::READ_BUCKET)
     }
 
+    /// The [`super::NotifyPrefs`] of a human in [`super::NOTIFY_BUCKET`]: the subject only that human puts them on.
+    pub fn notify_prefs(human: &UserId) -> String {
+        format!("$KV.{}.{human}", super::NOTIFY_BUCKET)
+    }
+
     /// Every [`super::Presence`] of a human's devices in [`super::PRESENCE_BUCKET`]: the subjects only that human puts
     /// them on.
     pub fn presence_of(human: &UserId) -> String {
@@ -989,6 +999,20 @@ fn presence_rights(human: &UserId) -> [String; 3] {
     [format!("$JS.API.STREAM.CREATE.{presence}"), format!("$JS.API.DIRECT.GET.{presence}.{own}"), own]
 }
 
+/// What a human's credentials need to hold back its notifications ([`NOTIFY_BUCKET`]): creating the bucket and reading
+/// and writing its own [`NotifyPrefs`] only, by key, so no human snoozes or mutes another's; `ants webhook serve`
+/// reads them with the human's own credentials.
+fn notify_prefs_rights(human: &UserId) -> [String; 4] {
+    let notify = kv_stream(NOTIFY_BUCKET);
+    let prefs = subject::notify_prefs(human);
+    [
+        format!("$JS.API.STREAM.INFO.{notify}"),
+        format!("$JS.API.STREAM.CREATE.{notify}"),
+        format!("$JS.API.DIRECT.GET.{notify}.{prefs}"),
+        prefs,
+    ]
+}
+
 /// What a user's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
 /// gets its own keys only, so no one forges or removes another's reaction; and for a human, creating the bucket and
 /// reading every reaction, singly and through the ordered consumers behind listing and watching them. An ant reads no
@@ -1080,7 +1104,8 @@ impl Permissions {
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
-    /// ([`presence_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
+    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications
+    /// ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
     /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
@@ -1243,6 +1268,7 @@ impl Permissions {
             publish.extend(read_marker_rights(user));
             publish.extend(presence_rights(user));
             publish.extend(thread_rights(user));
+            publish.extend(notify_prefs_rights(user));
             subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
@@ -1953,6 +1979,39 @@ impl ThreadMarks {
             return Some(Mark::Pinned);
         }
         self.archived.get(thread).map(|a| Mark::Archived { new_activity: last > a.after })
+    }
+}
+
+/// What a human holds back of its notifications for a while, on all its devices: kept under the human's key in
+/// [`NOTIFY_BUCKET`], updated with compare-and-set by `ants notify snooze|resume` and `ants thread mute|unmute`, and
+/// read by `ants webhook serve` before each notice. Each hold ends at its deadline, with no one there to lift it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyPrefs {
+    /// Until when every notice the human's config does not let through (`bypass`) is held back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    /// The muted threads, each until when: none of their notices are sent.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub muted: std::collections::BTreeMap<ThreadId, DateTime<Utc>>,
+}
+
+impl NotifyPrefs {
+    /// Whether a snooze holds at `now`.
+    pub fn snoozed(&self, now: DateTime<Utc>) -> bool {
+        self.snoozed_until.is_some_and(|until| now < until)
+    }
+
+    /// Whether `thread` is muted at `now`.
+    pub fn is_muted(&self, thread: &ThreadId, now: DateTime<Utc>) -> bool {
+        self.muted.get(thread).is_some_and(|until| now < *until)
+    }
+
+    /// Drop the holds that ended by `now`.
+    pub fn prune(&mut self, now: DateTime<Utc>) {
+        if !self.snoozed(now) {
+            self.snoozed_until = None;
+        }
+        self.muted.retain(|_, until| now < *until);
     }
 }
 

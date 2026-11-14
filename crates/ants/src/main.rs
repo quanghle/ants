@@ -20,6 +20,7 @@ mod notify;
 mod outbox;
 mod presence;
 mod progress;
+mod quiet;
 mod reload;
 mod renew;
 mod retire;
@@ -211,6 +212,10 @@ enum Command {
     /// consumed or marked read. Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
+    /// Hold back the notifications `ants webhook serve` pushes to the CLI's human for a while, on every device of the
+    /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
+    #[command(subcommand)]
+    Notify(NotifyCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
     /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
@@ -756,6 +761,40 @@ enum ThreadCommand {
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
+    /// Hold back every notification `ants webhook serve` pushes to the CLI's human about a thread, on every device of
+    /// the human, whatever the human's `bypass` lets through. Held notices are dropped, not sent later.
+    Mute {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+        /// How long (default: 30d).
+        #[arg(long = "for", value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+        duration: Option<Duration>,
+    },
+    /// Notify the CLI's human about a muted thread again.
+    Unmute {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum NotifyCommand {
+    /// Hold back every notice for DURATION (such as 30m, 1h or 2d), but those the human's `bypass` in the webhook
+    /// config lets through. Held notices are dropped, not sent later; nothing is marked read or decided.
+    Snooze {
+        #[arg(value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+        duration: Duration,
+    },
+    /// End a snooze.
+    Resume,
+    /// Show the snooze and the muted threads (quiet hours are in the webhook config).
+    Status {
+        /// One JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1229,6 +1268,11 @@ async fn run() -> Result<()> {
             let search = search::Search { from, to, channel, kinds, grep, limit, ..Default::default() };
             search::search(&nats()?, search, since, until, json).await
         }
+        Command::Thread(ThreadCommand::Mute { thread, duration }) => quiet::mute(&nats()?, thread, duration).await,
+        Command::Thread(ThreadCommand::Unmute { thread }) => quiet::unmute(&nats()?, thread).await,
+        Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
+        Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
+        Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
         Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
@@ -1737,6 +1781,9 @@ async fn run() -> Result<()> {
                     Err(e) => println!("fail  {sink}: {e:#}"),
                 }
             }
+            if let Some(quiet) = entry.quiet_hours(chrono::Utc::now()) {
+                println!("{quiet}; `ants notify status` shows the snooze and muted threads");
+            }
             let failed = results.iter().filter(|(_, sent)| sent.is_err()).count();
             match failed {
                 0 => Ok(()),
@@ -1852,7 +1899,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let mut lines: Vec<String> = fixed.iter().map(|finding| finding.fixed()).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
-        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -1866,7 +1913,8 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::REACTIONS_BUCKET,
         ants_proto::THREADS_BUCKET,
         ants_proto::READ_BUCKET,
-        ants_proto::PRESENCE_BUCKET
+        ants_proto::PRESENCE_BUCKET,
+        ants_proto::NOTIFY_BUCKET
     ));
     Ok(lines)
 }

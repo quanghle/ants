@@ -10,9 +10,10 @@ use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
-    PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
-    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET,
+    PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION,
+    WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{
@@ -40,11 +41,12 @@ pub enum Object {
     Threads,
     Read,
     Presence,
+    Notify,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -59,6 +61,7 @@ impl Object {
         Self::Threads,
         Self::Read,
         Self::Presence,
+        Self::Notify,
     ];
 
     /// The bucket's name; None for the stream.
@@ -78,6 +81,7 @@ impl Object {
             Self::Threads => THREADS_BUCKET,
             Self::Read => READ_BUCKET,
             Self::Presence => PRESENCE_BUCKET,
+            Self::Notify => NOTIFY_BUCKET,
         })
     }
 
@@ -110,6 +114,7 @@ impl Object {
             Self::Threads => Spec::Bucket(Box::new(threads_config())),
             Self::Read => Spec::Bucket(Box::new(read_config())),
             Self::Presence => Spec::Bucket(Box::new(presence_config())),
+            Self::Notify => Spec::Bucket(Box::new(notify_config())),
         }
     }
 
@@ -515,6 +520,12 @@ pub fn threads_config() -> kv::Config {
     lasting_config(THREADS_BUCKET, "Thread titles, and the threads each human pinned or archived")
 }
 
+/// What each human holds back of its notifications ([`NOTIFY_BUCKET`]): entries last, their holds end at the deadlines
+/// they carry.
+pub fn notify_config() -> kv::Config {
+    lasting_config(NOTIFY_BUCKET, "Each human's notification snooze and muted threads, on all its devices")
+}
+
 /// Where the devices of humans read ([`PRESENCE_BUCKET`]), whose entries expire [`PRESENCE_TTL`] after their last put.
 pub fn presence_config() -> kv::Config {
     kv::Config {
@@ -615,11 +626,11 @@ mod tests {
             denied.to_string(),
             format!("bucket ants_read is missing, and the credentials may not fix it ({read_create})")
         );
-        let left = [(Object::Read, None), (Object::Presence, None)];
+        let left = [(Object::Read, None), (Object::Presence, None), (Object::Notify, None)];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
         // As a human's credentials, which get no stream info of the presence bucket but may create it.
         let human = |s: &str| s != Object::Presence.info_subject();
-        assert_eq!(problems(&init(&js, human).await.unwrap()), [(Object::Read, None)]);
+        assert_eq!(problems(&init(&js, human).await.unwrap()), [(Object::Read, None), (Object::Notify, None)]);
         assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there and up to date");
         for object in Object::ALL.into_iter().filter(|o| *o != Object::Stream && *o != Object::Owners) {

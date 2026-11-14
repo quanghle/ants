@@ -104,6 +104,8 @@ struct File {
     public_url: Option<String>,
     action_secret_env: Option<String>,
     action_secret_file: Option<PathBuf>,
+    /// The time zone of the humans' quiet hours, unless one names its own.
+    timezone: Option<String>,
     #[serde(default, rename = "webhook")]
     webhooks: Vec<Entry>,
     #[serde(default, rename = "human")]
@@ -241,9 +243,15 @@ impl Config {
                 .with_context(|| format!("webhook config {shown}: webhook {name}"))?;
             webhooks.push(hook);
         }
+        let timezone = file
+            .timezone
+            .as_deref()
+            .map(ants_daemon::schedule::time_zone)
+            .transpose()
+            .with_context(|| format!("webhook config {shown}"))?;
         let mut humans: Vec<notify::Human> = Vec::with_capacity(file.humans.len());
         for entry in file.humans {
-            let human = notify::Human::from_entry(entry, &resolve, &env)
+            let human = notify::Human::from_entry(entry, timezone.as_ref(), &resolve, &env)
                 .with_context(|| format!("webhook config {shown}: human"))?;
             let name = &human.name;
             if humans.iter().any(|h| &h.name == name) {
@@ -1945,13 +1953,20 @@ pub(crate) mod tests {
 
         let plain = Envelope::new(dev_a.clone(), alice.clone(), "done");
         ant.publish(plain.subject(), serde_json::to_vec(&plain).unwrap().into()).await.unwrap().await.unwrap();
+        let replied = Envelope::new(alice.clone(), dev_a.clone(), "build it").reply(
+            dev_a.clone(),
+            "built",
+            ants_proto::Role::Human,
+        );
+        let replied = replied.unwrap();
+        ant.publish(replied.subject(), serde_json::to_vec(&replied).unwrap().into()).await.unwrap().await.unwrap();
         let escalation =
             ants_proto::Escalation::new(dev_a.clone(), plain.thread_id.clone(), ants_proto::EscalationReason::Asked);
         let escalated =
             Envelope::new(dev_a.clone(), alice.clone(), "which database?").with_escalation(Some(escalation));
         ant.publish(escalated.subject(), serde_json::to_vec(&escalated).unwrap().into()).await.unwrap().await.unwrap();
         let (path, body) = next(&mut posts).await;
-        assert_eq!(path, "/", "plain messages are not notified");
+        assert_eq!(path, "/", "plain messages, and replies unless completions = true, are not notified");
         assert_eq!(body["title"], "dev-a escalates: asked on dev-a");
         assert!(body["message"].as_str().unwrap().starts_with("which database?"), "{body}");
         assert!(body.get("actions").is_none());
@@ -2060,5 +2075,104 @@ pub(crate) mod tests {
             [pair("any", escalated), pair("laptop", escalated), pair("phone", escalated)],
             "the laptop stopped following"
         );
+    }
+
+    #[tokio::test]
+    async fn held_notices_are_dropped_unread_and_undecided_and_each_reply_is_notified_once() {
+        let Some((server, js, _)) = hub().await else { return };
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let creds = server.creds_as(&alice, ants_proto::Role::Human);
+        let (sink, mut posts) = sink().await;
+        let config = server.dir().join("webhooks.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\nbypass = [\"escalations\"]\n\
+                 [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice\"\n"
+            ),
+        )
+        .unwrap();
+        // Two services listing alice, which share her consumer.
+        let (_one, _) = start(&config, &server.url).await;
+        let (_two, _) = start(&config, &server.url).await;
+        let (_, own) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        let stream = own.get_stream(STREAM).await.unwrap();
+        for _ in 0..100 {
+            if stream.consumer_info(&ants_proto::notify_consumer(&alice)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (_, ant) = server.connect(&dev_a).await;
+        let send = async |envelope: &Envelope| {
+            ant.publish(envelope.subject(), serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
+        };
+        let reply = |thread: &ThreadId, text: &str| {
+            let asked = Envelope::on_thread(thread.clone(), alice.clone(), dev_a.clone(), "go on");
+            asked.reply(dev_a.clone(), text, ants_proto::Role::Human).unwrap()
+        };
+        let messages = async |posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize| {
+            let mut got = Vec::new();
+            for _ in 0..n {
+                let (_, body) = next(posts).await;
+                let first = body["message"].as_str().unwrap().lines().next().unwrap_or_default().to_owned();
+                got.push((body["title"].as_str().unwrap().to_owned(), first));
+            }
+            got.sort();
+            got
+        };
+        let replied = |text: &str| ("dev-a replied".to_owned(), text.to_owned());
+        let hold = async |change: &(dyn Fn(&mut ants_proto::NotifyPrefs, chrono::DateTime<chrono::Utc>) + Sync)| {
+            crate::quiet::update(&own, &alice, change).await.unwrap();
+        };
+        let (thread, muted) = (ThreadId::generate(), ThreadId::generate());
+
+        send(&reply(&thread, "first")).await;
+        send(&reply(&thread, "second")).await;
+        assert_eq!(messages(&mut posts, 2).await, [replied("first"), replied("second")]);
+
+        hold(&|prefs, now| prefs.snoozed_until = Some(now + chrono::TimeDelta::hours(1))).await;
+        let tool = ants_proto::ToolCall { kind: "execute".into(), title: "make".into(), ..Default::default() };
+        let options = vec![ants_proto::Verdict::AllowOnce];
+        let asked =
+            ants_proto::ApprovalRequest::new(dev_a.clone(), thread.clone(), tool, options, Duration::from_secs(600));
+        ant.publish(asked.subject(), serde_json::to_vec(&asked).unwrap().into()).await.unwrap().await.unwrap();
+        send(&reply(&thread, "while snoozed")).await;
+        let escalation =
+            ants_proto::Escalation::new(dev_a.clone(), thread.clone(), ants_proto::EscalationReason::Asked);
+        send(&Envelope::new(dev_a.clone(), alice.clone(), "which database?").with_escalation(Some(escalation))).await;
+        assert_eq!(
+            messages(&mut posts, 1).await,
+            [("dev-a escalates: asked on dev-a".to_owned(), "which database?".to_owned())],
+            "escalations bypass the snooze"
+        );
+
+        hold(&|prefs, now| {
+            prefs.snoozed_until = None;
+            prefs.muted.insert(muted.clone(), now + chrono::TimeDelta::hours(1));
+        })
+        .await;
+        send(&reply(&muted, "on the muted thread")).await;
+        let escalation = ants_proto::Escalation::new(dev_a.clone(), muted.clone(), ants_proto::EscalationReason::Asked);
+        send(&Envelope::new(dev_a.clone(), alice.clone(), "muted anyway").with_escalation(Some(escalation))).await;
+        send(&reply(&thread, "elsewhere")).await;
+        assert_eq!(messages(&mut posts, 1).await, [replied("elsewhere")], "a mute holds back escalations too");
+
+        // A snooze whose deadline passed holds nothing back, with no one there to lift it.
+        hold(&|prefs, now| prefs.snoozed_until = Some(now - chrono::TimeDelta::seconds(1))).await;
+        send(&reply(&thread, "after the snooze")).await;
+        assert_eq!(messages(&mut posts, 1).await, [replied("after the snooze")]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), posts.recv()).await.is_err(),
+            "nothing sent twice, nothing held sent later"
+        );
+
+        assert!(stored::<ants_proto::ApprovalDecision>(&js, &asked.decision_subject()).await.is_empty(), "undecided");
+        let seq = stream.get_last_raw_message_by_subject(&asked.subject()).await.unwrap().sequence;
+        let state = crate::tools::state(&own, &stream, seq, &asked, chrono::Utc::now()).await.unwrap();
+        assert_matches!(state, crate::tools::State::Pending, "pending");
+        if let Ok(read) = js.get_key_value(ants_proto::READ_BUCKET).await {
+            assert!(read.entry(alice.as_str()).await.unwrap().is_none(), "nothing marked read");
+        }
     }
 }

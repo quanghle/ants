@@ -32,9 +32,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ants_daemon::bus;
+use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, STREAM, UserId, Uuid,
-    Verdict, notify_consumer, subject,
+    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, NOTIFY_BUCKET, NotifyPrefs,
+    STREAM, ThreadId, UserId, Uuid, Verdict, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, stream::Stream};
@@ -45,6 +46,7 @@ use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::body::Bytes;
 use hyper::http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use hyper_util::rt::TokioIo;
+use jiff::tz::TimeZone;
 use ring::hmac;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -98,8 +100,26 @@ pub struct HumanEntry {
     #[serde(default = "yes")]
     escalations: bool,
     ants: Option<Vec<UserId>>,
+    /// Whether an ant's reply reaching the human's inbox is notified.
+    #[serde(default)]
+    completions: bool,
+    /// The daily window notices are held back in, such as `22:00-07:00`.
+    quiet: Option<String>,
+    /// The time zone `quiet` reads in, instead of the file's.
+    timezone: Option<String>,
+    /// What quiet hours and a snooze let through.
+    #[serde(default)]
+    bypass: Vec<Bypass>,
     #[serde(default)]
     notify: Vec<SinkEntry>,
+}
+
+/// What kind of notice quiet hours and a snooze let through, as a human's `bypass` lists them.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Bypass {
+    Approvals,
+    Escalations,
 }
 
 /// One `[[human.notify]]`.
@@ -156,7 +176,55 @@ pub struct Human {
     /// The ants whose tool requests are notified: `None` for none, an empty list for every ant.
     approvals: Option<Vec<UserId>>,
     escalations: bool,
+    completions: bool,
+    quiet: Option<QuietHours>,
+    bypass: Vec<Bypass>,
     sinks: Vec<Target>,
+}
+
+/// A daily window in a time zone, from `start` to `end` (minutes after midnight, `end` excluded), in which notices are
+/// held back; one ending before it starts crosses midnight.
+#[derive(Debug, PartialEq, Eq)]
+struct QuietHours {
+    start: u16,
+    end: u16,
+    zone: TimeZone,
+    /// As written, for display.
+    text: String,
+}
+
+impl QuietHours {
+    /// `text`, `HH:MM-HH:MM`, read in `zone`.
+    fn parse(text: &str, zone: TimeZone) -> Result<Self> {
+        let minutes = |t: &str| -> Option<u16> {
+            let (h, m) = t.trim().split_once(':')?;
+            let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+            (h < 24 && m < 60 && t.trim().len() == 5).then_some(h * 60 + m)
+        };
+        let window = text.split_once('-').and_then(|(start, end)| Some((minutes(start)?, minutes(end)?)));
+        let Some((start, end)) = window else { bail!("quiet {text:?}: expected HH:MM-HH:MM, such as 22:00-07:00") };
+        if start == end {
+            bail!("quiet {text:?}: the window starts where it ends");
+        }
+        Ok(Self { start, end, zone, text: text.trim().to_owned() })
+    }
+
+    /// Whether `at` falls in the window, by the wall clock of its time zone.
+    fn contains(&self, at: DateTime<Utc>) -> bool {
+        let Ok(at) = jiff::Timestamp::from_second(at.timestamp()) else { return false };
+        let time = self.zone.to_datetime(at);
+        let now = u16::try_from(time.hour()).unwrap_or(0) * 60 + u16::try_from(time.minute()).unwrap_or(0);
+        match self.start < self.end {
+            true => self.start <= now && now < self.end,
+            false => now >= self.start || now < self.end,
+        }
+    }
+}
+
+impl std::fmt::Display for QuietHours {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.text, self.zone.iana_name().unwrap_or("UTC"))
+    }
 }
 
 /// A sink, and the device of the human it is the push target of, if any. A sink of no device gets every notice.
@@ -202,8 +270,10 @@ const NTFY: &str = "https://ntfy.sh";
 const TELEGRAM: &str = "https://api.telegram.org";
 
 impl Human {
+    /// Check `entry`, reading its quiet hours in its own time zone, else `timezone` (the file's), else UTC.
     pub fn from_entry(
         entry: HumanEntry,
+        timezone: Option<&TimeZone>,
         resolve: &impl Fn(&Path) -> PathBuf,
         env: &impl Fn(&str) -> Option<String>,
     ) -> Result<Self> {
@@ -217,9 +287,20 @@ impl Human {
             (true, Some(ants)) if ants.is_empty() => bail!("ants = []: give the ants, or approvals = false"),
             (true, Some(ants)) => Some(ants),
         };
-        if approvals.is_none() && !entry.escalations {
-            bail!("approvals and escalations are both off: nothing to notify");
+        if approvals.is_none() && !entry.escalations && !entry.completions {
+            bail!("approvals, escalations and completions are all off: nothing to notify");
         }
+        let quiet = match (entry.quiet, entry.timezone) {
+            (None, Some(_)) => bail!("timezone goes with quiet only"),
+            (None, None) => None,
+            (Some(quiet), zone) => {
+                let zone = match zone {
+                    Some(name) => ants_daemon::schedule::time_zone(&name)?,
+                    None => timezone.cloned().unwrap_or(TimeZone::UTC),
+                };
+                Some(QuietHours::parse(&quiet, zone)?)
+            }
+        };
         let sinks = entry
             .notify
             .into_iter()
@@ -232,7 +313,16 @@ impl Human {
             })
             .collect::<Result<Vec<_>>>()?;
         let creds = entry.creds.as_deref().map(resolve);
-        Ok(Self { name: entry.name, creds, approvals, escalations: entry.escalations, sinks })
+        Ok(Self {
+            name: entry.name,
+            creds,
+            approvals,
+            escalations: entry.escalations,
+            completions: entry.completions,
+            quiet,
+            bypass: entry.bypass,
+            sinks,
+        })
     }
 
     /// Fail unless the credentials are the human's.
@@ -263,10 +353,29 @@ impl Human {
         self.sinks.iter().filter_map(|t| t.device)
     }
 
+    /// What the human's quiet hours are and whether they hold at `now`, for display; None without them.
+    pub fn quiet_hours(&self, now: DateTime<Utc>) -> Option<String> {
+        let quiet = self.quiet.as_ref()?;
+        let state = if quiet.contains(now) { "on now" } else { "off now" };
+        let through: Vec<&str> = self
+            .bypass
+            .iter()
+            .map(|b| match b {
+                Bypass::Approvals => "approvals",
+                Bypass::Escalations => "escalations",
+            })
+            .collect();
+        let through = match through.is_empty() {
+            true => "nothing".to_owned(),
+            false => through.join(" and "),
+        };
+        Some(format!("quiet hours {quiet} ({state}); quiet hours and a snooze let {through} through"))
+    }
+
     /// The consumer's subjects: tool requests and the human's inbox, as configured.
     fn subjects(&self) -> Vec<String> {
         let approvals = self.approvals.is_some().then(|| subject::ALL_APPROVAL_REQUESTS.to_owned());
-        let escalations = self.escalations.then(|| subject::inbox_of(&self.name));
+        let escalations = (self.escalations || self.completions).then(|| subject::inbox_of(&self.name));
         approvals.into_iter().chain(escalations).collect()
     }
 
@@ -639,8 +748,46 @@ enum About {
     Approval { request: Box<ApprovalRequest>, seq: u64 },
     /// An escalation reaching the human's inbox, in the message `id` from `from`.
     Escalation { id: Uuid, from: UserId, escalation: Box<Escalation> },
+    /// An ant's reply `id` from `from` on `thread`, reaching the human's inbox.
+    Completion { id: Uuid, from: UserId, thread: ThreadId },
     /// A test notice of `ants webhook notify-test`.
     Test { id: Uuid },
+}
+
+impl About {
+    /// The thread the notice is about, which muting it holds back; none for a test.
+    fn thread(&self) -> Option<&ThreadId> {
+        match self {
+            Self::Approval { request, .. } => Some(&request.thread_id),
+            Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
+            Self::Completion { thread, .. } => Some(thread),
+            Self::Test { .. } => None,
+        }
+    }
+
+    /// The `bypass` entry letting it through quiet hours and a snooze, if one may.
+    fn bypass(&self) -> Option<Bypass> {
+        match self {
+            Self::Approval { .. } => Some(Bypass::Approvals),
+            Self::Escalation { .. } => Some(Bypass::Escalations),
+            Self::Completion { .. } | Self::Test { .. } => None,
+        }
+    }
+}
+
+/// Why `about` is held back from `human` at `now`, given the holds `prefs` the human set, if it is: a muted thread
+/// holds back every notice of it; quiet hours and a snooze each one the human's `bypass` does not let through.
+fn held(human: &Human, about: &About, prefs: &NotifyPrefs, now: DateTime<Utc>) -> Option<&'static str> {
+    if about.thread().is_some_and(|thread| prefs.is_muted(thread, now)) {
+        return Some("muted thread");
+    }
+    if about.bypass().is_some_and(|kind| human.bypass.contains(&kind)) {
+        return None;
+    }
+    if prefs.snoozed(now) {
+        return Some("snoozed");
+    }
+    human.quiet.as_ref().is_some_and(|quiet| quiet.contains(now)).then_some("quiet hours")
 }
 
 /// `notice` as exec and http sinks get it, at `now`: version [`NOTICE_VERSION`] of the schema the README documents.
@@ -679,6 +826,12 @@ fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "reason": escalation.reason.as_str(),
             "stuck": escalation.stuck,
             "level": escalation.level,
+        }),
+        About::Completion { id, from, thread } => json!({
+            "kind": "completion",
+            "id": id,
+            "ant": from,
+            "thread": thread,
         }),
         About::Test { id } => json!({ "kind": "test", "id": id }),
     };
@@ -782,6 +935,34 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
         about: About::Escalation { id: envelope.id, from: envelope.from.clone(), escalation: escalation.clone() },
         human: envelope.to.clone(),
         title,
+        text,
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
+/// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
+/// escalation, decision or mention and comes from no webhook.
+fn completion_notice(envelope: &Envelope) -> Option<Notice> {
+    let reply = envelope.in_reply_to.is_some()
+        && envelope.escalation.is_none()
+        && envelope.approval.is_none()
+        && envelope.mention.is_none()
+        && !envelope.webhook
+        && envelope.from != envelope.to;
+    if !reply {
+        return None;
+    }
+    let thread = &envelope.thread_id;
+    let text = format!(
+        "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
+        cut(&envelope.text, MAX_TEXT),
+        envelope.from,
+    );
+    Some(Notice {
+        about: About::Completion { id: envelope.id, from: envelope.from.clone(), thread: thread.clone() },
+        human: envelope.to.clone(),
+        title: format!("{} replied", envelope.from),
         text,
         buttons: Vec::new(),
         urgent: false,
@@ -960,6 +1141,8 @@ struct HumanBus {
     js: jetstream::Context,
     stream: Stream,
     present: Present,
+    /// The human's holds ([`NotifyPrefs`]); none when its credentials may not read them.
+    prefs: Option<DirectKv>,
 }
 
 /// A human of the config, and its connection once made.
@@ -1025,7 +1208,24 @@ pub async fn run(
         tracing::warn!(human = %name, "sinks of a device get every notice: {e:#}");
     }
     let present = Present::new(&js, js_domain.as_ref()).await?;
-    let _ = human.bus.set(HumanBus { client, js, stream, present });
+    let prefs = match crate::humans::Rights::from_creds(creds) {
+        Ok(rights) if rights.may_publish(&subject::notify_prefs(name)) => {
+            // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
+            if let Err(e) = crate::quiet::ensure_bucket(&js).await {
+                tracing::warn!(human = %name, "{e:#}");
+            }
+            Some(DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?)
+        }
+        _ => {
+            tracing::warn!(
+                human = %name,
+                "credentials from before snoozes and muted threads: every notice is sent; renew with `ants auth user \
+                 {name} --human`"
+            );
+            None
+        }
+    };
+    let _ = human.bus.set(HumanBus { client, js, stream, present, prefs });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut delay = Duration::from_secs(1);
@@ -1082,11 +1282,15 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
 async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject: &str, payload: &[u8], seq: u64) {
     let config = &human.config;
     let now = Utc::now();
-    let escalation = subject.starts_with(subject::inbox_of(&config.name).trim_end_matches('*'));
-    let notice = if escalation {
+    let inbox = subject.starts_with(subject::inbox_of(&config.name).trim_end_matches('*'));
+    let notice = if inbox {
         match serde_json::from_slice::<Envelope>(payload) {
             Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {
-                escalation_notice(&envelope)
+                match envelope.escalation.is_some() {
+                    true if config.escalations => escalation_notice(&envelope),
+                    false if config.completions => completion_notice(&envelope),
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -1117,12 +1321,35 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         }
     };
     let Some(notice) = notice else { return };
-    let what = if escalation { Following::Inbox } else { Following::Approvals };
+    let prefs = holds(config, bus).await;
+    if let Some(why) = held(config, &notice.about, &prefs, now) {
+        // Dropped, not sent later: the message stays unread and a request pending, as for a notice never sent.
+        tracing::info!(human = %config.name, why, title = notice.title, "held back a notice");
+        return;
+    }
+    let what = if inbox { Following::Inbox } else { Following::Approvals };
     let reading = bus.present.following(&config.name, config.devices(), what).await;
     if !reading.is_empty() {
         tracing::debug!(human = %config.name, devices = ?reading, what = what.as_str(), "skipping devices reading");
     }
     send(config, &notice, |device| !reading.contains(device)).await;
+}
+
+/// The holds `human` set, read anew for each notice: none when they cannot be read, so a failure sends a notice too
+/// many, never one too few.
+async fn holds(human: &Human, bus: &HumanBus) -> NotifyPrefs {
+    let Some(kv) = &bus.prefs else { return NotifyPrefs::default() };
+    match kv.lookup(human.name.as_str()).await {
+        Ok(Lookup::Value(value)) => serde_json::from_slice(&value).unwrap_or_else(|e| {
+            tracing::warn!(human = %human.name, error = %e, "malformed snooze and muted threads: ignored");
+            NotifyPrefs::default()
+        }),
+        Ok(Lookup::NoValue | Lookup::NoBucket) => NotifyPrefs::default(),
+        Err(e) => {
+            tracing::warn!(human = %human.name, error = format!("{e:#}"), "reading the snooze and muted threads");
+            NotifyPrefs::default()
+        }
+    }
 }
 
 /// Whether the message of id `id`, a UUIDv7 stamped when sent, is younger than [`ESCALATION_MAX_AGE`].
@@ -1316,7 +1543,7 @@ mod tests {
             "HOOK_SECRET" => Some("0123456789abcdef-hook".to_owned()),
             _ => None,
         };
-        Human::from_entry(entry, &|p: &Path| Path::new("/etc/ants").join(p), &env)
+        Human::from_entry(entry, None, &|p: &Path| Path::new("/etc/ants").join(p), &env)
     }
 
     fn error(text: &str) -> String {
@@ -1386,6 +1613,131 @@ mod tests {
         }
         let leaked = error("name = \"bob\"\n[[notify]]\nkind = \"slack\"\nsecret_env = \"BOT_TOKEN\"\n");
         assert!(!leaked.contains("123:abc"), "{leaked}");
+    }
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn quiet_hours_read_the_wall_clock_of_their_time_zone_across_midnight() {
+        let night = human(&format!("name = \"bob\"\nquiet = \"22:00-07:00\"\n{NTFY_SINK}")).unwrap();
+        let quiet = night.quiet.as_ref().unwrap();
+        for (time, held) in [("21:59", false), ("22:00", true), ("23:59", true), ("00:00", true), ("06:59", true)] {
+            assert_eq!(quiet.contains(at(&format!("2026-03-10T{time}:30Z"))), held, "{time} UTC");
+        }
+        assert!(!quiet.contains(at("2026-03-10T07:00:00Z")), "the end is not in the window");
+        let day = QuietHours::parse("09:30-17:00", TimeZone::UTC).unwrap();
+        assert!(day.contains(at("2026-03-10T09:30:00Z")) && !day.contains(at("2026-03-10T17:00:00Z")));
+        assert!(!day.contains(at("2026-03-10T03:00:00Z")));
+
+        // Tokyo is UTC+9 all year; New York moves to UTC-4 on 2026-03-08.
+        let tokyo =
+            human(&format!("name = \"bob\"\nquiet = \"22:00-07:00\"\ntimezone = \"Asia/Tokyo\"\n{NTFY_SINK}")).unwrap();
+        let tokyo = tokyo.quiet.as_ref().unwrap();
+        assert!(tokyo.contains(at("2026-03-10T14:00:00Z")), "23:00 in Tokyo");
+        assert!(!tokyo.contains(at("2026-03-10T23:00:00Z")), "08:00 in Tokyo");
+        let entry: HumanEntry =
+            toml::from_str(&format!("name = \"bob\"\nquiet = \"22:00-07:00\"\n{NTFY_SINK}")).unwrap();
+        let york = ants_daemon::schedule::time_zone("America/New_York").unwrap();
+        let york = Human::from_entry(entry, Some(&york), &Path::to_path_buf, &|_: &str| None).unwrap();
+        assert_eq!(
+            york.quiet_hours(at("2026-03-07T03:30:00Z")).unwrap(),
+            "quiet hours 22:00-07:00 America/New_York (on now); quiet hours and a snooze let nothing through",
+            "22:30 EST, in the file's time zone"
+        );
+        assert!(!york.quiet.as_ref().unwrap().contains(at("2026-03-09T11:30:00Z")), "07:30 EDT");
+        assert!(york.quiet.as_ref().unwrap().contains(at("2026-03-09T10:30:00Z")), "06:30 EDT");
+
+        for (text, why) in [
+            ("quiet = \"22:00\"", "expected HH:MM-HH:MM"),
+            ("quiet = \"24:00-07:00\"", "expected HH:MM-HH:MM"),
+            ("quiet = \"7:00-9:00\"", "expected HH:MM-HH:MM"),
+            ("quiet = \"08:00-08:00\"", "starts where it ends"),
+            ("timezone = \"Asia/Tokyo\"", "timezone goes with quiet only"),
+            ("quiet = \"22:00-07:00\"\ntimezone = \"Mars/Base\"", "unknown time zone"),
+            ("bypass = [\"completions\"]", "unknown variant"),
+        ] {
+            let text = format!("name = \"bob\"\n{text}\n{NTFY_SINK}");
+            assert!(error(&text).contains(why), "{text}: {}", error(&text));
+        }
+        let only =
+            human(&format!("name = \"bob\"\napprovals = false\nescalations = false\ncompletions = true\n{NTFY_SINK}"));
+        assert_eq!(only.unwrap().subjects(), ["ants.inbox.bob.*"], "completions read the inbox");
+        let none = format!("name = \"bob\"\napprovals = false\nescalations = false\n{NTFY_SINK}");
+        assert!(error(&none).contains("nothing to notify"), "{}", error(&none));
+    }
+
+    #[test]
+    fn a_mute_holds_back_everything_of_its_thread_and_a_snooze_or_quiet_hours_what_bypass_does_not_list() {
+        let now = at("2026-03-10T12:00:00Z");
+        let bob = human(&format!("name = \"bob\"\nbypass = [\"approvals\"]\n{NTFY_SINK}")).unwrap();
+        let asked = request();
+        let approval = About::Approval { request: Box::new(asked.clone()), seq: 1 };
+        let other = ThreadId::generate();
+        let escalation = About::Escalation {
+            id: Uuid::now_v7(),
+            from: p("dev-a"),
+            escalation: Box::new(Escalation::new(p("dev-a"), other.clone(), ants_proto::EscalationReason::Asked)),
+        };
+        let completion = About::Completion { id: Uuid::now_v7(), from: p("dev-a"), thread: other };
+        let mut prefs = NotifyPrefs::default();
+        for about in [&approval, &escalation, &completion] {
+            assert_eq!(held(&bob, about, &prefs, now), None, "nothing held");
+        }
+
+        prefs.snoozed_until = Some(now + TimeDelta::minutes(5));
+        assert_eq!(held(&bob, &approval, &prefs, now), None, "approvals bypass");
+        assert_eq!(held(&bob, &escalation, &prefs, now), Some("snoozed"));
+        assert_eq!(held(&bob, &completion, &prefs, now), Some("snoozed"));
+        let later = now + TimeDelta::minutes(5);
+        assert_eq!(held(&bob, &completion, &prefs, later), None, "the snooze ended on its own");
+        prefs.prune(later);
+        assert_eq!(prefs, NotifyPrefs::default());
+
+        prefs.muted.insert(asked.thread_id, now + TimeDelta::hours(1));
+        assert_eq!(held(&bob, &approval, &prefs, now), Some("muted thread"), "whatever bypass says");
+        assert_eq!(held(&bob, &completion, &prefs, now), None, "another thread");
+        assert_eq!(held(&bob, &approval, &prefs, now + TimeDelta::hours(1)), None, "the mute ended");
+
+        let night = human(&format!("name = \"bob\"\nquiet = \"11:00-13:00\"\nbypass = [\"escalations\"]\n{NTFY_SINK}"));
+        let night = night.unwrap();
+        let prefs = NotifyPrefs::default();
+        assert_eq!(held(&night, &approval, &prefs, now), Some("quiet hours"));
+        assert_eq!(held(&night, &escalation, &prefs, now), None, "escalations bypass");
+        assert_eq!(held(&night, &completion, &prefs, now), Some("quiet hours"));
+        assert_eq!(held(&night, &completion, &prefs, at("2026-03-10T13:00:00Z")), None);
+    }
+
+    #[test]
+    fn a_reply_is_a_completion_and_nothing_else_is() {
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+        let done = asked.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+        let notice = completion_notice(&done).unwrap();
+        assert_eq!((notice.title.as_str(), &notice.human, notice.urgent), ("dev-a replied", &alice, false));
+        let thread = &asked.thread_id;
+        assert_eq!(
+            notice.text,
+            format!("built\n\nthread {thread}; answer with ants ask --thread {thread} @dev-a TEXT")
+        );
+        let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
+        assert_eq!(
+            (&json["version"], &json["kind"], &json["id"], &json["ant"], &json["thread"]),
+            (&json!(1), &json!("completion"), &json!(done.id), &json!("dev-a"), &json!(thread))
+        );
+        assert_eq!(json["links"], json!([]));
+
+        let started = Envelope::new(dev_a.clone(), alice, "hello");
+        assert!(completion_notice(&started).is_none(), "no reply");
+        let escalated = done.clone().with_escalation(Some(Escalation::new(
+            dev_a,
+            thread.clone(),
+            ants_proto::EscalationReason::Asked,
+        )));
+        assert!(completion_notice(&escalated).is_none(), "an escalation's notice is its own");
+        let hooked = Envelope { webhook: true, ..done };
+        assert!(completion_notice(&hooked).is_none());
     }
 
     /// Where a delivery `POST`s, its bearer token and its JSON body.
