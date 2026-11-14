@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans,
-    JsDomain, Role, State, ThreadId, ThreadOrigin, UserId, subject,
+    CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
+    Humans, JsDomain, Role, State, ThreadId, ThreadOrigin, UserId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -262,6 +262,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         js: &js,
         ant: &config.ant,
         pool: &pool,
+        cancels: Cancels::default(),
         attempts: &attempts,
         answered: &answered,
         buried: &buried,
@@ -297,6 +298,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     tokio::select! {
         () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
         () = escalator.deadlines() => {}
+        () = inbox.hear_cancels() => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;
@@ -387,11 +389,44 @@ struct Retry {
     until: tokio::time::Instant,
 }
 
+/// The prompt running on each thread, and where to send the human who cancels it.
+#[derive(Default)]
+struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<UserId>>>);
+
+impl Cancels {
+    /// Make the prompt about to run on `thread` cancellable until the guard drops; the cancels arrive on the receiver.
+    fn register<'a>(&'a self, thread: &ThreadId) -> (Cancellable<'a>, tokio::sync::mpsc::Receiver<UserId>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        self.0.lock().unwrap().insert(thread.clone(), tx);
+        (Cancellable { cancels: self, thread: thread.clone() }, rx)
+    }
+
+    /// Cancel the prompt running on `thread` for `by`, if one is; one cancelled already stays so.
+    fn cancel(&self, thread: &ThreadId, by: UserId) -> bool {
+        use tokio::sync::mpsc::error::TrySendError;
+        let cancels = self.0.lock().unwrap();
+        cancels.get(thread).is_some_and(|tx| !matches!(tx.try_send(by), Err(TrySendError::Closed(_))))
+    }
+}
+
+struct Cancellable<'a> {
+    cancels: &'a Cancels,
+    thread: ThreadId,
+}
+
+impl Drop for Cancellable<'_> {
+    fn drop(&mut self) {
+        self.cancels.0.lock().unwrap().remove(&self.thread);
+    }
+}
+
 struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
     pool: &'a Pool,
+    /// The prompts running, for `ants cancel`.
+    cancels: Cancels,
     attempts: &'a Attempts,
     answered: &'a Answered,
     /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
@@ -524,6 +559,41 @@ impl Inbox<'_> {
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
             }
         }
+    }
+
+    /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
+    /// running on the thread each one names.
+    async fn hear_cancels(&self) {
+        let mut requests = match self.client.subscribe(subject::cancel_of(self.ant)).await {
+            Ok(requests) => requests,
+            Err(e) => {
+                tracing::warn!(error = %e, "serving without ants cancel");
+                return std::future::pending().await;
+            }
+        };
+        while let Some(msg) = requests.next().await {
+            let request: CancelRequest = match serde_json::from_slice(&msg.payload) {
+                Ok(request) => request,
+                Err(e) => {
+                    tracing::warn!(subject = %msg.subject, error = %e, "ignoring a malformed cancel request");
+                    continue;
+                }
+            };
+            if let Err(e) = request.check_subject(&msg.subject) {
+                tracing::warn!(error = %e, "ignoring a forged cancel request");
+                continue;
+            }
+            let cancelled = self.cancels.cancel(&request.thread_id, request.by.clone());
+            if !cancelled {
+                tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
+            }
+            let answer = request.answer(cancelled);
+            let payload = serde_json::to_vec(&answer).expect("a cancel answer serializes");
+            if let Err(e) = self.client.publish(answer.subject(), payload.into()).await {
+                tracing::warn!(error = %e, "answering a cancel request");
+            }
+        }
+        std::future::pending().await
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
@@ -1119,6 +1189,8 @@ impl Inbox<'_> {
         let text = prompt_text(&text, cut_off, late);
         let prompt =
             Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
+        let (cancellable, mut cancel) = self.cancels.register(thread);
+        let (mut cancelled_by, mut cut_by_cancel) = (None, false);
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
@@ -1127,6 +1199,14 @@ impl Inbox<'_> {
                 r = &mut prompt => break r,
                 Some(update) = streamed.recv() => status.push(update),
                 _ = flush.tick() => status.flush(),
+                Some(by) = cancel.recv(), if cancelled_by.is_none() => {
+                    tracing::info!(%thread, %by, "cancelling the prompt");
+                    if let Some(stop) = stop_tx.take() {
+                        let _ = stop.send(format!("Cancelled by {by}"));
+                        cut_by_cancel = true;
+                    }
+                    cancelled_by = Some(by);
+                }
                 Some(spent) = spend.recv() => {
                     if let Some(cap) = self.record(thread, &spent).await {
                         if let Some(stop) = stop_tx.take() {
@@ -1146,7 +1226,15 @@ impl Inbox<'_> {
             status.push(update);
         }
         status.flush();
-        let reply = reply?;
+        drop(cancellable);
+        let reply = match reply {
+            // What a human cancelled is answered as it stands, never tried again.
+            Err(e) if cancelled_by.is_some() => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "cancelled prompt failed");
+                crate::harness::Reply { text: String::new(), cut: None }
+            }
+            reply => reply?,
+        };
         // Spend reported as the prompt ended, such as its tokens.
         while let Ok(spent) = spend.try_recv() {
             if let Some(cap) = self.record(thread, &spent).await {
@@ -1154,15 +1242,14 @@ impl Inbox<'_> {
             }
         }
 
-        let cut = reply.cut.is_some();
-        let limit = reply.cut.or(reached);
-        let text = match &limit {
-            None => reply.text,
-            Some(limit) => {
-                let notice = format!("[ants] {limit}{}", if cut { "; the prompt was cancelled." } else { "." });
-                [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
-            }
-        };
+        // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
+        let cut = reply.cut.is_some() && !cut_by_cancel;
+        let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
+        let limit_notice =
+            limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
+        let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
+        let notice = [limit_notice, cancel_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
+        let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
@@ -1594,6 +1681,7 @@ mod tests {
                 js: &self.js,
                 ant: &self.dev,
                 pool,
+                cancels: Cancels::default(),
                 attempts: &self.attempts,
                 answered: &self.answered,
                 buried: &self.buried,
@@ -1618,6 +1706,7 @@ mod tests {
             tokio::select! {
                 () = inbox.serve(messages, channels, IDLE, stop) => {}
                 () = escalator.deadlines() => {}
+                () = inbox.hear_cancels() => {}
             }
         }
 
@@ -2004,6 +2093,56 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().cancelled, 1);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    /// Ask the daemon to cancel the prompt on `thread` until it answers, as the daemon may not listen yet.
+    async fn cancel(bus: &Bus, thread: &ThreadId) -> bool {
+        let request = ants_proto::CancelRequest::new(bus.dev.clone(), thread.clone(), UserId::human());
+        let mut answers = bus.client.subscribe(request.reply_subject()).await.unwrap();
+        timeout(WAIT, async {
+            loop {
+                let payload = serde_json::to_vec(&request).unwrap();
+                bus.client.publish(request.subject(), payload.into()).await.unwrap();
+                if let Ok(Some(msg)) = timeout(Duration::from_millis(200), answers.next()).await {
+                    let answer: ants_proto::CancelReply = serde_json::from_slice(&msg.payload).unwrap();
+                    assert_eq!(answer.check_subject(&msg.subject), Ok(()));
+                    assert_eq!(answer.request_id, request.id);
+                    return answer.cancelled;
+                }
+            }
+        })
+        .await
+        .expect("no answer to the cancel request")
+    }
+
+    #[tokio::test]
+    async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let dev_b: UserId = "dev-b".parse().unwrap();
+        let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let t1 = ThreadId::generate();
+        bus.send_from(dev_b.clone(), &t1, "stall").await;
+        bus.send_from(dev_b.clone(), &t1, "after").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert!(!cancel(&bus, &ThreadId::generate()).await, "no prompt runs on another thread");
+            until("the prompt to run", || log.lock().unwrap().prompted == 1).await;
+            assert!(cancel(&bus, &t1).await);
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!(reply.text, "partial\n\n[ants] The prompt was cancelled by human (ants cancel).");
+            assert_eq!(next_reply(&mut to_dev_b).await, (t1.clone(), "after".to_owned()), "the thread goes on");
+            assert!(!cancel(&bus, &t1).await, "nothing left to cancel");
+            assert!(timeout(Duration::from_millis(300), to_human.next()).await.is_err(), "no escalation");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().cancelled, 1);
+        assert_eq!(log.lock().unwrap().prompted, 2, "not retried");
         assert_eq!(bus.unacked().await, 0);
     }
 

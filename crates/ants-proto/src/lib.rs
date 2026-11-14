@@ -518,6 +518,30 @@ pub mod subject {
         format!("ants.status.{ant}.*")
     }
 
+    /// Where a human asks the daemon of `ant` to cancel the prompt running on `thread`
+    /// ([`CancelRequest`](super::CancelRequest); core NATS, not stored). Only humans publish here.
+    pub fn cancel(ant: &UserId, thread: &ThreadId) -> String {
+        format!("ants.cancel.{ant}.{thread}")
+    }
+
+    /// The cancel requests for `ant`, on every thread: what its daemon listens to.
+    pub fn cancel_of(ant: &UserId) -> String {
+        format!("ants.cancel.{ant}.*")
+    }
+
+    /// Every cancel request, of all ants.
+    pub const ALL_CANCELS: &str = "ants.cancel.*.*";
+
+    /// Where a daemon of `ant` answers a cancel request on `thread` ([`CancelReply`](super::CancelReply); core NATS).
+    pub fn cancelled(ant: &UserId, thread: &ThreadId) -> String {
+        format!("ants.cancelled.{ant}.{thread}")
+    }
+
+    /// The answers of the daemons of `ant` to cancel requests, on every thread.
+    pub fn cancelled_of(ant: &UserId) -> String {
+        format!("ants.cancelled.{ant}.*")
+    }
+
     /// The roster entry of an ant: the subject its daemon puts [`super::RosterEntry`] on.
     pub fn roster(ant: &UserId) -> String {
         format!("$KV.{}.{ant}", super::ROSTER_BUCKET)
@@ -850,6 +874,7 @@ impl Permissions {
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
                 subject::ALL_APPROVAL_DECISIONS.to_owned(),
+                subject::ALL_CANCELS.to_owned(),
                 subject::DEAD_ALL.to_owned(),
                 // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
                 // leaf's own domain (the plain form is what a leaf maps its own domain to).
@@ -888,6 +913,7 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
                 subject::status_of(user),
+                subject::cancelled_of(user),
                 subject::chanadm_from(user),
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(user),
@@ -914,6 +940,7 @@ impl Permissions {
                 subject::ALL_NOTES.to_owned(),
                 subject::ALL_CHANNELS.to_owned(),
                 format!("{}.*", subject::approvals(user)),
+                subject::cancel_of(user),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(user),
             ]);
@@ -2651,6 +2678,78 @@ impl StatusEvent {
     }
 }
 
+/// A human asking the daemons of `ant` to cancel the prompt running on `thread_id`, on [`subject::cancel`] with
+/// core NATS: never stored, so only daemons connected at the time hear it. Each one answers with a [`CancelReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRequest {
+    pub id: Uuid,
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// The human asking, as the request names it: only human credentials publish cancel requests.
+    pub by: UserId,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl CancelRequest {
+    pub fn new(ant: UserId, thread_id: ThreadId, by: UserId) -> Self {
+        Self { id: Uuid::now_v7(), ant, thread_id, by, sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::cancel(&self.ant, &self.thread_id)
+    }
+
+    pub fn reply_subject(&self) -> String {
+        subject::cancelled(&self.ant, &self.thread_id)
+    }
+
+    /// Check that the request arrived on its own [`CancelRequest::subject`], so that a request naming another ant or
+    /// thread than its subject is not acted on.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser {
+            kind: "cancel request",
+            user: self.ant.clone(),
+            at: format!("{subject} (thread {})", self.thread_id),
+        })
+    }
+
+    /// A daemon's answer: whether it had a prompt running on the thread, which it then cancelled.
+    pub fn answer(&self, cancelled: bool) -> CancelReply {
+        CancelReply { request_id: self.id, ant: self.ant.clone(), thread_id: self.thread_id.clone(), cancelled }
+    }
+}
+
+/// The answer of one daemon of `ant` to a [`CancelRequest`], on [`subject::cancelled`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReply {
+    pub request_id: Uuid,
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// Whether a prompt was running on the thread and is now cancelled. Its partial reply follows on the thread.
+    pub cancelled: bool,
+}
+
+impl CancelReply {
+    pub fn subject(&self) -> String {
+        subject::cancelled(&self.ant, &self.thread_id)
+    }
+
+    /// Check that the answer arrived on its own [`CancelReply::subject`], which credentials pin to the ant's own.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser {
+            kind: "cancel answer",
+            user: self.ant.clone(),
+            at: format!("{subject} (thread {})", self.thread_id),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -2885,6 +2984,43 @@ mod tests {
         let forged = chunk.check_subject("ants.status.dev-b.t1").unwrap_err();
         assert_eq!(forged.to_string(), "status update of dev-a found at ants.status.dev-b.t1 (thread t1)");
         assert!(Permissions::for_user(&p("dev-a"), Role::Ant).publish.contains(&subject::status_of(&p("dev-a"))));
+    }
+
+    #[test]
+    fn humans_ask_and_only_the_ant_hears_and_answers_cancel_requests() {
+        let t: ThreadId = "t1".parse().unwrap();
+        let request = CancelRequest::new(p("dev-a"), t.clone(), UserId::human());
+        assert_eq!(
+            (request.subject(), request.reply_subject()),
+            ("ants.cancel.dev-a.t1".into(), "ants.cancelled.dev-a.t1".into())
+        );
+        assert_eq!(request.check_subject("ants.cancel.dev-a.t1"), Ok(()));
+        assert!(request.check_subject("ants.cancel.dev-a.t2").is_err(), "another thread");
+        let forged = request.check_subject("ants.cancel.dev-b.t1").unwrap_err();
+        assert_eq!(forged.to_string(), "cancel request of dev-a found at ants.cancel.dev-b.t1 (thread t1)");
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(serde_json::from_str::<CancelRequest>(&json).unwrap(), request);
+        let reply = request.answer(true);
+        assert_eq!((reply.request_id, reply.cancelled), (request.id, true));
+        assert_eq!(reply.subject(), request.reply_subject());
+        assert_eq!(reply.check_subject("ants.cancelled.dev-a.t1"), Ok(()));
+        assert!(reply.check_subject("ants.cancelled.dev-b.t1").is_err());
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(serde_json::from_str::<CancelReply>(&json).unwrap(), reply);
+
+        let human = Permissions::for_user(&UserId::human(), Role::Human);
+        assert!(human.publish.iter().any(|s| s == subject::ALL_CANCELS));
+        assert!(human.subscribe.iter().any(|s| s == subject::ALL), "the answers");
+        let a = Permissions::for_user(&p("dev-a"), Role::Ant);
+        assert_eq!(
+            a.subscribe.iter().filter(|s| s.starts_with("ants.cancel")).collect::<Vec<_>>(),
+            ["ants.cancel.dev-a.*"]
+        );
+        assert_eq!(
+            a.publish.iter().filter(|s| s.starts_with("ants.cancel")).collect::<Vec<_>>(),
+            ["ants.cancelled.dev-a.*"]
+        );
+        assert_eq!(subject::outbox(&request.subject()), None, "never stored, so never buffered");
     }
 
     #[test]

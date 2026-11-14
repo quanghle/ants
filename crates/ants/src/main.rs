@@ -20,8 +20,9 @@ use std::time::Duration;
 use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes, owners};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, Escalation, JsDomain,
-    Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
+    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
+    Envelope, Escalation, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId,
+    Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -130,6 +131,10 @@ enum Command {
         /// With an ant, follow only this thread.
         thread: Option<ThreadId>,
     },
+    /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
+    /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
+    /// behind it on the thread still run. Needs a human's credentials.
+    Cancel { ant: UserId, thread: ThreadId },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
     /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
@@ -673,6 +678,7 @@ async fn main() -> Result<()> {
             let filter = watch_filter(&subject, thread.as_ref())?;
             watch(&nats()?, filter).await
         }
+        Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
             let nats = nats()?;
             let (_, js) = nats.connect_only("ants-cli").await?;
@@ -1321,6 +1327,59 @@ async fn thread_notes(nats: &Nats<'_>, thread: ThreadId, text: Vec<String>) -> R
     Ok(())
 }
 
+/// How long `ants cancel` waits for a daemon of the ant to answer.
+const CANCEL_WAIT: Duration = Duration::from_secs(5);
+/// How long `ants cancel` waits on, after a daemon of the ant runs no prompt on the thread, for another daemon of the
+/// same ant that may run it.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+async fn cancel(nats: &Nats<'_>, ant: UserId, thread: ThreadId) -> Result<()> {
+    let me = &nats.me.id;
+    if !nats.me.role.is_human() {
+        bail!("the credentials of {me} are an ant's; only a human cancels a prompt");
+    }
+    let (client, _) = nats.connect("ants-cancel").await?;
+    let request = CancelRequest::new(ant, thread, me.clone());
+    let answers = client.subscribe(request.reply_subject()).await?;
+    client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
+    client.flush().await?;
+    let (ant, thread) = (&request.ant, &request.thread_id);
+    match cancel_outcome(&request, answers, CANCEL_WAIT, CANCEL_GRACE).await {
+        Some(true) => {
+            println!("cancelled the prompt of {ant} on thread {thread}; the partial reply follows on the thread");
+            Ok(())
+        }
+        Some(false) => bail!("{ant} has no prompt running on thread {thread}"),
+        None => bail!("no daemon serving {ant} answered within {}s", CANCEL_WAIT.as_secs()),
+    }
+}
+
+/// What the daemons of the ant answer to `request`: whether one cancelled the prompt, or `None` when none answers
+/// within `wait`. That no prompt runs is the answer once `grace` passes with no daemon cancelling it.
+async fn cancel_outcome(
+    request: &CancelRequest,
+    mut answers: impl futures::Stream<Item = async_nats::Message> + Unpin,
+    wait: Duration,
+    grace: Duration,
+) -> Option<bool> {
+    let mut deadline = tokio::time::Instant::now() + wait;
+    let mut outcome = None;
+    while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, answers.next()).await {
+        let Ok(answer) = serde_json::from_slice::<CancelReply>(&msg.payload) else { continue };
+        if answer.request_id != request.id || answer.check_subject(&msg.subject).is_err() {
+            continue;
+        }
+        if answer.cancelled {
+            return Some(true);
+        }
+        if outcome.is_none() {
+            outcome = Some(false);
+            deadline = deadline.min(tokio::time::Instant::now() + grace);
+        }
+    }
+    outcome
+}
+
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
 fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
@@ -1357,6 +1416,13 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
             let forged = forged(d.subject() == msg.subject.as_str());
             printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, tools::spelling(d.verdict)))
+        } else if let Ok(r) = serde_json::from_slice::<CancelRequest>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("[{}] {} asks to cancel the prompt of {}{forged}", r.thread_id, r.by, r.ant))
+        } else if let Ok(r) = serde_json::from_slice::<CancelReply>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            let outcome = if r.cancelled { "prompt cancelled" } else { "no prompt to cancel" };
+            printer.line(&format!("[{}] {}{forged}: {outcome}", r.thread_id, r.ant))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };
@@ -1598,6 +1664,33 @@ mod tests {
             envelope_line(&decided, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_for_any_daemon_of_the_ant_to_cancel_the_prompt() {
+        let request = CancelRequest::new("dev-a".parse().unwrap(), "t1".parse().unwrap(), UserId::human());
+        let msg = |answer: &CancelReply| async_nats::Message {
+            subject: answer.subject().into(),
+            reply: None,
+            payload: serde_json::to_vec(answer).unwrap().into(),
+            headers: None,
+            status: None,
+            description: None,
+            length: 0,
+        };
+        let other = CancelRequest::new(request.ant.clone(), request.thread_id.clone(), UserId::human());
+        let (idle, busy) = (msg(&request.answer(false)), msg(&request.answer(true)));
+        let (long, grace) = (Duration::from_secs(60), Duration::from_millis(50));
+        let answers = |msgs: Vec<async_nats::Message>| futures::stream::iter(msgs).chain(futures::stream::pending());
+
+        let outcome = cancel_outcome(&request, answers(vec![idle.clone(), busy]), long, grace).await;
+        assert_eq!(outcome, Some(true), "another daemon of the ant runs the prompt");
+        let alone = vec![msg(&other.answer(true)), idle];
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), cancel_outcome(&request, answers(alone), long, grace)).await;
+        assert_eq!(outcome, Ok(Some(false)), "no prompt, known once the grace passes");
+        let outcome = cancel_outcome(&request, answers(vec![msg(&other.answer(true))]), grace, grace).await;
+        assert_eq!(outcome, None, "no daemon answered this request");
     }
 
     #[test]
