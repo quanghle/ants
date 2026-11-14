@@ -277,39 +277,29 @@ pub async fn thread_owner(
     Ok(owner)
 }
 
-/// Hand each post on `post`'s thread arriving on `sub` (live channel traffic) to `show`, other than `post` itself,
-/// until `timeout` passes or `stop` completes. Posts whose sender or channel disagrees with their subject are dropped.
-/// Returns how many were shown.
-pub async fn follow_thread(
-    sub: &mut async_nats::Subscriber,
+/// The posts on the thread of `post` that `room`, a subscription to its channel, receives after it: those of others
+/// only with `by_others`. Forged posts are dropped with a warning.
+pub fn thread_posts(
+    room: async_nats::Subscriber,
     post: &ChannelPost,
-    timeout: Duration,
-    stop: impl Future<Output = ()>,
-    mut show: impl FnMut(&ChannelPost),
-) -> Result<usize> {
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline, stop);
-    let mut shown = 0;
-    loop {
-        let msg = tokio::select! {
-            () = &mut deadline => break,
-            () = &mut stop => break,
-            msg = sub.next() => match msg {
-                Some(msg) => msg,
-                None => bail!("connection closed while waiting for replies"),
+    by_others: bool,
+) -> impl futures::Stream<Item = ChannelPost> + use<> {
+    let (thread, id, from) = (post.thread_id.clone(), post.id, post.from.clone());
+    room.filter_map(move |msg| {
+        let reply = match serde_json::from_slice::<ChannelPost>(&msg.payload) {
+            Ok(reply) => match reply.check_subject(&msg.subject) {
+                Ok(()) => {
+                    (reply.thread_id == thread && reply.id != id && !(by_others && reply.from == from)).then_some(reply)
+                }
+                Err(e) => {
+                    tracing::warn!("ignoring a forged channel post: {e}");
+                    None
+                }
             },
+            Err(_) => None,
         };
-        let Ok(reply) = serde_json::from_slice::<ChannelPost>(&msg.payload) else { continue };
-        if let Err(e) = reply.check_subject(&msg.subject) {
-            tracing::warn!("ignoring a forged channel post: {e}");
-            continue;
-        }
-        if reply.thread_id == post.thread_id && reply.id != post.id {
-            show(&reply);
-            shown += 1;
-        }
-    }
-    Ok(shown)
+        std::future::ready(reply)
+    })
 }
 
 /// The posts of `channel` kept in the stream, oldest first, read through the reader consumer of `reader`, created for
@@ -586,22 +576,25 @@ mod tests {
         assert_eq!((fixed.channel.as_str(), fixed.members.len()), ("qa", 0));
 
         // Posting, following the thread live, and reading the channel back through the human's reader.
-        let mut sub = client.subscribe(subject::chan_room(&ops())).await.unwrap();
+        let room = || async { client.subscribe(subject::chan_room(&ops())).await.unwrap() };
+        let (following, waiting) = (room().await, room().await);
         let top = human_post(ops(), None, human.clone(), Some(human.clone()), "build is red @dev-a".to_owned());
         bus::store(&js, top.subject(), &top, &top.id.to_string()).await.unwrap();
         let (_, a_js) = server.connect(&dev_a).await;
+        let again =
+            human_post(ops(), Some(top.thread_id.clone()), human.clone(), Some(human.clone()), "anyone?".into());
+        bus::store(&js, again.subject(), &again, &again.id.to_string()).await.unwrap();
         let answer = top.reply(dev_a.clone(), "on it", &[], &Humans::default()).unwrap();
         bus::publish_json(&a_js, answer.subject(), &answer, None).await.unwrap();
-        let mut seen = Vec::new();
-        let shown = follow_thread(&mut sub, &top, Duration::from_secs(2), std::future::pending(), |p| {
-            seen.push(p.text.clone())
-        })
-        .await
-        .unwrap();
-        assert_eq!((shown, seen), (1, vec!["on it".to_owned()]));
+        let texts = |posts: Vec<ChannelPost>| posts.into_iter().map(|p| p.text).collect::<Vec<_>>();
+        let next_two = thread_posts(following, &top, false).take(2).collect();
+        assert_eq!(texts(tokio::time::timeout(Duration::from_secs(2), next_two).await.unwrap()), ["anyone?", "on it"]);
+        let mut waiting = Box::pin(thread_posts(waiting, &top, true));
+        let next = tokio::time::timeout(Duration::from_secs(2), waiting.next()).await.unwrap().unwrap();
+        assert_eq!(next.text, "on it", "waiting skips the poster's own posts");
 
         let posts = read(&js, &human, &ops()).await.unwrap();
-        assert_eq!(posts, [top, answer]);
+        assert_eq!(posts, [top, again, answer]);
         assert!(read(&js, &human, &"dev".parse().unwrap()).await.unwrap().is_empty());
 
         delete(&kv, &ops()).await.unwrap();

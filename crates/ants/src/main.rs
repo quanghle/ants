@@ -14,6 +14,7 @@ mod roster;
 mod serve;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
 use ants_proto::{
@@ -48,15 +49,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; the
-    /// messenger gets it otherwise.
+    /// messenger gets it otherwise. With --wait or --follow, print the replies to the CLI's human on the thread and
+    /// mark them read.
     Ask {
         /// Continue an existing thread. The message still prompts only its recipient (@ant, else the
         /// messenger), not the thread's other ants.
         #[arg(long)]
         thread: Option<ThreadId>,
-        /// Wait for the first reply on the thread, print it and mark it read.
-        #[arg(long)]
-        wait: bool,
+        #[command(flatten)]
+        replies: Replies,
         /// `@ant` (optional), then the message.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
@@ -90,7 +91,8 @@ enum Command {
     },
     /// Post to a channel as the CLI's human. An @ant in the text wakes only that member; a post that @mentions
     /// nobody goes to the channel's messenger, which wakes the members the post concerns. A new thread belongs to the
-    /// human who posts it, and the turn budget it runs out of comes back to that human.
+    /// human who posts it, and the turn budget it runs out of comes back to that human. With --wait, the first post
+    /// on the thread by someone other than the poster ends the wait; --follow prints every later post on it.
     Post {
         /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
         #[arg(value_parser = channel::parse_channel)]
@@ -98,12 +100,8 @@ enum Command {
         /// Post on an existing thread of the channel instead of starting one; the thread keeps its owner.
         #[arg(long)]
         thread: Option<ThreadId>,
-        /// Print the posts on the thread as each arrives, until the timeout or Ctrl-C.
-        #[arg(long)]
-        wait: bool,
-        /// Seconds to wait for posts with `--wait`.
-        #[arg(long, value_name = "SECS", default_value_t = 600, requires = "wait")]
-        timeout: u64,
+        #[command(flatten)]
+        replies: Replies,
         /// The post; each @ant mention wakes that member.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
@@ -182,6 +180,72 @@ enum Command {
     Bridge(BridgeCommand),
 }
 
+/// What `ants ask` and `ants post` do once sent: return at once, wait for the first reply, or follow the thread.
+#[derive(clap::Args, Debug, Default)]
+struct Replies {
+    /// Wait for the first reply on the thread, print it and exit; exit with status 1 if none comes within
+    /// --timeout.
+    #[arg(long, group = "awaiting")]
+    wait: bool,
+    /// Print every reply on the thread as it arrives, until --timeout or Ctrl-C.
+    #[arg(long, short, group = "awaiting")]
+    follow: bool,
+    /// How long --wait or --follow lasts, such as 90s, 10m or 1h30m. Without it, until a reply (--wait) or Ctrl-C.
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, requires = "awaiting")]
+    timeout: Option<Duration>,
+}
+
+impl Replies {
+    /// Hand the replies on `thread` to `show` as they come: the first one with `--wait`, each one with `--follow`,
+    /// until the timeout or, following, Ctrl-C. A `--wait` without a reply in time is an error.
+    async fn show<T>(
+        &self,
+        thread: &ThreadId,
+        replies: impl futures::Stream<Item = T>,
+        mut show: impl AsyncFnMut(T) -> Result<()>,
+    ) -> Result<()> {
+        let deadline = async {
+            match self.timeout {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending().await,
+            }
+        };
+        // Only a follow catches Ctrl-C, to end cleanly; a wait is left to end at once as interrupted.
+        let stop = async {
+            if self.follow {
+                _ = tokio::signal::ctrl_c().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(replies, deadline, stop);
+        let mut shown = 0;
+        loop {
+            let reply = tokio::select! {
+                () = &mut deadline => break,
+                () = &mut stop => return Ok(()),
+                reply = replies.next() => match reply {
+                    Some(reply) => reply,
+                    None => bail!("connection closed while waiting for replies on thread {thread}"),
+                },
+            };
+            show(reply).await?;
+            shown += 1;
+            if self.wait {
+                return Ok(());
+            }
+        }
+        let within = self.timeout.map(ants_proto::duration::format).unwrap_or_default();
+        if self.wait {
+            bail!("no reply on thread {thread} within {within}");
+        }
+        if shown == 0 {
+            eprintln!("no reply on thread {thread} within {within}");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand)]
 enum ChannelCommand {
     /// Create a channel; fails when the channel exists.
@@ -205,11 +269,11 @@ enum ChannelCommand {
         #[arg(long = "member", value_name = "ANT", value_delimiter = ',', value_parser = channel::parse_ant)]
         members: Option<Vec<UserId>>,
         /// Ant that triages the posts of humans that @mention nobody.
-        #[arg(long, value_parser = channel::parse_ant, conflicts_with = "no_messenger")]
+        #[arg(long, value_parser = channel::parse_ant, conflicts_with = "default_messenger")]
         messenger: Option<UserId>,
-        /// Go back to the default messenger, `messenger`.
+        /// Hand the triage back to the default messenger, the ant `messenger` (triage stays on).
         #[arg(long)]
-        no_messenger: bool,
+        default_messenger: bool,
     },
     /// Add members to a channel.
     Add {
@@ -483,16 +547,13 @@ async fn main() -> Result<()> {
     let domain = cli.js_domain.as_ref();
     let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
-        Command::Ask { thread, wait, words } => ask(&nats()?, thread, wait, words).await,
+        Command::Ask { thread, replies, words } => ask(&nats()?, thread, &replies, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread, limit, peek };
             show_inbox(&nats()?, &select, follow, json).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
-        Command::Post { channel, thread, wait, timeout, words } => {
-            let wait = wait.then(|| std::time::Duration::from_secs(timeout));
-            post(&nats()?, channel, thread, wait, words).await
-        }
+        Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Plan { thread, words } => plan_room(&nats()?, thread, words).await,
         Command::Watch { subject, thread } => {
@@ -739,40 +800,47 @@ fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
     Ok((to, words.join(" ")))
 }
 
-async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<String>) -> Result<()> {
+async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words: Vec<String>) -> Result<()> {
     let envelope = ask_envelope(&nats.me, thread, words)?;
     let (client, js) = nats.connect("ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
-    let mut replies = bus::live_inbox(&client, &nats.me.id).await?;
+    let inbox = bus::live_inbox(&client, &nats.me.id).await?;
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
     }
     println!("thread {}", envelope.thread_id);
-    if !wait {
+    if !replies.wait && !replies.follow {
         return Ok(());
     }
-    while let Some(msg) = replies.next().await {
-        let Ok(reply) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
-        if let Err(e) = reply.check_subject(&msg.subject) {
-            tracing::warn!("ignoring a reply with a forged sender: {e}");
-            continue;
-        }
-        if reply.thread_id == envelope.thread_id {
+    let thread = envelope.thread_id.clone();
+    let on_thread = inbox.filter_map(move |msg| {
+        let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
+            Ok(reply) => match reply.check_subject(&msg.subject) {
+                Ok(()) => (reply.thread_id == thread).then_some(reply),
+                Err(e) => {
+                    tracing::warn!("ignoring a reply with a forged sender: {e}");
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+        std::future::ready(reply)
+    });
+    replies
+        .show(&envelope.thread_id, on_thread, async |reply: Envelope| {
             println!("{}: {}", reply.from, reply.text);
-            if !nats.me.role.is_human() {
-                // An ant's inbox consumer is its daemon's.
-                return Ok(());
+            // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
+            // consumer is its daemon's.
+            if nats.me.role.is_human() {
+                match inbox::mark_read(&js, &nats.me.id, &reply).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!("reply already read"),
+                    Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
+                }
             }
-            // Seen here, so `ants inbox` need not show it again. The other replies stay unread.
-            match inbox::mark_read(&js, &nats.me.id, &reply).await {
-                Ok(true) => {}
-                Ok(false) => tracing::debug!("reply already read"),
-                Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
-            }
-            return Ok(());
-        }
-    }
-    bail!("connection closed before a reply arrived")
+            Ok(())
+        })
+        .await
 }
 
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
@@ -790,7 +858,7 @@ async fn post(
     nats: &Nats<'_>,
     channel: ChannelId,
     thread: Option<ThreadId>,
-    wait: Option<std::time::Duration>,
+    replies: &Replies,
     words: Vec<String>,
 ) -> Result<()> {
     let text = words.join(" ");
@@ -808,24 +876,24 @@ async fn post(
         tracing::warn!("@{ant} is no member of #{}: the post does not wake {ant}", post.channel);
     }
     // Subscribe first so a fast reply is not missed.
-    let mut replies = match wait {
-        Some(_) => Some(client.subscribe(subject::chan_room(&post.channel)).await?),
-        None => None,
+    let room = if replies.wait || replies.follow {
+        Some(client.subscribe(subject::chan_room(&post.channel)).await?)
+    } else {
+        None
     };
     if bus::store(&js, post.subject(), &post, &post.id.to_string()).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
     }
     println!("thread {}", post.thread_id);
-    let (Some(timeout), Some(replies)) = (wait, replies.as_mut()) else { return Ok(()) };
-    let stop = async { _ = tokio::signal::ctrl_c().await };
-    let shown = channel::follow_thread(replies, &post, timeout, stop, |reply| {
-        println!("{}: {}", reply.from, reply.text);
-    })
-    .await?;
-    if shown == 0 {
-        println!("no post on the thread within {}s", timeout.as_secs());
-    }
-    Ok(())
+    let Some(room) = room else { return Ok(()) };
+    // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all.
+    let on_thread = channel::thread_posts(room, &post, replies.wait);
+    replies
+        .show(&post.thread_id, on_thread, async |reply: ChannelPost| {
+            println!("{}: {}", reply.from, reply.text);
+            Ok(())
+        })
+        .await
 }
 
 async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
@@ -844,9 +912,9 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             warn_unserved(&js, entry.members.iter().chain(&entry.messenger)).await;
             println!("created {}", channel::describe(&entry));
         }
-        ChannelCommand::Set { channel, members, messenger, no_messenger } => {
-            if members.is_none() && messenger.is_none() && !no_messenger {
-                bail!("nothing to change: give --member, --messenger or --no-messenger");
+        ChannelCommand::Set { channel, members, messenger, default_messenger } => {
+            if members.is_none() && messenger.is_none() && !default_messenger {
+                bail!("nothing to change: give --member, --messenger or --default-messenger");
             }
             channel::check_not_human(members.iter().flatten().chain(&messenger), &humans)?;
             let (entry, ()) = channel::update(&kv, &channel, |entry| {
@@ -856,7 +924,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                         entry.add_member(member.clone());
                     }
                 }
-                if messenger.is_some() || no_messenger {
+                if messenger.is_some() || default_messenger {
                     entry.messenger.clone_from(&messenger);
                 }
             })
@@ -1342,6 +1410,75 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "add", "dev-a", "--enroll", "enroll-dev-a.creds"]).unwrap();
         assert!(matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a"));
         assert!(Cli::try_parse_from(["ants", "ant", "add", "dev-a"]).is_err());
+    }
+
+    #[test]
+    fn wait_and_follow_conflict_and_a_timeout_needs_one_of_them() {
+        let parse = |args: &str| Cli::try_parse_from(["ants"].into_iter().chain(args.split(' ')));
+        let replies = |args: &str| match parse(args).unwrap().command {
+            Command::Ask { replies, .. } | Command::Post { replies, .. } => replies,
+            _ => panic!("{args}"),
+        };
+        let r = replies("ask --wait --timeout 1h30m hi");
+        assert_eq!((r.wait, r.follow, r.timeout), (true, false, Some(Duration::from_secs(5400))));
+        let r = replies("post -f ops hi");
+        assert_eq!((r.wait, r.follow, r.timeout), (false, true, None));
+        for args in
+            ["ask --wait --follow hi", "post --wait -f ops hi", "ask --timeout 10m hi", "post --timeout 10m ops hi"]
+        {
+            assert!(parse(args).is_err(), "{args}");
+        }
+        let bare = parse("ask --wait --timeout 600 hi").err().unwrap().to_string();
+        assert!(bare.contains("without a unit"), "{bare}");
+    }
+
+    #[test]
+    fn the_default_messenger_conflicts_with_a_named_one() {
+        let parse = |args: &[&str]| Cli::try_parse_from(["ants", "channel", "set", "ops"].iter().chain(args));
+        let Command::Channel(ChannelCommand::Set { default_messenger, messenger, .. }) =
+            parse(&["--default-messenger"]).unwrap().command
+        else {
+            panic!("channel set")
+        };
+        assert!(default_messenger && messenger.is_none());
+        assert!(parse(&["--default-messenger", "--messenger", "triage"]).is_err());
+        assert!(parse(&["--no-messenger"]).is_err());
+    }
+
+    fn thread() -> ThreadId {
+        "t1".parse().unwrap()
+    }
+
+    async fn shown(
+        replies: Replies,
+        posts: impl futures::Stream<Item = &'static str>,
+    ) -> (Result<()>, Vec<&'static str>) {
+        let mut seen = Vec::new();
+        let result = replies
+            .show(&thread(), posts, async |p| {
+                seen.push(p);
+                Ok(())
+            })
+            .await;
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn waiting_ends_at_the_first_reply_or_fails_at_the_timeout() {
+        let timeout = Some(Duration::from_millis(50));
+        let wait = || Replies { wait: true, timeout, ..Default::default() };
+        let later = futures::stream::iter(["one", "two"]).chain(futures::stream::pending());
+        let (result, seen) = shown(wait(), later).await;
+        assert_eq!((result.is_ok(), seen), (true, vec!["one"]));
+
+        let (result, seen) = shown(wait(), futures::stream::pending()).await;
+        assert_eq!(result.unwrap_err().to_string(), "no reply on thread t1 within 0");
+        assert!(seen.is_empty());
+
+        let follow = Replies { follow: true, timeout, ..Default::default() };
+        let later = futures::stream::iter(["one", "two"]).chain(futures::stream::pending());
+        let (result, seen) = shown(follow, later).await;
+        assert_eq!((result.is_ok(), seen), (true, vec!["one", "two"]), "following ends at the timeout, cleanly");
     }
 
     #[test]

@@ -174,7 +174,7 @@ fn channels_are_managed_posted_to_and_read() {
     );
     assert_eq!(ok(&["channel", "remove", "ops", "dev-a"]).0, "#ops: members dev-b,dev-c; messenger triage\n");
     assert_eq!(
-        ok(&["channel", "set", "ops", "--no-messenger"]).0,
+        ok(&["channel", "set", "ops", "--default-messenger"]).0,
         "#ops: members dev-b,dev-c; messenger messenger (default)\n"
     );
     assert!(!run(ants(&["channel", "add", "qa", "dev-a"])).status.success(), "no such channel");
@@ -194,9 +194,9 @@ fn channels_are_managed_posted_to_and_read() {
     assert!(warned.contains("@dev-z is no member of #ops"), "{warned}");
     assert!(!warned.contains("@dev-c"), "{warned}");
 
-    // `--wait` prints the posts on the thread as they come.
+    // `--follow` prints the posts on the thread as they come.
     let mut waiting = Command::new(ANTS);
-    waiting.args(["--nats", &server.url, "post", "--wait", "--timeout", "30", "ops", "anyone?"]);
+    waiting.args(["--nats", &server.url, "post", "--follow", "--timeout", "30s", "ops", "anyone?"]);
     let mut waiting =
         Killed(waiting.env_remove("ANTS_CREDS").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
     let mut lines = std::io::BufReader::new(waiting.0.stdout.take().unwrap()).lines();
@@ -227,6 +227,13 @@ fn channels_are_managed_posted_to_and_read() {
     assert!(one.contains("any news?") && !one.contains("anyone?"), "{one}");
     let last = ok(&["channel", "read", "ops", "--limit", "1"]).0;
     assert!(last.contains("anyone?") && !last.contains("any news?"), "{last}");
+
+    // Nobody serves the messenger: a `--wait` gives up at the timeout, with an error.
+    let asked = run(ants(&["ask", "--wait", "--timeout", "1s", "anyone", "there?"]));
+    let (stdout, stderr) = (String::from_utf8_lossy(&asked.stdout), String::from_utf8_lossy(&asked.stderr));
+    let thread = stdout.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&stdout);
+    assert_eq!(asked.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("no reply on thread {thread} within 1s")), "{stderr}");
 
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
     assert!(!ok(&["channel", "list"]).0.contains("#dev"));

@@ -43,11 +43,14 @@ session's context, conversation history or files outside its own workdir.
 Option 1, block until the first reply on the thread:
 
 ```sh
-ants ask --wait @dev-a "..."     # prints the thread, then "<ant>: <reply>"
+ants ask --wait @dev-a "..."                 # prints the thread, then "<ant>: <reply>", and exits
+ants ask --wait --timeout 10m @dev-a "..."   # gives up after 10 minutes: exit status 1, "no reply on thread ..."
+ants ask --follow @dev-a "..."               # prints every reply on the thread until Ctrl-C (or --timeout)
 ```
 
-`--wait` has no timeout and ants can take minutes, so start it as a background or long-running shell command and
-read its output when it finishes rather than holding a short synchronous call open.
+`--wait` has no default timeout and ants can take minutes, so start it as a background or long-running shell command
+and read its output when it finishes rather than holding a short synchronous call open, or bound it with
+`--timeout` (`90s`, `10m`, `1h30m`). Replies printed by `--wait` or `--follow` are marked read.
 
 Option 2, send now and collect later:
 
@@ -83,7 +86,8 @@ channel on the post's thread, not in the inbox.
 ants channel list                                   # channels, members and messenger
 ants post '#ops' "@dev-b the deploy failed"         # prints the new thread
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
-ants post --wait '#ops' "who owns billing?"         # also print posts on the thread as they arrive (--timeout SECS)
+ants post --wait '#ops' "who owns billing?"         # then print the first answer on the thread and exit
+ants post --follow --timeout 10m '#ops' "status?"   # then print each post on the thread as it arrives, for 10 minutes
 ants channel read ops --thread <thread>             # the thread's posts
 ```
 
