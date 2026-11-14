@@ -238,7 +238,7 @@ async fn bucket_config(hub: &Context, bucket: &str) -> Result<Option<stream::Con
     }
 }
 
-fn not_found(e: &GetStreamError) -> bool {
+pub(crate) fn not_found(e: &GetStreamError) -> bool {
     matches!(e.kind(), GetStreamErrorKind::JetStream(e) if e.error_code() == ErrorCode::STREAM_NOT_FOUND)
 }
 

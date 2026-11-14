@@ -11,6 +11,7 @@
 //! the approval renews the leaf's uplink credentials to carry the ant too, and admits the ant into the hub's stream
 //! from the leaf's outbox ([`outbox::admit_ant`]).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 
-use crate::{auth, outbox};
+use crate::{auth, outbox, revoke};
 
 /// How long `ants enroll` listens for requests: one repeat of every machine still asking, and some slack.
 pub const LISTEN: Duration = ENROLL_REPEAT.saturating_add(Duration::from_secs(1));
@@ -181,6 +182,8 @@ pub struct Approver {
     js_domain: Option<JsDomain>,
     /// The team's account, which must have issued the credentials a request proves.
     account: String,
+    /// User keys revoked in the team directory (`ants auth revoke`), whose credentials prove nothing.
+    revoked: HashSet<String>,
     listen: Duration,
 }
 
@@ -218,7 +221,8 @@ impl Approver {
             None => async_nats::jetstream::new(client.clone()),
         };
         let account = auth::account_key(dir)?;
-        Ok(Self { client, hub, js_domain: js_domain.cloned(), account, listen })
+        let revoked = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
+        Ok(Self { client, hub, js_domain: js_domain.cloned(), account, revoked, listen })
     }
 
     /// Check that `request` proves its enrollment credentials of the team's account for its ant, unexpired, and if it
@@ -237,10 +241,16 @@ impl Approver {
         if enrollment.exp.is_some_and(|exp| exp <= now().unwrap_or(u64::MAX)) {
             bail!("expired enrollment credentials");
         }
+        if self.revoked.contains(&enrollment.sub) {
+            bail!("revoked enrollment credentials");
+        }
         auth::check_signature(&enrollment.sub, &signed, &request.signature).context("the enrollment credentials")?;
         if let Some(leaf) = &request.leaf {
             let uplink = auth::check_leaf(&self.account, &leaf.jwt, &leaf.machine)
                 .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
+            if self.revoked.contains(&uplink.sub) {
+                bail!("revoked uplink credentials of {}", leaf.machine);
+            }
             auth::check_signature(&uplink.sub, &signed, &leaf.signature)
                 .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
         }
@@ -512,6 +522,10 @@ mod tests {
         let posing = server.dir().join("leaf-m1-ant.creds");
         auth::issue(&team, &p("leaf-m1"), Role::Ant, None, &posing).unwrap();
         let (posing_jwt, posing_key) = auth::read_creds(&posing).unwrap();
+        let revoked = server.dir().join("leaf-m1-revoked.creds");
+        auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], false, None, &revoked).unwrap();
+        let (revoked_jwt, revoked_key) = auth::read_creds(&revoked).unwrap();
+        revoke::revoke(&team, None, &[revoked_key.public_key()]).unwrap();
         let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
 
         let signed = |leaf: Option<(&str, &KeyPair)>, enrollment: &KeyPair| {
@@ -537,6 +551,7 @@ mod tests {
             moved,
             signed(Some((&leaf_jwt, &stranger)), &enrollment_key),
             signed(Some((&posing_jwt, &posing_key)), &enrollment_key),
+            signed(Some((&revoked_jwt, &revoked_key)), &enrollment_key),
         ];
         let sending = async {
             for request in forged.iter().chain([&good]) {

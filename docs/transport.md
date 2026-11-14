@@ -42,6 +42,14 @@ include "server.conf"
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).
 - `feature_flags { js_api_reply_v2: true }` scopes JetStream source control replies to `$JSC.R.<machine>.*.ANTS_OUT.>`, required for hub outbox sourcing under scoped leaf credentials.
 
+### Revocation
+
+`server.conf` preloads the team's account JWT into a `MEMORY` resolver. `ants auth revoke NAME` (or `--key U...`) adds the user keys to the account's `revocations` (key to revocation time; JWTs of the key issued at or before it are refused), rewrites `server.conf` keeping its operator JWT (nats-server reloads no change of the trusted operator), and pushes the account JWT to the `--nats` server:
+
+- **Push:** a user of the system account, signed with `system.nk` for ten minutes, requests `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`; the server applies the account at once and closes the revoked users' connections. Pointed at a leaf node, the push updates that leaf only. An unreachable server leaves the revocation recorded in `revoked.json` and `server.conf`; `ants auth push` retries. Hubs on a `server.conf` from before revocations (whose system account allows no connection) need the new one copied and reloaded first.
+- **Reload:** copying the new `server.conf` over the hub's or a leaf's and sending `SIGHUP` applies the revocations too, also closing connections. Copy it to the hub and to every leaf node in any case: a restart otherwise loads the old account, and a leaf authenticates its local clients against its own copy, so a revoked ant behind a leaf keeps working through the leaf's uplink until the leaf reloads (or its uplink credentials are reissued without the ant).
+- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink at the hub.
+
 ## Reverse proxy
 
 Caddy passes WebSocket upgrades with no extra config and sets no idle timeout on upgraded connections:
@@ -143,7 +151,7 @@ launchctl kickstart -k gui/$(id -u)/ants.nats            # leaf machine (Linux: 
 ```
 
 - `ants add --enroll` reads the machine's `leaf.conf` (`--leaf-config FILE`, default `~/.config/ants/leaf.conf` when present) for its `server_name` and uplink credentials, and names the leaf in the request, signed with the uplink key. Each repeat of the request reads the uplink credentials again.
-- Every request carries the user JWT of its enrollment credentials and a signature by their key over the request (ant, public key, host, time, enrollment JWT, leaf machine and uplink JWT). `ants enroll` ignores requests whose enrollment credentials are not the team account's for that ant, expired or unproven, and requests naming a leaf whose uplink JWT is not the team account's `leaf-<machine>` leaf-only user or whose signature fails. A leaf thus cannot ask for an ant without its enrollment credentials, nor name another machine's leaf.
+- Every request carries the user JWT of its enrollment credentials and a signature by their key over the request (ant, public key, host, time, enrollment JWT, leaf machine and uplink JWT). `ants enroll` ignores requests whose enrollment credentials are not the team account's for that ant, expired, revoked (`ants auth revoke`) or unproven, and requests naming a leaf whose uplink JWT is not the team account's `leaf-<machine>` leaf-only user, is revoked or whose signature fails; a revoked uplink key is never renewed, as a JWT signed after its revocation would pass. A leaf thus cannot ask for an ant without its enrollment credentials, nor name another machine's leaf.
 - Approval of a request naming a leaf:
   - re-signs the leaf's uplink JWT for the same key, adding the ant's permissions (`Permissions::for_leaf` for the ant alone) to what it already allows, and sends it with the ant's JWT (`leaf_jwt`);
   - when `ANTS_IN` sources the machine's outbox, adds the ant's admission to `ANTS` (without its inbox subjects when a human's admission takes every inbox of the machine) and to `ants_links`, starting after the current `ANTS_IN` entries, before answering.
@@ -173,7 +181,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Unsequenced notes (`ants notes <thread> TEXT`), channel posts (`ants post`, daemon replies), passed links (`ants_links`) | Buffered in `ANTS_OUT` and sourced into `ANTS` or `ants_links` on reconnect. |
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates past 2 min. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
-| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
+| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), `ants cancel` of a prompt on another machine (`ants.cancel.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
 | Enrollment (`ants.enroll.*`) | `ants add --enroll` keeps repeating its request until the uplink is back and an answer comes or the enrollment credentials expire. |
 | KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
 | Owner records (`ants_owners`, from `ants ask`) | Buffered in `ANTS_OUT` ahead of the message and sourced into `ants_owners` on reconnect; a second record of a thread and ant is dropped as a repeat. `ANTS` and `ants_owners` source apart, so a daemon holds a human's message sourced from an outbox (`Nats-Stream-Source`) up to 10 s until its thread's owner is recorded for the ant. Webhooks reach the hub directly and record no owner in an outbox. |

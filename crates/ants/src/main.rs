@@ -9,8 +9,12 @@ mod humans;
 mod inbox;
 mod leaf;
 mod outbox;
+mod revoke;
 mod roster;
+mod scheduler;
 mod serve;
+mod spend;
+mod thread;
 mod tools;
 mod webhook;
 
@@ -20,8 +24,9 @@ use std::time::Duration;
 use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes, owners};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, Escalation, JsDomain,
-    Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
+    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
+    Envelope, Escalation, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId,
+    Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -91,6 +96,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
+    /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
+    /// Caps come from the local config file for the ants it lists. Needs human credentials.
+    Spend {
+        /// Only this ant.
+        ant: Option<UserId>,
+        /// What the ant, or each ant on the thread, spent on it since a human's last message there.
+        #[arg(long)]
+        thread: Option<ThreadId>,
+        /// UTC days to report, today included.
+        #[arg(long, default_value_t = spend::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..=366),
+              conflicts_with = "thread")]
+        days: u32,
+        /// One JSON object per line: per ant, or with --thread per ant on the thread.
+        #[arg(long)]
+        json: bool,
+        /// Config file with the ants' caps (default: ~/.ants/config.toml, if it exists).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
+    },
     /// Post to a channel as the CLI's human. An @mention in the text wakes only that member, if an ant, or puts a
     /// notice in the member's inbox, if a human; a post that @mentions nobody goes to the channel's messenger, which
     /// wakes the members the post concerns. A new thread belongs to the
@@ -121,6 +146,11 @@ enum Command {
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
     },
+    /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
+    /// and decisions, and dead letters: list the recent ones, find those mentioning a text, or show one's whole
+    /// history. Nothing is consumed or marked read. Needs a human's credentials.
+    #[command(subcommand)]
+    Thread(ThreadCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
     /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
@@ -130,6 +160,10 @@ enum Command {
         /// With an ant, follow only this thread.
         thread: Option<ThreadId>,
     },
+    /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
+    /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
+    /// behind it on the thread still run. Needs a human's credentials.
+    Cancel { ant: UserId, thread: ThreadId },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
     /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
@@ -384,6 +418,45 @@ enum BridgeCommand {
 }
 
 #[derive(Subcommand)]
+enum ThreadCommand {
+    /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
+    /// last time, messages, and the first line of the first message; the most recently active last.
+    List {
+        /// Only threads this ant (or human) sent or received a message on.
+        #[arg(long, value_name = "ANT")]
+        ant: Option<UserId>,
+        /// Only threads this human owns.
+        #[arg(long, value_name = "HUMAN")]
+        owner: Option<UserId>,
+        /// Only threads with a message whose text contains TEXT, whatever the case; its first matching line is shown
+        /// under the thread.
+        #[arg(long, value_name = "TEXT")]
+        grep: Option<String>,
+        /// How far back to read, such as 90m, 24h or 7d; 0 for everything the stream keeps. Each message in it is
+        /// read, so a longer one takes longer.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
+        since: Duration,
+        /// At most this many threads, the most recently active.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// One JSON thread per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
+    Show {
+        thread: ThreadId,
+        /// How far back to read; by default from the thread's start when its id is time-ordered (as generated ids
+        /// are), else everything the stream keeps.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+        since: Option<Duration>,
+        /// One JSON entry per line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DeadCommand {
     /// List dead letters, oldest first.
     List,
@@ -488,6 +561,37 @@ enum AuthCommand {
         /// Where to write the credentials (default: <dir>/leaf-<machine>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Revoke credentials before they expire: every key issued to NAME (an ant, human or webhook,
+    /// `leaf-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
+    /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections.
+    Revoke {
+        /// Name the credentials carry; every key issued to it is revoked.
+        #[arg(required_unless_present = "keys")]
+        name: Option<String>,
+        /// Public user NKey to revoke (repeatable), as `ants auth revoked` or the credentials' JWT shows it.
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Only record the revocation and write server.conf; push later with `ants auth push`.
+        #[arg(long)]
+        no_push: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// List the revoked keys: key, name, when revoked and when their credentials expire. Revocations of expired
+    /// credentials are dropped on the next revoke or push.
+    Revoked {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Push the team's account, with its revocations, to the server of --nats (the hub), as `ants auth revoke`
+    /// does.
+    Push {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -669,14 +773,30 @@ async fn main() -> Result<()> {
             show_inbox(&nats()?, &select, follow, json).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
+        Command::Spend { ant, thread, days, json, config } => {
+            let path = match config {
+                Some(path) => path,
+                None => ants_daemon::config::default_path()?,
+            };
+            let caps = ants_daemon::config::Summary::load(&path)?.caps;
+            spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
+        }
         Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
         Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
+        Command::Thread(ThreadCommand::List { ant, owner, grep, since, limit, json }) => {
+            let select = thread::Select { ant, owner, grep, limit: Some(limit) };
+            thread::list(&nats()?, since, &select, json).await
+        }
+        Command::Thread(ThreadCommand::Show { thread, since, json }) => {
+            thread::show(&nats()?, &thread, since, json).await
+        }
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
             watch(&nats()?, filter).await
         }
+        Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
             let nats = nats()?;
             let (_, js) = nats.connect_only("ants-cli").await?;
@@ -715,11 +835,14 @@ async fn main() -> Result<()> {
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
             let default_path = ants_daemon::config::default_path()?;
-            let configs = || {
-                let (ants, harnesses) = serve::ants(&args, &default_path)?;
-                serve::configs(ants, &harnesses, &cli.nats, cli.creds.clone(), domain.cloned())
+            let served = || {
+                let listed = serve::ants(&args, &default_path)?;
+                let configs =
+                    serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
+                let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
+                Ok(serve::Served { configs, schedules })
             };
-            serve::run(configs()?, configs).await
+            serve::run(served()?, served).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { pick }) => {
@@ -750,6 +873,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key }) => {
+            let kind = match webhook {
+                true => revoke::Kind::Webhook,
+                false => auth::role(&user, human).into(),
+            };
             let permissions = match webhook {
                 true => {
                     if user.is_human() {
@@ -766,11 +893,11 @@ async fn main() -> Result<()> {
             let dir = team_dir(dir)?;
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                auth::issue_with(&dir, &user, permissions, &out)?;
+                auth::issue_with(&dir, &user, kind, permissions, &out)?;
                 println!("{}", out.display());
                 return Ok(());
             };
-            let jwt = auth::sign_with(&dir, &user, permissions, &key)?;
+            let jwt = auth::sign_with(&dir, &user, kind, permissions, &key)?;
             match out {
                 Some(out) => {
                     std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
@@ -848,6 +975,26 @@ async fn main() -> Result<()> {
             println!("{}", out.display());
             Ok(())
         }
+        Command::Auth(AuthCommand::Revoke { name, keys, no_push, dir }) => {
+            let dir = team_dir(dir)?;
+            let now = auth::now()?;
+            for r in revoke::revoke(&dir, name.as_deref(), &keys)? {
+                let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
+                println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
+            }
+            println!(
+                "{} carries the revocations: copy it to the hub and every leaf node and reload them (SIGHUP), so \
+                 restarts keep them and leaf nodes refuse the revoked users too",
+                dir.join(auth::SERVER_CONF).display()
+            );
+            if no_push {
+                println!("push them to the hub with: ants auth push --nats URL");
+                return Ok(());
+            }
+            push(&cli.nats, &dir).await
+        }
+        Command::Auth(AuthCommand::Revoked { dir }) => revoke::list(&team_dir(dir)?),
+        Command::Auth(AuthCommand::Push { dir }) => push(&cli.nats, &team_dir(dir)?).await,
         Command::Leaf(LeafCommand::Config {
             machine,
             uplinks,
@@ -955,6 +1102,21 @@ impl<'a> Nats<'a> {
     /// Connect as [`Nats::me`] without registering it.
     async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         bus::connect(self.url, self.creds, self.domain, &self.me.id, name).await
+    }
+}
+
+/// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure.
+async fn push(url: &str, dir: &Path) -> Result<()> {
+    match revoke::push(url, dir).await {
+        Ok(server) => {
+            println!("account pushed to server {server} ({url}); connections of revoked credentials are closed");
+            Ok(())
+        }
+        Err(e) => Err(e.context(format!(
+            "the account was not pushed to {url}; the revocations stay in {}: push them with `ants auth push \
+             --nats URL` once the hub is in reach, or copy server.conf to the hub and reload it (SIGHUP)",
+            dir.display()
+        ))),
     }
 }
 
@@ -1336,6 +1498,59 @@ async fn thread_notes(nats: &Nats<'_>, thread: ThreadId, text: Vec<String>) -> R
     Ok(())
 }
 
+/// How long `ants cancel` waits for a daemon of the ant to answer.
+const CANCEL_WAIT: Duration = Duration::from_secs(5);
+/// How long `ants cancel` waits on, after a daemon of the ant runs no prompt on the thread, for another daemon of the
+/// same ant that may run it.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+async fn cancel(nats: &Nats<'_>, ant: UserId, thread: ThreadId) -> Result<()> {
+    let me = &nats.me.id;
+    if !nats.me.role.is_human() {
+        bail!("the credentials of {me} are an ant's; only a human cancels a prompt");
+    }
+    let (client, _) = nats.connect("ants-cancel").await?;
+    let request = CancelRequest::new(ant, thread, me.clone());
+    let answers = client.subscribe(request.reply_subject()).await?;
+    client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
+    client.flush().await?;
+    let (ant, thread) = (&request.ant, &request.thread_id);
+    match cancel_outcome(&request, answers, CANCEL_WAIT, CANCEL_GRACE).await {
+        Some(true) => {
+            println!("cancelled the prompt of {ant} on thread {thread}; the partial reply follows on the thread");
+            Ok(())
+        }
+        Some(false) => bail!("{ant} has no prompt running on thread {thread}"),
+        None => bail!("no daemon serving {ant} answered within {}s", CANCEL_WAIT.as_secs()),
+    }
+}
+
+/// What the daemons of the ant answer to `request`: whether one cancelled the prompt, or `None` when none answers
+/// within `wait`. That no prompt runs is the answer once `grace` passes with no daemon cancelling it.
+async fn cancel_outcome(
+    request: &CancelRequest,
+    mut answers: impl futures::Stream<Item = async_nats::Message> + Unpin,
+    wait: Duration,
+    grace: Duration,
+) -> Option<bool> {
+    let mut deadline = tokio::time::Instant::now() + wait;
+    let mut outcome = None;
+    while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, answers.next()).await {
+        let Ok(answer) = serde_json::from_slice::<CancelReply>(&msg.payload) else { continue };
+        if answer.request_id != request.id || answer.check_subject(&msg.subject).is_err() {
+            continue;
+        }
+        if answer.cancelled {
+            return Some(true);
+        }
+        if outcome.is_none() {
+            outcome = Some(false);
+            deadline = deadline.min(tokio::time::Instant::now() + grace);
+        }
+    }
+    outcome
+}
+
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
 fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
@@ -1372,6 +1587,13 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
             let forged = forged(d.subject() == msg.subject.as_str());
             printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, tools::spelling(d.verdict)))
+        } else if let Ok(r) = serde_json::from_slice::<CancelRequest>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("[{}] {} asks to cancel the prompt of {}{forged}", r.thread_id, r.by, r.ant))
+        } else if let Ok(r) = serde_json::from_slice::<CancelReply>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            let outcome = if r.cancelled { "prompt cancelled" } else { "no prompt to cancel" };
+            printer.line(&format!("[{}] {}{forged}: {outcome}", r.thread_id, r.ant))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };
@@ -1613,6 +1835,33 @@ mod tests {
             envelope_line(&decided, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_for_any_daemon_of_the_ant_to_cancel_the_prompt() {
+        let request = CancelRequest::new("dev-a".parse().unwrap(), "t1".parse().unwrap(), UserId::human());
+        let msg = |answer: &CancelReply| async_nats::Message {
+            subject: answer.subject().into(),
+            reply: None,
+            payload: serde_json::to_vec(answer).unwrap().into(),
+            headers: None,
+            status: None,
+            description: None,
+            length: 0,
+        };
+        let other = CancelRequest::new(request.ant.clone(), request.thread_id.clone(), UserId::human());
+        let (idle, busy) = (msg(&request.answer(false)), msg(&request.answer(true)));
+        let (long, grace) = (Duration::from_secs(60), Duration::from_millis(50));
+        let answers = |msgs: Vec<async_nats::Message>| futures::stream::iter(msgs).chain(futures::stream::pending());
+
+        let outcome = cancel_outcome(&request, answers(vec![idle.clone(), busy]), long, grace).await;
+        assert_eq!(outcome, Some(true), "another daemon of the ant runs the prompt");
+        let alone = vec![msg(&other.answer(true)), idle];
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), cancel_outcome(&request, answers(alone), long, grace)).await;
+        assert_eq!(outcome, Ok(Some(false)), "no prompt, known once the grace passes");
+        let outcome = cancel_outcome(&request, answers(vec![msg(&other.answer(true))]), grace, grace).await;
+        assert_eq!(outcome, None, "no daemon answered this request");
     }
 
     #[test]
