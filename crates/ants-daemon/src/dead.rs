@@ -20,6 +20,10 @@
 //! thread's owner directly and terminates the message itself ([`finish`]). The human's side writes dead letters only
 //! from what the hub holds, so straight into its stream.
 //!
+//! The hub's stream keeps a second copy of a dead letter out by its message id only within its duplicate window (two
+//! minutes). A daemon that finishes a burial later, having been down, first reads its own dead letters back from the
+//! hub ([`stored`]) and keeps a letter of the same message found there instead of storing another.
+//!
 //! When storing the dead letter fails on that extra delivery too, JetStream delivers the message no more and only
 //! publishes a max-deliveries advisory. As a backstop, the human's side ([`watch`]) turns those advisories into dead
 //! letters. Advisories are core NATS: one published while no watcher runs is lost, and its message stays in the
@@ -29,19 +33,30 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, UserId, Uuid, chan_consumer, inbox_consumer, subject,
+    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, ThreadOrigin, UserId, Uuid, chan_consumer,
+    dead_reader, inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::stream::{self, RawMessageErrorKind};
-use async_nats::jetstream::{self, AckKind};
+use async_nats::jetstream::{self, AckKind, consumer};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::attempts::Notes;
 use crate::bus;
+use crate::channel::Threads;
+use crate::daemon::Claims;
 use crate::escalation::{Escalator, Stuck};
 use crate::humans::Registry;
+use crate::webhooks::Webhooks;
+
+/// How long a dead letter reader left behind by an interrupted read lives on.
+const INACTIVE: Duration = Duration::from_secs(30);
+/// Dead letters asked for at once.
+const BATCH: u64 = 256;
+/// One read of dead letters at a time: an ant's reads share its reader.
+static READING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Where a delivery stands among the `attempts` a message gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,28 +205,79 @@ pub async fn bury_letter(
         tracing::warn!(stream_seq = dead.stream_seq, error = dead.error, "dead letter kept in this machine's outbox");
         return Ok(Burial::Outbox);
     };
-    tell(js, dead, ack.sequence, post, humans, escalator).await?;
+    bury_stored(js, msg, dead, ack.sequence, post, humans, escalator).await
+}
+
+/// [`bury_letter`] for `dead`, which an earlier delivery of `msg` kept in the machine's outbox ([`Buried`]): a letter of
+/// the message the hub's stream holds already ([`stored`]), as the outbox copy landed long before, is the one the
+/// notice names, and no other is stored.
+pub async fn bury_kept(
+    js: &jetstream::Context,
+    msg: &jetstream::Message,
+    dead: &DeadLetter,
+    post: Option<&ChannelPost>,
+    humans: &Registry,
+    escalator: Option<&Escalator>,
+) -> Result<Burial> {
+    match stored(js, dead).await {
+        Ok(letters) => {
+            if let Some(&(dead_seq, _)) = letters.first() {
+                return bury_stored(js, msg, dead, dead_seq, post, humans, escalator).await;
+            }
+        }
+        Err(e) => tracing::warn!(stream_seq = dead.stream_seq, error = format!("{e:#}"), "reading dead letters back"),
+    }
+    bury_letter(js, msg, dead, post, humans, escalator).await
+}
+
+/// Tell about `dead`, the dead letter of `msg` stored at `dead_seq` in the hub's stream, as [`bury_letter`] does, then
+/// terminate `msg`.
+async fn bury_stored(
+    js: &jetstream::Context,
+    msg: &jetstream::Message,
+    dead: &DeadLetter,
+    dead_seq: u64,
+    post: Option<&ChannelPost>,
+    humans: &Registry,
+    escalator: Option<&Escalator>,
+) -> Result<Burial> {
+    tell(js, dead, dead_seq, post, humans, escalator).await?;
     // Only now: a crash before this redelivers the message, and the message ids keep the copies single.
     msg.ack_with(AckKind::Term).await.map_err(|e| anyhow!(e))?;
     tracing::warn!(
         stream_seq = dead.stream_seq,
-        dead_seq = ack.sequence,
+        dead_seq,
         deliveries = dead.deliveries,
         error = dead.error,
         "dead-lettered"
     );
-    Ok(Burial::Hub(ack.sequence))
+    Ok(Burial::Hub(dead_seq))
 }
 
 /// Finish the burial of `kept`, a dead letter kept in the machine's outbox on its message's last delivery, once the hub
 /// is in reach: store it in the hub's stream (never the outbox again), tell the thread's owner, else the default human
 /// of `humans`, then terminate the message. The notice goes there directly, as [`watch`] sends it, under the same
 /// message id: the consumer gives up on the message, so a running watcher may bury it too, and whichever notice comes
-/// first is the only one. Returns the dead letter's stream sequence, or `None` while the hub is out of reach.
+/// first is the only one. A letter of the message the hub's stream holds already ([`stored`]), the outbox copy or the
+/// watcher's, is kept instead of storing another, and the watcher's was told already. Returns the dead letter's stream
+/// sequence, or `None` while the hub is out of reach.
 pub async fn finish(js: &jetstream::Context, kept: &Kept, humans: &Registry) -> Result<Option<u64>> {
     let Kept { dead, post, last_delivery } = kept;
-    let Some(ack) = bus::store_in_hub(js, dead.subject(), dead, &dead.msg_id()).await? else { return Ok(None) };
-    tell(js, dead, ack.sequence, post.as_ref(), humans, None).await?;
+    let letters = stored(js, dead).await.unwrap_or_else(|e| {
+        tracing::debug!(stream_seq = dead.stream_seq, error = format!("{e:#}"), "reading dead letters back");
+        Vec::new()
+    });
+    let dead_seq = match letters.first() {
+        Some(&(dead_seq, _)) => dead_seq,
+        None => match bus::store_in_hub(js, dead.subject(), dead, &dead.msg_id()).await? {
+            Some(ack) => ack.sequence,
+            None => return Ok(None),
+        },
+    };
+    // Any letter but this one is the watcher's, which told when it stored it.
+    if letters.iter().all(|(_, letter)| letter == dead) {
+        tell(js, dead, dead_seq, post.as_ref(), humans, None).await?;
+    }
     if let Some(reply) = last_delivery {
         let client = js.client();
         client.publish(reply.clone(), AckKind::Term.into()).await.context("terminating the message")?;
@@ -219,11 +285,58 @@ pub async fn finish(js: &jetstream::Context, kept: &Kept, humans: &Registry) -> 
     }
     tracing::warn!(
         stream_seq = dead.stream_seq,
-        dead_seq = ack.sequence,
+        dead_seq,
         error = dead.error,
         "dead-lettered from this machine's outbox"
     );
-    Ok(Some(ack.sequence))
+    Ok(Some(dead_seq))
+}
+
+/// The letters of the message `dead` is of that the hub's stream holds, oldest first, with their sequences: read back
+/// from the dead letters of its ant stored after the message, through the ant's own consumer [`dead_reader`], created
+/// for the read and deleted after it.
+pub async fn stored(js: &jetstream::Context, dead: &DeadLetter) -> Result<Vec<(u64, DeadLetter)>> {
+    let _one = READING.lock().await;
+    let name = dead_reader(&dead.ant);
+    // A consumer left by an interrupted read would carry on where it stopped.
+    let _ = js.delete_consumer_from_stream(&name, STREAM).await;
+    let config = consumer::pull::Config {
+        name: Some(name.clone()),
+        filter_subject: dead.subject(),
+        deliver_policy: consumer::DeliverPolicy::ByStartSequence { start_sequence: dead.stream_seq + 1 },
+        ack_policy: consumer::AckPolicy::None,
+        inactive_threshold: INACTIVE,
+        ..Default::default()
+    };
+    let reader: consumer::PullConsumer =
+        js.create_consumer_on_stream(config, STREAM).await.context("reading dead letters back")?;
+    let letters = read_back(&reader, dead.stream_seq).await;
+    if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
+        tracing::debug!(error = %e, consumer = name, "deleting the dead letter reader");
+    }
+    letters
+}
+
+async fn read_back(reader: &consumer::PullConsumer, seq: u64) -> Result<Vec<(u64, DeadLetter)>> {
+    let mut letters = Vec::new();
+    let mut left = reader.cached_info().num_pending;
+    while left > 0 {
+        let mut batch = reader.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
+        let mut got = 0;
+        while let Some(msg) = batch.next().await {
+            let msg = msg.map_err(|e| anyhow!(e))?;
+            got += 1;
+            let Ok(info) = msg.info() else { continue };
+            if let Some(dead) = letter(&msg.subject, &msg.payload).ok().filter(|dead| dead.stream_seq == seq) {
+                letters.push((info.stream_sequence, dead));
+            }
+        }
+        if got == 0 {
+            break;
+        }
+        left = left.saturating_sub(got);
+    }
+    Ok(letters)
 }
 
 fn letter_of(
@@ -307,10 +420,12 @@ impl MaxDeliveries {
 
 /// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message an ant's inbox or
 /// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
-/// Runs until the connection closes. Needs the human's credentials.
+/// Channel threads are read through the reader consumer of `reader`, the human. Runs until the connection closes.
+/// Needs the human's credentials.
 pub async fn watch(
     client: &async_nats::Client,
     js: &jetstream::Context,
+    reader: &UserId,
     mut buried: impl FnMut(u64, &DeadLetter),
 ) -> Result<()> {
     let mut advisories = client
@@ -320,6 +435,9 @@ pub async fn watch(
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let humans = Registry::default();
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
+    let webhooks = Webhooks::new(js.clone());
+    let threads = Threads::new(js.clone(), reader.clone(), bus::ensure_sessions(js).await?);
+    let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
             Ok(advisory) => advisory,
@@ -328,7 +446,7 @@ pub async fn watch(
                 continue;
             }
         };
-        match bury_undelivered(js, &stream, &advisory, &humans).await {
+        match bury_undelivered(js, &stream, &advisory, &claims).await {
             Ok(Some((seq, dead))) => buried(seq, &dead),
             Ok(None) => {}
             Err(e) => tracing::warn!(stream_seq = advisory.stream_seq, error = format!("{e:#}"), "dead-lettering"),
@@ -339,12 +457,14 @@ pub async fn watch(
 
 /// Dead-letter the message `advisory` names, unless it is not an ant's inbox message or channel post, is gone, or
 /// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
-/// else the default human of `humans`, not up the ant's escalation chain.
+/// else the default human of `claims`, not up the ant's escalation chain. The owner and creator are checked as the
+/// ant's daemon checks them: an envelope's against `claims` ([`Claims::sender_claims`]), and a channel post's as the
+/// posts of its thread say ([`Threads::origin`]).
 pub async fn bury_undelivered(
     js: &jetstream::Context,
     stream: &stream::Stream,
     advisory: &MaxDeliveries,
-    humans: &Registry,
+    claims: &Claims<'_>,
 ) -> Result<Option<(u64, DeadLetter)>> {
     let Some((ant, consumer)) = advisory.ant() else {
         tracing::debug!(consumer = advisory.consumer, "ignoring an advisory of a consumer that is no ant's inbox");
@@ -374,17 +494,27 @@ pub async fn bury_undelivered(
                 bail!("message {seq} is on {}, not in the inbox of {ant}", msg.subject);
             }
             // As the daemon does: an envelope whose sender is forged is kept only as a payload.
-            let envelope =
+            let mut envelope =
                 serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
+            if let Some(envelope) = envelope.as_mut() {
+                claims.sender_claims(envelope, seq).await;
+            }
             (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
         }
         Consumer::Channels => {
             if subject::parse_chan(&msg.subject).is_none() {
                 bail!("message {seq} is on {}, not a channel post", msg.subject);
             }
-            let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
+            let mut post = serde_json::from_slice::<ChannelPost>(&msg.payload)
                 .ok()
                 .filter(|p| p.check_subject(&msg.subject).is_ok());
+            if let Some(post) = post.as_mut() {
+                let origin = claims.threads.origin(post, seq, &claims.humans.humans()).await.unwrap_or_else(|e| {
+                    tracing::warn!(thread = %post.thread_id, error = format!("{e:#}"), "reading the thread's origin");
+                    ThreadOrigin::default()
+                });
+                origin.apply(post);
+            }
             (DeadLetter::of_payload(ant.clone(), seq, advisory.deliveries, &error, &msg.payload), post)
         }
     };
@@ -396,7 +526,7 @@ pub async fn bury_undelivered(
         .context("publishing")?
         .await
         .context("waiting for JetStream to store the message")?;
-    tell(js, &dead, ack.sequence, post.as_ref(), humans, None).await?;
+    tell(js, &dead, ack.sequence, post.as_ref(), claims.humans, None).await?;
     if ack.duplicate {
         return Ok(None);
     }

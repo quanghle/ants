@@ -539,9 +539,9 @@ impl Inbox<'_> {
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
-    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A top-level post kept
-    /// names its thread's owner, a human, and its creator, an ant ([`ThreadOrigin`]); any other names none until
-    /// [`Inbox::handle`] reads its thread's.
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A post is a webhook's
+    /// only from a webhook ([`Webhooks`]) or a human. A top-level post kept names its thread's owner, a human, and its
+    /// creator, an ant ([`ThreadOrigin`]); any other names none until [`Inbox::handle`] reads its thread's.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -556,6 +556,15 @@ impl Inbox<'_> {
                 return None;
             }
         };
+        if post.webhook && !self.humans.is_human(&post.from) && !self.webhooks.is_webhook(&post.from).await {
+            tracing::warn!(
+                channel = %post.channel,
+                thread = %post.thread_id,
+                sender = %post.from,
+                "taking a post marked as a webhook's for an ant's: the sender has no webhook marker"
+            );
+            post.webhook = false;
+        }
         let humans = self.humans.humans();
         if post.from == *self.ant && !self.notify_mentioned(msg, &post, channels, &humans).await {
             return None;
@@ -634,16 +643,36 @@ impl Inbox<'_> {
         incoming.envelope.creator.clone_from(&posted.post.creator);
     }
 
-    /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread: its sender
-    /// wrote it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
-    /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
-    /// creator its posts say ([`Threads::origin_of`]); any other has no creator, and the owner the ant names, which
-    /// nothing stored can check.
+    /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread
+    /// ([`Claims::sender_claims`]).
     async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
-        let envelope = &mut incoming.envelope;
         if incoming.post.is_some() {
             return;
         }
+        let claims = Claims { humans: self.humans, webhooks: self.webhooks, threads: self.threads };
+        claims.sender_claims(&mut incoming.envelope, seq).await;
+    }
+}
+
+/// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
+/// that buries what the daemon could not ([`dead::bury_undelivered`]).
+pub struct Claims<'a> {
+    /// Who is a human.
+    pub humans: &'a Registry,
+    /// Who of the senders that say so are webhooks.
+    pub webhooks: &'a Webhooks,
+    /// The channel threads, whose posts say who started each.
+    pub threads: &'a Threads,
+}
+
+impl Claims<'_> {
+    /// Check what inbox message `envelope`, at stream sequence `seq`, says of its sender and thread: its sender wrote
+    /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
+    /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
+    /// creator its posts say ([`Threads::origin_of`]); any other has the owner the ant names, which nothing stored can
+    /// check, and the creator of the channel thread it was spun off, if the sender takes part in that one
+    /// ([`Threads::origin_for`]), else none.
+    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
         if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
         {
             tracing::warn!(
@@ -658,24 +687,56 @@ impl Inbox<'_> {
         }
         if envelope.webhook {
             envelope.creator = None;
+            envelope.origin_thread = None;
             return;
         }
         if envelope.owner.is_none() && envelope.creator.is_none() {
+            envelope.origin_thread = None;
             return;
         }
-        match self.threads.origin_of(&envelope.thread_id, seq, &self.humans.humans()).await {
+        let humans = self.humans.humans();
+        match self.threads.origin_of(&envelope.thread_id, seq, &humans).await {
             Ok(Some(origin)) => {
                 envelope.owner = origin.owner;
                 envelope.creator = origin.creator;
+                envelope.origin_thread = None;
             }
-            Ok(None) => envelope.creator = None,
+            Ok(None) => self.spun_off_creator(envelope, seq, &humans).await,
             Err(e) => {
                 tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's origin");
                 envelope.creator = None;
+                envelope.origin_thread = None;
             }
         }
     }
+    /// Name the creator of the thread of `envelope`, an ant's message at stream sequence `seq` on a thread no channel
+    /// post started, as that of the channel thread it links to ([`Envelope::origin_thread`]) when its sender takes
+    /// part in that one; else the thread has none and links nowhere.
+    async fn spun_off_creator(&self, envelope: &mut Envelope, seq: u64, humans: &Humans) {
+        let creator = match envelope.origin_thread.as_ref().filter(|_| envelope.creator.is_some()) {
+            None => None,
+            Some(origin) => match self.threads.origin_for(origin, &envelope.from, seq, humans).await {
+                Ok(origin) => origin.and_then(|origin| origin.creator),
+                Err(e) => {
+                    tracing::warn!(thread = %origin, error = format!("{e:#}"), "reading the origin thread");
+                    None
+                }
+            },
+        };
+        if creator.is_none() && envelope.creator.is_some() {
+            tracing::debug!(
+                thread = %envelope.thread_id,
+                sender = %envelope.from,
+                "dropping the message's creator: it links to no channel thread an ant created that the sender takes \
+                 part in"
+            );
+        }
+        envelope.origin_thread = creator.is_some().then(|| envelope.origin_thread.take()).flatten();
+        envelope.creator = creator;
+    }
+}
 
+impl Inbox<'_> {
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
     /// thread's queue: the prompt that asked is in flight on that thread.
     async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
@@ -739,7 +800,7 @@ impl Inbox<'_> {
         if let Some(kept) = self.buried.get(envelope).await {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
             tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
-            match self.bury_letter(&incoming, &msg, &kept.dead).await {
+            match self.bury_letter(&incoming, &msg, &kept.dead, true).await {
                 Ok(()) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
@@ -792,16 +853,28 @@ impl Inbox<'_> {
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
         let dead = dead::letter_for(self.ant, msg, envelope, error)?;
-        self.bury_letter(incoming, msg, &dead).await
+        self.bury_letter(incoming, msg, &dead, false).await
     }
 
-    /// Bury `msg` as `dead` ([`dead::bury_letter`]). A dead letter kept in the machine's outbox is noted in `buried`,
-    /// so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its ack subject, for
-    /// [`Inbox::finish_buried`].
-    async fn bury_letter(&self, incoming: &Incoming, msg: &jetstream::Message, dead: &DeadLetter) -> Result<()> {
+    /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, `kept` in the machine's outbox on an earlier delivery, as the
+    /// letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
+    /// noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
+    /// ack subject, for [`Inbox::finish_buried`].
+    async fn bury_letter(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        dead: &DeadLetter,
+        kept: bool,
+    ) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
         let escalator = Some(self.escalator);
-        match dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await? {
+        let burial = if kept {
+            dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await?
+        } else {
+            dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?
+        };
+        match burial {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => {
                 let last = msg.info().is_ok_and(|info| info.delivered >= MAX_DELIVER);
@@ -2431,7 +2504,17 @@ mod tests {
         async fn kept(&self) -> u64 {
             self.outbox.clone().info().await.unwrap().state.messages
         }
+
+        /// Shorten the hub stream's duplicate window to [`SHORT_WINDOW`], so a test can outwait it.
+        async fn shorten_duplicate_window(&self) {
+            let mut config = self.hub_js.get_stream(ants_proto::STREAM).await.unwrap().cached_info().config.clone();
+            config.duplicate_window = SHORT_WINDOW;
+            self.hub_js.update_stream(&config).await.unwrap();
+        }
     }
+
+    /// A duplicate window a test outwaits in three times as long.
+    const SHORT_WINDOW: Duration = Duration::from_millis(300);
 
     /// dev-a's daemon on a leaf node replies while the leaf's uplink is down: the reply goes to the machine's outbox
     /// and the ack fails. Once the uplink is back, the redelivery to a restarted daemon is acked, not answered again.
@@ -2482,7 +2565,21 @@ mod tests {
     /// human and terminates the message, without another prompt.
     #[tokio::test]
     async fn a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back() {
+        dead_letter_kept_in_the_outbox(false).await;
+    }
+
+    /// As above, with the outbox copy landing long before the redelivery, past the hub's duplicate window: the
+    /// redelivery finds it and stores no other.
+    #[tokio::test]
+    async fn a_dead_letter_kept_in_the_outbox_lands_once_past_the_duplicate_window() {
+        dead_letter_kept_in_the_outbox(true).await;
+    }
+
+    async fn dead_letter_kept_in_the_outbox(past_window: bool) {
         let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        if past_window {
+            uplinked.shorten_duplicate_window().await;
+        }
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
@@ -2517,6 +2614,11 @@ mod tests {
         assert!(dead::list(&stream).await.unwrap().is_empty(), "not in the hub's stream yet");
 
         uplinked.switch(true).await;
+        if past_window {
+            // As the hub's stream takes the outbox copy once the uplink is back.
+            bus::publish_json(&uplinked.hub_js, kept.subject(), &kept, Some(&kept.msg_id())).await.unwrap();
+            tokio::time::sleep(SHORT_WINDOW * 3).await;
+        }
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let check = async {
             bus.until_acked(seq).await;
@@ -2549,12 +2651,25 @@ mod tests {
     /// The human gets one notice either way.
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_outbox_copy() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false }).await;
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: false })
+            .await;
     }
 
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_watcher_s() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true }).await;
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: false }).await;
+    }
+
+    /// As above, with the daemon restarted past the hub's duplicate window: it finds the letter there and stores no
+    /// other, and tells only when the watcher did not.
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_outbox_copy() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: true }).await;
+    }
+
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_watcher_s() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: true }).await;
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2562,12 +2677,16 @@ mod tests {
         /// Within the hub's ack wait, with the daemon running.
         Live,
         /// After JetStream gave up on the message and a watcher heard so, `watcher_first` or after the outbox copy
-        /// landed, with the daemon restarted.
-        Restarted { watcher_first: bool },
+        /// landed, with the daemon restarted, `past_window`: after the hub's duplicate window ran out.
+        Restarted { watcher_first: bool, past_window: bool },
     }
 
     async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        let past_window = matches!(back, UplinkBack::Restarted { past_window: true, .. });
+        if past_window {
+            uplinked.shorten_duplicate_window().await;
+        }
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
@@ -2657,7 +2776,7 @@ mod tests {
             }
             notices
         };
-        if let UplinkBack::Restarted { watcher_first } = back {
+        if let UplinkBack::Restarted { watcher_first, .. } = back {
             // The watcher's view of JetStream's max-deliveries advisory.
             let advisory = dead::MaxDeliveries {
                 stream: ants_proto::STREAM.to_owned(),
@@ -2666,7 +2785,11 @@ mod tests {
                 deliveries: MAX_DELIVER as u64,
             };
             let humans = Registry::default();
-            let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &humans);
+            let webhooks = Webhooks::new(uplinked.hub_js.clone());
+            let sessions = bus::ensure_sessions(&uplinked.hub_js).await.unwrap();
+            let threads = Threads::new(uplinked.hub_js.clone(), UserId::human(), sessions);
+            let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+            let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &claims);
             // As the hub's stream takes the outbox copy once the uplink is back.
             let dead_id = kept.dead.msg_id();
             let outbox_copy = || bus::publish_json(&uplinked.hub_js, kept.dead.subject(), &kept.dead, Some(&dead_id));
@@ -2679,6 +2802,9 @@ mod tests {
                 outbox_copy().await.unwrap();
                 assert_eq!(watch().await.unwrap(), None, "a dead letter already");
                 assert!(notices().await.is_empty(), "the watcher sends no notice for the outbox copy");
+            }
+            if past_window {
+                tokio::time::sleep(SHORT_WINDOW * 3).await;
             }
 
             let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -2919,6 +3045,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_thread_spun_off_a_channel_thread_keeps_its_creator_only_from_an_ant_taking_part_in_it() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [dev_b, dev_c, eve, lead, boss] = ants(["dev-b", "dev-c", "eve", "lead", "boss"]);
+        let [mut to_dev_b, mut to_dev_c, mut to_eve] =
+            inboxes(&bus, &[dev_b.clone(), dev_c.clone(), eve.clone()]).await;
+        let (ops, _) = bus.channel("ops", &["lead", "dev-b", "dev-c"]).await;
+        let root = ChannelPost::new(ops.clone(), lead.clone(), "@dev-b plan the release");
+        bus.post(&root).await;
+        // eve, no member, can still store a post on the thread.
+        bus.post(&ChannelPost::on_thread(ops, root.thread_id.clone(), eve.clone(), "me too")).await;
+        let spin = |from: &UserId, text: &str| {
+            Envelope::on_thread(root.thread_id.clone(), from.clone(), bus.dev.clone(), text)
+                .with_creator(Some(boss.clone()))
+                .spun_off(ThreadId::generate())
+        };
+        let spun = spin(&dev_b, "woken on lead's thread");
+        let mut spent = spin(&dev_b, "stuck");
+        spent.turn_budget = 0;
+        let no_part = spin(&dev_c, "a member that took no part");
+        let no_member = spin(&eve, "no member");
+        let mut seq = 0;
+        for envelope in [&spun, &no_part, &no_member, &spent] {
+            seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let named = |reply: &Envelope| (reply.in_reply_to, reply.creator.clone(), reply.origin_thread.clone());
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!(named(&reply), (Some(spun.id), Some(lead.clone()), Some(root.thread_id.clone())));
+            assert_eq!(named(&next_envelope(&mut to_dev_c).await), (Some(no_part.id), None, None));
+            assert_eq!(named(&next_envelope(&mut to_eve).await), (Some(no_member.id), None, None));
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!((&escalation.thread_id, &escalation.creator), (&spent.thread_id, &Some(lead.clone())));
+            let created = format!("starts at lead, which created thread {} and has no escalate_to.", spent.thread_id);
+            assert!(escalation.text.ends_with(&created), "{}", escalation.text);
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
     async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
         let Some((bus, mut human)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
@@ -3040,6 +3211,48 @@ mod tests {
         assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
         let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
         assert!(prompt.contains(members), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [hook, dev_b] = ants(["github", "dev-b"]);
+        bus.mark_webhook(&hook).await;
+        // dev-a is the channel's messenger and a member.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member(bus.dev.clone());
+        entry.add_member(dev_b.clone());
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let human = Some(UserId::human());
+        let real = ChannelPost::new(entry.channel.clone(), hook.clone(), "build red").with_owner(human.clone());
+        let real = real.from_webhook(Vec::new());
+        bus.post(&real).await;
+        let forged = ChannelPost::new(entry.channel.clone(), dev_b.clone(), "triage me").with_owner(human.clone());
+        let forged = forged.from_webhook(Vec::new());
+        bus.post(&forged).await;
+        let on_forged = forged.reply(dev_b.clone(), "@dev-a over to you", &[], &Humans::default()).unwrap();
+        assert_eq!((&on_forged.owner, &on_forged.creator), (&human, &None), "as the forged post says");
+        let seq = bus.post(&on_forged).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut answers = [next_post(&mut replies).await, next_post(&mut replies).await];
+            answers.sort_by_key(|answer| answer.thread_id != real.thread_id);
+            let named = |post: &ChannelPost| (post.in_reply_to, post.owner.clone(), post.creator.clone());
+            assert_eq!(named(&answers[0]), (Some(real.id), human.clone(), None), "the webhook's");
+            assert_eq!(named(&answers[1]), (Some(on_forged.id), None, Some(dev_b.clone())), "dev-b's thread");
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 2, "no triage of dev-b's post: {answered:?}");
+        assert!(answered.iter().any(|p| p.contains("Post from github (a webhook) mentioning nobody")), "{answered:?}");
     }
 
     #[tokio::test]

@@ -385,8 +385,8 @@ impl Hub {
         envelope.in_reply_to = None;
         match on.map(str::trim) {
             None | Some("") => {}
-            Some("new") => envelope.thread_id = ThreadId::generate(),
-            Some(other) => envelope.thread_id = other.parse().map_err(|e| format!("{e}"))?,
+            Some("new") => envelope = envelope.spun_off(ThreadId::generate()),
+            Some(other) => envelope = envelope.spun_off(other.parse().map_err(|e| format!("{e}"))?),
         }
         // On the escalation's thread, a message carries it, so its leader's answer is known as one.
         let escalation = current.escalation.as_deref().filter(|e| e.thread_id == envelope.thread_id).cloned();

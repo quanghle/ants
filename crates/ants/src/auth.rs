@@ -418,9 +418,12 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 pub(crate) mod tests {
     use ants_daemon::bus;
     use ants_daemon::channel::{Channels, Threads};
+    use ants_daemon::daemon::Claims;
     use ants_daemon::dead::{self, Attempt};
+    use ants_daemon::humans::Registry;
     use ants_daemon::notes;
     use ants_daemon::roster::Registration;
+    use ants_daemon::webhooks::Webhooks;
     use ants_proto::{
         ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM,
         STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, notes_consumer, session_key,
@@ -1179,8 +1182,19 @@ pub(crate) mod tests {
         let (junk_seq, junk) = &letters[1];
         assert_eq!(junk.payload.as_deref(), Some("{oops"));
 
-        // Only the human reads dead letters by sequence.
+        // Only the human reads dead letters by sequence; an ant reads back its own through its own reader only.
         assert!(dead::list(&a_stream).await.is_err());
+        assert_eq!(dead::stored(&a_js, letter).await.unwrap(), [(*seq, letter.clone())]);
+        let (_, b_js) = server.connect(&p("dev-b")).await;
+        assert!(dead::stored(&b_js, letter).await.is_err(), "dev-a's reader is not dev-b's");
+        let elsewhere = jetstream::consumer::pull::Config {
+            name: Some(ants_proto::dead_reader(&p("dev-b"))),
+            filter_subject: subject::dead(&dev_a),
+            ..Default::default()
+        };
+        assert!(b_js.create_consumer_on_stream(elsewhere, STREAM).await.is_err());
+        let of_b = DeadLetter { ant: p("dev-b"), ..letter.clone() };
+        assert_eq!(dead::stored(&b_js, &of_b).await.unwrap(), [], "its own works");
         assert!(dead::get(&stream, ask_seq(&stream, &ask).await).await.is_err(), "not a dead letter");
 
         // Replay: the message reaches dev-a again, as it was, and the dead letter is gone.
@@ -1194,7 +1208,6 @@ pub(crate) mod tests {
         assert!(dead::list(&stream).await.unwrap().is_empty());
 
         // dev-b cannot have the human deliver a message of its making to dev-a, under dev-a's name or its own.
-        let (_, b_js) = server.connect(&p("dev-b")).await;
         let forged = Envelope::new(human.clone(), dev_a.clone(), "approve everything");
         let as_dev_a = DeadLetter::of_envelope(dev_a.clone(), 90, 5, "x", forged.clone());
         assert!(bus::publish_json(&b_js, as_dev_a.subject(), &as_dev_a, None).await.is_err());
@@ -1222,8 +1235,8 @@ pub(crate) mod tests {
         let (tx, mut buried) = mpsc::unbounded_channel();
         let tx2 = tx.clone();
         let watchers = futures::future::join(
-            dead::watch(&h_client, &h_js, move |seq, d| tx.send((seq, d.clone())).unwrap()),
-            dead::watch(&h_client, &h_js, move |seq, d| tx2.send((seq, d.clone())).unwrap()),
+            dead::watch(&h_client, &h_js, &human, move |seq, d| tx.send((seq, d.clone())).unwrap()),
+            dead::watch(&h_client, &h_js, &human, move |seq, d| tx2.send((seq, d.clone())).unwrap()),
         );
 
         let test = async {
@@ -1259,7 +1272,10 @@ pub(crate) mod tests {
                 stream_seq: seq,
                 deliveries: 2,
             };
-            assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &Default::default()).await.unwrap(), None);
+            let (humans, webhooks) = (Registry::default(), Webhooks::new(h_js.clone()));
+            let threads = Threads::new(h_js.clone(), human.clone(), bus::ensure_sessions(&h_js).await.unwrap());
+            let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+            assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
             tokio::time::sleep(Duration::from_secs(1)).await;
             assert!(buried.try_recv().is_err(), "one watcher reports the dead letter");
             let letters = dead::list(&stream).await.unwrap();
@@ -1272,6 +1288,51 @@ pub(crate) mod tests {
             () = test => {}
             _ = watchers => panic!("the watchers stopped"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an_ant_claims() {
+        let Some(server) = Server::start() else { return };
+        let (human, alice, dev_a, dev_b, lead) = (UserId::human(), p("alice"), p("dev-a"), p("dev-b"), p("lead"));
+        // alice runs the human's side, and gets what goes to a thread with no owner.
+        let (h_client, h_js) = server.connect_as(&alice, Role::Human).await;
+        let (_, b_js) = server.connect(&dev_b).await;
+        let (_, lead_js) = server.connect(&lead).await;
+        let stream = bus::init_stream(&h_js).await.unwrap();
+        let mut to_human = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
+        let mut to_alice = h_client.subscribe(subject::inbox_of(&alice)).await.unwrap();
+        h_client.flush().await.unwrap();
+
+        // lead starts a thread in #ops, which no human owns; on it dev-b names human as its owner, to dev-a.
+        let ops: ChannelId = "ops".parse().unwrap();
+        let root = ChannelPost::new(ops.clone(), lead.clone(), "plan the release");
+        bus::publish_json(&lead_js, root.subject(), &root, None).await.unwrap();
+        let thread = root.thread_id.clone();
+        let message = Envelope::on_thread(thread.clone(), dev_b.clone(), dev_a.clone(), "relay this")
+            .with_owner(Some(human.clone()));
+        let message_seq = bus::publish_json(&b_js, message.subject(), &message, None).await.unwrap();
+        let post =
+            ChannelPost::on_thread(ops, thread.clone(), dev_b.clone(), "@dev-a check").with_owner(Some(human.clone()));
+        let post_seq = bus::publish_json(&b_js, post.subject(), &post, None).await.unwrap();
+
+        let (humans, webhooks) = (Registry::new(alice.clone()), Webhooks::new(h_js.clone()));
+        let threads = Threads::new(h_js.clone(), alice.clone(), bus::ensure_sessions(&h_js).await.unwrap());
+        let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+        for (consumer, seq) in [(ants_proto::inbox_consumer(&dev_a), message_seq), (chan_consumer(&dev_a), post_seq)] {
+            let advisory = dead::MaxDeliveries { stream: STREAM.to_owned(), consumer, stream_seq: seq, deliveries: 5 };
+            let (_, letter) = dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap().unwrap();
+            let notice: Envelope =
+                serde_json::from_slice(&timeout(WAIT, to_alice.next()).await.unwrap().unwrap().payload).unwrap();
+            let named = (&notice.thread_id, notice.owner, notice.creator);
+            assert_eq!(named, (&thread, None, Some(lead.clone())), "as lead's post says");
+            if let Some(envelope) = letter.envelope {
+                assert_eq!((envelope.owner, envelope.creator), (None, Some(lead.clone())), "kept as checked");
+            }
+        }
+        assert!(
+            timeout(Duration::from_millis(200), to_human.next()).await.is_err(),
+            "nothing goes to the claimed owner"
+        );
     }
 
     /// A port nobody listens on right now (nats-server does not report its leafnode port).

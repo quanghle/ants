@@ -580,6 +580,12 @@ pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
 }
 
+/// JetStream consumer an ant reads its own dead letters back through, one read at a time, like [`notes_consumer`]. Its
+/// filter is pinned to [`subject::dead`] of the ant.
+pub fn dead_reader(ant: &UserId) -> String {
+    format!("deadread-{ant}")
+}
+
 /// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
 /// credentials can be confined to its own.
 pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
@@ -635,7 +641,8 @@ impl Permissions {
     ///
     /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
-    /// letters, reads only its own inbox (consumer and live), the notes of every thread (live, and from the stream
+    /// letters, reads back only its own dead letters (through its own [`dead_reader`]), reads only its own inbox
+    /// (consumer and live), the notes of every thread (live, and from the stream
     /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
     /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
@@ -747,6 +754,7 @@ impl Permissions {
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
             let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
+            let dead_read = dead_reader(user);
             publish.extend([
                 // Get and put of its own sessions.
                 format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
@@ -761,6 +769,10 @@ impl Permissions {
                 format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(user)),
                 subject::dead(user),
                 subject::outbox(&subject::dead(user)).expect("an outbox subject"),
+                // Reading its own dead letters back, through its own consumer filtering only those.
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
+                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
+                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
                 subject::status_of(user),
                 subject::chanadm_from(user),
                 // Put and delete of its own roster entry, and of its own escalation chain.
@@ -1156,9 +1168,17 @@ pub struct Envelope {
     /// The ant whose top-level channel post started the thread ([`ChannelPost::thread_creator`]), kept like `owner`.
     /// Its escalate_to is the thread's origin chain ([`Escalation::new_from`]); a creator that is a human is none. A
     /// daemon takes it from an ant or a webhook only as the thread's top-level post kept in the stream says
-    /// ([`ThreadOrigin`]): on a thread no channel post started, there is none.
+    /// ([`ThreadOrigin`]): on a thread no channel post started, that of the channel thread an ant's message links to
+    /// ([`Envelope::origin_thread`]), else there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
+    /// The channel thread this message's thread was spun off, as when an ant handling a message on it sends one on a
+    /// new thread: the link a daemon checks the `creator` of an ant's message against on a thread no channel post
+    /// started. Replies and the messages an agent sends on or from the thread keep it; a daemon takes the linked
+    /// thread's creator only when a top-level channel post kept in the stream started it and the sender, a member or
+    /// the messenger of its channel, posted on it or was woken by a post on it, else drops both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_thread: Option<ThreadId>,
     /// The escalation the message carries up a chain, or answers. Never copied by [`Envelope::reply`] or
     /// [`Envelope::follow_up`]: the daemon sets it with [`Envelope::with_escalation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1207,6 +1227,7 @@ impl Envelope {
             in_reply_to: None,
             owner: None,
             creator: None,
+            origin_thread: None,
             escalation: None,
             approval: None,
             webhook: false,
@@ -1263,14 +1284,23 @@ impl Envelope {
             .then(|| request.decide(decision.verdict))
     }
 
-    /// A message on this envelope's thread, with a fresh budget and the same owner and creator.
+    /// A message on this envelope's thread, with a fresh budget and the same owner, creator and origin thread.
     pub fn follow_up(&self, from: UserId, to: UserId, text: impl Into<String>) -> Self {
-        Self::on_thread(self.thread_id.clone(), from, to, text)
+        let follow_up = Self::on_thread(self.thread_id.clone(), from, to, text)
             .with_owner(self.owner.clone())
-            .with_creator(self.creator.clone())
+            .with_creator(self.creator.clone());
+        Self { origin_thread: self.origin_thread.clone(), ..follow_up }
     }
 
-    /// Reply to the sender, whose role is `to`, keeping the thread's owner and creator. Replies to a human are free;
+    /// The envelope moved to `thread`, spun off this one's: it keeps the link to the channel thread its creator
+    /// comes from ([`Envelope::origin_thread`]), this thread unless it was spun off one itself.
+    pub fn spun_off(self, thread: ThreadId) -> Self {
+        let origin = self.origin_thread.clone().unwrap_or_else(|| self.thread_id.clone());
+        let origin_thread = (self.creator.is_some() && origin != thread).then_some(origin);
+        Self { thread_id: thread, origin_thread, ..self }
+    }
+
+    /// Reply to the sender, whose role is `to`, keeping the thread's owner, creator and origin thread. Replies to a human are free;
     /// agent-to-agent replies spend one turn, and fail when none are left, so the caller escalates to a human instead
     /// of looping.
     pub fn reply(&self, from: UserId, text: impl Into<String>, to: Role) -> Result<Self, Error> {
@@ -1289,6 +1319,7 @@ impl Envelope {
             in_reply_to: Some(self.id),
             owner: self.owner.clone(),
             creator: self.creator.clone(),
+            origin_thread: self.origin_thread.clone(),
             escalation: None,
             approval: None,
             webhook: false,
@@ -1852,8 +1883,8 @@ pub struct ChannelPost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
     /// A webhook's post, as `ants webhook serve` marks it: one that mentions nobody goes to the channel's messenger, as
-    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim, granting nothing an ant could not get by
-    /// messaging the messenger itself.
+    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim: a daemon takes it only from a sender whose
+    /// marker is in [`WEBHOOKS_BUCKET`] ([`webhook_marker_key`]) or a human, so no ant names a thread's owner with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     pub sent_at: DateTime<Utc>,
@@ -2680,6 +2711,22 @@ mod tests {
         assert_eq!(reply.in_reply_to, Some(ask.id));
         assert_eq!(reply.turn_budget, ask.turn_budget, "replying to the human spends no turn");
         assert_eq!(reply.subject(), "ants.inbox.human.dev-a");
+    }
+
+    #[test]
+    fn a_spun_off_thread_links_to_the_channel_thread_its_creator_comes_from() {
+        let (channel_thread, a, b): (ThreadId, ThreadId, ThreadId) =
+            ("t0".parse().unwrap(), "t1".parse().unwrap(), "t2".parse().unwrap());
+        let woken =
+            Envelope::on_thread(channel_thread.clone(), p("lead"), p("dev-a"), "go").with_creator(Some(p("lead")));
+        let spun = woken.reply(p("dev-a"), "help", Role::Ant).unwrap().spun_off(a.clone());
+        assert_eq!((&spun.thread_id, &spun.origin_thread), (&a, &Some(channel_thread.clone())));
+        let answer = spun.reply(p("dev-b"), "done", Role::Ant).unwrap();
+        assert_eq!(answer.follow_up(p("dev-a"), p("dev-c"), "x").origin_thread, Some(channel_thread.clone()));
+        assert_eq!(answer.clone().spun_off(b).origin_thread, Some(channel_thread.clone()), "still the channel thread");
+        assert_eq!(answer.spun_off(channel_thread.clone()).origin_thread, None, "back on the channel thread");
+        let uncreated = Envelope::on_thread(channel_thread, p("lead"), p("dev-a"), "go");
+        assert_eq!(uncreated.spun_off(a).origin_thread, None, "no creator to keep");
     }
 
     #[test]

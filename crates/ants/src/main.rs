@@ -1195,7 +1195,7 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
         if follow {
             // A dead letter stored here tells the human through the inbox, like one the daemon stores.
             let watch = async {
-                if let Err(e) = dead::watch(&client, &js, |_, _| {}).await {
+                if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
                     tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
                 }
                 std::future::pending::<()>().await
@@ -1235,7 +1235,7 @@ async fn dead_letters(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
             println!("dropped dead letter {seq}");
         }
         DeadCommand::Watch => {
-            let watch = dead::watch(&client, &js, |seq, letter| println!("{}", dead_row(seq, letter)));
+            let watch = dead::watch(&client, &js, &nats.me.id, |seq, letter| println!("{}", dead_row(seq, letter)));
             tokio::select! {
                 watched = watch => watched?,
                 _ = tokio::signal::ctrl_c() => {}
