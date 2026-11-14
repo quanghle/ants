@@ -303,6 +303,15 @@ letter and notice land first are the only ones; a notice up the escalation chain
 could reach the human twice. Verified by `a_dead_letter_kept_on_the_extra_delivery_*` in
 `crates/ants-daemon/src/daemon.rs`.
 
+The message ids keep the copies single only within the hub's duplicate window (2 minutes), and a daemon may be down
+for longer. So before storing a noted letter, on the redelivery or the extra delivery, the daemon reads back the ant's
+dead letters stored after the message, through its consumer `deadread-<ant>`, created for the read and deleted after
+it (`dead::stored`); credentials pin its filter to `ants.dead.<ant>`, and the dead letters of a message to the ant
+hold nothing it did not have. A letter of the message found there, the outbox copy or the watcher's, is kept and
+named by the notice; on the extra delivery, a letter other than the daemon's own is the watcher's, which told the
+human already, so the daemon sends no notice. A read that fails (credentials issued before, the hub out of reach)
+stores as before. Verified by `*_past_the_duplicate_window*` in `crates/ants-daemon/src/daemon.rs`.
+
 A message `ANTS` sources is stored without being published on its subject, so live waiters (`ants ask --wait`, an
 ant's waiting `ask_agent`, an ant waiting for its escalation chain's decision) would miss it; only the inbox
 consumers would see it (ants-5zr). `ANTS` therefore republishes every inbox message it stores, sourced or not
@@ -404,11 +413,11 @@ Limits:
   before dead letters were buffered needs `ants leaf outbox` again for `ANTS` to take its dead letters, and ant
   credentials issued before need `ants auth user` again to publish on `ants.out.dead.<ant>`.
 - A dead letter kept in the outbox on the message's extra delivery gets its notice from the daemon straight to the
-  thread's owner, not up the escalation chain. A daemon that stays down for more than two minutes after the outbox
-  copy or the watcher's letter landed stores the letter again once it runs; the notice, under the same id, may come
-  twice too.
-- The outbox copy of a daemon's dead letter and the one the redelivery stores usually land within two minutes of each
-  other (the source's retry backoff, the consumer's 60 second ack wait); further apart, the hub's stream keeps both.
+  thread's owner, not up the escalation chain. A daemon that stops after sending the notice and before forgetting
+  its note, for more than two minutes, sends it again once it runs.
+- The outbox copy of a daemon's dead letter usually lands within two minutes of the uplink coming back (the source's
+  retry backoff); landing more than two minutes after the daemon or the watcher stored the letter from the hub, it is
+  stored twice.
 
 ## HTTPS fallback bridge
 

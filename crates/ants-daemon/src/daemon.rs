@@ -721,7 +721,7 @@ impl Inbox<'_> {
         if let Some(kept) = self.buried.get(envelope).await {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
             tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
-            match self.bury_letter(&incoming, &msg, &kept.dead).await {
+            match self.bury_letter(&incoming, &msg, &kept.dead, true).await {
                 Ok(()) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
@@ -774,16 +774,28 @@ impl Inbox<'_> {
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
         let dead = dead::letter_for(self.ant, msg, envelope, error)?;
-        self.bury_letter(incoming, msg, &dead).await
+        self.bury_letter(incoming, msg, &dead, false).await
     }
 
-    /// Bury `msg` as `dead` ([`dead::bury_letter`]). A dead letter kept in the machine's outbox is noted in `buried`,
-    /// so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its ack subject, for
-    /// [`Inbox::finish_buried`].
-    async fn bury_letter(&self, incoming: &Incoming, msg: &jetstream::Message, dead: &DeadLetter) -> Result<()> {
+    /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, `kept` in the machine's outbox on an earlier delivery, as the
+    /// letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
+    /// noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
+    /// ack subject, for [`Inbox::finish_buried`].
+    async fn bury_letter(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        dead: &DeadLetter,
+        kept: bool,
+    ) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
         let escalator = Some(self.escalator);
-        match dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await? {
+        let burial = if kept {
+            dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await?
+        } else {
+            dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?
+        };
+        match burial {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => {
                 let last = msg.info().is_ok_and(|info| info.delivered >= MAX_DELIVER);
@@ -2406,7 +2418,17 @@ mod tests {
         async fn kept(&self) -> u64 {
             self.outbox.clone().info().await.unwrap().state.messages
         }
+
+        /// Shorten the hub stream's duplicate window to [`SHORT_WINDOW`], so a test can outwait it.
+        async fn shorten_duplicate_window(&self) {
+            let mut config = self.hub_js.get_stream(ants_proto::STREAM).await.unwrap().cached_info().config.clone();
+            config.duplicate_window = SHORT_WINDOW;
+            self.hub_js.update_stream(&config).await.unwrap();
+        }
     }
+
+    /// A duplicate window a test outwaits in three times as long.
+    const SHORT_WINDOW: Duration = Duration::from_millis(300);
 
     /// dev-a's daemon on a leaf node replies while the leaf's uplink is down: the reply goes to the machine's outbox
     /// and the ack fails. Once the uplink is back, the redelivery to a restarted daemon is acked, not answered again.
@@ -2457,7 +2479,21 @@ mod tests {
     /// human and terminates the message, without another prompt.
     #[tokio::test]
     async fn a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back() {
+        dead_letter_kept_in_the_outbox(false).await;
+    }
+
+    /// As above, with the outbox copy landing long before the redelivery, past the hub's duplicate window: the
+    /// redelivery finds it and stores no other.
+    #[tokio::test]
+    async fn a_dead_letter_kept_in_the_outbox_lands_once_past_the_duplicate_window() {
+        dead_letter_kept_in_the_outbox(true).await;
+    }
+
+    async fn dead_letter_kept_in_the_outbox(past_window: bool) {
         let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        if past_window {
+            uplinked.shorten_duplicate_window().await;
+        }
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
@@ -2492,6 +2528,11 @@ mod tests {
         assert!(dead::list(&stream).await.unwrap().is_empty(), "not in the hub's stream yet");
 
         uplinked.switch(true).await;
+        if past_window {
+            // As the hub's stream takes the outbox copy once the uplink is back.
+            bus::publish_json(&uplinked.hub_js, kept.subject(), &kept, Some(&kept.msg_id())).await.unwrap();
+            tokio::time::sleep(SHORT_WINDOW * 3).await;
+        }
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let check = async {
             bus.until_acked(seq).await;
@@ -2524,12 +2565,25 @@ mod tests {
     /// The human gets one notice either way.
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_outbox_copy() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false }).await;
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: false })
+            .await;
     }
 
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_watcher_s() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true }).await;
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: false }).await;
+    }
+
+    /// As above, with the daemon restarted past the hub's duplicate window: it finds the letter there and stores no
+    /// other, and tells only when the watcher did not.
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_outbox_copy() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: true }).await;
+    }
+
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_watcher_s() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: true }).await;
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2537,12 +2591,16 @@ mod tests {
         /// Within the hub's ack wait, with the daemon running.
         Live,
         /// After JetStream gave up on the message and a watcher heard so, `watcher_first` or after the outbox copy
-        /// landed, with the daemon restarted.
-        Restarted { watcher_first: bool },
+        /// landed, with the daemon restarted, `past_window`: after the hub's duplicate window ran out.
+        Restarted { watcher_first: bool, past_window: bool },
     }
 
     async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
         let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        let past_window = matches!(back, UplinkBack::Restarted { past_window: true, .. });
+        if past_window {
+            uplinked.shorten_duplicate_window().await;
+        }
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
@@ -2632,7 +2690,7 @@ mod tests {
             }
             notices
         };
-        if let UplinkBack::Restarted { watcher_first } = back {
+        if let UplinkBack::Restarted { watcher_first, .. } = back {
             // The watcher's view of JetStream's max-deliveries advisory.
             let advisory = dead::MaxDeliveries {
                 stream: ants_proto::STREAM.to_owned(),
@@ -2658,6 +2716,9 @@ mod tests {
                 outbox_copy().await.unwrap();
                 assert_eq!(watch().await.unwrap(), None, "a dead letter already");
                 assert!(notices().await.is_empty(), "the watcher sends no notice for the outbox copy");
+            }
+            if past_window {
+                tokio::time::sleep(SHORT_WINDOW * 3).await;
             }
 
             let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
