@@ -1428,12 +1428,13 @@ impl Inbox<'_> {
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
+        // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
         let mut worked = false;
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
                 Some(update) = streamed.recv() => {
-                    worked = true;
+                    worked |= matches!(update, StatusUpdate::Tool { .. });
                     status.push(update);
                 }
                 _ = flush.tick() => status.flush(),
@@ -1461,7 +1462,7 @@ impl Inbox<'_> {
             }
         };
         while let Ok(update) = streamed.try_recv() {
-            worked = true;
+            worked |= matches!(update, StatusUpdate::Tool { .. });
             status.push(update);
         }
         status.flush();
@@ -2455,7 +2456,14 @@ mod tests {
     async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
         let Some((bus, mut replies)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
-        log.lock().unwrap().limited = Some("You've hit your usage limit. Upgrade to get more.".to_owned());
+        // Copilot CLI's reply when the provider turns the prompt away, which is no answer.
+        let error = "Error: Failed to get response from the AI model; retried 5 times (total retry wait time: 56.70 \
+                     seconds) Last error: 429 You exceeded your current quota, please check your plan and billing \
+                     details.";
+        {
+            let mut faked = log.lock().unwrap();
+            (faked.limited, faked.limited_reply) = (Some(error.to_owned()), true);
+        }
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let thread = ThreadId::generate();
         let (_, seq) = bus.send(&thread, "a").await;

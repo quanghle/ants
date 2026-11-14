@@ -720,6 +720,9 @@ pub async fn prompt_once(launch: &Launch, text: &str) -> Result<String> {
 /// The prompt in flight, as the session's notifications fill it in.
 struct Current {
     text: String,
+    /// Whether every piece of the text so far reads as the harness's error or notice
+    /// ([`crate::ratelimit::is_error_chunk`]).
+    errors_only: bool,
     /// What the session reported of each tool call, without its content or output.
     tool_calls: HashMap<ToolCallId, ToolCall>,
     max_tool_calls: Option<usize>,
@@ -756,6 +759,9 @@ impl Observed {
         match n.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(t) = chunk.content {
+                    if !t.text.trim().is_empty() && !crate::ratelimit::is_error_chunk(&t.text) {
+                        current.errors_only = false;
+                    }
                     current.text.push_str(&t.text);
                 }
             }
@@ -905,7 +911,7 @@ async fn serve(
                 let mut rebuild = lost.take();
                 // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
                 let mut retry = rebuild.is_none();
-                let (done, cut, text) = loop {
+                let (done, cut, text, errors_only) = loop {
                     let too_many = Arc::new(Notify::new());
                     {
                         let mut observed = observed.lock().expect("observed");
@@ -915,6 +921,7 @@ async fn serve(
                         }
                         observed.current = Some(Current {
                             text: String::new(),
+                            errors_only: true,
                             tool_calls: HashMap::new(),
                             max_tool_calls: limits.max_tool_calls,
                             too_many: too_many.clone(),
@@ -935,7 +942,12 @@ async fn serve(
                         .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
                         .block_task();
                     let (done, cut) = bounded(&cx, &id, request, limits, &too_many, &mut stop, &cancelled).await;
-                    let text = observed.lock().expect("observed").current.take().map(|c| c.text).unwrap_or_default();
+                    let (text, errors_only) = observed
+                        .lock()
+                        .expect("observed")
+                        .current
+                        .take()
+                        .map_or_else(Default::default, |c| (c.text, c.errors_only));
                     let overflowed = |e: &agent_client_protocol::Error| overflows(&launch.harness, &e.to_string());
                     match &done {
                         Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
@@ -957,7 +969,7 @@ async fn serve(
                             let _ = reply.send(Err(ContextOverflow { harness, detail: e.to_string() }.into()));
                             return Err(e.clone());
                         }
-                        _ => break (done, cut, text),
+                        _ => break (done, cut, text, errors_only),
                     }
                 };
                 match done {
@@ -966,7 +978,15 @@ async fn serve(
                         if let (Some(tx), Some(usage)) = (&spend, &done.usage) {
                             let _ = tx.send(Spend::Tokens(usage.total_tokens));
                         }
-                        let _ = reply.send(Ok(Reply { text, cut }));
+                        // Copilot CLI and Antigravity end a prompt their provider turned away as a reply of error
+                        // lines, which is no answer.
+                        let limited = (errors_only && cut.is_none())
+                            .then(|| crate::ratelimit::classify(&launch.harness, &text))
+                            .flatten();
+                        let _ = reply.send(match limited {
+                            Some(limited) => Err(limited.into()),
+                            None => Ok(Reply { text, cut }),
+                        });
                     }
                     Some(Err(e)) if cut.is_none() => {
                         let error = harness_error(&launch, "prompt", &e, &methods.lock().expect("auth methods"));
@@ -1187,6 +1207,8 @@ mod tests {
 
     use super::*;
     use crate::permission::Allowlist;
+    use crate::ratelimit::Limited;
+    use ants_proto::LimitKind;
 
     /// A fake harness starting its sessions in `auto`, offering `modes`; returns the modes it was switched to.
     fn launch(modes: &'static [&'static str]) -> (Launch, Arc<Mutex<Vec<String>>>) {
@@ -1391,6 +1413,63 @@ mod tests {
             assert_eq!(session.prompt("go").await.unwrap(), chosen, "{rule}");
             session.close().await;
         }
+    }
+
+    /// A fake harness that streams each `|`-separated piece of a prompt as a chunk of its reply, then ends the turn.
+    fn echoing() -> Launch {
+        let connect: Connector = Arc::new(|| {
+            DynConnectTo::new(
+                Agent
+                    .v1()
+                    .name("echo")
+                    .on_receive_request(
+                        async move |init: InitializeRequest, responder, _cx| {
+                            responder.respond(InitializeResponse::new(init.protocol_version))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: NewSessionRequest, responder, _cx| {
+                            responder.respond(NewSessionResponse::new("s1"))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |prompt: PromptRequest, responder, cx| {
+                            let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
+                            for piece in t.text.split('|') {
+                                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(piece)));
+                                cx.send_notification(SessionNotification::new(
+                                    prompt.session_id.clone(),
+                                    SessionUpdate::AgentMessageChunk(chunk),
+                                ))?;
+                            }
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    ),
+            )
+        });
+        Launch::with_transport(connect, PathBuf::from("/"), Default::default())
+    }
+
+    #[tokio::test]
+    async fn a_reply_of_error_lines_reporting_a_limit_is_no_answer() {
+        let session = Session::start(&echoing(), None).await.unwrap();
+        let limited = |reply: Result<String>| reply.err().and_then(|e| e.downcast_ref::<Limited>().map(|l| l.kind));
+        let overloaded = "Info: Request failed due to a transient API error. Retrying...|Error: Failed to get response \
+                          from the AI model; retried 5 times (total retry wait time: 16.07 seconds) Last error: 529 \
+                          Overloaded";
+        assert_eq!(limited(session.prompt(overloaded).await), Some(LimitKind::RateLimit));
+        let answers = [
+            "A provider |answers 429 |when a rate limit is hit.",
+            "Info: Request failed due to a transient API error. Retrying...|Hello",
+            "Error: Failed to get response from the AI model; retried 5 times Last error: 500 Internal Server Error",
+        ];
+        for answer in answers {
+            assert_eq!(session.prompt(answer).await.unwrap(), answer.replace('|', ""), "the session lives on");
+        }
+        session.close().await;
     }
 
     fn command_line(
