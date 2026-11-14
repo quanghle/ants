@@ -25,8 +25,9 @@ fn main() {
     if Path::new(&me).file_name().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 5] = [
+    let tests: [(&str, fn()); 6] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
+        ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
         ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
@@ -252,6 +253,57 @@ fn channels_are_managed_posted_to_and_read() {
 
 /// A daemon serving the built-in messenger hands it over to a daemon started later with a listed messenger, on the same
 /// machine, and serves it again once that daemon stops.
+/// `cargo install` renames the new executable over the old one: the daemon stops as on SIGTERM and exits with status
+/// 75, which the service units restart on.
+fn a_daemon_exits_once_its_executable_was_replaced() {
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("upgrade");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    let installed = bin.join("ants");
+    std::fs::copy(ANTS, &installed).unwrap();
+    let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let mut daemon = Command::new(&installed);
+    daemon
+        .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--upgrade-check", "1s", "--workdir"])
+        .arg(&dir)
+        .arg("--home")
+        .arg(dir.join("home"))
+        .env_remove("ANTS_CREDS")
+        .env_remove("ANTS_CONFIG")
+        .env_remove("ANTS_UPGRADE_CHECK")
+        .env("PATH", &bin)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap());
+    let mut daemon = Killed(daemon.spawn().unwrap());
+    let start = Instant::now();
+    while !log().contains("serving inbox") {
+        assert!(start.elapsed() < WAIT, "daemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(daemon.0.try_wait().unwrap().is_none(), "exited unreplaced\ndaemon log:\n{}", log());
+
+    let staged = bin.join(".ants-new");
+    std::fs::copy(ANTS, &staged).unwrap();
+    std::fs::rename(&staged, &installed).unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < WAIT, "still running\ndaemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(75), "daemon log:\n{}", log());
+    let log = log();
+    assert!(log.contains("the executable was replaced") && log.contains("stopped"), "{log}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("handover");

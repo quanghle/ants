@@ -3,7 +3,8 @@
 <!-- ants: the webhook ingress (`ants webhook serve`), on the hub machine behind its TLS-terminating reverse proxy.
      scripts/install-units.sh --webhook fills in the @...@ placeholders and installs it as
      ~/Library/LaunchAgents/ants.webhook.plist. Until ants.nats listens, requests answer 503 and the ingress retries
-     the connection. Secrets come from secret_file entries of the config file. -->
+     the connection. Secrets come from secret_file entries of the config file.
+     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
