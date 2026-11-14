@@ -5,11 +5,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
+use ants_daemon::schedule::Schedule;
 use ants_daemon::{Config, Harnesses, Stop};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use futures::stream::{FuturesUnordered, StreamExt as _};
+use tokio::task::JoinHandle;
 use tracing::Instrument as _;
+
+use crate::scheduler;
 
 #[derive(clap::Args, Debug)]
 pub struct DaemonArgs {
@@ -218,17 +222,29 @@ fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
     })
 }
 
-/// The ants to serve, and the harnesses they may name: those of the config file, or for an ant described by flags
-/// those of the file at `default_path` if it exists.
-pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<(Vec<Ant>, Harnesses)> {
+/// What `ants daemon` is to serve, as listed.
+#[derive(Debug)]
+pub struct Listed {
+    pub ants: Vec<Ant>,
+    /// The harnesses the ants may name.
+    pub harnesses: Harnesses,
+    pub schedules: Vec<Schedule>,
+}
+
+/// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
+/// described by flags the harnesses of the file at `default_path` if it exists. The schedules run only when the
+/// daemon serves the whole file, not one ant picked with `--ant`.
+pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
     match source(args, default_path)? {
         Source::Flags(name) => {
             let ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
-            Ok((vec![ant], Summary::load(default_path)?.harnesses))
+            let harnesses = Summary::load(default_path)?.harnesses;
+            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new() })
         }
         Source::File(path) => {
-            let (all, harnesses) = config::load(&path)?;
-            Ok((pick(all, args, &path)?, harnesses))
+            let loaded = config::load(&path)?;
+            let schedules = if args.ant.is_some() { Vec::new() } else { loaded.schedules };
+            Ok(Listed { ants: pick(loaded.ants, args, &path)?, harnesses: loaded.harnesses, schedules })
         }
     }
 }
@@ -276,13 +292,22 @@ pub fn configs(
         .collect()
 }
 
-/// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection. An ant that fails is reported and the
-/// others keep running; it is an error only when none is left. On SIGHUP `reload` lists the ants again and the
-/// daemon serves those ([`reconcile`]); a list it cannot read is reported and the ants served stay as they are.
-pub async fn run(configs: Vec<Config>, reload: impl Fn() -> Result<Vec<Config>>) -> Result<()> {
+/// What `ants daemon` serves: its ants' configs and its schedules, ready to run.
+pub struct Served {
+    pub configs: Vec<Config>,
+    pub schedules: Vec<Schedule>,
+}
+
+/// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
+/// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
+/// left. On SIGHUP `reload` lists the ants and schedules again and the daemon serves those ([`reconcile`],
+/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is.
+pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<()> {
     let mut hangup = Hangup::new()?;
     let mut running = HashMap::new();
-    let mut tasks: FuturesUnordered<_> = reconcile(&mut running, configs).into_iter().map(serve).collect();
+    let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
+    let mut schedules = Schedules::default();
+    schedules.reconcile(served.schedules, run_schedule);
     let shutdown = async {
         if let Err(e) = ants_daemon::daemon::stop_signal().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
@@ -307,11 +332,15 @@ pub async fn run(configs: Vec<Config>, reload: impl Fn() -> Result<Vec<Config>>)
                     tasks.push(serve(Running::insert(&mut running, config)));
                 }
             }
-            () = &mut shutdown, if !stopping => stopping = true,
+            () = &mut shutdown, if !stopping => {
+                stopping = true;
+                schedules.reconcile(Vec::new(), run_schedule);
+            }
             () = hangup.recv(), if !stopping => match reload() {
-                Ok(configs) => {
+                Ok(served) => {
                     tracing::info!("config reloaded");
-                    tasks.extend(reconcile(&mut running, configs).into_iter().map(serve));
+                    tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
+                    schedules.reconcile(served.schedules, run_schedule);
                 }
                 Err(e) => tracing::error!(error = format!("{e:#}"), "reload failed; serving the ants as before"),
             },
@@ -329,6 +358,61 @@ fn serve((config, stop): (Config, Stop)) -> impl Future<Output = (UserId, Result
     let ant = config.ant.clone();
     let span = tracing::info_span!("ant", name = %ant);
     async move { (ant, ants_daemon::run_until(config, &stop).await) }.instrument(span)
+}
+
+/// Run `schedule` in a task of its own until aborted.
+fn run_schedule(schedule: Schedule) -> JoinHandle<()> {
+    let name = schedule.name.clone();
+    let span = tracing::info_span!("schedule", name = %name);
+    tokio::spawn(
+        async move {
+            if let Err(e) = scheduler::run(schedule).await {
+                tracing::error!(schedule = %name, error = format!("{e:#}"), "schedule stopped");
+            }
+        }
+        .instrument(span),
+    )
+}
+
+/// The schedules running, each in its task, which stops with them.
+#[derive(Default)]
+struct Schedules(HashMap<UserId, (Schedule, JoinHandle<()>)>);
+
+impl Schedules {
+    /// Run the schedules `wanted`, started with `spawn`. One no longer listed stops at once, between firings or in
+    /// the middle of one, which another daemon or a restart sends as it was not marked sent; one whose entry changed,
+    /// or which stopped, starts again; the others carry on untouched.
+    fn reconcile(&mut self, wanted: Vec<Schedule>, spawn: impl Fn(Schedule) -> JoinHandle<()>) {
+        let listed: HashSet<UserId> = wanted.iter().map(|s| s.name.clone()).collect();
+        self.0.retain(|name, (_, task)| {
+            let keep = listed.contains(name);
+            if !keep {
+                tracing::info!(schedule = %name, "stopping the schedule no longer listed");
+                task.abort();
+            }
+            keep
+        });
+        for schedule in wanted {
+            let name = schedule.name.clone();
+            match self.0.get(&name) {
+                Some((running, task)) if *running == schedule && !task.is_finished() => continue,
+                Some(_) => tracing::info!(schedule = %name, "restarting the schedule: its entry changed or it stopped"),
+                None => tracing::info!(schedule = %name, "starting the schedule"),
+            }
+            let task = spawn(schedule.clone());
+            if let Some((_, old)) = self.0.insert(name, (schedule, task)) {
+                old.abort();
+            }
+        }
+    }
+}
+
+impl Drop for Schedules {
+    fn drop(&mut self) {
+        for (_, task) in self.0.values() {
+            task.abort();
+        }
+    }
 }
 
 /// An ant being served.
@@ -539,6 +623,31 @@ mod tests {
         assert!(names(reconcile(&mut running, vec![a, b, config("dev-c", None)])).is_empty());
         assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((true, Some(None)), (true, Some(None))));
         assert_eq!(state(&running, "dev-c"), (false, None));
+    }
+
+    #[tokio::test]
+    async fn a_reload_starts_stops_or_restarts_schedules() {
+        use std::cell::RefCell;
+        let entry = |name: &str, text: &str| {
+            let toml = format!("name = \"{name}\"\nevery = \"1h\"\nant = \"dev-a\"\ntext = \"{text}\"\n");
+            Schedule::from_entry(toml::from_str(&toml).unwrap(), Path::to_path_buf).unwrap()
+        };
+        let started = RefCell::new(Vec::new());
+        let spawn = |s: Schedule| {
+            started.borrow_mut().push(s.name.to_string());
+            tokio::spawn(std::future::pending())
+        };
+        let mut schedules = Schedules::default();
+        schedules.reconcile(vec![entry("nightly", "a"), entry("pulse", "a")], spawn);
+        schedules.reconcile(vec![entry("nightly", "a"), entry("pulse", "a")], spawn);
+        assert_eq!(started.take(), ["nightly", "pulse"]);
+        let pulse = schedules.0[&"pulse".parse::<UserId>().unwrap()].1.abort_handle();
+
+        schedules.reconcile(vec![entry("nightly", "b"), entry("weekly", "a")], spawn);
+        assert_eq!(started.take(), ["nightly", "weekly"]);
+        tokio::task::yield_now().await;
+        assert!(pulse.is_finished(), "a schedule no longer listed stops");
+        assert_eq!(schedules.0.len(), 2);
     }
 
     #[test]

@@ -21,6 +21,12 @@
 //! args = ["--stdio"]
 //! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
 //! mode = "default"                  # ACP session mode every session must run in
+//!
+//! [[schedule]]                      # a prompt on a timetable; see crate::schedule
+//! name = "nightly"
+//! cron = "0 3 * * *"
+//! ant = "dev-a"
+//! text = "Audit the dependencies."
 //! ```
 //!
 //! `~` expands to the home directory; other relative paths, harness commands with a `/` included, are relative to the
@@ -41,6 +47,7 @@ use crate::caps::Caps;
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::schedule::{self, Schedule};
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -77,6 +84,8 @@ struct File {
     human: Option<UserId>,
     #[serde(default, rename = "ant")]
     ants: Vec<Ant>,
+    #[serde(default, rename = "schedule")]
+    schedules: Vec<schedule::Entry>,
 }
 
 /// One ant the daemon serves, as the config file (or the command line) describes it.
@@ -334,17 +343,27 @@ pub fn builtin_messenger(harness: &str, home: &Path) -> Ant {
     }
 }
 
-/// Read and check the config file at `path`: its ants, and the harnesses they may name.
-pub fn load(path: &Path) -> Result<(Vec<Ant>, Harnesses)> {
+/// What a config file lists, checked.
+#[derive(Debug)]
+pub struct Loaded {
+    pub ants: Vec<Ant>,
+    /// The harnesses the ants may name.
+    pub harnesses: Harnesses,
+    pub schedules: Vec<Schedule>,
+}
+
+/// Read and check the config file at `path`: its ants, the harnesses they may name, and its schedules.
+pub fn load(path: &Path) -> Result<Loaded> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
     parse(&text, &std::path::absolute(path)?, &home_dir()?)
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
-/// exist and every harness named is defined, and add the built-in messenger unless `messenger = false` or an ant is
-/// named `messenger`.
-pub fn parse(text: &str, path: &Path, home: &Path) -> Result<(Vec<Ant>, Harnesses)> {
+/// exist and every harness named is defined, add the built-in messenger unless `messenger = false` or an ant is
+/// named `messenger`, and check the schedules, each named once and after no ant, with the top-level `nats` and
+/// `js_domain` where they set none.
+pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
     let harnesses = define(std::mem::take(&mut file.harnesses), base, home)
@@ -394,7 +413,30 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<(Vec<Ant>, Harnesse
         }
         ants.push(ant);
     }
-    Ok((ants, harnesses))
+    let mut schedules: Vec<Schedule> = Vec::with_capacity(file.schedules.len());
+    for entry in file.schedules {
+        let name = entry.name.clone();
+        let mut schedule = Schedule::from_entry(entry, |p| resolve(p, base, home))
+            .with_context(|| format!("config {}: schedule {name}", path.display()))?;
+        let name = &schedule.name;
+        if schedules.iter().any(|s| s.name == *name) {
+            bail!("config {}: schedule {name} is listed twice", path.display());
+        }
+        if names.contains(name) {
+            bail!(
+                "config {}: schedule {name} has the name of an ant; a schedule sends as a user of its own",
+                path.display()
+            );
+        }
+        if schedule.nats.is_none() {
+            schedule.nats.clone_from(&file.nats);
+        }
+        if schedule.js_domain.is_none() {
+            schedule.js_domain.clone_from(&file.js_domain);
+        }
+        schedules.push(schedule);
+    }
+    Ok(Loaded { ants, harnesses, schedules })
 }
 
 /// The built-in harnesses with the file's `definitions`, their commands given as paths resolved like other paths.
@@ -621,6 +663,10 @@ mod tests {
     }
 
     fn parse_with_harnesses(text: &str) -> Result<(Vec<Ant>, Harnesses)> {
+        parse_all(text).map(|loaded| (loaded.ants, loaded.harnesses))
+    }
+
+    fn parse_all(text: &str) -> Result<Loaded> {
         let dir = manifest_dir();
         parse(text, &dir.join("config.toml"), dir.parent().unwrap().parent().unwrap())
     }
@@ -1001,6 +1047,35 @@ Review changes for correctness."""
     }
 
     #[test]
+    fn schedules_take_the_top_level_server_and_unique_names() {
+        let loaded = parse_all(
+            "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\
+             [[schedule]]\nname = \"nightly\"\ncreds = \"~/auth/nightly.creds\"\ncron = \"0 3 * * *\"\n\
+             ant = \"dev-a\"\nowner = \"alice\"\ntext = \"Audit.\"\n\
+             [[schedule]]\nname = \"pulse\"\nnats = \"nats://127.0.0.1:4222\"\njs_domain = \"own\"\nevery = \"15m\"\n\
+             channel = \"ops\"\nmention = [\"dev-b\"]\ntext = \"Stuck?\"\n",
+        )
+        .unwrap();
+        let [nightly, pulse] = &loaded.schedules[..] else { panic!("two schedules") };
+        let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
+        assert_eq!(nightly.creds, Some(root.join("auth/nightly.creds")));
+        assert_eq!(nightly.nats.as_deref(), Some("wss://hub.example/nats"));
+        assert_eq!(nightly.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
+        assert_eq!(nightly.owner.as_ref().map(UserId::as_str), Some("alice"));
+        assert_eq!(pulse.nats.as_deref(), Some("nats://127.0.0.1:4222"));
+        assert_eq!(pulse.js_domain.as_ref().map(JsDomain::as_str), Some("own"));
+        assert_eq!(pulse.mentions, schedule::Mentions::Listed(vec!["dev-b".parse().unwrap()]));
+
+        let err = |text: &str| format!("{:#}", parse_all(text).unwrap_err());
+        let one = "[[schedule]]\nname = \"nightly\"\ncron = \"@daily\"\nant = \"dev-a\"\ntext = \"t\"\n";
+        assert!(err(&format!("{one}{one}")).contains("schedule nightly is listed twice"));
+        let ant = one.replace("nightly", "messenger");
+        assert!(err(&ant).contains("schedule messenger has the name of an ant"));
+        let bad = err(&one.replace("@daily", "0 25 * * *"));
+        assert!(bad.contains("config.toml: schedule nightly: cron \"0 25 * * *\": hour"), "{bad}");
+    }
+
+    #[test]
     fn durations_need_a_unit() {
         let idle = |line: &str| parse_here(&format!("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n{line}"));
         assert_eq!(idle("idle_timeout = \"10m\"").unwrap()[0].idle_timeout, Duration::from_secs(600));
@@ -1060,7 +1135,7 @@ Review changes for correctness."""
         add("dev-b").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
-        let names: Vec<_> = load(&path).unwrap().0.into_iter().map(|ant| ant.name.to_string()).collect();
+        let names: Vec<_> = load(&path).unwrap().ants.into_iter().map(|ant| ant.name.to_string()).collect();
         assert_eq!(names, ["dev-a", "dev-b", "messenger"]);
 
         let err = format!("{:#}", add("dev-a").unwrap_err());
