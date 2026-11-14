@@ -300,6 +300,8 @@ pub enum SecretSource {
 pub struct Outline {
     /// What each secret is for and where it comes from.
     pub secrets: Vec<(String, SecretSource)>,
+    /// What each exec sink is for and the program it runs, a path resolved or a name to find on `PATH`.
+    pub commands: Vec<(String, String)>,
     pub public_url: Option<String>,
 }
 
@@ -325,7 +327,13 @@ pub fn outline(path: &Path) -> Result<Outline> {
             secrets.push((what, SecretSource::File(resolve(file))));
         }
     }
-    Ok(Outline { secrets, public_url: file.public_url })
+    let commands = file
+        .humans
+        .iter()
+        .flat_map(notify::HumanEntry::commands)
+        .map(|(what, program)| (what, notify::resolve_program(program, &resolve)))
+        .collect();
+    Ok(Outline { secrets, commands, public_url: file.public_url })
 }
 
 /// What `ants webhook add` reads of a config file's text: where it serves, and the webhooks it lists.

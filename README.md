@@ -148,7 +148,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants auth devices HUMAN [--json]` / `rename HUMAN DEVICE LABEL` | List a human's devices (id, label, key, issue time, revoked); relabel one. `DEVICE` is an id, a key, or a label no other device of the human has. |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing (`outbox`: members from `--ant`/`--human`, or those the uplink credentials of `--leaf-config FILE` carry, changed by `--add-*`/`--remove-*`). |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
-| `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
+| `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack, Telegram, commands or signed HTTP endpoints with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
 | `ants webhook notify-test HUMAN [--config FILE]` | Send a test notice through each sink of `HUMAN` in the webhooks' config file and print `ok` or `fail` with the error per sink; exits with status 1 when one fails (see [Notifications](#notifications)). |
 | `ants webhook add NAME (--to ANT \| --channel CH) [--preset github\|gitlab\|grafana] [--config FILE] [--dir DIR] [--out FILE] [--enroll CREDS [--hub URL]]` | Issue a webhook's credentials (or ask for them over NATS), write a new secret file, append its `[[webhook]]` entry, reload the webhook service and print the URL and secret for the sender (see [Adding a webhook](#adding-a-webhook)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon` (a named pipe on Windows). |
@@ -196,7 +196,7 @@ The script runs `ants` with `ANTS_COMPLETE` set for each completion. Besides com
 - **hub resolver**: on the machine holding the team keys (`--dir`, `ANTS_AUTH_DIR`, default `~/.config/ants/auth`), the `--nats` server, asked as a user of the team's system account, keeps pushed accounts across restarts (a `full` resolver); a warning otherwise, with the `resolver` line to add, and when the server refuses the system account (a `server.conf` from before revocations or of another team). Skipped without the team keys and when the CLI connects through the leaf node.
 - **leaf**, **leaf uplink**, **leaf system uplink**, **leaf node**, **outbox**: with a leaf node configuration (`--leaf-config`, default `~/.config/ants/leaf.conf`), its uplink credentials carry the machine's ants and the CLI's human that connect through it, the system account uplink is configured, the leaf node listens where the CLI connects, and, with human credentials, the hub sources the machine's outbox for every member.
 - **daemon service** and **leaf node service**: the units of `scripts/install-units.sh` are installed for the config file and the leaf node configuration, and running (see [Services](#services)); with the webhooks' config file, **webhook service** too.
-- **webhook secrets**, **webhooks** and **public_url**: with the webhooks' config file (`--webhook-config`, default `~/.ants/webhooks.toml`; no lines without it), each `secret_file` it names (webhooks, sinks, the action secret) exists with mode 0600, as `ants webhook serve` refuses one readable by others (fix: `chmod 600 FILE`, or write the file); a `secret_env` unset in the shell running `ants doctor` warns, as only the service's environment may hold it. The file then reads as `ants webhook serve` reads it, without checking credentials, and `GET <public_url>/_approval` must answer as `ants webhook serve` does (`400`, incomplete link), within 5 seconds: a warning otherwise, as approval links would not open (the machine may also fail to reach its own public address). Sinks themselves are tried with `ants webhook notify-test HUMAN`.
+- **webhook secrets**, **webhooks** and **public_url**: with the webhooks' config file (`--webhook-config`, default `~/.ants/webhooks.toml`; no lines without it), each `secret_file` it names (webhooks, sinks, the action secret) exists with mode 0600, as `ants webhook serve` refuses one readable by others (fix: `chmod 600 FILE`, or write the file); a `secret_env` unset in the shell running `ants doctor` warns, as only the service's environment may hold it. The file then reads as `ants webhook serve` reads it, without checking credentials; the program of each `exec` sink (**notify commands**) must be an executable file at its path, or, for a bare name, on the `PATH` of the shell running `ants doctor` (a warning otherwise, as the service's `PATH` may differ: give the full path); and `GET <public_url>/_approval` must answer as `ants webhook serve` does (`400`, incomplete link), within 5 seconds: a warning otherwise, as approval links would not open (the machine may also fail to reach its own public address). Sinks themselves are tried with `ants webhook notify-test HUMAN`.
 - **devtunnel service**, **devtunnel host service**, **devtunnel login**, **devtunnel token**: with the Dev Tunnel units of `scripts/install-units.sh` installed (`--devtunnel`, `--devtunnel-host`; no lines without them), each is running and its devtunnel binary is there. `devtunnel connect` with a token file (`--devtunnel-token`) needs the file present, mode 0600 (a warning otherwise), and its connect token not expired, a warning within 6 hours of its `exp` (a token that is no JWT counts as expiring a day after the file was written; fix: `devtunnel token TUNNEL --scopes connect` into the file, then restart the service). Otherwise, and for `devtunnel host`, `devtunnel user show` must report a login (fix: `devtunnel user login`, then restart the service), a warning within a day of its expiry when it shows one.
 - **bridge service**, **bridge token**, **bridge url**, and **bridge serve service**, **bridge serve token**, **bridge serve url**: with the units of `ants bridge connect` or `ants bridge serve` installed (`--bridge`, `--bridge-serve`; no lines without them), each is running, its `--token-file` exists with mode 0600 (a warning for other modes; `ants bridge serve` without a token warns), and its bridge answers within 5 seconds as a bridge taking the token: `ants bridge connect`'s URL, through its `--proxy` and trusting its unit's `SSL_CERT_FILE`, and `ants bridge serve`'s listen address. A refused token fails with the file to correct; no answer names what to restart or reach.
 
@@ -534,7 +534,7 @@ Tool calls requested by a harness are checked against the ant's allowlist (`allo
 Matched calls auto-approve with `allow_once`. Unmatched calls set `waiting_approval`, publish an `ApprovalRequest` on `ants.approvals.<ant>`, and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject` before rejecting:
 
 - **Human decisions:** `ants tools approve|reject <ant>/<id>` stores an `ApprovalDecision` on `ants.approvals.<ant>.<id>` using `Nats-Expected-Last-Subject-Sequence` so the first human answer wins; the daemon verifies the stored decision via direct get.
-- **Off the terminal:** `ants webhook serve` pushes pending requests to each configured human's ntfy, Slack or Telegram, with signed approve/reject links that store the same `ApprovalDecision` (see [Notifications](#notifications)).
+- **Off the terminal:** `ants webhook serve` pushes pending requests to each configured human's ntfy, Slack, Telegram, command or HTTP endpoint, with signed approve/reject links that store the same `ApprovalDecision` (see [Notifications](#notifications)).
 - **Suggested rules:** once 3 requests of an ant for the same exact call (`execute:<command>`, `<kind>:<absolute path>` for a single file, `fetch:<url>`, else `<kind>:<title>`) are approved by humans, counting the one at hand and the earlier ones still in the stream, `ants tools approve` prints that allow rule and approval notices mention it. `ants tools approve ID --rule` approves and appends the rule to the ant's `allow` in `~/.ants/config.toml` (`--config`/`ANTS_CONFIG`), leaving the rest of the file as it is, then reloads the daemon service (the ant restarts once its prompts in flight finish). No rule is suggested for commands with shell control characters or `*`, or for calls touching several files.
 - **Chain decisions:** ants with `escalate_to` also send an `[ants]` notice (`approval` escalation) to every ant in `escalate_to` on the thread. Members handling that notice may call `decide_approval(verdict)` (`ants.inbox.<ant>.<decider>`); `escalate` is refused on approval notices. Earliest stored decision wins (human or chain member), and `ants tools` inspects both.
 - **Expiry:** a request left undecided for `approval_timeout` leaves `ants tools list` and is rejected; the thread's owner (else the default human) gets an `[ants]` notice, on a thread of its own so that `ants ask --wait` still waits for the reply, naming the ant, request, tool and thread, with how to retry (`ants ask --thread`), raise `approval_timeout` or add an `allow` rule. The notice carries the request's `approval` escalation, so `ants webhook serve` pushes it to that human's sinks. Each ant of `escalate_to` that was asked gets an `[ants]` message on the request's thread saying the request expired and needs no answer; a human among them, already told, gets no second notice.
@@ -732,10 +732,20 @@ secret_env = "ANTS_TELEGRAM_TOKEN"            # the bot token
 kind = "ntfy"
 topic = "alice-laptop-9c2e"
 device = "01968f7e-..."                       # optional: a device id (ants auth devices alice)
+
+[[human.notify]]
+kind = "exec"
+command = ["~/bin/ants-notice", "--to", "alice"]  # program and arguments, no shell; a bare name is found on PATH
+timeout = "20s"                               # optional, any kind: 1s to 30s (default 10s)
+
+[[human.notify]]
+kind = "http"
+url = "https://hooks.example/ants"            # receives the notice as signed JSON
+secret_file = "~/.ants/notice.secret"         # HMAC-SHA256 key, 16+ characters, mode 0600; or secret_env
 ```
 
-- **Test:** `ants webhook notify-test HUMAN [--config FILE]` sends a test notice, naming the machine, through each sink of `HUMAN` at once, those of a device too whatever its presence, and needs no NATS. It prints `ok    SINK` or `fail  SINK: ERROR` per sink (the HTTP status and the start of the answer, or why no answer came within `10s`; never URLs or tokens) and exits with status 1 when one fails.
-- **One notice per event:** each human is its own NATS user and reads durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so several `ants webhook serve` processes listing the same human share it and each request or escalation is sent once. Requests already decided or expired, unreadable or forged ones, and escalations older than a day are skipped. Sinks run concurrently with a `10s` timeout; failures are logged (never with URLs or tokens) and not retried.
+- **Test:** `ants webhook notify-test HUMAN [--config FILE]` sends a test notice, naming the machine, through each sink of `HUMAN` at once, those of a device too whatever its presence, and needs no NATS. It prints `ok    SINK` or `fail  SINK: ERROR` per sink (the HTTP status and the start of the answer, a command's exit status, or why none came within the sink's `timeout`; never URLs, tokens or command arguments) and exits with status 1 when one fails.
+- **One notice per event:** each human is its own NATS user and reads durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so several `ants webhook serve` processes listing the same human share it and each request or escalation is sent once. Requests already decided or expired, unreadable or forged ones, and escalations older than a day are skipped. Sinks run concurrently, each within its `timeout`; failures are logged (never with URLs or tokens) and not retried.
 - **Per device:** a sink with `device` is that device's push target and gets no notice while the device follows what the notice is about: `ants tools list -f` or `ants inbox -f` without `--thread` and `--json` for tool requests, `ants inbox -f` without `--thread` for escalations. The human's other devices still get it. While following, the CLI puts the device's presence in `ants_presence` every 10s and deletes it when it stops; a device that stops without deleting it (crash, lost connection) counts as away within 30s. A sink without `device` gets every notice, as before. Unreadable presence counts as away, so a failure sends a notice too many, never one too few. Legacy devices (credentials without a device id) record no presence.
 - **Content:** approval notices carry the ant, tool title and kind, files, an input excerpt, thread, time left and the `ants tools approve|reject <ant>/<id>` commands; a request whose call was approved twice before carries the allow rule `ants tools approve --rule` would add; escalation notices carry the reason, the stuck ant, the text and the `ants ask --thread` command to answer on the escalation's thread (an expired tool request's notice is titled as such and answers on the request's thread); `[ants] Reminder:` messages of an unanswered escalation are pushed the same way. Plain messages are not notified.
 - **Approve/reject links:** with `public_url` and the action secret, approval notices carry one link per offered verdict (`Approve`, `Always allow`, `Reject`): `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=`, HMAC-SHA256 over every field, valid until the request expires. `GET` shows the request, its state and a confirm button; `POST` stores the decision with the human's credentials exactly as `ants tools approve|reject` does (first answer wins). Answers: `200` stored or shown, `400` incomplete link, `403` wrong signature, `404` unknown human or request, `405` not `GET`/`POST`, `409` already answered or expired, `410` past expiry, `503` hub unreachable. Without `public_url`, notices carry only the commands. Anyone holding a link can decide that one request, so keep sinks private (ntfy topics are public unless the server requires a token).
@@ -745,6 +755,60 @@ device = "01968f7e-..."                       # optional: a device id (ants auth
 | `ntfy` | JSON publish, priority high for tool requests | HTTP action buttons that `POST` the link: one tap decides |
 | `slack` | Incoming webhook, `mrkdwn` section | Link buttons opening the confirm page (Slack may flag them without an app interactivity URL; harmless) |
 | `telegram` | Bot API `sendMessage`, link previews off | Inline URL buttons opening the confirm page |
+| `exec` | The [JSON notice](#json-notice) on the command's standard input | The `links` of the JSON |
+| `http` | The [JSON notice](#json-notice) in a signed `POST` | The `links` of the JSON |
+
+Every kind goes through the same path: one notice per event and human, the per-device filter, all sinks at once, each within its `timeout` (default `10s`, at most `30s`), and a failure logged by the sink's label (`ntfy topic T`, `slack`, `telegram chat C`, `exec PROGRAM`, `http HOST`), never stopping the others nor naming URLs, tokens, secrets or command arguments.
+
+- **exec:** runs `command` directly (no shell), relative paths and `~` resolved like the file's other paths, with the environment and working directory of `ants webhook serve`. The JSON notice is written to its standard input as one line, which then closes; its standard output is dropped and its standard error goes to that of `ants webhook serve` (the service's log). It succeeds by exiting with status 0 within `timeout`; another status fails it (`exit status: 3`), and past `timeout` it is killed (`SIGKILL`, the command itself, not processes it started) and reaped (`no exit within 20s: killed`). It takes no `url`, `secret_file` or `secret_env`: the command reads its own secrets.
+- **http:** `POST`s the JSON notice to `url` (no user, password or query) with `Content-Type: application/json`, `X-Ants-Timestamp: <Unix seconds>` and `X-Ants-Signature: sha256=<hex>`, the lowercase hex HMAC-SHA256, keyed with the secret, of the timestamp's digits, a `.` and the raw body (`<timestamp>.<body>`). Any `2xx` answer succeeds; another fails it (`answered 401 Unauthorized: ...`). A receiver should recompute the signature over the raw body, compare it in constant time, refuse a timestamp more than 5 minutes from its clock, and drop a notice whose `kind` and `id` it has already taken.
+
+#### JSON notice
+
+`exec` and `http` sinks get each notice as one JSON object, version 1 of this schema. Later versions only add fields; a change that breaks readers of version 1 raises `version`.
+
+```json
+{
+  "version": 1,
+  "kind": "approval",
+  "id": "01968f8a-…",
+  "human": "alice",
+  "ant": "dev-a",
+  "thread": "01968f89-…",
+  "title": "dev-a asks to run a tool",
+  "text": "cargo publish (execute)\nthread …, request dev-a/01968f8a-…, rejected in 9m59s unless answered\n…",
+  "urgent": true,
+  "sent_at": "2026-11-15T05:18:05Z",
+  "request": "dev-a/01968f8a-…",
+  "seq": 4211,
+  "tool": { "kind": "execute", "title": "cargo publish", "locations": ["Cargo.toml"], "input": "{…}" },
+  "options": ["allow_once", "allow_always", "reject"],
+  "expires_at": "2026-11-15T05:28:05Z",
+  "links": [
+    { "verdict": "allow_once", "label": "Approve", "url": "https://hub.example/hooks/_approval?…" },
+    { "verdict": "allow_always", "label": "Always allow", "url": "https://hub.example/hooks/_approval?…" },
+    { "verdict": "reject", "label": "Reject", "url": "https://hub.example/hooks/_approval?…" }
+  ]
+}
+```
+
+| Field | Kinds | Meaning |
+|---|---|---|
+| `version` | all | `1` |
+| `kind` | all | `approval` (a pending tool request), `escalation` (an escalation reaching the human's inbox) or `test` (`ants webhook notify-test`) |
+| `id` | all | The tool request's id, the escalation message's id, or a fresh one per test; with `kind`, what to deduplicate on |
+| `human` | all | The human notified |
+| `title`, `text` | all | The notice as the other sinks show it: a title and plain text with the commands answering it |
+| `urgent` | all | `true` for tool requests |
+| `sent_at` | all | When the notice was formatted, RFC 3339 UTC |
+| `links` | all | One `{verdict, label, url}` per offered verdict, as described under approve/reject links; empty without `public_url`, and for escalations and tests |
+| `ant`, `thread` | approval, escalation | The ant asking, or the ant whose message escalates; the thread to answer on |
+| `request` | approval | `<ant>/<id>`, as `ants tools approve\|reject` take it |
+| `seq` | approval | The request's sequence on stream `ANTS` |
+| `tool` | approval | `kind`, `title`, and `locations` and `input` when the request has them |
+| `options` | approval | The verdicts offered: `allow_once`, `allow_always`, `reject` |
+| `expires_at` | approval | When the ant rejects the request unless answered, RFC 3339 UTC |
+| `reason`, `stuck`, `level` | escalation | Why (`turn_budget`, `approval`, …), the stuck ant, and the escalation level (0: the stuck ant itself) |
 
 Human credentials issued before notifications lack the `notify-<human>` consumer permissions; connecting with them warns and names the command that renews them ([Credentials across upgrades](#credentials-across-upgrades)). Those issued before presence lack `ants_presence`: `ants webhook serve` refuses them for a human with device sinks, and following on such a device warns and records no presence, so its sinks keep getting every notice; renew them (and the leaf uplinks where they run) and run `ants init`.
 

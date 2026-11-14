@@ -1041,7 +1041,7 @@ fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
 }
 
 /// The webhooks' config file at `path`, when it is there: its secret files, present and private to their owner, the
-/// file itself as `ants webhook serve` reads it, and whether `public_url` reaches it.
+/// file itself as `ants webhook serve` reads it, the programs of its exec sinks, and whether `public_url` reaches it.
 async fn check_webhooks(path: &Path) -> Vec<Check> {
     if !path.exists() {
         return Vec::new();
@@ -1097,10 +1097,45 @@ async fn check_webhooks(path: &Path) -> Vec<Check> {
             Err(e) => Check::fail("webhooks", format!("{e:#}"), vec![refused()]),
         });
     }
+    checks.extend(outline.commands.iter().map(|(what, program)| check_command(what, program)));
     if let Some(public_url) = &outline.public_url {
         checks.push(check_public_url(public_url).await);
     }
     checks
+}
+
+/// Whether the program of an exec sink is there to run: an executable file at its path, or one on `PATH` here.
+fn check_command(what: &str, program: &str) -> Check {
+    let check = "notify commands";
+    let executable = |path: &Path| {
+        let Ok(metadata) = std::fs::metadata(path) else { return false };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        metadata.is_file()
+    };
+    if program.contains(std::path::is_separator) {
+        return match executable(Path::new(program)) {
+            true => Check::ok(check, format!("{what}: {program} is executable")),
+            false => Check::fail(
+                check,
+                format!("{what}: {program} is no executable file"),
+                vec![format!("put the program at {program} and chmod +x it, or correct command")],
+            ),
+        };
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match std::env::split_paths(&path).map(|dir| dir.join(program)).find(|p| executable(p)) {
+        Some(found) => Check::ok(check, format!("{what}: {program} is {} here", found.display())),
+        None => Check::warn(
+            check,
+            format!("{what}: {program} is not on PATH here"),
+            vec![format!("give the full path of {program} in command")],
+        ),
+    }
 }
 
 /// Whether `public_url`, the approval links' address, reaches `ants webhook serve`: its page for a link without a
@@ -2051,6 +2086,38 @@ mod tests {
 
         config(&format!("http://{addr}/elsewhere"));
         assert_eq!(one(&check_webhooks(&path).await, "public_url").status, Status::Warn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_programs_of_exec_sinks_must_be_there_to_run() {
+        let dir = ants_test_support::scratch_dir("doctor-exec").canonicalize().unwrap();
+        let path = dir.join("webhooks.toml");
+        private(&dir.join("hook"), "0123456789abcdef-hook\n");
+        std::fs::write(
+            &path,
+            "[[human]]\nname = \"alice\"\n\
+             [[human.notify]]\nkind = \"exec\"\ncommand = [\"bin/notify\", \"--quiet\"]\n\
+             [[human.notify]]\nkind = \"exec\"\ncommand = [\"no-such-program-of-ants\"]\n\
+             [[human.notify]]\nkind = \"http\"\nurl = \"https://hooks.example/a\"\nsecret_file = \"hook\"\n",
+        )
+        .unwrap();
+        let program = dir.join("bin/notify");
+        let commands = |checks: &[Check]| -> Vec<(Status, String)> {
+            checks.iter().filter(|c| c.check == "notify commands").map(|c| (c.status, c.detail.clone())).collect()
+        };
+        let checks = check_webhooks(&path).await;
+        let missing = format!("human alice notify #1: {} is no executable file", program.display());
+        let off_path = "human alice notify #2: no-such-program-of-ants is not on PATH here".to_owned();
+        assert_eq!(commands(&checks), [(Status::Fail, missing), (Status::Warn, off_path.clone())]);
+        assert_eq!(one(&checks, "webhook secrets").status, Status::Ok, "the http sink's secret file: {checks:#?}");
+
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(&program, "#!/bin/sh\ncat > /dev/null\n").unwrap();
+        chmod(&program, 0o755);
+        let ready = format!("human alice notify #1: {} is executable", program.display());
+        assert_eq!(commands(&check_webhooks(&path).await), [(Status::Ok, ready), (Status::Warn, off_path)]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
