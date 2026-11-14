@@ -62,6 +62,12 @@ pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
 const SERVER_NAME: &str = "ants";
 const DEFAULT_ASK_WAIT: Duration = Duration::from_secs(300);
 const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
+/// How long `request_ant` waits for the new ant's credentials by default, a human's approval included.
+const DEFAULT_REQUEST_WAIT: Duration = Duration::from_mins(15);
+/// How long `request_ant` waits for the new ant to be in the roster once listed; the config file is reread within
+/// seconds of a change.
+const LISTED_WAIT: Duration = Duration::from_secs(60);
+const LISTED_POLL: Duration = Duration::from_secs(1);
 /// Asks remembered for their replies; the oldest are forgotten first.
 const MAX_ASKS: usize = 1024;
 /// Late replies kept for `check_inbox`; the oldest are dropped first.
@@ -157,6 +163,40 @@ pub fn jetstream_lookup(js: async_nats::jetstream::Context) -> RosterLookup {
     })
 }
 
+/// What a manager ant's `request_ant` asks for: ant `name` from `template`, set as `request` asks, for `reason`, on
+/// the manager's `thread`, waiting at most `wait` for its credentials.
+#[derive(Debug, Clone)]
+pub struct AntAsk {
+    pub manager: UserId,
+    pub thread: ThreadId,
+    pub name: UserId,
+    pub template: String,
+    pub request: crate::template::Request,
+    pub reason: String,
+    pub wait: Duration,
+}
+
+/// Adds the ant a manager asks for ([`AntAsk`]) once its credentials are signed, listing it in the config file for the
+/// daemon to serve; returns what it did, or why not.
+pub type AntRequester = Arc<dyn Fn(AntAsk) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
+
+/// The [`AntRequester`] of a manager ant, which only managers have. Two compare equal when both have one or neither
+/// has, so a reload does not restart a manager for a new one.
+#[derive(Clone, Default)]
+pub struct Requester(pub Option<AntRequester>);
+
+impl PartialEq for Requester {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.is_some() == other.0.is_some()
+    }
+}
+
+impl std::fmt::Debug for Requester {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Requester(Some(..))" } else { "Requester(None)" })
+    }
+}
+
 /// The MCP server of one ant. Dropping it stops the listeners.
 pub struct Mcp {
     hub: Arc<Hub>,
@@ -203,6 +243,7 @@ impl Mcp {
             channels: std::sync::OnceLock::new(),
             lookup: OnceLock::new(),
             admin: OnceLock::new(),
+            requester: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -236,6 +277,11 @@ impl Mcp {
     /// recipient is looked up.
     pub fn with_lookup(&self, lookup: RosterLookup) {
         let _ = self.hub.lookup.set(lookup);
+    }
+
+    /// Serve `request_ant` through `requester`, for a manager ant; without one the tool is not offered.
+    pub fn with_requester(&self, requester: AntRequester) {
+        let _ = self.hub.requester.set(requester);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -383,6 +429,7 @@ struct Hub {
     channels: std::sync::OnceLock<ChannelAccess>,
     lookup: OnceLock<RosterLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
+    requester: OnceLock<AntRequester>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -721,6 +768,46 @@ impl Hub {
         Some(format!("{why}. {}", alternatives(to, entry.as_ref(), &others, now)))
     }
 
+    /// Add the ant `args` asks for through the requester ([`AntRequester`]), then wait up to [`LISTED_WAIT`] for the
+    /// daemon to serve it.
+    async fn request_ant(&self, thread: &ThreadId, args: RequestAnt) -> Result<String, String> {
+        let requester = self.requester.get().ok_or("request_ant is for the managers of an ant template")?;
+        let name: UserId = args.name.trim().parse().map_err(|e| format!("name {:?}: {e}", args.name))?;
+        let request = match args.overrides {
+            Some(overrides) => {
+                serde_json::from_value(serde_json::Value::Object(overrides)).map_err(|e| format!("overrides: {e}"))?
+            }
+            None => crate::template::Request::default(),
+        };
+        let wait = match args.timeout.as_deref() {
+            None => DEFAULT_REQUEST_WAIT,
+            Some(timeout) => ask_wait(Some(timeout))?,
+        };
+        let ask = AntAsk {
+            manager: self.ant.clone(),
+            thread: thread.clone(),
+            name: name.clone(),
+            template: args.template.trim().to_owned(),
+            request,
+            reason: args.reason,
+            wait,
+        };
+        let added = requester(ask).await?;
+        let Some(lookup) = self.lookup.get() else { return Ok(added) };
+        let deadline = tokio::time::Instant::now() + LISTED_WAIT;
+        loop {
+            if let Ok(Ok(Some(_))) = tokio::time::timeout(LOOKUP_TIMEOUT, lookup(name.clone())).await {
+                return Ok(format!("{added} {name} is in the roster: send_message and ask_agent reach it."));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(format!(
+                    "{added} {name} is not in the roster yet; messages to it wait in its inbox until it is served."
+                ));
+            }
+            tokio::time::sleep(LISTED_POLL).await;
+        }
+    }
+
     /// Send `envelope` and wait up to `wait` (or until `cancelled`) for its reply.
     async fn ask(
         &self,
@@ -1026,6 +1113,26 @@ struct ManageChannel {
     clear_messenger: bool,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RequestAnt {
+    /// The new ant's name, fitting the template's name pattern (by default `<manager>-*`, such as `lead-docs`).
+    name: String,
+    /// The ant template to add it from.
+    template: String,
+    /// Why the ant is needed; a human deciding on a request outside the template's policy reads it.
+    reason: String,
+    /// Settings within the template's bounds, each left out taking the template's: workdir, harness, model,
+    /// reasoning_effort, context, whoami, memory, tasks, capabilities, allow_sets, max_thread_tokens,
+    /// max_thread_cost, max_daily_tokens, max_daily_cost, max_harnesses, prompt_timeout (such as `10m`),
+    /// max_tool_calls.
+    #[serde(default)]
+    overrides: Option<serde_json::Map<String, serde_json::Value>>,
+    /// How long to wait for the credentials, a human's approval included: a duration such as `10m` (default 15m,
+    /// at most 30m).
+    #[serde(default)]
+    timeout: Option<String>,
+}
+
 /// The tools, served to one MCP connection. Over HTTP the caller's thread comes with each request instead.
 #[derive(Clone)]
 struct Tools {
@@ -1036,7 +1143,11 @@ struct Tools {
 
 impl Tools {
     fn new(hub: Arc<Hub>, caller: Option<ThreadId>) -> Self {
-        Self { hub, caller, tool_router: Self::tool_router() }
+        let mut tool_router = Self::tool_router();
+        if hub.requester.get().is_none() {
+            tool_router.remove_route("request_ant");
+        }
+        Self { hub, caller, tool_router }
     }
 
     fn thread(&self, cx: &RequestContext<RoleServer>) -> Result<ThreadId, ErrorData> {
@@ -1494,6 +1605,22 @@ impl Tools {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.manage_channel(&thread, args).await))
     }
+
+    #[tool(description = "Add a worker ant from an ant template that lists this ant among its managers: `name` \
+        fitting the template's name pattern, `reason` saying why it is needed, and `overrides` choosing settings \
+        within the template's bounds. It is checked against the template here first and refused at once outside \
+        it. Its key is made on this machine and its credentials signed where the team's account key is: at once \
+        within the template's policy, else once a human approves, which can take a while. Then it is listed in \
+        the config file and served by this machine's daemon; it returns once the new ant is in the roster, to be \
+        reached with send_message and ask_agent, or says why it was refused. Ants added this way never add ants.")]
+    async fn request_ant(
+        &self,
+        Parameters(args): Parameters<RequestAnt>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.request_ant(&thread, args).await))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1501,11 +1628,11 @@ impl ServerHandler for Tools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions(&self.hub.ant))
+            .with_instructions(instructions(&self.hub.ant, self.hub.requester.get().is_some()))
     }
 }
 
-fn instructions(ant: &UserId) -> String {
+fn instructions(ant: &UserId, manager: bool) -> String {
     let mut text = format!(
         "Messaging between ants; this session speaks as {ant}. send_message and ask_agent reach other \
          ants, check_inbox collects late replies, list_ants shows ants with the advertised whoami field \
@@ -1519,6 +1646,12 @@ fn instructions(ant: &UserId) -> String {
          channels a human made this ant the owner of, and changes their members and messenger. Memory and task \
          tools follow the ant's configured instructions."
     );
+    if manager {
+        text.push_str(
+            " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
+             than the roster has; give the reason a human would need to approve it.",
+        );
+    }
     if *ant == UserId::messenger() {
         text.push_str(
             " As the messenger, answer each request by routing it: pick the capability it needs from list_ants, \
@@ -1957,6 +2090,55 @@ mod tests {
             let entry = roster.iter().find(|e| e.ant == ant).cloned();
             Box::pin(async move { Ok(entry) })
         })
+    }
+
+    #[tokio::test]
+    async fn request_ant_is_offered_to_managers_and_returns_once_the_ant_is_in_the_roster() {
+        let (mcp, _sent) = start(&home("request")).await;
+        let thread = ThreadId::generate();
+        let (url, token) = http_server(&mcp, &thread);
+        let names = async |client: &Client| -> Vec<String> {
+            client.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect()
+        };
+        assert!(!names(&http_client(&url, &token).await).await.contains(&"request_ant".to_owned()));
+
+        let asked = Arc::new(StdMutex::new(Vec::<AntAsk>::new()));
+        let seen = asked.clone();
+        mcp.with_requester(Arc::new(move |ask: AntAsk| {
+            seen.lock().unwrap().push(ask.clone());
+            Box::pin(async move {
+                match ask.name.as_str() {
+                    "dev-a-docs" => Ok("Added dev-a-docs.".to_owned()),
+                    _ => Err("the signer refused it".to_owned()),
+                }
+            })
+        }));
+        mcp.with_lookup(lookup_in(vec![listed("dev-a-docs", &[])]));
+        let client = http_client(&url, &token).await;
+        assert!(names(&client).await.contains(&"request_ant".to_owned()));
+
+        let args = serde_json::json!({
+            "name": "dev-a-docs", "template": "worker", "reason": "docs",
+            "overrides": {"model": "gpt-5", "prompt_timeout": "10m"},
+        });
+        let (ok, text) = call(&client, "request_ant", args).await;
+        assert!(ok && text.starts_with("Added dev-a-docs.") && text.contains("is in the roster"), "{text}");
+        let ask = asked.lock().unwrap()[0].clone();
+        assert_eq!(
+            (ask.manager, ask.thread, ask.template, ask.wait),
+            (user("dev-a"), thread, "worker".to_owned(), DEFAULT_REQUEST_WAIT)
+        );
+        assert_eq!(ask.request.model.as_deref(), Some("gpt-5"));
+        assert_eq!(ask.request.prompt_timeout, Some(Duration::from_mins(10)));
+
+        let args = serde_json::json!({"name": "dev-a-x", "template": "worker", "reason": "x", "timeout": "1m"});
+        let (ok, text) = call(&client, "request_ant", args).await;
+        assert!(!ok && text.contains("the signer refused it"), "{text}");
+        assert_eq!(asked.lock().unwrap()[1].wait, Duration::from_mins(1));
+        let args = serde_json::json!({"name": "dev-a-y", "template": "worker", "reason": "y", "overrides": {"x": 1}});
+        let (ok, text) = call(&client, "request_ant", args).await;
+        assert!(!ok && text.contains("overrides"), "{text}");
+        assert_eq!(asked.lock().unwrap().len(), 2, "a malformed request goes nowhere");
     }
 
     #[test]

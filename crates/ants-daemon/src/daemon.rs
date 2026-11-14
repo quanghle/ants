@@ -118,6 +118,8 @@ pub struct Config {
     pub human: UserId,
     /// The ant's escalation chain, published in the roster, and its limits.
     pub escalation: Chain,
+    /// For a manager ant of an `[[ant_template]]`, what adds the ants its `request_ant` tool asks for.
+    pub requester: crate::mcp::Requester,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -236,6 +238,9 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
     mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
+    if let Some(requester) = &config.requester.0 {
+        mcp.with_requester(requester.clone());
+    }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
     let launch = Launch::new(
         config.harness.clone(),

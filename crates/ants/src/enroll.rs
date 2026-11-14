@@ -227,6 +227,11 @@ impl Approver {
         Ok(Self { client, hub, js_domain: js_domain.cloned(), account, revoked, listen })
     }
 
+    /// The hub's JetStream.
+    pub(crate) fn hub(&self) -> &async_nats::jetstream::Context {
+        &self.hub
+    }
+
     /// Check that `request` proves its enrollment credentials of the team's account for its ant, unexpired, and if it
     /// names a leaf node, the leaf's uplink credentials.
     fn check(&self, request: &EnrollRequest) -> Result<()> {

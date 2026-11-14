@@ -13,6 +13,7 @@ mod humans;
 mod inbox;
 mod keys;
 mod leaf;
+mod manager;
 mod members;
 mod notify;
 mod outbox;
@@ -26,6 +27,7 @@ mod scheduler;
 mod serve;
 mod service;
 mod setup;
+mod signer;
 mod spend;
 mod thread;
 mod tools;
@@ -229,6 +231,25 @@ enum Command {
     /// list them, approve or reject one; and renewal requests (`ants renew`): list them, renew one or all.
     #[command(subcommand)]
     Enroll(EnrollCommand),
+    /// On the machine holding the account key, sign the credentials of the ants manager ants ask for (their
+    /// `request_ant` tool), until stopped: at once for a request within the policy of the [[ant_template]] tables of
+    /// --config (the template lists the manager, has room under its max_ants among the live keys the team issued,
+    /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
+    /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused.
+    Signer {
+        /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
+        /// (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
+        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
+        approval_timeout: Duration,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
+    },
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
     /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
@@ -850,7 +871,8 @@ enum ToolsCommand {
         #[arg(long)]
         always: bool,
         /// Also add the allow rule fitting the request exactly to the ant's allow list in the config file, then
-        /// reload the daemon serving it.
+        /// reload the daemon serving it. An ant added from a template takes its allow rules from the template:
+        /// nothing is added to its entry.
         #[arg(long)]
         rule: bool,
         /// Config file listing the ant, for --rule (default: ~/.ants/config.toml).
@@ -1123,8 +1145,16 @@ async fn run() -> Result<()> {
             let default_path = ants_daemon::config::default_path()?;
             let served = || {
                 let listed = serve::ants(&args, &default_path)?;
-                let configs =
+                let mut configs =
                     serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
+                if let Some((managers, path)) = &listed.managers {
+                    for config in configs.iter_mut().filter(|c| managers.contains(&c.ant)) {
+                        let (nats, creds, js_domain) =
+                            (config.nats_url.clone(), config.creds.clone(), config.js_domain.clone());
+                        let manager = manager::Manager::new(path.clone(), nats, creds, js_domain)?;
+                        config.requester = ants_daemon::mcp::Requester(Some(manager.requester()));
+                    }
+                }
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
                 Ok(serve::Served { configs, schedules, metrics: listed.metrics })
             };
@@ -1295,6 +1325,31 @@ async fn run() -> Result<()> {
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
+        Command::Signer { config, approval_timeout, dir, upgrade } => {
+            let dir = team_dir(dir)?;
+            let config = match config {
+                Some(path) => path,
+                None => ants_daemon::config::default_path()?,
+            };
+            let templates = ants_daemon::config::signer_templates(&config)?;
+            let names: Vec<_> = templates.iter().map(|t| t.name.as_str()).collect();
+            eprintln!(
+                "signing the ants manager ants ask for, within the templates of {} ({}); Ctrl-C stops",
+                config.display(),
+                if names.is_empty() { "none yet: every request goes to a human".to_owned() } else { names.join(", ") }
+            );
+            let options = signer::Options {
+                config: &config,
+                approval_timeout,
+                reconnect: renew::AUTO_RECONNECT,
+                tick: signer::TICK,
+            };
+            let stop = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let serving = signer::serve(&cli.nats, &dir, domain, &options, signer::print, stop);
+            Box::pin(upgrade::or_exit(serving, &upgrade)).await
+        }
         Command::Enroll(command) => {
             let dir = |dir| team_dir(dir);
             match command {

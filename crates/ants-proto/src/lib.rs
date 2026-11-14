@@ -558,6 +558,22 @@ pub mod subject {
     /// Every answer to a renewal request.
     pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
 
+    /// Where a manager ant asks for an ant added from a template (`request_ant`;
+    /// [`AntRequest`](super::AntRequest); core NATS, not stored). Only the manager publishes here.
+    pub fn antreq(manager: &UserId) -> String {
+        format!("ants.antreq.{manager}")
+    }
+
+    /// Where the answer to an ant request of `manager` goes ([`AntReply`](super::AntReply); core NATS).
+    pub fn antreq_reply(manager: &UserId) -> String {
+        format!("ants.antreq.{manager}.reply")
+    }
+
+    /// Every ant request, of all managers.
+    pub const ALL_ANT_REQUESTS: &str = "ants.antreq.*";
+    /// Every answer to an ant request.
+    pub const ALL_ANT_REPLIES: &str = "ants.antreq.*.reply";
+
     /// Live progress of an ant on a thread ([`StatusEvent`](super::StatusEvent)s; core NATS, not stored).
     pub fn status(ant: &UserId, thread: &ThreadId) -> String {
         format!("ants.status.{ant}.{thread}")
@@ -1148,6 +1164,8 @@ impl Permissions {
                 format!("$KV.{LINKS_BUCKET}.{user}.>"),
                 format!("ants.out.links.{user}.>"),
                 subject::renew(user.as_str()),
+                // Asking the signer for an ant added from a template, should it manage one.
+                subject::antreq(user),
             ]);
             // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
             // filter pinned; no ack, so the spares of the inbox consumer only read it.
@@ -1171,6 +1189,7 @@ impl Permissions {
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(user),
                 subject::renew_reply(user.as_str()),
+                subject::antreq_reply(user),
             ]);
         }
         Self { publish, subscribe }
@@ -1401,15 +1420,22 @@ impl Permissions {
         Self { publish, subscribe }
     }
 
-    /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment and renewal
-    /// request and answering it, and admitting an ant new to a leaf node into the hub's stream and links bucket from the leaf's
-    /// outbox, as `ants leaf outbox` does, with the replies of its JetStream requests under [`ENROLL_INBOX`].
+    /// What `ants enroll` and `ants signer` allow themselves on the machine holding the account key: hearing every
+    /// enrollment, renewal and ant request ([`AntRequest`]) and answering it, asking the humans about an ant request
+    /// as an approval request of its manager and reading their decision, and admitting an ant new to a leaf node into
+    /// the hub's stream and links bucket from the leaf's outbox, as `ants leaf outbox` does, with the replies of its
+    /// JetStream requests under [`ENROLL_INBOX`].
     pub fn for_enroll_approver() -> Self {
         let links = kv_stream(LINKS_BUCKET);
         Self {
             publish: vec![
                 subject::ALL_ENROLL_REPLIES.to_owned(),
                 subject::ALL_RENEW_REPLIES.to_owned(),
+                subject::ALL_ANT_REPLIES.to_owned(),
+                // A manager's ant request outside the templates' policy goes to the humans as an approval request
+                // of the manager's, whose decision it reads back as the ant would.
+                subject::ALL_APPROVAL_REQUESTS.to_owned(),
+                format!("$JS.API.DIRECT.GET.{STREAM}.{}", subject::ALL_APPROVAL_DECISIONS),
                 format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.INFO.{STREAM}"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
@@ -1419,6 +1445,7 @@ impl Permissions {
             subscribe: vec![
                 subject::ALL_ENROLL_REQUESTS.to_owned(),
                 subject::ALL_RENEW_REQUESTS.to_owned(),
+                subject::ALL_ANT_REQUESTS.to_owned(),
                 format!("{ENROLL_INBOX}.>"),
             ],
         }
@@ -3255,6 +3282,153 @@ impl RenewReply {
     }
 }
 
+/// A manager ant asking on [`subject::antreq`] for an ant added from a template (its `request_ant` tool): the
+/// ant's name, the template, the settings asked for within the template's bounds (`request`, the JSON of a template
+/// request, as the manager's config file would list them), and the public key of the user NKey the manager's machine
+/// generated for the ant, whose seed stays there. The signer on the machine holding the account key (`ants signer`)
+/// signs a user JWT for that key when the request keeps within its own copy of the template's policy, asks the humans
+/// otherwise, and answers with an [`AntReply`].
+///
+/// The request carries the manager's user JWT (`credentials`) and its key's `signature` of [`AntRequest::signed`], so
+/// the signer takes only requests the manager made, whatever connection carried them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AntRequest {
+    pub manager: UserId,
+    /// The ant asked for.
+    pub name: UserId,
+    pub template: String,
+    /// The settings asked for, a JSON object of the keys a template request may set.
+    pub request: String,
+    /// Why the manager wants the ant, shown to a human asked to approve.
+    pub reason: String,
+    /// The manager's thread the request comes from, where a human's approval request appears.
+    pub thread_id: ThreadId,
+    /// The ant's public NKey, `U...`.
+    pub public_key: String,
+    /// Host name of the asking machine, as it reports it.
+    pub host: String,
+    pub sent_at: DateTime<Utc>,
+    /// When the manager stops waiting: no answer counts after it, and no human is asked past it.
+    pub expires_at: DateTime<Utc>,
+    /// The user JWT of the manager's credentials.
+    pub credentials: String,
+    /// Signature of [`AntRequest::signed`] by the manager's key, base64url without padding.
+    pub signature: String,
+    /// The leaf node the asking machine reaches the hub through, whose uplink an approval extends to the ant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf: Option<EnrollLeaf>,
+}
+
+impl AntRequest {
+    /// A request sent now, waiting until `expires_at`, to be completed with the manager's JWT and signatures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        manager: UserId,
+        name: UserId,
+        template: impl Into<String>,
+        request: impl Into<String>,
+        reason: impl Into<String>,
+        thread_id: ThreadId,
+        public_key: impl Into<String>,
+        host: impl Into<String>,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            manager,
+            name,
+            template: template.into(),
+            request: request.into(),
+            reason: reason.into(),
+            thread_id,
+            public_key: public_key.into(),
+            host: host.into(),
+            sent_at: Utc::now(),
+            expires_at,
+            credentials: String::new(),
+            signature: String::new(),
+            leaf: None,
+        }
+    }
+
+    /// What the manager's key and the leaf's uplink key sign: every field but the signatures, one per line, the
+    /// free texts prefixed with their length in bytes, so that none can pass for the next.
+    pub fn signed(&self) -> Vec<u8> {
+        let at = |t: &DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let quoted = |t: &str| format!("{}:{t}", t.len());
+        let (machine, leaf) = self.leaf.as_ref().map_or(("", ""), |l| (l.machine.as_str(), l.jwt.as_str()));
+        let fields = [
+            "ants-antreq",
+            self.manager.as_str(),
+            self.name.as_str(),
+            &quoted(&self.template),
+            &quoted(&self.request),
+            &quoted(&self.reason),
+            self.thread_id.as_str(),
+            &self.public_key,
+            &quoted(&self.host),
+            &at(&self.sent_at),
+            &at(&self.expires_at),
+            &self.credentials,
+            machine,
+            leaf,
+        ];
+        fields.join("\n").into_bytes()
+    }
+
+    pub fn subject(&self) -> String {
+        subject::antreq(&self.manager)
+    }
+
+    /// Check that the request arrived on its manager's own [`AntRequest::subject`], which only the manager's
+    /// credentials publish on.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "ant request", user: self.manager.clone(), at: subject.to_owned() })
+    }
+}
+
+/// The answer to an [`AntRequest`], on [`subject::antreq_reply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum AntReply {
+    /// The user JWT of `public_key` for ant `name`, which completes its credentials with the seed kept on the
+    /// manager's machine, and for a request through a leaf node ([`AntRequest::leaf`]) the renewed user JWT of the
+    /// leaf's uplink key, allowing the ant as well.
+    Approved {
+        manager: UserId,
+        name: UserId,
+        public_key: String,
+        jwt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_jwt: Option<String>,
+    },
+    /// No credentials, and why.
+    Refused { manager: UserId, name: UserId, public_key: String, reason: String },
+}
+
+impl AntReply {
+    pub fn manager(&self) -> &UserId {
+        match self {
+            Self::Approved { manager, .. } | Self::Refused { manager, .. } => manager,
+        }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::antreq_reply(self.manager())
+    }
+
+    /// Whether the answer is meant for the request of ant `name` with `public_key`.
+    pub fn answers(&self, name: &UserId, public_key: &str) -> bool {
+        match self {
+            Self::Approved { name: n, public_key: key, .. } | Self::Refused { name: n, public_key: key, .. } => {
+                n == name && key == public_key
+            }
+        }
+    }
+}
+
 /// Where an ant stands on a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -3587,6 +3761,48 @@ mod tests {
         assert!(approver.subscribe.iter().any(|s| s == subject::ALL_RENEW_REQUESTS));
         assert!(approver.publish.iter().any(|s| s == subject::ALL_RENEW_REPLIES));
         assert!(!approver.publish.iter().any(|s| s == subject::ALL_RENEW_REQUESTS));
+    }
+
+    #[test]
+    fn ants_ask_only_for_their_own_ant_requests_and_the_approver_answers_them() {
+        let (lead, other) = (p("lead"), p("dev-b"));
+        let ant = Permissions::for_user(&lead, Role::Ant);
+        let asks = |list: &[String]| -> Vec<String> {
+            list.iter().filter(|s| s.starts_with("ants.antreq.")).cloned().collect()
+        };
+        assert_eq!(asks(&ant.publish), ["ants.antreq.lead"]);
+        assert_eq!(asks(&ant.subscribe), ["ants.antreq.lead.reply"]);
+        let m1: Machine = "m1".parse().unwrap();
+        let leaf = Permissions::for_leaf(&m1, [(&lead, Role::Ant), (&other, Role::Ant)]);
+        assert_eq!(asks(&leaf.publish), ["ants.antreq.lead", "ants.antreq.dev-b"]);
+        let approver = Permissions::for_enroll_approver();
+        assert_eq!(asks(&approver.subscribe), [subject::ALL_ANT_REQUESTS]);
+        assert_eq!(asks(&approver.publish), [subject::ALL_ANT_REPLIES]);
+        assert!(approver.publish.iter().any(|s| s == subject::ALL_APPROVAL_REQUESTS));
+        assert!(
+            !approver.publish.iter().any(|s| s == subject::ALL_APPROVAL_DECISIONS),
+            "only humans and the escalation chain decide"
+        );
+        let request = AntRequest::new(
+            lead.clone(),
+            p("lead-w1"),
+            "worker",
+            "{}",
+            "more hands",
+            "t1".parse().unwrap(),
+            "UKEY",
+            "host",
+            Utc::now(),
+        );
+        assert_eq!(request.subject(), "ants.antreq.lead");
+        assert!(request.check_subject("ants.antreq.dev-b").is_err());
+        let mut moved = request.clone();
+        moved.reason = "more hands\n".into();
+        assert_ne!(moved.signed(), request.signed());
+        let reply =
+            AntReply::Refused { manager: lead, name: p("lead-w1"), public_key: "UKEY".into(), reason: "no".into() };
+        assert_eq!(reply.subject(), "ants.antreq.lead.reply");
+        assert!(reply.answers(&p("lead-w1"), "UKEY") && !reply.answers(&p("lead-w2"), "UKEY"));
     }
 
     #[test]

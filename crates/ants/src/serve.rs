@@ -257,6 +257,9 @@ pub struct Listed {
     pub schedules: Vec<Schedule>,
     /// Where to serve health and metrics: `--metrics`, else the file's `metrics`.
     pub metrics: Option<SocketAddr>,
+    /// The ants that get `request_ant`, managers of the file's templates, and the file they add ants to: only when
+    /// the daemon serves the whole file, which the ants added join.
+    pub managers: Option<(Vec<UserId>, PathBuf)>,
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
@@ -267,13 +270,22 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
         Source::Flags(name) => {
             let ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
             let harnesses = Summary::load(default_path)?.harnesses;
-            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new(), metrics: args.metrics })
+            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new(), metrics: args.metrics, managers: None })
         }
         Source::File(path) => {
             let loaded = config::load(&path)?;
-            let schedules = if args.ant.is_some() { Vec::new() } else { loaded.schedules };
+            let whole = args.ant.is_none();
+            let schedules = if whole { loaded.schedules } else { Vec::new() };
             let metrics = args.metrics.or(loaded.metrics);
-            Ok(Listed { ants: pick(loaded.ants, args, &path)?, harnesses: loaded.harnesses, schedules, metrics })
+            let managers = loaded
+                .ants
+                .iter()
+                .filter(|a| crate::manager::manages(&loaded.templates, &a.name, a.template.is_some()))
+                .map(|a| a.name.clone())
+                .collect();
+            let managers = whole.then(|| (managers, path.clone()));
+            let ants = pick(loaded.ants, args, &path)?;
+            Ok(Listed { ants, harnesses: loaded.harnesses, schedules, metrics, managers })
         }
     }
 }

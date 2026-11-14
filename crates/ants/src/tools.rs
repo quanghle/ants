@@ -772,13 +772,19 @@ pub async fn show(nats: &crate::Nats<'_>, id: &str, json: bool) -> Result<()> {
 
 /// `ants tools approve ID [--always] [--rule]` and `ants tools reject ID`: answer one request with `verdict`. With
 /// `rule`, the config file there, also add the allow rule fitting the request to its ant's allow list, then reload
-/// the daemon serving the file.
+/// the daemon serving the file; for an ant added from a template, whose entry may set no allow list, only answer.
 pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, rule: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = find(&stream, id).await?;
+    // An ant added from a template takes its allow rules from the template, and its entry may set no `allow`.
+    let template = match rule {
+        Some(path) => config::template_of(path, &request.ant)?,
+        None => None,
+    };
     // Checked before answering, so a rule that cannot be added leaves the request pending.
     let edit = match rule {
+        Some(_) if template.is_some() => None,
         Some(path) => {
             let rule = permission::rule_for(&request.tool).with_context(|| {
                 format!(
@@ -804,6 +810,11 @@ pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, 
             reload_daemon(path, ant);
         }
         None if verdict == Verdict::Reject => {}
+        None if template.is_some() => println!(
+            "{ant} is added from template {}, whose allow rules it takes: no rule added to its entry; add one to the \
+             template's allow or one of its allow_sets by hand",
+            template.as_deref().unwrap_or_default()
+        ),
         None => match suggestion(&stream, seq, &request).await {
             Ok(Some(s)) => println!("{}", suggestion_text(&request, &s)),
             Ok(None) => {}
