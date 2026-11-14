@@ -103,7 +103,7 @@ pub async fn serve(
     mut report: impl FnMut(&AntRequest, &Event),
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
-    let mut signer = Signer { dir, js_domain, options, answered: HashMap::new(), waiting: Vec::new() };
+    let mut signer = Signer { dir, options, answered: HashMap::new(), waiting: Vec::new() };
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect(url, dir, js_domain, crate::enroll::LISTEN).await?;
@@ -128,7 +128,6 @@ pub async fn serve(
 
 struct Signer<'a> {
     dir: &'a Path,
-    js_domain: Option<&'a JsDomain>,
     options: &'a Options<'a>,
     /// The answer to each manager, ant and key: a machine that missed it asks again and gets the same.
     answered: HashMap<(UserId, UserId, String), (AntReply, DateTime<Utc>)>,
@@ -246,7 +245,9 @@ impl Signer<'_> {
     }
 
     async fn signed(&self, approver: &Approver, request: &AntRequest) -> Result<(String, Option<String>)> {
-        let (name, domain) = (&request.name, self.js_domain);
+        // The ant runs where its manager does, so it reaches JetStream the same way.
+        let manager = ants_daemon::creds::Finding::from_jwt(&request.credentials)?;
+        let (name, domain) = (&request.name, manager.js_domain.as_ref());
         let jwt = auth::sign_added(self.dir, name, domain, &request.public_key, &request.template, &request.manager)?;
         let Some(leaf) = &request.leaf else {
             return Ok((jwt, None));
