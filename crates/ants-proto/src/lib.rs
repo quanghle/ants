@@ -1621,7 +1621,7 @@ impl fmt::Display for PermissionsVersion {
 pub enum Following {
     /// Every message to the human (`ants inbox --follow`), escalations among them.
     Inbox,
-    /// The tool requests of every ant (`ants tools list --follow`).
+    /// The tool requests of every ant (`ants tools list --follow`, or `ants inbox --follow` as text on every thread).
     Approvals,
 }
 

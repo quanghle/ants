@@ -98,7 +98,8 @@ enum Command {
         #[arg(long)]
         limit: Option<usize>,
         /// Keep waiting for new replies until Ctrl-C, meanwhile dead-lettering the messages JetStream stops
-        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does).
+        /// delivering without the daemon having stored them as dead letters (as `ants dead watch` does). Without
+        /// --thread and --json, also print the pending tool requests, new ones and how each ends.
         #[arg(long, short)]
         follow: bool,
         /// One JSON envelope per line.
@@ -1788,6 +1789,35 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
                 Some(_) => followed.await,
             }
         };
+        // Following every thread as text shows the tool requests too, until the replies end or showing them fails.
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let followed = async {
+            let followed = followed.await;
+            drop(stop);
+            followed
+        };
+        let requests = async {
+            if select.thread.is_some() || json {
+                return;
+            }
+            let report = |update: &tools::Update| {
+                println!("{}", tools::render(update, chrono::Utc::now()));
+                Ok(())
+            };
+            let shown = async {
+                tokio::select! {
+                    shown = Box::pin(tools::follow(&client, &js, report)) => {
+                        if let Err(e) = shown {
+                            tracing::warn!("not showing tool requests: {e:#}");
+                        }
+                    }
+                    _ = stopped => {}
+                }
+            };
+            let device = nats.device.id;
+            Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Approvals, shown)).await;
+        };
+        let followed = async { tokio::join!(followed, requests).0 };
         tokio::select! {
             followed = followed => followed?,
             () = watch => {}
