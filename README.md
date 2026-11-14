@@ -581,6 +581,7 @@ cron = "0 3 * * 1-5"                          # minute hour day-of-month month d
 ant = "dev-a"
 owner = "alice"                               # optional human owner for replies and escalations
 text = "Triage the failing nightly tests and summarise them."
+catch_up = true                               # optional: send the latest missed firing late (see Missed firings)
 
 [[schedule]]
 name = "standup"                              # ants auth user standup --webhook --channel ops
@@ -596,7 +597,7 @@ nats = "nats://127.0.0.1:4222"                # optional, as js_domain: default 
 - **Destination:** exactly one of `ant` and `channel`; `mention` and `broadcast` (all members at the firing) only with `channel`. `owner` works as for webhooks.
 - **Identity:** a schedule is a webhook-role user (`ants auth user NAME --webhook --to ANT` or `--channel CH`, and `--webhook NAME` in `ants auth leaf`), checked at load: its credentials must name it, be no human's and allow its destination. Its messages carry `webhook: true` and it refreshes `<schedule>.webhook` in `ants_webhooks` daily, so replies and triage work as for a [webhook](#webhooks).
 - **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 24 h `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.
-- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, never made up.
+- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, unless the schedule sets `catch_up = true` (default `false`): then, once a daemon runs and reaches the hub again (at start, or on waking), the latest firing missed within the last 7 days goes out late, once, with `(Sent late: due YYYY-MM-DD HH:MM UTC.)` appended to `text`; older missed firings are skipped, never sent as a backlog, and none is made up when a later firing is due within the minute. It keeps the firing's own key `<schedule>.<unix time>`, so several daemons, restarts or an earlier on-time send never repeat it, and a firing the hub does not take is retried every 5s until the next one is due.
 
 ## Credentials
 
