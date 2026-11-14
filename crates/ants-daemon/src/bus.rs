@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, ROSTER_BUCKET, SESSIONS_BUCKET,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, SESSIONS_BUCKET,
     STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
@@ -304,6 +304,12 @@ pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
     })
     .await
     .context("creating the chains bucket (with credentials, `ants init` as the human creates it)")
+}
+
+/// The KV bucket of the links to channel threads ants passed on ([`LINKS_BUCKET`]), created when missing and the
+/// credentials allow it (the human's). Entries expire with the stream's messages.
+pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
+    ensure_kept(js, LINKS_BUCKET).await
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.

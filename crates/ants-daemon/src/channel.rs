@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 
+use crate::links;
 use crate::webhooks::Webhooks;
 
 /// What ants tells a channel's messenger about triaging a post; the messenger's own instructions add to it.
@@ -44,6 +45,8 @@ const BATCH: u64 = 256;
 const CLOCK_SLACK: Duration = Duration::from_secs(300);
 /// Most thread origins kept in memory; past it they are read again.
 const MAX_ORIGINS: usize = 4096;
+/// Most ants, the sender of a message among them, whose link to a channel thread is checked for it.
+const MAX_LINK_CHECKS: usize = 32;
 
 /// The channels in the bucket, kept current by a watch. An entry whose channel disagrees with its key is skipped, and
 /// so is a malformed one: neither is a channel.
@@ -360,6 +363,7 @@ impl Sink for Root<'_> {
 
 /// Finds whether a post on `thread`, stored up to stream sequence `upto`, is by `sender` or wakes it, a member or the
 /// messenger of the thread's channel, whose `entry` it is.
+#[derive(Clone, Copy)]
 struct Part<'a> {
     thread: &'a ThreadId,
     sender: &'a UserId,
@@ -517,10 +521,10 @@ impl Threads {
         self.origin(&on_thread, seq, humans).await.map(Some)
     }
 
-    /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` takes part
-    /// in it: a member or the messenger of its channel as the channels bucket holds it now, the sender has a post on
-    /// the thread stored before `seq`, or one there wakes it ([`ChannelEntry::woken`]). None otherwise: no ant links
-    /// its thread to a channel thread it has no part in, to take that thread's creator.
+    /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` has a link
+    /// to it: it takes part in the thread ([`Threads::takes_part`]), or an ant that does passed the link on to it,
+    /// directly or through ants it passed the link on to in turn ([`links::passed_on`]). None otherwise: no ant links
+    /// its thread to a channel thread it has no link to, to take that thread's creator.
     pub async fn origin_for(
         &self,
         thread: &ThreadId,
@@ -531,26 +535,60 @@ impl Threads {
         let Some(channel) = self.root(thread, seq).await? else { return Ok(None) };
         let channels = self.js.get_key_value(CHANNELS_BUCKET).await.context("opening the channels")?;
         let Stored::Entry(entry, _) = load(&channels, &channel).await? else { return Ok(None) };
-        if !entry.is_member(sender) && entry.messenger() != *sender {
+        let at = Part { thread, sender, entry: &entry, humans, upto: seq, found: false };
+        if !self.takes_part(&channel, &at, sender).await? && !self.passed_to(&channel, &at, sender).await? {
             return Ok(None);
         }
-        let known = self.parts.lock().expect("parts").contains(&(thread.clone(), sender.clone()));
-        if !known {
-            let mut part = Part { thread, sender, entry: &entry, humans, upto: seq, found: false };
-            self.scan(&subject::chan_room(&channel), from_start(thread), &mut part)
-                .await
-                .with_context(|| format!("reading thread {thread} of #{channel} for posts of {sender}"))?;
-            if !part.found {
-                return Ok(None);
-            }
+        let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
+        self.origin(&on_thread, seq, humans).await.map(Some)
+    }
+
+    /// Whether `sender` takes part in the thread of `channel` that `at` reads: a member or the messenger of the channel
+    /// as the channels bucket holds it now, with a post on the thread stored up to where `at` reads, or woken by one
+    /// there ([`ChannelEntry::woken`]).
+    async fn takes_part(&self, channel: &ChannelId, at: &Part<'_>, sender: &UserId) -> Result<bool> {
+        let mut part = Part { sender, found: false, ..*at };
+        let thread = part.thread;
+        if !part.entry.is_member(sender) && part.entry.messenger() != *sender {
+            return Ok(false);
+        }
+        if self.parts.lock().expect("parts").contains(&(thread.clone(), sender.clone())) {
+            return Ok(true);
+        }
+        self.scan(&subject::chan_room(channel), from_start(thread), &mut part)
+            .await
+            .with_context(|| format!("reading thread {thread} of #{channel} for posts of {sender}"))?;
+        if part.found {
             let mut parts = self.parts.lock().expect("parts");
             if parts.len() >= MAX_ORIGINS {
                 parts.clear();
             }
             parts.insert((thread.clone(), sender.clone()));
         }
-        let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
-        self.origin(&on_thread, seq, humans).await.map(Some)
+        Ok(part.found)
+    }
+
+    /// Whether an ant taking part in the thread of `channel` that `at` reads ([`Threads::takes_part`]) passed the link
+    /// to the thread on to `to`, directly or through ants it passed it on to in turn, as the links bucket says
+    /// ([`links::passed_on`]). At most [`MAX_LINK_CHECKS`] ants are checked.
+    async fn passed_to(&self, channel: &ChannelId, at: &Part<'_>, to: &UserId) -> Result<bool> {
+        let links = links::passed_on(&self.js, at.thread).await?;
+        let from = |to: &UserId| links.iter().filter(|(_, t)| t == to).map(|(from, _)| from).collect::<Vec<_>>();
+        let mut checked = HashSet::from([to]);
+        let mut queue = VecDeque::from(from(to));
+        while let Some(ant) = queue.pop_front() {
+            if !checked.insert(ant) {
+                continue;
+            }
+            if checked.len() > MAX_LINK_CHECKS {
+                break;
+            }
+            if self.takes_part(channel, at, ant).await? {
+                return Ok(true);
+            }
+            queue.extend(from(ant));
+        }
+        Ok(false)
     }
 
     /// The channel whose top-level post, stored before stream sequence `seq`, started `thread`: the first post of any

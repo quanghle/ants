@@ -426,8 +426,8 @@ pub(crate) mod tests {
     use ants_daemon::webhooks::Webhooks;
     use ants_proto::{
         ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM,
-        STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, notes_consumer, session_key,
-        subject,
+        STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer,
+        session_key, subject,
     };
     use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
@@ -841,6 +841,35 @@ pub(crate) mod tests {
         a_kv.put("dev-a", serde_json::to_vec(&forged).unwrap().into()).await.unwrap();
         assert_eq!(ants_daemon::chains::read(&h_kv, &dev_a).await.unwrap(), None);
         assert!(h_kv.put("lead", "spoof".into()).await.is_err(), "the human does not write chains");
+    }
+
+    #[tokio::test]
+    async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
+        let Some(server) = Server::start() else { return };
+        let (dev_a, dev_b, lead) = (p("dev-a"), p("dev-b"), p("lead"));
+        let (_a, a_js) = server.connect(&dev_a).await;
+        assert!(bus::ensure_links(&a_js).await.is_err(), "only the human creates the bucket");
+        let (_h, h_js) = server.connect(&UserId::human()).await;
+        let h_kv = bus::ensure_links(&h_js).await.unwrap();
+
+        let origin = ThreadId::generate();
+        let spin = |from: &UserId, to: &UserId| {
+            Envelope::on_thread(origin.clone(), from.clone(), to.clone(), "")
+                .with_creator(Some(lead.clone()))
+                .spun_off(ThreadId::generate())
+        };
+        ants_daemon::links::pass_on(&a_js, &spin(&dev_a, &dev_b)).await.unwrap();
+        let a_kv = a_js.get_key_value(ants_proto::LINKS_BUCKET).await.unwrap();
+        for forged in [link_key(&lead, &origin, &dev_b), link_key(&dev_b, &origin, &dev_a)] {
+            assert!(a_kv.put(forged, "spoof".into()).await.is_err(), "dev-a records its own links only");
+        }
+        assert!(h_kv.put(link_key(&lead, &origin, &dev_a), "spoof".into()).await.is_err(), "the human records none");
+
+        let (_b, b_js) = server.connect(&dev_b).await;
+        for js in [&a_js, &b_js, &h_js] {
+            assert_eq!(ants_daemon::links::passed_on(js, &origin).await.unwrap(), [(dev_a.clone(), dev_b.clone())]);
+        }
+        assert!(ants_daemon::links::passed_on(&b_js, &ThreadId::generate()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

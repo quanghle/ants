@@ -53,7 +53,7 @@ use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::notes::NotesStore;
-use crate::{bus, roster};
+use crate::{bus, links, roster};
 
 /// Environment variable carrying the session's token to `ants mcp`.
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
@@ -75,11 +75,22 @@ const SHOWN_POSTS: usize = 50;
 /// Publishes an envelope and resolves once JetStream has stored it.
 pub type Outbox = Arc<dyn Fn(Envelope) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
-/// Publishes through JetStream.
+/// Publishes through JetStream, first recording the link to a channel thread the envelope passes on, if any
+/// ([`links::pass_on`]).
 pub fn jetstream_outbox(js: async_nats::jetstream::Context) -> Outbox {
     Arc::new(move |envelope| {
         let js = js.clone();
-        Box::pin(async move { bus::publish(&js, &envelope).await.map(drop) })
+        Box::pin(async move {
+            if let Err(e) = links::pass_on(&js, &envelope).await {
+                tracing::warn!(
+                    thread = ?envelope.origin_thread,
+                    to = %envelope.to,
+                    error = format!("{e:#}"),
+                    "recording the link passed on; replies and messages from the recipient lose the thread's creator"
+                );
+            }
+            bus::publish(&js, &envelope).await.map(drop)
+        })
     })
 }
 

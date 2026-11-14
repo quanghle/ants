@@ -3090,6 +3090,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_link_passed_on_from_an_ant_taking_part_carries_the_creator_further() {
+        let Some((bus, _to_human)) = Bus::start().await else { return };
+        bus::ensure_links(&bus.js).await.unwrap();
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [dev_b, dev_x, dev_y, eve, mallory, lead, boss] =
+            ants(["dev-b", "dev-x", "dev-y", "eve", "mallory", "lead", "boss"]);
+        let [mut to_dev_y, mut to_eve] = inboxes(&bus, &[dev_y.clone(), eve.clone()]).await;
+        let (ops, _) = bus.channel("ops", &["lead", "dev-b"]).await;
+        let root = ChannelPost::new(ops, lead.clone(), "@dev-b plan the release");
+        bus.post(&root).await;
+        let spin = |from: &UserId, to: &UserId, text: &str| {
+            Envelope::on_thread(root.thread_id.clone(), from.clone(), to.clone(), text)
+                .with_creator(Some(boss.clone()))
+                .spun_off(ThreadId::generate())
+        };
+        // dev-b, woken on lead's thread, passes the link on to dev-x, which passes it on to dev-y. eve passes it on
+        // to itself and gets it from mallory, neither with a link of its own.
+        for (from, to) in [(&dev_b, &dev_x), (&dev_x, &dev_y), (&eve, &eve), (&mallory, &eve)] {
+            crate::links::pass_on(&bus.js, &spin(from, to, "")).await.unwrap();
+        }
+        let passed = spin(&dev_y, &bus.dev, "two hops away");
+        let forged = spin(&eve, &bus.dev, "no link");
+        let mut seq = 0;
+        for envelope in [&passed, &forged] {
+            seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let named = |reply: &Envelope| (reply.in_reply_to, reply.creator.clone(), reply.origin_thread.clone());
+            let reply = next_envelope(&mut to_dev_y).await;
+            assert_eq!(named(&reply), (Some(passed.id), Some(lead.clone()), Some(root.thread_id.clone())));
+            assert_eq!(named(&next_envelope(&mut to_eve).await), (Some(forged.id), None, None));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
     async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
         let Some((bus, mut human)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);

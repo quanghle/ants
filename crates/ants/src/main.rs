@@ -673,11 +673,12 @@ async fn main() -> Result<()> {
             bus::ensure_attempts(&js).await?;
             bus::ensure_channels(&js).await?;
             bus::ensure_chains(&js).await?;
+            bus::ensure_links(&js).await?;
             humans::ensure(&js).await?;
             webhook::ensure_bucket(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
@@ -685,6 +686,7 @@ async fn main() -> Result<()> {
                 ants_proto::CHANNELS_BUCKET,
                 ants_proto::HUMANS_BUCKET,
                 ants_proto::CHAINS_BUCKET,
+                ants_proto::LINKS_BUCKET,
                 ants_proto::WEBHOOKS_BUCKET
             );
             Ok(())

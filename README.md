@@ -30,7 +30,7 @@ Headless agent teams on several machines, talking to each other and to a human a
 
 - **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, thread
   notes, channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
-  channels and escalation chains. In operator
+  channels, escalation chains and links to channel threads passed on. In operator
   mode (`ants auth`), every ant and every human connects as its own NATS user with its own NKey/JWT credentials,
   limited to the subjects of its role.
 - **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
@@ -339,7 +339,8 @@ looks again every 30 s, knowing only `human` and the default human meanwhile. On
 ignores an `owner` that is no human, as an ant may name any, and neither escalates to it nor passes it on. On a
 thread a channel post started, it takes an ant's message's `owner` and `creator` from the thread's posts, as in the
 channel; on any other thread, it keeps the `owner` an ant's message names, unchecked, and drops its `creator` unless
-the thread was spun off a channel thread the sender takes part in (see Channels). A reply
+the thread was spun off a channel thread the sender takes part in or got the link to from an ant with one (see
+Channels). A reply
 to any human spends no turn, a message from any human renews the thread's allowance, and `send_message` to a human
 spends no turn either; `ask_agent` refuses a human.
 
@@ -847,9 +848,16 @@ post, whatever that post or a later one says, and never a human, a webhook or th
 from the thread on another one (`send_message` with `thread`) links back to it as `origin_thread`, and so do the
 replies and messages on or from that thread: a daemon takes the `creator` of an ant's message on a thread no channel
 post started from the channel thread it links to, only when the sender is a member or the messenger of that thread's
-channel and has a post on the thread or was woken by one there. Otherwise it drops the `creator`: a message started
-that thread, or the ant made the `creator` or the link up. So an ant woken on the thread passes its creator on to the
-ants it messages from there, but those pass it no further unless they take part in the thread too. An escalation on
+channel and has a post on the thread or was woken by one there, or when an ant that does passed the link on to the
+sender, directly or through other ants. Each daemon records the links its ants pass on (a message from them carrying
+`origin_thread`) in the KV bucket `ants_links`, under `<sender>.<channel thread>.<recipient>`, keys only the sender's
+credentials write; the receiving daemon follows these records back from the sender, through at most 32 ants, to one
+taking part in the thread. Otherwise it drops the `creator`: a message started that thread, or the ant made the
+`creator` or the link up. So an ant woken on the thread passes its creator on to the ants it messages from there, and
+they to the ants they message in turn, while no ant outside the thread can claim a link no linked ant passed on
+to it. A link recorded expires after 30 days. A message sent while the machine's uplink is down records no link, and
+while `ants_links` does not exist (`ants init` creates it) only an ant taking part in the thread passes its creator
+on. An escalation on
 a thread an ant created goes up the creator's chain, whichever ant gets stuck (see Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
 on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
 `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
@@ -1187,8 +1195,13 @@ takes `owner` and `creator` as a human's or a webhook's envelope carries them (a
 ant, on a thread a channel post started (the first post of any channel whose id is the thread's, among those stored
 within 5 minutes of the time in it), it takes both from the thread's posts as in the channel, and on any other thread
 it keeps `owner` unchecked, as nothing stored names a message thread's owner, and drops `creator` unless the envelope's
-`origin_thread` names a channel thread the sender takes part in, whose creator it takes (see Channels). An envelope
-carries `origin_thread` only with a `creator`, and envelopes without one stay valid. A daemon or
+`origin_thread` names a channel thread the sender takes part in or got the link to as `ants_links` records, whose
+creator it takes (see Channels). An envelope carries `origin_thread` only with a `creator`, and envelopes without one
+stay valid. The KV bucket `ants_links` keeps, under `<from>.<channel thread>.<to>`, that `from` sent `to` a message
+carrying `origin_thread` (the value is the message's thread). Only the credentials of `from` write its keys, every
+credential lists the keys of one channel thread through an ordered consumer, and entries expire after 30 days.
+Credentials issued before `ants_links` need `ants auth user` (and `ants auth leaf`) again, and `ants init` creates
+the bucket; until then only an ant taking part in the channel thread passes its creator on. A daemon or
 CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. An envelope to
 a human member of a channel may carry `mention: {channel, post}`, the channel post that @mentioned it (see [Human
 members](#human-members)); a CLI from before `mention` shows it as a message from the post's author. Credentials
