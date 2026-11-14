@@ -17,7 +17,7 @@ mod webhook;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, notes};
+use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, Escalation, JsDomain,
     Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
@@ -604,16 +604,37 @@ enum LeafCommand {
 enum HarnessCommand {
     /// Start the harness and complete the ACP handshake.
     Check {
-        #[arg(long, default_value_t = HarnessKind::Copilot)]
-        harness: HarnessKind,
+        #[command(flatten)]
+        pick: HarnessPick,
     },
     /// Run one prompt in the current directory and print the reply. Tool requests are rejected.
     Prompt {
-        #[arg(long, default_value_t = HarnessKind::Copilot)]
-        harness: HarnessKind,
+        #[command(flatten)]
+        pick: HarnessPick,
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
+}
+
+#[derive(clap::Args)]
+struct HarnessPick {
+    /// Harness name: built in (`copilot`, `claude`, `antigravity`) or defined in the config file (default: the
+    /// file's top-level `harness`, else `copilot`).
+    #[arg(long)]
+    harness: Option<String>,
+    /// Config file defining harnesses (default: ~/.ants/config.toml, if it exists).
+    #[arg(long, env = "ANTS_CONFIG")]
+    config: Option<PathBuf>,
+}
+
+impl HarnessPick {
+    fn resolve(&self) -> Result<std::sync::Arc<ants_daemon::Harness>> {
+        let path = match &self.config {
+            Some(path) => path.clone(),
+            None => ants_daemon::config::default_path()?,
+        };
+        ants_daemon::config::Summary::load(&path)?.harness(self.harness.as_deref())
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -676,17 +697,18 @@ async fn main() -> Result<()> {
         Command::Tools(ToolsCommand::Reject { id }) => tools::decide_request(&nats()?, &id, Verdict::Reject).await,
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
-            let ants = serve::ants(&args, &ants_daemon::config::default_path()?)?;
-            serve::run(serve::configs(ants, &cli.nats, cli.creds, domain.cloned())?).await
+            let (ants, harnesses) = serve::ants(&args, &ants_daemon::config::default_path()?)?;
+            serve::run(serve::configs(ants, &harnesses, &cli.nats, cli.creds, domain.cloned())?).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
-        Command::Harness(HarnessCommand::Check { harness }) => {
-            println!("{harness}: {}", harness::check(harness).await?);
+        Command::Harness(HarnessCommand::Check { pick }) => {
+            let harness = pick.resolve()?;
+            println!("{harness}: {}", harness::check(&harness).await?);
             Ok(())
         }
-        Command::Harness(HarnessCommand::Prompt { harness, words }) => {
+        Command::Harness(HarnessCommand::Prompt { pick, words }) => {
             let launch = Launch::new(
-                harness,
+                pick.resolve()?,
                 std::env::current_dir()?,
                 Vec::new(),
                 PermissionPolicy::reject_all(),

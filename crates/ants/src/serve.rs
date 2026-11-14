@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_daemon::config::{self, Ant};
-use ants_daemon::{Config, HarnessKind};
+use ants_daemon::config::{self, Ant, Summary};
+use ants_daemon::{Config, Harnesses};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use tracing::Instrument as _;
@@ -42,9 +42,10 @@ pub struct AntOptions {
     /// Add NAME=VALUE to the harness environment (repeatable); overrides the file's entry for NAME.
     #[arg(long = "env", value_name = "NAME=VALUE", value_parser = env_pair)]
     env: Vec<(String, String)>,
-    /// Agent harness: `copilot` (default), `claude` or `antigravity`.
+    /// Agent harness: `copilot` (default), `claude`, `antigravity`, or a name the config file defines under
+    /// `[harnesses.NAME]`.
     #[arg(long)]
-    harness: Option<HarnessKind>,
+    harness: Option<String>,
     /// Model ID advertised by the harness. Omitted: keep the harness default.
     #[arg(long)]
     model: Option<String>,
@@ -144,8 +145,8 @@ impl AntOptions {
             p.tasks = Some(tasks.clone());
         }
         p.env.extend(self.env.iter().cloned());
-        if let Some(harness) = self.harness {
-            p.harness = Some(harness);
+        if let Some(harness) = &self.harness {
+            p.harness = Some(harness.clone());
         }
         if let Some(model) = &self.model {
             p.model = Some(model.clone());
@@ -209,11 +210,18 @@ fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
     })
 }
 
-/// The ants to serve.
-pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Vec<Ant>> {
+/// The ants to serve, and the harnesses they may name: those of the config file, or for an ant described by flags
+/// those of the file at `default_path` if it exists.
+pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<(Vec<Ant>, Harnesses)> {
     match source(args, default_path)? {
-        Source::Flags(name) => Ok(vec![args.options.apply(Ant::new(name, std::env::current_dir()?))]),
-        Source::File(path) => pick(config::load(&path)?, args, &path),
+        Source::Flags(name) => {
+            let ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
+            Ok((vec![ant], Summary::load(default_path)?.harnesses))
+        }
+        Source::File(path) => {
+            let (all, harnesses) = config::load(&path)?;
+            Ok((pick(all, args, &path)?, harnesses))
+        }
     }
 }
 
@@ -233,10 +241,16 @@ fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
     }
 }
 
-/// Daemon configs, with `nats` as the server, `js_domain` as the JetStream domain and, for a lone ant, `creds` as
-/// the credentials where the ant sets none. Several ants cannot share one set of credentials, so `creds` is
-/// ignored for them.
-pub fn configs(ants: Vec<Ant>, nats: &str, creds: Option<PathBuf>, js_domain: Option<JsDomain>) -> Result<Vec<Config>> {
+/// Daemon configs, with their harnesses from `harnesses`, `nats` as the server, `js_domain` as the JetStream domain
+/// and, for a lone ant, `creds` as the credentials where the ant sets none. Several ants cannot share one set of
+/// credentials, so `creds` is ignored for them.
+pub fn configs(
+    ants: Vec<Ant>,
+    harnesses: &Harnesses,
+    nats: &str,
+    creds: Option<PathBuf>,
+    js_domain: Option<JsDomain>,
+) -> Result<Vec<Config>> {
     let lone = ants.len() == 1;
     if !lone && creds.is_some() {
         tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several ants; set creds per ant instead");
@@ -249,7 +263,7 @@ pub fn configs(ants: Vec<Ant>, nats: &str, creds: Option<PathBuf>, js_domain: Op
             if p.js_domain.is_none() {
                 p.js_domain.clone_from(&js_domain);
             }
-            p.into_config(nats)
+            p.into_config(nats, harnesses)
         })
         .collect()
 }
@@ -353,18 +367,26 @@ mod tests {
         let cli_creds = Some(PathBuf::from("cli.creds"));
         let (cli_domain, own_domain): (JsDomain, JsDomain) = ("cli".parse().unwrap(), "own".parse().unwrap());
 
-        let one = configs(vec![bare.clone()], "nats://cli:4222", cli_creds.clone(), Some(cli_domain.clone())).unwrap();
+        let one = configs(
+            vec![bare.clone()],
+            &Harnesses::builtin(),
+            "nats://cli:4222",
+            cli_creds.clone(),
+            Some(cli_domain.clone()),
+        )
+        .unwrap();
         assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
         assert_eq!(one[0].js_domain, Some(cli_domain.clone()));
 
         let mut own = ant("dev-a");
         own.js_domain = Some(own_domain.clone());
-        let one = configs(vec![own], "nats://cli:4222", cli_creds.clone(), Some(cli_domain)).unwrap();
+        let one =
+            configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", cli_creds.clone(), Some(cli_domain)).unwrap();
         assert_eq!(one[0].nats_url, "nats://dev-a:4222");
         assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
         assert_eq!(one[0].js_domain, Some(own_domain));
 
-        let two = configs(vec![bare, ant("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
+        let two = configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
     }

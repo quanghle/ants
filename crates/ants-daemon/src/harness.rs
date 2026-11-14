@@ -1,10 +1,9 @@
 //! ACP client side: start harnesses over stdio, keep their sessions, and run prompts through them.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -18,66 +17,170 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{PlanStep, StatusUpdate, ThreadId};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
+use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::permission::PermissionPolicy;
 
-/// An agent harness ants can drive over ACP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HarnessKind {
-    /// GitHub Copilot CLI, `copilot --acp`. Uses the sign-in from `copilot login`.
-    #[default]
-    Copilot,
-    /// Claude Code through its ACP adapter, `claude-agent-acp` (npm `@agentclientprotocol/claude-agent-acp`). Uses
-    /// the sign-in from `claude login`, or `ANTHROPIC_API_KEY`.
-    Claude,
-    /// Google Antigravity CLI, `agy acp`. Uses the sign-in from `agy` (or `agy acp --login`), or a Gemini API key.
-    Antigravity,
+/// The harness of an ant that names none, in a file that names none.
+pub const DEFAULT_HARNESS: &str = "copilot";
+
+/// The built-in definitions, in the same form as a config file's `[harnesses.<name>]` tables.
+pub const BUILTIN_HARNESSES: &str = include_str!("harnesses.toml");
+
+/// A named agent harness ants drives over ACP on stdio: an executable and its arguments, run directly (no shell),
+/// with the environment it adds, the session mode it must run in and the context settings it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Harness {
+    #[serde(skip)]
+    name: String,
+    /// A path, or a bare name looked up on `PATH` when the harness starts.
+    pub(crate) command: PathBuf,
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    /// Added to the daemon's environment; the ant's own `env` wins over it.
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
+    /// ACP session mode every session is switched to, so that tool requests reach the client instead of being
+    /// approved by the harness itself; a harness that does not offer it fails the session.
+    pub(crate) mode: Option<String>,
+    /// The values an ant's `context` may take, and what each selects. Empty: the harness takes no `context`.
+    #[serde(default)]
+    pub(crate) context: BTreeMap<String, ContextValue>,
 }
 
-impl HarnessKind {
-    pub const ALL: [HarnessKind; 3] = [HarnessKind::Copilot, HarnessKind::Claude, HarnessKind::Antigravity];
+/// What one `context` value selects.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextValue {
+    /// Appended to the harness's arguments.
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    /// Appended to the model ID selected through ACP. A value with a suffix requires an explicit model.
+    pub(crate) model_suffix: Option<String>,
+}
 
-    pub fn name(self) -> &'static str {
-        match self {
-            HarnessKind::Copilot => "copilot",
-            HarnessKind::Claude => "claude",
-            HarnessKind::Antigravity => "antigravity",
-        }
+impl Harness {
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    fn command(self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            HarnessKind::Copilot => ("copilot", &["--acp"]),
-            HarnessKind::Claude => ("claude-agent-acp", &[]),
-            HarnessKind::Antigravity => ("agy", &["acp", "--disable-telemetry"]),
-        }
+    /// Whether `command` is a path rather than a name to look up on `PATH`.
+    pub(crate) fn command_is_path(&self) -> bool {
+        self.command.components().count() > 1
     }
 
-    /// The ACP session mode every session must run in, so tool requests reach the client instead of being approved
-    /// by the harness itself. Claude Code starts in its `auto` mode, where a classifier approves tools; Antigravity
-    /// CLI starts in the saved `agentMode`, `auto` unless set, where edits and commands it deems safe run unasked.
-    fn mode(self) -> Option<&'static str> {
-        match self {
-            HarnessKind::Copilot => None,
-            HarnessKind::Claude | HarnessKind::Antigravity => Some("default"),
-        }
-    }
-
-    /// The harness process, with `env` added to the daemon's environment.
-    fn args(self, settings: &ModelSettings) -> Vec<String> {
-        let mut args: Vec<String> = self.command().1.iter().map(|arg| (*arg).to_owned()).collect();
-        if self == Self::Copilot
-            && let Some(context) = &settings.context
+    fn validate(&self) -> Result<()> {
+        let name = &self.name;
+        if name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
         {
-            args.extend(["--context".to_owned(), context.clone()]);
+            bail!("harness name {name:?}: use lowercase letters, digits, '-' and '_'");
         }
-        args
+        if self.command.as_os_str().is_empty() {
+            bail!("harness {name}: command must not be empty");
+        }
+        let args = self.args.iter().chain(self.context.values().flat_map(|value| &value.args));
+        if self.command.as_os_str().as_encoded_bytes().contains(&0) || args.into_iter().any(|arg| arg.contains('\0')) {
+            bail!("harness {name}: command and arguments must not contain NUL");
+        }
+        validate_env(&self.env).with_context(|| format!("harness {name}"))?;
+        if self.mode.as_ref().is_some_and(|mode| mode.trim().is_empty()) {
+            bail!("harness {name}: mode must not be blank; omit it to keep the harness's own mode");
+        }
+        for (value, selects) in &self.context {
+            if value.trim().is_empty() {
+                bail!("harness {name}: context values must not be blank");
+            }
+            if selects.model_suffix.as_ref().is_some_and(String::is_empty) {
+                bail!("harness {name}: context {value}: model_suffix must not be empty");
+            }
+        }
+        Ok(())
     }
 
-    fn agent(self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
-        AcpAgent::new(AcpAgentConfig::new(self.command().0).args(self.args(settings)).envs(env.iter().cloned()))
+    /// The harness process: its arguments with those of the ant's `context`, its environment with the ant's `env`
+    /// over it.
+    pub(crate) fn process(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgentConfig {
+        let context = settings.context.as_ref().and_then(|value| self.context.get(value));
+        let args = self.args.iter().chain(context.into_iter().flat_map(|value| &value.args)).cloned();
+        AcpAgentConfig::new(&self.command).args(args).envs(self.env.clone()).envs(env.iter().cloned())
+    }
+
+    fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
+        AcpAgent::new(self.process(env, settings))
+    }
+}
+
+impl fmt::Display for Harness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+/// Environment variable names must be non-empty without `=` or NUL, values without NUL. Errors never show values.
+pub(crate) fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
+    for (name, value) in env {
+        if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+            bail!("invalid harness environment variable {name:?}");
+        }
+    }
+    Ok(())
+}
+
+/// The harnesses ants can run, by name: the built-in ones and those a config file defines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Harnesses(Arc<BTreeMap<String, Arc<Harness>>>);
+
+static BUILTIN: LazyLock<Harnesses> = LazyLock::new(|| {
+    Harnesses(Arc::default())
+        .define(parse_definitions(BUILTIN_HARNESSES).expect("built-in harnesses parse"))
+        .expect("built-in harnesses are valid")
+});
+
+/// `[harnesses.<name>]` tables, as a config file holds them.
+pub fn parse_definitions(text: &str) -> Result<BTreeMap<String, Harness>> {
+    #[derive(Deserialize)]
+    struct Tables {
+        harnesses: BTreeMap<String, Harness>,
+    }
+    Ok(toml::from_str::<Tables>(text)?.harnesses)
+}
+
+impl Default for Harnesses {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
+impl Harnesses {
+    /// The built-in harnesses alone ([`BUILTIN_HARNESSES`]).
+    pub fn builtin() -> Self {
+        BUILTIN.clone()
+    }
+
+    /// These harnesses with `definitions` added, each replacing a harness of the same name whole.
+    pub fn define(&self, definitions: BTreeMap<String, Harness>) -> Result<Self> {
+        let mut all = (*self.0).clone();
+        for (name, mut harness) in definitions {
+            harness.name.clone_from(&name);
+            harness.validate()?;
+            all.insert(name, Arc::new(harness));
+        }
+        Ok(Self(Arc::new(all)))
+    }
+
+    /// The harness named `name`.
+    pub fn get(&self, name: &str) -> Result<Arc<Harness>> {
+        self.0.get(name).cloned().ok_or_else(|| {
+            let known: Vec<_> = self.0.keys().map(String::as_str).collect();
+            anyhow!(
+                "unknown harness {name:?}, expected one of {} or a [harnesses.{name}] table in the config file",
+                known.join(", ")
+            )
+        })
     }
 }
 
@@ -91,7 +194,7 @@ pub struct ModelSettings {
 }
 
 impl ModelSettings {
-    pub fn validate(&self, harness: HarnessKind) -> Result<()> {
+    pub fn validate(&self, harness: &Harness) -> Result<()> {
         for (name, value) in
             [("model", &self.model), ("reasoning_effort", &self.reasoning_effort), ("context", &self.context)]
         {
@@ -99,64 +202,64 @@ impl ModelSettings {
                 bail!("{name} must not be blank; omit it to keep the harness default");
             }
         }
-        if let Some(context) = self.context.as_deref() {
-            match (harness, context) {
-                (HarnessKind::Copilot, "default" | "long_context") => {}
-                (HarnessKind::Claude, "default") => {
-                    if self.model.as_deref().is_some_and(|model| model.ends_with("[1m]")) {
-                        bail!("claude context default conflicts with an explicit [1m] model");
-                    }
-                }
-                (HarnessKind::Claude, "1m") if self.model.is_some() => {}
-                (HarnessKind::Claude, "1m") => bail!("claude context 1m requires an explicit model"),
-                (HarnessKind::Copilot, _) => bail!("copilot context must be default or long_context"),
-                (HarnessKind::Claude, _) => bail!("claude context must be default or 1m"),
-                (HarnessKind::Antigravity, _) => {
-                    bail!("antigravity ACP has no separate context selector; omit context and select a model instead")
-                }
+        let Some(context) = self.context.as_deref() else { return Ok(()) };
+        if harness.context.is_empty() {
+            bail!(
+                "harness {harness} has no context setting; omit context and select a model with the needed native window"
+            );
+        }
+        let Some(selects) = harness.context.get(context) else {
+            let values: Vec<_> = harness.context.keys().map(String::as_str).collect();
+            bail!("harness {harness}: context must be {}", one_of(&values));
+        };
+        if selects.model_suffix.is_some() && self.model.is_none() {
+            bail!("harness {harness}: context {context} requires an explicit model");
+        }
+        if let Some(model) = &self.model {
+            let other = harness.context.iter().find(|(value, other)| {
+                value.as_str() != context
+                    && other.model_suffix.as_ref().is_some_and(|suffix| {
+                        model.ends_with(suffix.as_str()) && selects.model_suffix.as_ref() != Some(suffix)
+                    })
+            });
+            if let Some((value, _)) = other {
+                bail!(
+                    "harness {harness}: context {context} conflicts with model {model}, which selects context {value}"
+                );
             }
         }
         Ok(())
     }
 
-    fn model_id(&self, harness: HarnessKind) -> Option<String> {
-        self.model.as_ref().map(|model| {
-            if harness == HarnessKind::Claude && self.context.as_deref() == Some("1m") {
-                format!("{}[1m]", model.trim_end_matches("[1m]"))
-            } else {
-                model.clone()
-            }
+    fn model_id(&self, harness: &Harness) -> Option<String> {
+        let suffix = self.context.as_ref().and_then(|value| harness.context.get(value)?.model_suffix.as_deref());
+        self.model.as_ref().map(|model| match suffix {
+            Some(suffix) => format!("{}{suffix}", model.trim_end_matches(suffix)),
+            None => model.clone(),
         })
     }
 }
 
-impl fmt::Display for HarnessKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl FromStr for HarnessKind {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self> {
-        Self::ALL.into_iter().find(|h| h.name() == s).ok_or_else(|| {
-            let known: Vec<_> = Self::ALL.iter().map(|h| h.name()).collect();
-            anyhow!("unknown harness {s:?}, expected one of {}", known.join(", "))
-        })
+/// `a`, `a or b`, `a, b or c`.
+fn one_of(values: &[&str]) -> String {
+    match values {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
     }
 }
 
 /// Start the harness, complete the ACP handshake and describe the agent.
-pub async fn check(kind: HarnessKind) -> Result<String> {
+pub async fn check(harness: &Harness) -> Result<String> {
     Client
         .v1()
         .name("ants")
-        .connect_with(kind.agent(&[], &ModelSettings::default()), async |cx: ConnectionTo<Agent>| {
+        .connect_with(harness.agent(&[], &ModelSettings::default()), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             Ok(format!("{:?}", init.agent_info))
         })
         .await
-        .map_err(|e| anyhow!("{kind} ACP handshake: {e}"))
+        .map_err(|e| anyhow!("{harness} ACP handshake: {e}"))
 }
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -168,12 +271,9 @@ pub type McpServers = Arc<dyn Fn(&ThreadId, bool) -> Vec<McpServer> + Send + Syn
 /// How to start a harness and open sessions in it.
 #[derive(Clone)]
 pub struct Launch {
-    name: String,
-    kind: HarnessKind,
+    harness: Arc<Harness>,
     settings: ModelSettings,
     connect: Connector,
-    /// See [`HarnessKind::mode`].
-    mode: Option<&'static str>,
     cwd: PathBuf,
     policy: PermissionPolicy,
     /// The thread the sessions serve, so a permission request can be escalated on it.
@@ -183,28 +283,17 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// `kind` working in `cwd`, with `env` added to the daemon's environment.
+    /// `harness` working in `cwd`, with its own environment and then `env` added to the daemon's.
     pub fn new(
-        kind: HarnessKind,
+        harness: Arc<Harness>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         policy: PermissionPolicy,
         settings: ModelSettings,
     ) -> Self {
-        let process_settings = settings.clone();
-        let connect: Connector = Arc::new(move || DynConnectTo::new(kind.agent(&env, &process_settings)));
-        Self {
-            name: kind.name().to_owned(),
-            kind,
-            settings,
-            connect,
-            mode: kind.mode(),
-            cwd,
-            policy,
-            thread: None,
-            mcp: None,
-            instructions: String::new(),
-        }
+        let (process, process_settings) = (harness.clone(), settings.clone());
+        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&env, &process_settings)));
+        Self { harness, settings, connect, cwd, policy, thread: None, mcp: None, instructions: String::new() }
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -231,12 +320,18 @@ impl Launch {
 
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
-        Self {
+        let harness = Harness {
             name: "test".to_owned(),
-            kind: HarnessKind::Copilot,
+            command: "test".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            mode: None,
+            context: BTreeMap::new(),
+        };
+        Self {
+            harness: Arc::new(harness),
             settings: ModelSettings::default(),
             connect,
-            mode: None,
             cwd,
             policy,
             thread: None,
@@ -246,17 +341,16 @@ impl Launch {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_mode(self, mode: &'static str) -> Self {
-        Self { mode: Some(mode), ..self }
+    pub(crate) fn with_harness(self, harness: Arc<Harness>) -> Self {
+        Self { harness, ..self }
     }
 }
 
 impl fmt::Debug for Launch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Launch")
-            .field("name", &self.name)
+            .field("harness", &self.harness.name)
             .field("settings", &self.settings)
-            .field("mode", &self.mode)
             .field("cwd", &self.cwd)
             .field("policy", &self.policy)
             .field("thread", &self.thread)
@@ -342,7 +436,7 @@ impl Session {
         let (opened_tx, opened) = oneshot::channel();
         let (turns, turns_rx) = mpsc::channel(1);
         let task = tokio::spawn(serve(launch.clone(), resume, opened_tx, turns_rx));
-        let id = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.name))??;
+        let id = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
         Ok(Self { id, turns, task })
     }
 
@@ -560,12 +654,12 @@ async fn serve(
                         let _ = reply.send(Ok(Reply { text, cut }));
                     }
                     Some(Err(e)) if cut.is_none() => {
-                        let _ = reply.send(Err(anyhow!("{} prompt: {e}", launch.name)));
+                        let _ = reply.send(Err(anyhow!("{} prompt: {e}", launch.harness)));
                         return Err(e);
                     }
                     // Cancelled, but the harness failed or did not end the prompt: stop it, the prompt is over.
                     _ => {
-                        tracing::warn!(session = %id, "{} did not end a cancelled prompt; stopping it", launch.name);
+                        tracing::warn!(session = %id, "{} did not end a cancelled prompt; stopping it", launch.harness);
                         let _ = reply.send(Ok(Reply { text, cut }));
                         return Ok(());
                     }
@@ -577,9 +671,9 @@ async fn serve(
     if let Err(e) = result {
         match opened {
             Some(tx) => {
-                let _ = tx.send(Err(anyhow!("{} session: {e}", launch.name)));
+                let _ = tx.send(Err(anyhow!("{} session: {e}", launch.harness)));
             }
-            None => tracing::warn!(error = %e, "{} session ended", launch.name),
+            None => tracing::warn!(error = %e, "{} session ended", launch.harness),
         }
     }
 }
@@ -635,7 +729,7 @@ async fn open(
 ) -> Result<SessionId, agent_client_protocol::Error> {
     if let Some(id) = resume {
         if !can_load {
-            tracing::warn!(session = %id, "{} cannot load sessions; starting a new one", launch.name);
+            tracing::warn!(session = %id, "{} cannot load sessions; starting a new one", launch.harness);
         } else {
             let load = LoadSessionRequest::new(id.clone(), launch.cwd.clone()).mcp_servers(mcp.clone());
             match cx.send_request(load).block_task().await {
@@ -661,10 +755,10 @@ async fn configure(
 ) -> Result<(), agent_client_protocol::Error> {
     launch
         .settings
-        .validate(launch.kind)
+        .validate(&launch.harness)
         .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
     set_mode(cx, launch, id, modes).await?;
-    let model = launch.settings.model_id(launch.kind);
+    let model = launch.settings.model_id(&launch.harness);
     for (name, value) in
         [("model", model.as_deref()), ("reasoning_effort", launch.settings.reasoning_effort.as_deref())]
     {
@@ -738,16 +832,16 @@ async fn set_mode(
     id: &SessionId,
     modes: Option<SessionModeState>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let Some(want) = launch.mode else { return Ok(()) };
+    let Some(want) = launch.harness.mode.as_deref() else { return Ok(()) };
     let offered = modes.as_ref().is_some_and(|m| m.available_modes.iter().any(|mode| &*mode.id.0 == want));
     if !offered {
         return Err(agent_client_protocol::Error::internal_error()
-            .data(format!("{} does not offer session mode {want}", launch.name)));
+            .data(format!("{} does not offer session mode {want}", launch.harness)));
     }
     if modes.is_some_and(|m| &*m.current_mode_id.0 == want) {
         return Ok(());
     }
-    cx.send_request(SetSessionModeRequest::new(id.clone(), want)).block_task().await?;
+    cx.send_request(SetSessionModeRequest::new(id.clone(), want.to_owned())).block_task().await?;
     tracing::debug!(session = %id, mode = want, "session mode set");
     Ok(())
 }
@@ -794,7 +888,18 @@ mod tests {
                     ),
             )
         });
-        (Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_mode("default"), set)
+        let custom = custom("command = \"custom-acp\"\nmode = \"default\"");
+        (Launch::with_transport(connect, PathBuf::from("/"), Default::default()).with_harness(custom), set)
+    }
+
+    /// The harness a config file defines as `[harnesses.custom]` with `table`.
+    fn custom(table: &str) -> Arc<Harness> {
+        let definitions = parse_definitions(&format!("[harnesses.custom]\n{table}")).unwrap();
+        Harnesses::builtin().define(definitions).unwrap().get("custom").unwrap()
+    }
+
+    fn builtin(name: &str) -> Arc<Harness> {
+        Harnesses::builtin().get(name).unwrap()
     }
 
     #[tokio::test]
@@ -810,6 +915,92 @@ mod tests {
         let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
         assert!(err.contains("does not offer session mode default"), "{err}");
         assert!(set.lock().unwrap().is_empty());
+    }
+
+    fn command_line(
+        harness: &Harness,
+        env: &[(&str, &str)],
+        context: Option<&str>,
+    ) -> (String, Vec<String>, Vec<String>) {
+        let env: Vec<_> = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let settings = ModelSettings { context: context.map(str::to_owned), ..Default::default() };
+        let process = harness.process(&env, &settings);
+        let env = process.environment().iter().map(|(k, v)| format!("{k}={v}")).collect();
+        (process.command().display().to_string(), process.arguments().to_vec(), env)
+    }
+
+    #[test]
+    fn builtin_harnesses_launch_as_before() {
+        let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let cases = [
+            ("copilot", None, "copilot", &["--acp"][..], None),
+            ("copilot", Some("long_context"), "copilot", &["--acp", "--context", "long_context"][..], None),
+            ("copilot", Some("default"), "copilot", &["--acp", "--context", "default"][..], None),
+            ("claude", Some("1m"), "claude-agent-acp", &[][..], Some("default")),
+            ("antigravity", None, "agy", &["acp", "--disable-telemetry"][..], Some("default")),
+        ];
+        for (name, context, command, args, mode) in cases {
+            let harness = builtin(name);
+            assert_eq!(command_line(&harness, &[], context), (command.to_owned(), strings(args), Vec::new()), "{name}");
+            assert_eq!(harness.mode.as_deref(), mode, "{name}");
+        }
+        let claude =
+            ModelSettings { model: Some("smart".to_owned()), context: Some("1m".to_owned()), ..Default::default() };
+        assert_eq!(claude.model_id(&builtin("claude")).as_deref(), Some("smart[1m]"));
+        assert_eq!(claude.model_id(&builtin("copilot")).as_deref(), Some("smart"));
+    }
+
+    #[test]
+    fn a_custom_adapter_launches_with_its_arguments_and_environment() {
+        let harness = custom(
+            "command = \"/opt/acp/bin/my-adapter\"\nargs = [\"--stdio\", \"--log=warn\"]\n\
+             env = { ADAPTER_HOME = \"/opt/acp\", SHARED = \"definition\" }\n\
+             [harnesses.custom.context]\nwide = { args = [\"--window\", \"wide\"], model_suffix = \"-wide\" }",
+        );
+        let (command, args, env) = command_line(&harness, &[("SHARED", "ant"), ("OWN", "1")], None);
+        assert_eq!(command, "/opt/acp/bin/my-adapter");
+        assert_eq!(args, ["--stdio", "--log=warn"]);
+        assert_eq!(env, ["ADAPTER_HOME=/opt/acp", "OWN=1", "SHARED=ant"], "the ant's env wins over the definition's");
+        assert_eq!(command_line(&harness, &[], Some("wide")).1, ["--stdio", "--log=warn", "--window", "wide"]);
+
+        let wide = |model: Option<&str>| ModelSettings {
+            model: model.map(str::to_owned),
+            context: Some("wide".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(wide(Some("m")).model_id(&harness).as_deref(), Some("m-wide"));
+        let err = wide(None).validate(&harness).unwrap_err().to_string();
+        assert!(err.contains("harness custom: context wide requires an explicit model"), "{err}");
+        let narrow = ModelSettings { context: Some("narrow".to_owned()), ..Default::default() };
+        assert!(narrow.validate(&harness).unwrap_err().to_string().contains("context must be wide"));
+        let plain = custom("command = \"my-adapter\"");
+        let err = wide(Some("m")).validate(&plain).unwrap_err().to_string();
+        assert!(err.contains("harness custom has no context setting"), "{err}");
+        assert!(ModelSettings::default().validate(&plain).is_ok());
+    }
+
+    #[test]
+    fn definitions_are_checked_and_replace_builtins_whole() {
+        let define = |text: &str| parse_definitions(text).and_then(|defs| Harnesses::builtin().define(defs));
+        let err = |text: &str| format!("{:#}", define(text).unwrap_err());
+        assert!(err("[harnesses.custom]\ncommand = \"\"").contains("harness custom: command must not be empty"));
+        assert!(err("[harnesses.custom]\nargs = [\"x\"]").contains("missing field `command`"));
+        assert!(err("[harnesses.custom]\ncommand = \"x\"\nshell = true").contains("unknown field `shell`"));
+        assert!(err("[harnesses.custom]\ncommand = \"x\"\nargs = [\"a\\u0000\"]").contains("must not contain NUL"));
+        assert!(err("[harnesses.custom]\ncommand = \"x\"\nmode = \" \"").contains("mode must not be blank"));
+        let env = err("[harnesses.custom]\ncommand = \"x\"\nenv = { 'A=B' = \"secret\" }");
+        assert!(env.contains("harness custom") && env.contains("invalid harness environment variable"), "{env}");
+        assert!(!env.contains("secret"), "{env}");
+        assert!(err("[harnesses.\"My Agent\"]\ncommand = \"x\"").contains("use lowercase letters"));
+        let suffix = err("[harnesses.custom]\ncommand = \"x\"\ncontext = { big = { model_suffix = \"\" } }");
+        assert!(suffix.contains("model_suffix must not be empty"), "{suffix}");
+
+        let harnesses = define("[harnesses.copilot]\ncommand = \"/usr/local/bin/copilot-acp\"").unwrap();
+        let copilot = harnesses.get("copilot").unwrap();
+        assert_eq!((copilot.name(), copilot.args.is_empty(), copilot.context.is_empty()), ("copilot", true, true));
+        assert_eq!(harnesses.get("claude").unwrap(), builtin("claude"));
+        let unknown = harnesses.get("vim").unwrap_err().to_string();
+        assert!(unknown.contains("unknown harness \"vim\", expected one of antigravity, claude, copilot"), "{unknown}");
     }
 
     #[derive(Clone, Copy)]
@@ -846,7 +1037,7 @@ mod tests {
         ]
     }
 
-    fn configurable(kind: HarnessKind, settings: ModelSettings, behavior: ConfigBehavior) -> (Launch, ConfigCalls) {
+    fn configurable(harness: &str, settings: ModelSettings, behavior: ConfigBehavior) -> (Launch, ConfigCalls) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let log = calls.clone();
         let connect: Connector = Arc::new(move || {
@@ -909,7 +1100,8 @@ mod tests {
             )
         });
         let mut launch = Launch::with_transport(connect, PathBuf::from("/"), Default::default());
-        launch.kind = kind;
+        // The fake offers no session modes.
+        launch.harness = Arc::new(Harness { mode: None, ..(*builtin(harness)).clone() });
         launch.settings = settings;
         (launch, calls)
     }
@@ -918,8 +1110,8 @@ mod tests {
     async fn model_then_effort_are_applied_to_new_and_resumed_sessions() {
         let settings =
             ModelSettings { model: Some("smart".to_owned()), reasoning_effort: Some("high".to_owned()), context: None };
-        for kind in HarnessKind::ALL {
-            let (launch, calls) = configurable(kind, settings.clone(), ConfigBehavior::Apply);
+        for harness in ["copilot", "claude", "antigravity"] {
+            let (launch, calls) = configurable(harness, settings.clone(), ConfigBehavior::Apply);
             Session::start(&launch, None).await.unwrap().close().await;
             Session::start(&launch, Some("s1".into())).await.unwrap().close().await;
             let calls = calls.lock().unwrap();
@@ -949,7 +1141,7 @@ mod tests {
                 reasoning_effort: effort.map(str::to_owned),
                 context: None,
             };
-            let (launch, _) = configurable(HarnessKind::Copilot, settings, behavior);
+            let (launch, _) = configurable("copilot", settings, behavior);
             for resume in [None, Some("s1".into())] {
                 let err = Session::start(&launch, resume).await.err().expect("settings should fail").to_string();
                 assert!(err.contains(expected), "{err}");
@@ -962,7 +1154,7 @@ mod tests {
         for (model, expected) in [("smart", Some("smart[1m]")), ("smart[1m]", Some("smart[1m]")), ("base", None)] {
             let settings =
                 ModelSettings { model: Some(model.to_owned()), context: Some("1m".to_owned()), ..Default::default() };
-            let (launch, calls) = configurable(HarnessKind::Claude, settings, ConfigBehavior::Apply);
+            let (launch, calls) = configurable("claude", settings, ConfigBehavior::Apply);
             let session = Session::start(&launch, None).await;
             if let Some(expected) = expected {
                 session.unwrap().close().await;

@@ -7,8 +7,8 @@ Headless agent teams on several machines, talking to each other and to a human a
 - **Transport:** any uplink that carries NATS: `wss://`/`ws://` through a reverse proxy, `tls://`, or a Dev Tunnel to
   the hub's ports, optionally through an HTTP `CONNECT` proxy, or the HTTPS fallback bridge (`ants bridge`). See [Transport options](#transport-options).
 - **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default),
-  Claude Code through its ACP adapter (`claude-agent-acp`), or Google Antigravity CLI (`agy acp`). See
-  [Harnesses](#harnesses).
+  Claude Code through its ACP adapter (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or any other ACP
+  agent or adapter defined in the config file. See [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, runs as the CLI, the ant daemon and its MCP server.
 
 ## Architecture
@@ -45,7 +45,8 @@ Headless agent teams on several machines, talking to each other and to a human a
   role. The CLI acts as a human: the one its credentials name, or `human` without credentials. The ant
   `messenger` gets every `ants ask` without `@ant` and routes it by capability. Messages go on
   `ants.inbox.<to>.<from>`, grouped into threads with a turn budget for agent-to-agent traffic.
-- **Harnesses:** the agent CLIs the daemon drives over ACP on stdio: `copilot`, `claude` or `antigravity`.
+- **Harnesses:** the agent CLIs the daemon drives over ACP on stdio, by name: the built-in `copilot`, `claude` and
+  `antigravity`, or one defined under `[harnesses.NAME]` in the config file.
 
 ## Install
 
@@ -211,7 +212,7 @@ in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and r
 empty, or names the harness, and serves the built-in messenger alone (see [Messenger](#messenger)):
 
 ```toml
-harness = "copilot"                        # the default; or "claude", "antigravity"
+harness = "copilot"                        # the default; or "claude", "antigravity", or a [harnesses.NAME] table
 ```
 
 A fuller file:
@@ -227,7 +228,7 @@ human = "alice"                            # default human, see Escalations; def
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "claude"                         # default: the top-level harness, else "copilot"; or "antigravity"
+harness = "claude"                         # default: the top-level harness, else "copilot"; see Harnesses
 model = "gpt-6.1-sol"                      # optional; exact model ID offered by the harness
 reasoning_effort = "high"                  # optional; a value offered by the selected model
 context = "long_context"                  # optional; provider-native tier/window, not a token cap
@@ -269,8 +270,9 @@ waiting or not.
 How flags and the file combine:
 
 - `ants daemon` serves every ant in `~/.ants/config.toml`.
-- `ants daemon --ant dev-a` ignores that default file and takes the ant from the flags (`--workdir`, `--home`,
-  `--harness`, `--max-harnesses`, ...), as before.
+- `ants daemon --ant dev-a` ignores the ants of that default file and takes the ant from the flags (`--workdir`,
+  `--home`, `--harness`, `--max-harnesses`, ...), as before; `--harness` may name a harness the default file defines
+  under `[harnesses.NAME]`, so that file, when present, must parse.
 - `ants daemon --config FILE --ant dev-a` serves only `dev-a` from `FILE`; ant flags given override its entries.
 - `ants daemon --config FILE --ant messenger` serves only the built-in messenger of a file.
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
@@ -351,15 +353,19 @@ the selected model. Settings are reapplied to new and resumed sessions. Values m
 option IDs; unsupported values, missing selectors, rejected changes or a selector that reports a different value
 fail the session before a prompt runs. Errors list available choices for unsupported values.
 
+The values `context` may take come from the harness definition's `context` table (see [Harnesses](#harnesses)): each
+value appends launch arguments, a suffix to the model ID, or both. A harness without the table takes no `context`.
+
 | Harness | Model and reasoning effort | Native `context` selection |
 |---|---|---|
 | Copilot | ACP model and reasoning-effort selectors | `default` or `long_context`, passed to `copilot --acp --context ...`; support depends on the selected model and account |
 | Claude | ACP model and effort selectors | `default`, or `1m` with an explicit `model`; `1m` selects the exact advertised `<model>[1m]` variant, without falling back to another model |
 | Antigravity | ACP model and thinking-level selectors | No separate context selector; omit `context` and select a model with the required native window |
 
-For Claude, a model ID already ending in `[1m]` can be used without a separate `context`; `context = "default"`
-with such an ID is a configuration error. Other model IDs must match the advertised IDs exactly; aliases work only
-when the harness lists the alias. A configured context is a native tier/window, not a custom numeric token limit
+A value with a `model_suffix` requires an explicit `model`. A model ID already ending in a value's suffix (Claude's
+`[1m]`) can be used without a separate `context`; another `context` with such an ID (`context = "default"`) is a
+configuration error. Other model IDs must match the advertised IDs exactly; aliases work only when the harness lists
+the alias. A configured context is a native tier/window, not a custom numeric token limit
 or a spending cap. ants does not truncate or compact history to enforce a context size. Copilot's context tier is
 applied at process launch; ACP does not expose a context selector for read-back. Actual context capacity remains
 model- and account-dependent.
@@ -528,13 +534,58 @@ while no watcher runs is lost, and its message stays in the stream unnoticed unt
 
 ## Harnesses
 
-| `--harness` / `harness =` | Runs | Sign-in |
-|---|---|---|
-| `copilot` (default) | `copilot --acp` | `copilot login` |
-| `claude` | `claude-agent-acp`, from `npm install -g @agentclientprotocol/claude-agent-acp` | `claude login`, or `ANTHROPIC_API_KEY` |
-| `antigravity` | `agy acp --disable-telemetry`, from `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` once (or `agy acp --login` without a browser), or a Gemini API key |
+A harness is a named definition: an executable that speaks ACP on stdio, its arguments, the environment it adds, the
+session mode it must run in and the `context` values it takes. Three are built in:
 
-The command must be on the daemon's `PATH`. `ants harness check --harness claude` tests the handshake.
+| `--harness` / `harness =` | Runs | Mode | Sign-in |
+|---|---|---|---|
+| `copilot` (default) | `copilot --acp` | its own | `copilot login` |
+| `claude` | `claude-agent-acp`, from `npm install -g @agentclientprotocol/claude-agent-acp` | `default` | `claude login`, or `ANTHROPIC_API_KEY` |
+| `antigravity` | `agy acp --disable-telemetry`, from `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `default` | `agy` once (or `agy acp --login` without a browser), or a Gemini API key |
+
+The config file adds others, or replaces a built-in one whole, with `[harnesses.NAME]` tables. Names are lowercase
+letters, digits, `-` and `_`. For example, an independently installed ACP adapter:
+
+```toml
+harness = "my-agent"                       # the default of every ant and of the built-in messenger
+
+[harnesses.my-agent]
+command = "~/.local/bin/my-agent-acp"      # required; a bare name is looked up on PATH
+args = ["--stdio", "--log-level", "warn"]  # optional; passed as they are, without a shell
+env = { MY_AGENT_TELEMETRY = "off" }       # optional; added to the daemon's environment
+mode = "default"                           # optional ACP session mode; a session without it fails
+
+[harnesses.my-agent.context]               # optional; the values an ant's `context` may take
+default = {}
+large = { args = ["--context-window", "1m"] }   # appended to the arguments
+huge = { model_suffix = "-1m" }            # appended to the explicit model ID, as Claude's [1m]
+
+[[ant]]
+name = "dev-c"
+workdir = "~/src/repo-c"
+harness = "my-agent"
+```
+
+The built-in definitions in this form are in `crates/ants-daemon/src/harnesses.toml`; copying one is the way to
+change a built-in's command or arguments, for example to run a wrapper script.
+
+- `command` with a `/` is a path: `~` expands to the home directory, and a relative path is relative to the config
+  file. A bare name is looked up on the daemon's `PATH` (or the `PATH` the definition or the ant's `env` sets) when
+  the harness starts.
+- The environment of a harness process is the daemon's, then the definition's `env` over it, then the ant's `env`
+  (and `--env`) over both.
+- `mode` names an ACP session mode in which tool requests reach ants rather than being approved by the harness. Every
+  new and resumed session is switched to it; a harness that does not offer it fails the session. Without `mode`,
+  sessions keep the harness's own mode.
+- Model and reasoning effort are always chosen through the harness's ACP selectors; see
+  [Model, reasoning effort and context](#model-reasoning-effort-and-context). The daemon's MCP server, session resume
+  and the MCP transport are negotiated through ACP as for the built-in harnesses.
+- Unknown keys, an empty `command`, a bad name, or an ant, top-level `harness` or `--harness` naming no definition
+  fail when the file loads.
+
+`ants harness check` tests the ACP handshake and `ants harness prompt TEXT` runs one prompt, each with the file's
+top-level harness, or the one `--harness NAME` names; definitions come from `--config FILE` (`ANTS_CONFIG`, default
+`~/.ants/config.toml` if it exists). `ants harness check --harness claude` tests Claude Code.
 
 Claude Code sessions are switched to its `default` permission mode when they open, since its `auto` mode approves
 tools without asking the client; a Claude Code that does not offer `default` fails the session. Claude Code still
@@ -1330,6 +1381,21 @@ Stored entries written under the old naming are skipped as unreadable, never del
 - A human registers again on its next connection: run any `ants` command (for example `ants roster`) once with each
   human's credentials. Until then daemons treat that human's messages as an agent's.
 - Enrollment requests are not stored, but `ants add --enroll` and `ants enroll` need the same version on both ends.
+
+## Upgrading to harness definitions
+
+Harnesses are now definitions in a registry rather than a fixed list (see [Harnesses](#harnesses)):
+
+- `copilot`, `claude` and `antigravity` are built-in definitions with the same commands, arguments, modes and
+  `context` values as before, so files and flags naming them work unchanged.
+- `harness =`, `--harness` and `ants harness check|prompt --harness` take any defined name; a name with no definition
+  fails when the file loads, listing the defined ones.
+- A `[harnesses.NAME]` table with a built-in's name replaces that built-in whole: copy every key it needs from
+  `crates/ants-daemon/src/harnesses.toml`.
+- `ants harness check` and `prompt` default to the config file's top-level `harness`, else `copilot`, and take
+  `--config`.
+- A harness wrapper put on `PATH` under a built-in's name (a `copilot` script, say) still works; a definition with the
+  wrapper's path as `command` now does the same without touching `PATH`.
 
 ## Upgrading to tools, notes and unit durations
 

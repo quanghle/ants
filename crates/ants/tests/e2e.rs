@@ -1,7 +1,8 @@
 //! End to end against a real nats-server: `ants ask --wait` -> `ants daemon` -> harness over ACP -> reply.
 //!
-//! The harness is this test binary itself: started through a `copilot` symlink on the daemon's PATH, it serves ACP on
-//! stdio and answers every prompt with `stub: <prompt>`.
+//! The harness is this test binary itself: started through a `copilot` symlink on the daemon's PATH, or a
+//! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
+//! `stub: <prompt>`.
 
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -21,14 +22,18 @@ const WAIT: Duration = Duration::from_secs(60);
 
 fn main() {
     let me = std::env::args().next().unwrap_or_default();
-    if Path::new(&me).file_name().is_some_and(|name| name == "copilot") {
+    if Path::new(&me).file_name().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 4] = [
+    let tests: [(&str, fn()); 5] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
         ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
+        (
+            "a_configured_adapter_serves_ants_the_messenger_and_the_cli",
+            a_configured_adapter_serves_ants_the_messenger_and_the_cli,
+        ),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
@@ -307,6 +312,86 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("adapter");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("stub-adapter")).unwrap();
+    let (user_home, home) = (dir.join("user"), dir.join("dev-a"));
+    std::fs::create_dir_all(&user_home).unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "harness = \"stubby\"\n\
+             [harnesses.stubby]\ncommand = \"bin/stub-adapter\"\nargs = [\"--flag\", \"two words\"]\n\
+             env = {{ ANTS_TEST_ADAPTER = \"1\", OVERRIDDEN = \"definition\" }}\n\
+             [harnesses.strict]\ncommand = \"bin/stub-adapter\"\nmode = \"default\"\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\nenv = {{ OVERRIDDEN = \"ant\" }}\n"
+        ),
+    )
+    .unwrap();
+    // Neither the daemon nor the CLI finds the adapter on PATH: the definition's path, relative to the file, does.
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command
+            .args(["--nats", &server.url])
+            .args(args)
+            .env_remove("ANTS_CREDS")
+            .env_remove("ANTS_CONFIG")
+            .env_remove("ANTS_TEST_ADAPTER")
+            .env("HOME", &user_home)
+            .env("PATH", "/usr/bin:/bin");
+        command
+    };
+    let stdout = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = |output: &Output| String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(run(ants(&["init"])).status.success());
+
+    let check = run(ants(&["harness", "check", "--config", config.to_str().unwrap()]));
+    assert!(check.status.success(), "ants harness check: {}", stderr(&check));
+    assert!(stdout(&check).starts_with("stubby: "), "{}", stdout(&check));
+    let prompt = run(ants(&["harness", "prompt", "--config", config.to_str().unwrap(), "hi"]));
+    assert!(prompt.status.success(), "ants harness prompt: {}", stderr(&prompt));
+    assert!(stdout(&prompt).contains("stub: hi\nargs=--flag two words; OVERRIDDEN=definition"), "{}", stdout(&prompt));
+    let strict = run(ants(&["harness", "prompt", "--config", config.to_str().unwrap(), "--harness", "strict", "hi"]));
+    assert!(!strict.status.success());
+    assert!(stderr(&strict).contains("does not offer session mode default"), "{}", stderr(&strict));
+    let unknown = run(ants(&["harness", "check", "--config", config.to_str().unwrap(), "--harness", "nope"]));
+    assert!(!unknown.status.success());
+    assert!(stderr(&unknown).contains("unknown harness \"nope\""), "{}", stderr(&unknown));
+
+    let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
+    let mut command = ants(&["daemon", "--config", config.to_str().unwrap()]);
+    let _daemon = Killed(command.env("RUST_LOG", "info").stdout(Stdio::null()).stderr(log).spawn().unwrap());
+    let daemon_log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let ask = |args: &[&str], expected: &str| {
+        let ask = run(ants(&[&["ask", "--wait"], args].concat()));
+        assert!(stdout(&ask).contains(expected), "{}{}\ndaemon log:\n{}", stdout(&ask), stderr(&ask), daemon_log());
+    };
+    ask(&["@dev-a", "hello"], "dev-a: stub: hello\nargs=--flag two words; OVERRIDDEN=ant");
+    ask(&["hello"], "messenger: stub: hello\nargs=--flag two words; OVERRIDDEN=definition");
+
+    let workdir = dir.to_str().unwrap();
+    let add = |harness: &str| {
+        let out = dir.join("dev-b.creds");
+        let mut command = ants(&["add", "dev-b", "--config", config.to_str().unwrap(), "--workdir", workdir]);
+        command.arg("--harness").arg(harness).arg("--out").arg(out);
+        run(command)
+    };
+    let unknown = add("nope");
+    assert!(!unknown.status.success());
+    assert!(stderr(&unknown).contains("unknown harness \"nope\""), "{}", stderr(&unknown));
+    let added = add("stubby");
+    assert!(added.status.success(), "ants add: {}", stderr(&added));
+    let text = std::fs::read_to_string(&config).unwrap();
+    let dev_b = text.split("name = \"dev-b\"").nth(1).unwrap_or_default();
+    assert!(dev_b.contains("harness = \"stubby\"\n"), "{text}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Run `command` to completion, killing it after [`WAIT`].
 fn run(mut command: Command) -> Output {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
@@ -353,6 +438,10 @@ fn stub_harness() {
     let on_new = options.clone();
     let on_set = options.clone();
     let args: Vec<_> = std::env::args().collect();
+    let adapter = std::env::var("ANTS_TEST_ADAPTER").is_ok().then(|| {
+        let overridden = std::env::var("OVERRIDDEN").unwrap_or_default();
+        format!("\nargs={}; OVERRIDDEN={overridden}", args[1..].join(" "))
+    });
     let context = args
         .windows(2)
         .find(|args| args[0] == "--context")
@@ -398,6 +487,9 @@ fn stub_harness() {
                         })
                         .collect();
                     let mut reply = format!("stub: {text}");
+                    if let Some(adapter) = &adapter {
+                        reply.push_str(adapter);
+                    }
                     if let Ok(db) = std::env::var("ANTS_TEST_TOOL_DB") {
                         reply.push_str(&format!(
                             "\n{db}; BD_DB={}; BD_REMOTE={}",
