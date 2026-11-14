@@ -438,8 +438,8 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 
 | Tool | Description |
 |---|---|
-| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored; warns when no daemon serves the ant now. |
-| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans, and an ant no daemon serves now at once, sending nothing). |
+| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored; warns when no daemon serves the ant now or a provider limit holds its messages. |
+| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans, and at once, sending nothing, an ant no daemon serves now or whose provider limit outlasts the wait). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
 | `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command, or a provider limit and until when). |
 | `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, no provider limit > limited, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
