@@ -1,6 +1,7 @@
 //! The roster against a real nats-server: entries appear, refresh, leave on a clean stop and expire after a crash.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
@@ -13,11 +14,14 @@ fn entry(persona: &str) -> RosterEntry {
     entry_on(persona, "test")
 }
 
+/// An entry of a daemon run of its own on `machine`.
 fn entry_on(persona: &str, machine: &str) -> RosterEntry {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
     let now = chrono::Utc::now();
     RosterEntry {
         persona: persona.parse().unwrap(),
         machine: machine.to_owned(),
+        instance: Some(format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed))),
         harness: "copilot".to_owned(),
         capabilities: vec!["rust".to_owned()],
         whoami: Some("Maintain the Rust backend.".to_owned()),
@@ -125,10 +129,10 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     wait_activity(&kv, "dev-a", Activity::Idle, Duration::from_secs(5)).await;
 }
 
-/// The built-in messenger waits while another machine serves the messenger, takes over once that one stops, and of
-/// two daemons starting at once only one goes ahead.
+/// The built-in messenger waits while another daemon serves the messenger, on this machine or another, takes over once
+/// that one stops, and of two daemons starting at once only one goes ahead.
 #[tokio::test]
-async fn the_builtin_messenger_waits_for_another_machines_messenger() {
+async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     let Some(server) = Server::start() else { return };
     let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
@@ -138,7 +142,10 @@ async fn the_builtin_messenger_waits_for_another_machines_messenger() {
     roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
     assert_eq!(read(&kv, "messenger").await.map(|e| e.machine).as_deref(), Some("here"), "nobody served it");
     roster::wait_for_turn(&kv, &mut here, every).await.unwrap();
-    assert_eq!(read(&kv, "messenger").await.unwrap().machine, "here", "this machine's own entry");
+    assert_eq!(read(&kv, "messenger").await.unwrap().instance, here.instance, "its own entry");
+    let mut neighbour = entry_on("messenger", "here");
+    let blocked = tokio::time::timeout(every * 5, roster::wait_for_turn(&kv, &mut neighbour, every)).await;
+    assert!(blocked.is_err(), "started while another daemon on the same machine serves the messenger");
     kv.delete("messenger").await.unwrap();
 
     let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(10)).await.unwrap();
@@ -163,4 +170,81 @@ async fn the_builtin_messenger_waits_for_another_machines_messenger() {
     assert!(a.is_finished() != b.is_finished(), "exactly one of two daemons starting at once goes ahead");
     a.abort();
     b.abort();
+}
+
+/// Poll until `registration` is lost, or fail after `limit`.
+async fn wait_lost(registration: &Registration, limit: Duration) {
+    tokio::time::timeout(limit, registration.lost()).await.expect("handed over");
+    assert!(registration.is_lost());
+}
+
+/// A held messenger entry is handed over as soon as another daemon puts the entry, such as one serving a listed
+/// messenger, and its daemon then leaves that daemon's entry alone; the built-in messenger takes over again once that
+/// daemon stops.
+#[tokio::test]
+async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let every = Duration::from_millis(100);
+    // No heartbeat comes during the test: the watch of the entry does it all.
+    let beat = Duration::from_secs(60);
+
+    let mut builtin = entry_on("messenger", "here");
+    let revision = roster::wait_for_turn(&kv, &mut builtin, every).await.unwrap();
+    let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, None).await.unwrap();
+
+    // Deleted under it, the entry is put back at once.
+    kv.delete("messenger").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(read(&kv, "messenger").await.map(|e| e.instance), Some(builtin.instance.clone()));
+    assert!(!held.is_lost());
+
+    // A listed messenger, here on the same machine, puts its entry regardless.
+    let listed = entry_on("messenger", "here");
+    let explicit = Registration::start(kv.clone(), listed.clone(), Duration::from_secs(10)).await.unwrap();
+    wait_lost(&held, Duration::from_secs(2)).await;
+    held.deregister().await;
+    assert_eq!(read(&kv, "messenger").await.unwrap().instance, listed.instance, "left the other daemon's entry");
+
+    // Once the listed messenger stops, the built-in messenger, waiting again, takes over.
+    let mut again = entry_on("messenger", "here");
+    let waiting = tokio::spawn({
+        let kv = kv.clone();
+        async move { roster::wait_for_turn(&kv, &mut again, every).await.map(|_| again) }
+    });
+    tokio::time::sleep(every * 5).await;
+    assert!(!waiting.is_finished(), "started while the listed messenger serves");
+    explicit.deregister().await;
+    let again = tokio::time::timeout(Duration::from_secs(5), waiting).await.expect("took over").unwrap().unwrap();
+    assert_eq!(read(&kv, "messenger").await.unwrap().instance, again.instance);
+}
+
+/// Of two daemons that each put the messenger's entry in turn, only the one whose put is the latest keeps serving:
+/// one whose entry went away and was put by another daemon (as after its heartbeats stopped for the TTL) finds that
+/// entry at its next put and hands over.
+#[tokio::test]
+async fn of_two_builtin_messengers_only_the_latest_put_serves() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let (every, beat) = (Duration::from_millis(100), Duration::from_millis(200));
+
+    let mut a = entry_on("messenger", "here");
+    let stale = roster::wait_for_turn(&kv, &mut a, every).await.unwrap();
+    kv.delete("messenger").await.unwrap();
+    let mut b = entry_on("messenger", "here");
+    let revision = roster::wait_for_turn(&kv, &mut b, every).await.unwrap();
+    let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, None).await.unwrap();
+
+    let first = read(&kv, "messenger").await.unwrap();
+
+    let a_held = Registration::hold(kv.clone(), a, stale, beat, None).await.unwrap();
+    assert!(a_held.is_lost(), "its entry was put by another daemon");
+    a_held.deregister().await;
+    tokio::time::sleep(beat * 3).await;
+    assert!(!b_held.is_lost());
+    let later = read(&kv, "messenger").await.unwrap();
+    assert_eq!(later.instance, b.instance);
+    assert!(later.heartbeat_at > first.heartbeat_at, "its heartbeats go on");
 }

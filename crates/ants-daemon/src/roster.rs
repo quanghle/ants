@@ -8,8 +8,8 @@ use ants_proto::{Activity, PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry}
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::Utc;
-use futures::TryStreamExt as _;
-use tokio::sync::Notify;
+use futures::{StreamExt as _, TryStreamExt as _};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use crate::bus;
@@ -21,6 +21,8 @@ pub struct Registration {
     kv: kv::Store,
     key: String,
     heartbeat: JoinHandle<()>,
+    /// Of a held entry ([`Registration::hold`]): the revision last put, `None` once another daemon put the entry.
+    held: Option<watch::Receiver<Option<u64>>>,
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled and the live
@@ -84,6 +86,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
     RosterEntry {
         persona: config.persona.clone(),
         machine: machine().await,
+        instance: Some(uuid::Uuid::new_v4().to_string()),
         harness: config.harness.to_string(),
         capabilities: config.capabilities.clone(),
         whoami: config.whoami.clone(),
@@ -108,45 +111,194 @@ pub async fn register(
     Registration::start_with(kv, entry, ROSTER_HEARTBEAT, Some(workload)).await
 }
 
-/// Whether a daemon on `machine` may start serving a persona whose roster entry is `current` without serving it twice:
-/// only if the roster lists no entry for it from another machine. An entry stays in the roster until its daemon stops
-/// or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are compared.
-pub fn may_start(current: Option<&RosterEntry>, machine: &str) -> bool {
-    current.is_none_or(|e| e.machine == machine)
+/// Whether a daemon may start serving a persona as `ours` without serving it twice, when the persona's roster entry is
+/// `current`: only if the roster lists none, or `ours` itself (a put whose answer was lost). An entry stays in the
+/// roster until its daemon stops or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are
+/// compared. Two daemons on one machine are told apart by [`RosterEntry::instance`].
+pub fn may_start(current: Option<&RosterEntry>, ours: &RosterEntry) -> bool {
+    current.is_none_or(|e| e.instance.is_some() && e.instance == ours.instance)
 }
 
-/// Wait until [`may_start`] allows `entry`, looking at the roster every `every`, then put `entry`, started now. The
-/// put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
-pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<()> {
+/// What one look at a persona's roster entry came to.
+enum Claim {
+    /// The entry was put, at this revision.
+    Put(u64),
+    /// Another daemon's entry is there.
+    Held { machine: String, instance: Option<String> },
+    /// The entry changed between the look and the put.
+    Raced,
+}
+
+/// Put `entry` if [`may_start`] allows it, expecting the revision looked at, so of two daemons only one goes ahead.
+async fn claim(kv: &kv::Store, entry: &RosterEntry) -> Result<Claim> {
+    let key = entry.key();
+    let found = kv.entry(key).await.with_context(|| format!("reading {key} in the roster"))?;
+    let current = found
+        .as_ref()
+        .filter(|e| e.operation == kv::Operation::Put)
+        .and_then(|e| serde_json::from_slice::<RosterEntry>(&e.value).ok());
+    if let Some(other) = current.filter(|c| !may_start(Some(c), entry)) {
+        return Ok(Claim::Held { machine: other.machine, instance: other.instance });
+    }
+    let value = serde_json::to_vec(entry)?.into();
+    let put = match &found {
+        Some(e) => kv
+            .update(key, value, e.revision)
+            .await
+            .map_err(|e| (e.kind() == kv::UpdateErrorKind::WrongLastRevision, anyhow::Error::from(e))),
+        None => kv
+            .create(key, value)
+            .await
+            .map_err(|e| (e.kind() == kv::CreateErrorKind::AlreadyExists, anyhow::Error::from(e))),
+    };
+    match put {
+        Ok(revision) => Ok(Claim::Put(revision)),
+        Err((true, _)) => Ok(Claim::Raced),
+        Err((false, e)) => Err(e.context(format!("putting {key} in the roster"))),
+    }
+}
+
+/// Wait until [`may_start`] allows `entry`, looking at the roster every `every`, then put `entry`, started now, and
+/// return the revision put, for [`hold`]. The put expects the entry it looked at, so of two daemons starting at once
+/// only one goes ahead; the other waits on.
+pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<u64> {
     let key = entry.key().to_owned();
     let mut ticks = tokio::time::interval(every);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut waiting_for = None;
     loop {
         ticks.tick().await;
-        let found = kv.entry(key.as_str()).await.with_context(|| format!("reading {key} in the roster"))?;
-        let current = found
-            .as_ref()
-            .filter(|e| e.operation == kv::Operation::Put)
-            .and_then(|e| serde_json::from_slice::<RosterEntry>(&e.value).ok());
-        if !may_start(current.as_ref(), &entry.machine) {
-            let other = current.map(|e| e.machine);
-            if waiting_for != other {
-                tracing::info!(persona = key, machine = other, "waiting while the roster lists it on another machine");
-                waiting_for = other;
-            }
-            continue;
-        }
         let now = Utc::now();
         (entry.started_at, entry.heartbeat_at) = (now, now);
-        let value = serde_json::to_vec(entry)?.into();
-        let claimed = match &found {
-            Some(e) => kv.update(&key, value, e.revision).await.map(drop).map_err(anyhow::Error::from),
-            None => kv.create(&key, value).await.map(drop).map_err(anyhow::Error::from),
+        match claim(kv, entry).await {
+            Ok(Claim::Put(revision)) => return Ok(revision),
+            Ok(Claim::Held { machine, instance }) => {
+                if waiting_for.as_ref() != Some(&instance) {
+                    tracing::info!(persona = key, machine, "waiting while another daemon serves it");
+                    waiting_for = Some(instance);
+                }
+            }
+            Ok(Claim::Raced) => tracing::info!(persona = key, "roster entry changed; looking again"),
+            Err(e) => tracing::warn!(persona = key, error = format!("{e:#}"), "looking at the roster; trying again"),
+        }
+    }
+}
+
+/// List `entry` in the roster over `revision`, which [`wait_for_turn`] put, and keep it fresh with its `workload` as
+/// [`register`] does, as long as no other daemon puts the entry: then the registration is lost
+/// ([`Registration::lost`]) and puts nothing more.
+pub async fn hold(
+    js: &jetstream::Context,
+    entry: RosterEntry,
+    revision: u64,
+    workload: Arc<Workload>,
+) -> Result<Registration> {
+    let kv = bus::ensure_roster(js, ROSTER_TTL).await?;
+    Registration::hold(kv, entry, revision, ROSTER_HEARTBEAT, Some(workload)).await
+}
+
+/// Put `entry` over `revision`. When another write came in between: put it again if it is gone or ours, and give the
+/// revision put, or `None` if another daemon's entry is there.
+async fn renew(kv: &kv::Store, entry: &RosterEntry, revision: u64) -> Result<Option<u64>> {
+    match kv.update(entry.key(), serde_json::to_vec(entry)?.into(), revision).await {
+        Ok(revision) => return Ok(Some(revision)),
+        Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
+        Err(e) => return Err(e.into()),
+    }
+    loop {
+        match claim(kv, entry).await? {
+            Claim::Put(revision) => return Ok(Some(revision)),
+            Claim::Held { .. } => return Ok(None),
+            Claim::Raced => {}
+        }
+    }
+}
+
+/// Wait until `entry` is due for a put: at the next tick of `ticks`, or as soon as `workload` turns idle or working.
+/// Then stamp it with the workload and the time.
+async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, entry: &mut RosterEntry) {
+    loop {
+        let changed = async {
+            match workload {
+                Some(w) => w.changed.notified().await,
+                None => std::future::pending().await,
+            }
         };
-        match claimed {
-            Ok(()) => return Ok(()),
-            Err(e) => tracing::info!(persona = key, error = format!("{e:#}"), "roster entry changed; looking again"),
+        let beat = tokio::select! {
+            _ = ticks.tick() => true,
+            () = changed => false,
+        };
+        if let Some(workload) = workload {
+            if !beat && entry.activity == Some(workload.activity()) {
+                // Turned and turned back before this task ran: nothing new to show.
+                continue;
+            }
+            workload.stamp(entry);
+        }
+        entry.heartbeat_at = Utc::now();
+        return;
+    }
+}
+
+/// The heartbeats of a held entry, put at `held`'s revision until another daemon's write shows up, in `changes` or
+/// as a failed put: then `held` turns `None`.
+async fn keep_held(
+    kv: kv::Store,
+    mut entry: RosterEntry,
+    every: Duration,
+    workload: Option<Arc<Workload>>,
+    held: watch::Sender<Option<u64>>,
+    mut changes: Option<kv::Watch>,
+) {
+    let Some(mut revision) = *held.borrow() else { return };
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticks.tick().await;
+    loop {
+        tokio::select! {
+            () = due(&mut ticks, workload.as_deref(), &mut entry) => {}
+            Some(change) = next_change(&mut changes) => {
+                if change.revision <= revision {
+                    continue;
+                }
+                if change.operation == kv::Operation::Put {
+                    let ours = serde_json::from_slice::<RosterEntry>(&change.value)
+                        .is_ok_and(|e| e.instance.is_some() && e.instance == entry.instance);
+                    if !ours {
+                        break;
+                    }
+                    continue;
+                }
+                // Deleted under it: put it back now, unless another daemon got there first.
+                entry.heartbeat_at = Utc::now();
+            }
+        }
+        match renew(&kv, &entry, revision).await {
+            Ok(Some(put)) => {
+                revision = put;
+                held.send_replace(Some(put));
+            }
+            Ok(None) => break,
+            Err(e) => tracing::warn!(persona = %entry.persona, error = format!("{e:#}"), "roster heartbeat"),
+        }
+    }
+    tracing::info!(persona = %entry.persona, "another daemon took over the roster entry");
+    held.send_replace(None);
+}
+
+/// The next change `changes` shows, if any; on an error it stops watching, so only the heartbeats see changes.
+async fn next_change(changes: &mut Option<kv::Watch>) -> Option<kv::Entry> {
+    let Some(watch) = changes else { return std::future::pending().await };
+    match watch.next().await {
+        Some(Ok(change)) => Some(change),
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "watching the roster entry; the heartbeats still notice another daemon");
+            *changes = None;
+            None
+        }
+        None => {
+            *changes = None;
+            None
         }
     }
 }
@@ -177,36 +329,71 @@ impl Registration {
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticks.tick().await;
             loop {
-                let changed = async {
-                    match &workload {
-                        Some(w) => w.changed.notified().await,
-                        None => std::future::pending().await,
-                    }
-                };
-                let beat = tokio::select! {
-                    _ = ticks.tick() => true,
-                    () = changed => false,
-                };
-                if let Some(workload) = &workload {
-                    if !beat && entry.activity == Some(workload.activity()) {
-                        // Turned and turned back before this task ran: nothing new to show.
-                        continue;
-                    }
-                    workload.stamp(&mut entry);
-                }
-                entry.heartbeat_at = Utc::now();
+                due(&mut ticks, workload.as_deref(), &mut entry).await;
                 if let Err(e) = put(&beat_kv, &entry).await {
                     tracing::warn!(persona = %entry.persona, error = format!("{e:#}"), "roster heartbeat");
                 }
             }
         });
-        Ok(Self { kv, key, heartbeat })
+        Ok(Self { kv, key, heartbeat, held: None })
     }
 
-    /// Stop the heartbeats and remove the entry.
+    /// Like [`Registration::start_with`], but every put expects the revision put before, starting at `revision`, and
+    /// the registration is lost as soon as another daemon puts the entry: on its watch of the entry, or at the next
+    /// heartbeat. An entry deleted or expired under it is put again if no other daemon got there first.
+    pub async fn hold(
+        kv: kv::Store,
+        mut entry: RosterEntry,
+        revision: u64,
+        every: Duration,
+        workload: Option<Arc<Workload>>,
+    ) -> Result<Self> {
+        let key = entry.key().to_owned();
+        let changes = match kv.watch(&key).await {
+            Ok(changes) => Some(changes),
+            Err(e) => {
+                tracing::warn!(persona = key, error = %e, "watching the roster entry; the heartbeats still notice another daemon");
+                None
+            }
+        };
+        if let Some(workload) = &workload {
+            workload.stamp(&mut entry);
+        }
+        entry.heartbeat_at = Utc::now();
+        let first = renew(&kv, &entry, revision).await.with_context(|| format!("registering {key} in the roster"))?;
+        let (held, watching) = watch::channel(first);
+        let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, workload, held, changes));
+        Ok(Self { kv, key, heartbeat, held: Some(watching) })
+    }
+
+    /// Resolves once another daemon put the entry this registration held ([`Registration::hold`]); never for one that
+    /// puts it regardless ([`Registration::start`]).
+    pub async fn lost(&self) {
+        match &self.held {
+            Some(held) => drop(held.clone().wait_for(Option::is_none).await),
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Whether another daemon put the entry this registration held.
+    pub fn is_lost(&self) -> bool {
+        self.held.as_ref().is_some_and(|held| held.borrow().is_none())
+    }
+
+    /// Stop the heartbeats and remove the entry, unless another daemon put it since.
     pub async fn deregister(self) {
         self.heartbeat.abort();
-        if let Err(e) = self.kv.delete(&self.key).await {
+        let deleted = match &self.held {
+            None => self.kv.delete(&self.key).await,
+            Some(held) => {
+                let revision = *held.borrow();
+                match revision {
+                    Some(revision) => self.kv.delete_expect_revision(&self.key, Some(revision)).await,
+                    None => return,
+                }
+            }
+        };
+        if let Err(e) = deleted {
             tracing::warn!(persona = %self.key, error = %e, "leaving the roster; the entry expires on its own");
         }
     }
@@ -285,6 +472,7 @@ mod tests {
         RosterEntry {
             persona: persona.parse().unwrap(),
             machine: machine.to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,
@@ -337,9 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn starts_unless_another_machine_lists_the_persona() {
-        assert!(may_start(None, "m1"), "nobody serves it");
-        assert!(may_start(Some(&entry_on("messenger", "m1", &[])), "m1"), "left by this machine's last run");
-        assert!(!may_start(Some(&entry_on("messenger", "m2", &[])), "m1"), "served on another machine");
+    fn starts_unless_another_daemon_lists_the_persona() {
+        let run = |machine, instance: Option<&str>| RosterEntry {
+            instance: instance.map(str::to_owned),
+            ..entry_on("messenger", machine, &[])
+        };
+        let ours = run("m1", Some("a"));
+        assert!(may_start(None, &ours), "nobody serves it");
+        assert!(may_start(Some(&ours), &ours), "its own put");
+        assert!(!may_start(Some(&run("m1", Some("b"))), &ours), "another daemon on this machine");
+        assert!(!may_start(Some(&run("m2", Some("b"))), &ours), "served on another machine");
+        assert!(!may_start(Some(&run("m1", None)), &ours), "an older daemon on this machine");
     }
 }

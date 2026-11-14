@@ -131,7 +131,7 @@ pub struct Persona {
     /// Seconds an escalation waits for its leader's answer before going one level higher; 0 waits for good.
     #[serde(default = "default_escalate_after_secs")]
     pub escalate_after_secs: u64,
-    /// The built-in messenger, which waits to start while the roster lists a live messenger on another machine.
+    /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
 }
@@ -260,7 +260,7 @@ impl Persona {
                 after: Some(Duration::from_secs(self.escalate_after_secs)).filter(|t| !t.is_zero()),
             },
             persona: self.name,
-            defer_to_other_machines: self.builtin,
+            defer_to_others: self.builtin,
         })
     }
 
@@ -606,7 +606,7 @@ Review changes for correctness."""
         assert_eq!(personas.len(), 1);
         assert_eq!(personas[0].harness, None);
         let config = personas[0].clone().into_config("nats://unused").unwrap();
-        assert_eq!((config.harness, config.defer_to_other_machines), (HarnessKind::Copilot, false));
+        assert_eq!((config.harness, config.defer_to_others), (HarnessKind::Copilot, false));
     }
 
     #[test]
@@ -619,7 +619,7 @@ Review changes for correctness."""
         let messenger = builtin_messenger(HarnessKind::Copilot, &home);
         assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
         let config = messenger.into_config("nats://unused").unwrap();
-        assert!(config.defer_to_other_machines);
+        assert!(config.defer_to_others);
         assert_eq!(config.workdir, home.join(".ants/messenger").canonicalize().unwrap());
         assert_eq!(config.model_settings, ModelSettings::default());
         std::fs::remove_dir_all(&home).unwrap();

@@ -556,6 +556,7 @@ pub(crate) mod tests {
         let entry = RosterEntry {
             persona: dev_a.clone(),
             machine: "m1".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned()],
             whoami: None,
