@@ -314,9 +314,9 @@ pub fn thread_posts(
     })
 }
 
-/// The posts of `channel` kept in the stream, oldest first, read as `reader` reads channels back ([`Reading`]): a
-/// human by message gets, so any number of reads may run at once, an ant through its reader consumer, created for the
-/// read and deleted after it, one read at a time. Posts whose sender or channel disagrees with their subject are
+/// The posts of `channel` kept in the stream, oldest first, read as the CLI reads channels back as `reader`
+/// ([`Reading::cli`]): a human by message gets, an ant through a free spare of its reader consumer, taken for the read
+/// and deleted after it, so any number of reads, and the ant's daemon's, may run at once. Posts whose sender or channel disagrees with their subject are
 /// dropped with a warning.
 pub async fn read(js: &jetstream::Context, reader: &Me, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
     let mut posts = Vec::new();
@@ -337,7 +337,7 @@ async fn scan(
     start: consumer::DeliverPolicy,
     mut take: impl FnMut(ChannelPost) -> ControlFlow<()>,
 ) -> Result<()> {
-    let reading = Reading::of(reader.role);
+    let reading = Reading::cli(reader.role);
     read_back(js, &reader.id, reading, &subject::chan_room(channel), start, |_, _, subject, post| match post {
         Ok(post) => take(post),
         Err(error) => {
@@ -629,22 +629,46 @@ mod tests {
 
         // bob's reads get the posts one by one: many at once all read the whole channel, and none touches a reader
         // consumer, here one an older ants is reading through.
-        let older = consumer::pull::Config {
-            name: Some(chan_reader(&bob)),
+        let reader = |user: &UserId| consumer::pull::Config {
+            name: Some(chan_reader(user)),
             filter_subject: subject::chan_room(&ops()),
             ack_policy: consumer::AckPolicy::None,
             ..Default::default()
         };
-        let older: consumer::PullConsumer = b_js.create_consumer_on_stream(older, STREAM).await.unwrap();
-        let next = || async { older.fetch().max_messages(1).messages().await.unwrap().next().await.unwrap().unwrap() };
+        let older: consumer::PullConsumer = b_js.create_consumer_on_stream(reader(&bob), STREAM).await.unwrap();
+        let next = |c: &consumer::PullConsumer| {
+            let c = c.clone();
+            async move { c.fetch().max_messages(1).messages().await.unwrap().next().await.unwrap().unwrap() }
+        };
         let post = |msg: jetstream::Message| serde_json::from_slice::<ChannelPost>(&msg.payload).unwrap();
-        assert_eq!(post(next().await), top);
+        assert_eq!(post(next(&older).await), top);
         let (as_bob, room) = (me(&bob), ops());
         let reads = futures::future::join_all((0..8).map(|_| read(&b_js, &as_bob, &room))).await;
         for posts in reads {
             assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
         }
-        assert_eq!(post(next().await), answer, "the older read carries on where it was");
+        assert_eq!(post(next(&older).await), answer, "the older read carries on where it was");
+
+        // dev-a's CLI reads through spares of dev-a's reader: more reads at once than it has spares all read the whole
+        // channel, and the read of dev-a's daemon, through the reader itself, carries on.
+        let daemon: consumer::PullConsumer = d_js.create_consumer_on_stream(reader(&dev_a), STREAM).await.unwrap();
+        assert_eq!(post(next(&daemon).await), top);
+        let as_dev_a = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };
+        let reads = futures::future::join_all((0..8).map(|_| read(&d_js, &as_dev_a, &room))).await;
+        for posts in reads {
+            assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
+        }
+        assert_eq!(post(next(&daemon).await), answer, "the daemon's read carries on where it was");
+        for spare in ants_proto::spare_readers(&chan_reader(&dev_a)) {
+            let check = consumer::pull::Config {
+                name: Some(spare.clone()),
+                description: Some("check".into()),
+                ..reader(&dev_a)
+            };
+            let left = d_js.create_consumer_strict_on_stream::<consumer::pull::Config, _>(check, STREAM).await;
+            assert!(left.is_ok(), "{spare} is deleted after its read: {left:?}");
+            d_js.delete_consumer_from_stream(&spare, STREAM).await.unwrap();
+        }
 
         // An ant creates the thread it starts, and owns none; a human's post on it keeps the creator.
         let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };

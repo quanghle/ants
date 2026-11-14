@@ -2206,7 +2206,10 @@ mod tests {
     }
 
     async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> {
-        crate::notes::read(&bus.js, &"reader".parse().unwrap(), thread).await.unwrap().posts
+        crate::notes::read(&bus.js, &"reader".parse().unwrap(), crate::reading::Reading::Consumer, thread)
+            .await
+            .unwrap()
+            .posts
     }
 
     #[tokio::test]

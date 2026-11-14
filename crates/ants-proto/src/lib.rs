@@ -585,10 +585,22 @@ pub fn parse_link_key(key: &str, thread: &ThreadId) -> Option<(UserId, UserId)> 
     Some((from.parse().ok()?, to.parse().ok()?))
 }
 
-/// JetStream consumer a user reads thread notes through, one thread at a time. Its name is fixed, so its credentials
-/// need not let it pull from other consumers.
+/// JetStream consumer an ant's daemon reads thread notes through, one thread at a time. Its name is fixed, so its
+/// credentials need not let it pull from other consumers. The CLI with the ant's credentials reads through one of its
+/// [`spare_readers`] instead, and a human gets the posts one by one (`STREAM.MSG.GET`), with no consumer.
 pub fn notes_consumer(user: &UserId) -> String {
     format!("notes-{user}")
+}
+
+/// How many [`spare_readers`] each of an ant's reader consumers has.
+pub const SPARE_READERS: usize = 3;
+
+/// The spares of an ant's reader consumer `reader` ([`notes_consumer`], [`chan_reader`]), `<reader>_<n>`, with the
+/// same filter pinned: the CLI with the ant's credentials takes a free one for each read, so it never deletes the
+/// consumer its daemon, or another CLI read, is reading through. A user id has no `_`, so no spare is named like any
+/// user's own consumer.
+pub fn spare_readers(reader: &str) -> impl Iterator<Item = String> + '_ {
+    (1..=SPARE_READERS).map(move |n| format!("{reader}_{n}"))
 }
 
 /// Durable JetStream consumer an ant takes channel posts from, to be woken by those meant for it. Its filter is
@@ -597,9 +609,10 @@ pub fn chan_consumer(ant: &UserId) -> String {
     format!("chan-{ant}")
 }
 
-/// JetStream consumer an ant reads a channel (or a thread of it) back through, one read at a time, like
-/// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too. A human gets the posts one by one
-/// instead (`STREAM.MSG.GET`), so its reads need no consumer and never get in each other's way.
+/// JetStream consumer an ant's daemon reads a channel (or a thread of it) back through, one read at a time, like
+/// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too. The CLI with the ant's credentials
+/// reads through one of its [`spare_readers`], and a human gets the posts one by one (`STREAM.MSG.GET`), so no read
+/// gets in another's way.
 pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
 }
@@ -667,8 +680,8 @@ impl Permissions {
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
     /// letters, reads back only its own dead letters (through its own [`dead_reader`]), reads only its own inbox
     /// (consumer and live), the notes of every thread (live, and from the stream
-    /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
-    /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
+    /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
+    /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
     /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
     /// the channels and humans buckets but never writes them, reads which users are webhooks (their
@@ -812,6 +825,16 @@ impl Permissions {
                 // Put of the links it passed on.
                 format!("$KV.{LINKS_BUCKET}.{user}.>"),
             ]);
+            // The spares of its notes and channel readers, for the CLI, each with the same filter pinned.
+            for (reader, filter) in [(&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)] {
+                for spare in spare_readers(reader) {
+                    publish.extend([
+                        format!("$JS.API.CONSUMER.CREATE.{STREAM}.{spare}.{filter}"),
+                        format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{spare}"),
+                        format!("$JS.API.CONSUMER.DELETE.{STREAM}.{spare}"),
+                    ]);
+                }
+            }
             subscribe.extend([
                 subject::ALL_NOTES.to_owned(),
                 subject::ALL_CHANNELS.to_owned(),
@@ -3222,6 +3245,33 @@ mod tests {
         for s in ["ants.chan.*.alice", "$KV.ants_channels.>"] {
             assert!(alice.publish.iter().any(|have| have == s), "any human: {s} missing from {:?}", alice.publish);
         }
+    }
+
+    #[test]
+    fn only_ants_get_spare_readers_pinned_like_their_own() {
+        let a = Permissions::for_user(&p("dev-a"), Role::Ant);
+        assert_eq!(
+            spare_readers("chanread-dev-a").collect::<Vec<_>>(),
+            ["chanread-dev-a_1", "chanread-dev-a_2", "chanread-dev-a_3"]
+        );
+        for (reader, filter) in [("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")] {
+            for spare in spare_readers(reader) {
+                for s in [
+                    format!("$JS.API.CONSUMER.CREATE.ANTS.{spare}.{filter}"),
+                    format!("$JS.API.CONSUMER.MSG.NEXT.ANTS.{spare}"),
+                    format!("$JS.API.CONSUMER.DELETE.ANTS.{spare}"),
+                ] {
+                    assert!(a.publish.contains(&s), "{s} missing from {:?}", a.publish);
+                }
+            }
+        }
+        let spares = a.publish.iter().filter(|s| s.contains("-dev-a_")).count();
+        assert_eq!(spares, 2 * 3 * SPARE_READERS, "no spare with any other filter");
+        let human = Permissions::for_user(&UserId::human(), Role::Human);
+        assert!(!human.publish.iter().any(|s| s.contains("notes-human_") || s.contains("chanread-human_")));
+        let named_like =
+            |spare: String| spare.strip_prefix("chanread-").is_some_and(|user| user.parse::<UserId>().is_ok());
+        assert!(!spare_readers("chanread-dev-a").any(named_like), "no spare is another user's reader");
     }
 
     #[test]
