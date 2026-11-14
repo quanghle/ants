@@ -1,9 +1,9 @@
-//! The team's humans: the KV bucket [`HUMANS_BUCKET`], which only humans' credentials write and personas read, and the
+//! The team's humans: the KV bucket [`HUMANS_BUCKET`], which only humans' credentials write and ants read, and the
 //! human the CLI acts as ([`Me`]), which registers itself there when it connects ([`register`]).
 
 use std::path::Path;
 
-use ants_proto::{HUMANS_BUCKET, HumanEntry, Humans, PersonaId, Role, subject};
+use ants_proto::{HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv, stream};
@@ -28,11 +28,11 @@ pub async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
     .context("creating the humans bucket (with credentials, `ants init` as a human creates it)")
 }
 
-/// Who the CLI acts as: the persona its credentials name, or `human` without credentials.
+/// Who the CLI acts as: the user its credentials name, a human or an ant, or `human` without credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Me {
-    pub id: PersonaId,
-    /// A human's credentials, or a persona's (a persona using the CLI).
+    pub id: UserId,
+    /// A human's credentials, or an ant's (an ant using the CLI).
     pub role: Role,
 }
 
@@ -40,7 +40,7 @@ impl Me {
     /// The one the credentials file `creds` names, from the `name` of its user JWT; `human` without credentials.
     pub fn from_creds(creds: Option<&Path>) -> Result<Self> {
         let Some(path) = creds else {
-            return Ok(Self { id: PersonaId::human(), role: Role::Human });
+            return Ok(Self { id: UserId::human(), role: Role::Human });
         };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         Self::from_creds_text(&text).with_context(|| format!("credentials {}", path.display()))
@@ -54,7 +54,7 @@ impl Me {
             .map_err(|e| anyhow!("a malformed user JWT: {e}"))?;
         let claims: Value = serde_json::from_slice(&payload).context("a malformed user JWT")?;
         let name = claims["name"].as_str().context("a user JWT without a name")?;
-        let id: PersonaId = name.parse().with_context(|| format!("a user JWT naming {name:?}, no persona"))?;
+        let id: UserId = name.parse().with_context(|| format!("a user JWT naming {name:?}, not a user id"))?;
         // Writing the humans bucket is the right only humans have.
         let humans = format!("$KV.{HUMANS_BUCKET}.>");
         let writes_humans =
@@ -65,7 +65,7 @@ impl Me {
 }
 
 /// Register `me` in the humans bucket, creating the bucket when missing, unless its entry is there already: one
-/// direct get then. `human`, a human without an entry, and a persona are never registered. Returns whether it put an
+/// direct get then. `human`, a human without an entry, and an ant are never registered. Returns whether it put an
 /// entry.
 pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
     if me.id.is_human() || !me.role.is_human() {
@@ -130,7 +130,7 @@ pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
     let id = &me.id;
     if !me.role.is_human() {
         tracing::warn!(
-            "the credentials of {id} are a persona's: acting as the persona {id}, not registered in {HUMANS_BUCKET} \
+            "the credentials of {id} are an ant's: acting as the ant {id}, not registered in {HUMANS_BUCKET} \
              (`ants auth user {id} --human` issues a human's)"
         );
         return;
@@ -160,19 +160,19 @@ mod tests {
         format!("-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\nseed follows\n")
     }
 
-    fn p(s: &str) -> PersonaId {
+    fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 
     #[test]
     fn the_credentials_name_whom_the_cli_acts_as() {
-        assert_eq!(Me::from_creds(None).unwrap(), Me { id: PersonaId::human(), role: Role::Human });
+        assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human });
         let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.>"] } });
         let me = |claims| Me::from_creds_text(&creds_with(claims)).map_err(|e| format!("{e:#}"));
         assert_eq!(me(json!({ "name": "alice", "nats": human })), Ok(Me { id: p("alice"), role: Role::Human }));
-        let persona = json!({ "pub": { "allow": ["ants.inbox.*.dev-a"] } });
-        assert_eq!(me(json!({ "name": "dev-a", "nats": persona })), Ok(Me { id: p("dev-a"), role: Role::Persona }));
-        assert_eq!(me(json!({ "name": "human" })), Ok(Me { id: PersonaId::human(), role: Role::Human }));
+        let ant = json!({ "pub": { "allow": ["ants.inbox.*.dev-a"] } });
+        assert_eq!(me(json!({ "name": "dev-a", "nats": ant })), Ok(Me { id: p("dev-a"), role: Role::Ant }));
+        assert_eq!(me(json!({ "name": "human" })), Ok(Me { id: UserId::human(), role: Role::Human }));
         assert!(me(json!({ "name": "Alice Smith" })).unwrap_err().starts_with("a user JWT naming \"Alice Smith\""));
         assert_eq!(me(json!({ "sub": "U123" })).unwrap_err(), "a user JWT without a name");
         assert_eq!(Me::from_creds_text("no JWT here").unwrap_err().to_string(), "no user JWT");
@@ -180,7 +180,7 @@ mod tests {
 
     /// With real credentials: the human's first connection creates the bucket and registers it, later ones find it.
     #[tokio::test]
-    async fn a_human_registers_itself_once_and_a_persona_never() {
+    async fn a_human_registers_itself_once_and_an_ant_never() {
         let Some(server) = Server::start() else { return };
         let (alice, dev_a) = (p("alice"), p("dev-a"));
         let connect =
@@ -193,15 +193,15 @@ mod tests {
         assert!(!register(&a_js, &me).await.unwrap(), "already registered");
         let kv = ensure(&a_js).await.unwrap();
         let entry: HumanEntry = serde_json::from_slice(&kv.get("alice").await.unwrap().unwrap()).unwrap();
-        assert_eq!(entry.persona, alice);
+        assert_eq!(entry.human, alice);
         kv.delete("alice").await.unwrap();
         assert!(register(&a_js, &me).await.unwrap(), "a removed human registers again");
 
-        let creds = server.creds_as(&dev_a, Role::Persona);
-        let persona = Me::from_creds(Some(&creds)).unwrap();
-        assert_eq!(persona.role, Role::Persona);
-        assert!(!register(&connect(&persona, &creds).await, &persona).await.unwrap());
-        let creds = server.creds_as(&PersonaId::human(), Role::Human);
+        let creds = server.creds_as(&dev_a, Role::Ant);
+        let ant = Me::from_creds(Some(&creds)).unwrap();
+        assert_eq!(ant.role, Role::Ant);
+        assert!(!register(&connect(&ant, &creds).await, &ant).await.unwrap());
+        let creds = server.creds_as(&UserId::human(), Role::Human);
         let human = Me::from_creds(Some(&creds)).unwrap();
         assert!(!register(&connect(&human, &creds).await, &human).await.unwrap(), "human needs no entry");
         let keys: Vec<String> = kv.keys().await.unwrap().try_collect().await.unwrap();

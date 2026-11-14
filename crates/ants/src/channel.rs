@@ -10,9 +10,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Humans, PersonaId, RosterEntry, STREAM, ThreadId, Uuid, subject,
-};
+use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
@@ -30,14 +28,14 @@ pub fn parse_channel(s: &str) -> Result<ChannelId, ants_proto::Error> {
     s.strip_prefix('#').unwrap_or(s).parse()
 }
 
-/// A persona id as given on the command line: `@dev-a` or `dev-a`.
-pub fn parse_persona(s: &str) -> Result<PersonaId, ants_proto::Error> {
+/// An ant id as given on the command line: `@dev-a` or `dev-a`.
+pub fn parse_ant(s: &str) -> Result<UserId, ants_proto::Error> {
     s.strip_prefix('@').unwrap_or(s).parse()
 }
 
-/// Members and messengers are personas a daemon serves: `humans` read channels instead.
-pub fn check_not_human<'a>(personas: impl IntoIterator<Item = &'a PersonaId>, humans: &Humans) -> Result<()> {
-    if let Some(human) = personas.into_iter().find(|p| humans.contains(p)) {
+/// Members and messengers are ants a daemon serves: `humans` read channels instead.
+pub fn check_not_human<'a>(ants: impl IntoIterator<Item = &'a UserId>, humans: &Humans) -> Result<()> {
+    if let Some(human) = ants.into_iter().find(|p| humans.contains(p)) {
         bail!(
             "{human} is a human, so neither a member nor the messenger of a channel; `ants channel read` shows channel \
              posts"
@@ -46,11 +44,11 @@ pub fn check_not_human<'a>(personas: impl IntoIterator<Item = &'a PersonaId>, hu
     Ok(())
 }
 
-/// The persona that triages humans' posts that @mention nobody, and whether it is the default one.
-pub fn messenger(entry: &ChannelEntry) -> (PersonaId, bool) {
+/// The ant that triages humans' posts that @mention nobody, and whether it is the default one.
+pub fn messenger(entry: &ChannelEntry) -> (UserId, bool) {
     match &entry.messenger {
         Some(m) => (m.clone(), false),
-        None => (PersonaId::messenger(), true),
+        None => (UserId::messenger(), true),
     }
 }
 
@@ -65,7 +63,7 @@ fn members_label(entry: &ChannelEntry) -> String {
     if entry.members.is_empty() {
         "-".to_owned()
     } else {
-        entry.members.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(",")
+        entry.members.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -96,14 +94,14 @@ pub fn table(entries: &[ChannelEntry]) -> String {
     lines.join("\n")
 }
 
-/// The personas of `personas` that no entry of the roster serves now.
-pub fn unserved<'a>(personas: impl IntoIterator<Item = &'a PersonaId>, roster: &[RosterEntry]) -> Vec<&'a PersonaId> {
-    personas.into_iter().filter(|p| !roster.iter().any(|e| e.persona == **p)).collect()
+/// Those of `ants` that no entry of the roster serves now.
+pub fn unserved<'a>(ants: impl IntoIterator<Item = &'a UserId>, roster: &[RosterEntry]) -> Vec<&'a UserId> {
+    ants.into_iter().filter(|p| !roster.iter().any(|e| e.ant == **p)).collect()
 }
 
-/// The personas `post` @mentions that it does not wake, not being members of the channel. `humans` are no members
+/// The ants `post` @mentions that it does not wake, not being members of the channel. `humans` are no members
 /// but read the channel anyway, so mentions of them are left out.
-pub fn idle_mentions<'a>(post: &'a ChannelPost, entry: Option<&ChannelEntry>, humans: &Humans) -> Vec<&'a PersonaId> {
+pub fn idle_mentions<'a>(post: &'a ChannelPost, entry: Option<&ChannelEntry>, humans: &Humans) -> Vec<&'a UserId> {
     post.mentions.iter().filter(|m| !humans.contains(m) && entry.is_none_or(|e| !e.is_member(m))).collect()
 }
 
@@ -223,8 +221,8 @@ pub async fn list(kv: &kv::Store) -> Result<Vec<ChannelEntry>> {
 pub fn human_post(
     channel: ChannelId,
     thread: Option<ThreadId>,
-    from: PersonaId,
-    owner: Option<PersonaId>,
+    from: UserId,
+    owner: Option<UserId>,
     text: String,
 ) -> ChannelPost {
     let Some(thread) = thread else { return ChannelPost::new(channel, from, text).with_owner(owner) };
@@ -235,7 +233,7 @@ pub fn human_post(
 }
 
 /// What `ants post` posts as `me` to `channel`, or on its `thread`. A human owns the thread it starts, and one on an
-/// existing thread keeps its owner ([`thread_owner`]), or takes it when none is known; a persona's post owns nothing
+/// existing thread keeps its owner ([`thread_owner`]), or takes it when none is known; an ant's post owns nothing
 /// and keeps a known owner.
 pub async fn compose(
     js: &jetstream::Context,
@@ -261,11 +259,11 @@ pub async fn compose(
 /// post that started it is read from its start; any other from the channel's oldest post kept.
 pub async fn thread_owner(
     js: &jetstream::Context,
-    reader: &PersonaId,
+    reader: &UserId,
     channel: &ChannelId,
     thread: &ThreadId,
     humans: &Humans,
-) -> Result<Option<PersonaId>> {
+) -> Result<Option<UserId>> {
     let start = match ants_daemon::channel::thread_start(thread) {
         Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
         None => consumer::DeliverPolicy::All,
@@ -317,7 +315,7 @@ pub async fn follow_thread(
 /// The posts of `channel` kept in the stream, oldest first, read through the reader consumer of `reader`, created for
 /// the read and deleted after it. Only one read per reader may run at a time. Posts whose sender or channel disagrees
 /// with their subject are dropped with a warning.
-pub async fn read(js: &jetstream::Context, reader: &PersonaId, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
+pub async fn read(js: &jetstream::Context, reader: &UserId, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
     let mut posts = Vec::new();
     scan(js, reader, channel, consumer::DeliverPolicy::All, |post| {
         posts.push(post);
@@ -331,7 +329,7 @@ pub async fn read(js: &jetstream::Context, reader: &PersonaId, channel: &Channel
 /// [`read`] does.
 async fn scan(
     js: &jetstream::Context,
-    reader: &PersonaId,
+    reader: &UserId,
     channel: &ChannelId,
     start: consumer::DeliverPolicy,
     take: impl FnMut(ChannelPost) -> ControlFlow<()>,
@@ -458,7 +456,7 @@ mod tests {
     use super::*;
     use crate::auth::tests::Server;
 
-    fn p(s: &str) -> PersonaId {
+    fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 
@@ -467,17 +465,17 @@ mod tests {
     }
 
     #[test]
-    fn channels_and_personas_parse_with_or_without_their_sigil() {
+    fn channels_and_ants_parse_with_or_without_their_sigil() {
         assert_eq!(parse_channel("#ops").unwrap(), ops());
         assert_eq!(parse_channel("ops").unwrap(), ops());
         assert!(parse_channel("##ops").is_err());
         assert!(parse_channel("#").is_err());
         assert!(parse_channel("#Ops").is_err());
-        assert_eq!(parse_persona("@dev-a").unwrap(), p("dev-a"));
-        assert_eq!(parse_persona("dev-a").unwrap(), p("dev-a"));
-        assert!(parse_persona("@").is_err());
+        assert_eq!(parse_ant("@dev-a").unwrap(), p("dev-a"));
+        assert_eq!(parse_ant("dev-a").unwrap(), p("dev-a"));
+        assert!(parse_ant("@").is_err());
         let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
-        assert!(check_not_human([&p("dev-a"), &PersonaId::human()], &humans).is_err());
+        assert!(check_not_human([&p("dev-a"), &UserId::human()], &humans).is_err());
         assert!(check_not_human([&p("alice")], &humans).is_err());
         assert!(check_not_human([&p("dev-a")], &humans).is_ok());
     }
@@ -501,7 +499,7 @@ mod tests {
     fn mentions_of_non_members_wake_nobody() {
         let mut entry = ChannelEntry::new(ops());
         entry.add_member(p("dev-a"));
-        let post = ChannelPost::new(ops(), PersonaId::human(), "@dev-a @dev-b @human @alice look");
+        let post = ChannelPost::new(ops(), UserId::human(), "@dev-a @dev-b @human @alice look");
         let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
         assert_eq!(idle_mentions(&post, Some(&entry), &humans), [&p("dev-b")]);
         assert_eq!(idle_mentions(&post, None, &humans), [&p("dev-a"), &p("dev-b")]);
@@ -529,11 +527,11 @@ mod tests {
 
     #[test]
     fn posts_group_by_thread_with_replies_indented() {
-        let a = at(ChannelPost::new(ops(), PersonaId::human(), "build is red @dev-a"), 0);
+        let a = at(ChannelPost::new(ops(), UserId::human(), "build is red @dev-a"), 0);
         let b = at(ChannelPost::new(ops(), p("dev-b"), "deploying"), 1);
         let a1 = at(a.reply(p("dev-a"), "on it\nsee the log", &[], &Humans::default()).unwrap(), 2);
         // A reply stored before the post that started its thread, as one kept in an outbox can be.
-        let c = at(ChannelPost::new(ops(), PersonaId::human(), "late start"), 4);
+        let c = at(ChannelPost::new(ops(), UserId::human(), "late start"), 4);
         let c1 = at(c.reply(p("dev-a"), "early reply", &[], &Humans::default()).unwrap(), 3);
         let orphan = at(ChannelPost::on_thread(ops(), "t1".parse().unwrap(), p("dev-b"), "lost root"), 5);
         let grouped = threads(vec![a.clone(), b.clone(), a1.clone(), c1.clone(), c.clone(), orphan.clone()]);
@@ -563,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn the_human_manages_channels_and_reads_them_back() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (human, dev_a) = (UserId::human(), p("dev-a"));
         let (client, js) = server.connect(&human).await;
         bus::init_stream(&js).await.unwrap();
         let kv = open(&js).await.unwrap();
@@ -618,7 +616,7 @@ mod tests {
     async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
         let Some(server) = Server::start() else { return };
         let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-        let me = |id: &PersonaId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+        let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
         let (a_client, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
         let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
         bus::init_stream(&a_js).await.unwrap();
@@ -627,7 +625,7 @@ mod tests {
             crate::humans::register(js, &me(human)).await.unwrap();
         }
         let humans = crate::humans::load(&b_js, &me(&bob)).await;
-        assert!(humans.contains(&alice) && humans.contains(&bob) && humans.contains(&PersonaId::human()));
+        assert!(humans.contains(&alice) && humans.contains(&bob) && humans.contains(&UserId::human()));
 
         let mut sub = a_client.subscribe(subject::chan_room(&ops())).await.unwrap();
         a_client.flush().await.unwrap();
@@ -637,7 +635,7 @@ mod tests {
         let got = tokio::time::timeout(Duration::from_secs(2), sub.next()).await.unwrap().unwrap();
         assert_eq!(got.subject.as_str(), "ants.chan.ops.alice");
 
-        // A persona's answer keeps the owner; so does bob's post on the thread, which reads it back.
+        // An ant's answer keeps the owner; so does bob's post on the thread, which reads it back.
         let (_, d_js) = server.connect(&dev_a).await;
         let answer = top.reply(dev_a.clone(), "on it", &[], &humans).unwrap();
         assert_eq!(answer.owner, Some(alice.clone()));

@@ -9,7 +9,7 @@ use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
 use ants_daemon::mcp::Roster;
 use ants_daemon::{bus, chains};
-use ants_proto::{Envelope, EscalationReason, PersonaId, RosterEntry, ThreadId, subject};
+use ants_proto::{Envelope, EscalationReason, RosterEntry, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::{self, kv};
 use futures::StreamExt as _;
@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn persona(name: &str) -> PersonaId {
+fn ant(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
@@ -26,7 +26,7 @@ fn roster() -> Roster {
     Arc::new(|| {
         let now = chrono::Utc::now();
         let entry = move |name: &str, chain: &str| RosterEntry {
-            persona: persona(name),
+            ant: ant(name),
             machine: "test".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -38,18 +38,17 @@ fn roster() -> Roster {
             activity: None,
             handling: None,
             harnesses: None,
-            escalate_to: vec![persona(chain)],
+            escalate_to: vec![ant(chain)],
         };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })
 }
 
 fn escalator(js: &jetstream::Context, sessions: &kv::Store) -> Escalator {
-    let chain =
-        Chain { escalate_to: vec![persona("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
-    let ledger = Arc::new(Ledger::kv(sessions.clone(), persona("dev-a"), Caps::default()));
+    let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
+    let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
-    Escalator::new(persona("dev-a"), chain, roster(), Registry::default(), ledger, send)
+    Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send)
 }
 
 async fn next(subscriber: &mut async_nats::Subscriber) -> Envelope {
@@ -60,42 +59,42 @@ async fn next(subscriber: &mut async_nats::Subscriber) -> Envelope {
 #[tokio::test]
 async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_human_once_the_chains_loop() {
     let Some(server) = Server::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &persona("dev-a"), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
     let sessions = bus::ensure_sessions(&js).await.unwrap();
-    let mut to_lead = client.subscribe(subject::inbox_of(&persona("lead"))).await.unwrap();
-    let mut to_boss = client.subscribe(subject::inbox_of(&persona("boss"))).await.unwrap();
-    let mut to_human = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
+    let mut to_lead = client.subscribe(subject::inbox_of(&ant("lead"))).await.unwrap();
+    let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
     client.flush().await.unwrap();
     let thread = ThreadId::generate();
     let stuck = |text: &str, id: &str| {
-        let notice = Envelope::on_thread(thread.clone(), persona("dev-a"), PersonaId::human(), text);
+        let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), text);
         Stuck::new(EscalationReason::TurnBudget, notice, id.to_owned(), None)
     };
 
     let first = escalator(&js, &sessions);
     let escalated = first.escalate(stuck("Turn budget spent.", "e1")).await.unwrap();
-    assert_eq!(escalated, Escalated::Chain { level: 1, leader: persona("lead"), to: vec![persona("lead")] });
+    assert_eq!(escalated, Escalated::Chain { level: 1, leader: ant("lead"), to: vec![ant("lead")] });
     let one = next(&mut to_lead).await;
     assert_eq!(one.escalation.as_deref().map(|e| e.level), Some(1));
     drop(first);
 
-    // Restarted, the persona still escalates past the deadline it stored.
+    // Restarted, the ant still escalates past the deadline it stored.
     let escalator = escalator(&js, &sessions);
     let check = async {
         let two = next(&mut to_boss).await;
         let level = two.escalation.as_deref().expect("the escalation").clone();
-        assert_eq!((level.level, &level.leader), (2, &persona("boss")));
+        assert_eq!((level.level, &level.leader), (2, &ant("boss")));
         assert!(two.text.contains("[ants] No answer from lead on thread"), "{}", two.text);
         assert!(two.text.ends_with("Turn budget spent."), "{}", two.text);
 
         // Stuck again before boss answers: the same members get it again, at the same level.
         let again = escalator.escalate(stuck("Still stuck.", "e2")).await.unwrap();
-        assert_eq!(again, Escalated::Chain { level: 2, leader: persona("boss"), to: vec![persona("boss")] });
+        assert_eq!(again, Escalated::Chain { level: 2, leader: ant("boss"), to: vec![ant("boss")] });
         assert!(next(&mut to_boss).await.text.ends_with("Still stuck."));
 
         // boss answers: a fresh budget once, and no more deadline.
-        let mut answer = two.reply(persona("boss"), "go on", ants_proto::Role::Persona).unwrap();
+        let mut answer = two.reply(ant("boss"), "go on", ants_proto::Role::Ant).unwrap();
         answer = answer.with_escalation(Some(level));
         answer.turn_budget = 0;
         assert!(escalator.arrived(&mut answer, false).await.unwrap());
@@ -108,13 +107,13 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
 
         // boss's chain leads back to dev-a, so the human gets the thread.
         let escalated = escalator.escalate(stuck("Spent again.", "e3")).await.unwrap();
-        assert_eq!(escalated, Escalated::Owner(PersonaId::human()));
+        assert_eq!(escalated, Escalated::Owner(UserId::human()));
         let notice = next(&mut to_human).await;
         assert!(notice.text.starts_with("Spent again.\n\n[ants] The escalation of dev-a reached level 2"));
         assert!(notice.text.ends_with("dev-a had it already, so the chains loop."), "{}", notice.text);
         assert_eq!(notice.escalation.as_deref().map(|e| e.level), Some(2));
 
-        let mut human = Envelope::on_thread(thread.clone(), PersonaId::human(), persona("dev-a"), "carry on");
+        let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
         assert!(!escalator.arrived(&mut human, true).await.unwrap());
         assert_eq!(escalator.ledger().pending(&thread).await.unwrap(), None, "a human ends it");
     };
@@ -128,26 +127,25 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
 #[tokio::test]
 async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_chain_kept_for_it() {
     let Some(server) = Server::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &persona("dev-a"), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
     let sessions = bus::ensure_sessions(&js).await.unwrap();
     let kept = bus::ensure_chains(&js).await.unwrap();
-    chains::publish(&js, &persona("lead"), &[persona("boss")]).await.unwrap();
+    chains::publish(&js, &ant("lead"), &[ant("boss")]).await.unwrap();
     let revision = kept.entry("lead").await.unwrap().unwrap().revision;
-    chains::publish(&js, &persona("lead"), &[persona("boss")]).await.unwrap();
+    chains::publish(&js, &ant("lead"), &[ant("boss")]).await.unwrap();
     assert_eq!(kept.entry("lead").await.unwrap().unwrap().revision, revision, "kept already");
-    chains::publish(&js, &persona("dev-b"), &[]).await.unwrap();
+    chains::publish(&js, &ant("dev-b"), &[]).await.unwrap();
     assert!(kept.get("dev-b").await.unwrap().is_none(), "no chain, no entry");
 
-    let mut to_lead = client.subscribe(subject::inbox_of(&persona("lead"))).await.unwrap();
-    let mut to_boss = client.subscribe(subject::inbox_of(&persona("boss"))).await.unwrap();
+    let mut to_lead = client.subscribe(subject::inbox_of(&ant("lead"))).await.unwrap();
+    let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
     client.flush().await.unwrap();
-    let chain =
-        Chain { escalate_to: vec![persona("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
-    let ledger = Arc::new(Ledger::kv(sessions, persona("dev-a"), Caps::default()));
+    let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
+    let ledger = Arc::new(Ledger::kv(sessions, ant("dev-a"), Caps::default()));
     let offline: Roster = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let escalator = Escalator::new(
-        persona("dev-a"),
+        ant("dev-a"),
         chain,
         offline,
         Registry::default(),
@@ -156,7 +154,7 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
     )
     .with_chains(chains::jetstream_chains(js.clone()));
     let thread = ThreadId::generate();
-    let notice = Envelope::on_thread(thread, persona("dev-a"), PersonaId::human(), "Turn budget spent.");
+    let notice = Envelope::on_thread(thread, ant("dev-a"), UserId::human(), "Turn budget spent.");
     let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
     escalator.escalate(stuck).await.unwrap();
     assert_eq!(next(&mut to_lead).await.escalation.as_deref().map(|e| e.level), Some(1));
@@ -167,5 +165,5 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
         () = escalator.deadlines() => unreachable!(),
     };
     let level = climbed.escalation.as_deref().expect("the escalation");
-    assert_eq!((level.level, &level.leader), (2, &persona("boss")));
+    assert_eq!((level.level, &level.leader), (2, &ant("boss")));
 }

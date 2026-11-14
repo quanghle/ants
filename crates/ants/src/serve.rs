@@ -1,32 +1,32 @@
-//! `ants daemon`: which personas to serve, from the config file and the command line, and serving them together.
+//! `ants daemon`: which ants to serve, from the config file and the command line, and serving them together.
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::config::{self, Persona};
+use ants_daemon::config::{self, Ant};
 use ants_daemon::{Config, HarnessKind};
-use ants_proto::{JsDomain, PersonaId};
+use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use tracing::Instrument as _;
 
 #[derive(clap::Args, Debug)]
 pub struct DaemonArgs {
-    /// Serve only this persona: picked from the config file when one is given, described by the flags below otherwise.
-    #[arg(long, env = "ANTS_PERSONA")]
-    persona: Option<PersonaId>,
-    /// Config file listing the personas to serve (default without --persona: ~/.ants/config.toml, if it exists).
+    /// Serve only this ant: picked from the config file when one is given, described by the flags below otherwise.
+    #[arg(long, env = "ANTS_ANT")]
+    ant: Option<UserId>,
+    /// Config file listing the ants to serve (default without --ant: ~/.ants/config.toml, if it exists).
     #[arg(long, env = "ANTS_CONFIG")]
     config: Option<PathBuf>,
     #[command(flatten)]
-    options: PersonaOptions,
+    options: AntOptions,
 }
 
-/// The settings of a persona on the command line, of `ants daemon` and `ants persona add`.
+/// The settings of an ant on the command line, of `ants daemon` and `ants add`.
 #[derive(clap::Args, Debug, Default)]
-pub struct PersonaOptions {
+pub struct AntOptions {
     /// Directory the harness works in (default: the current directory).
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// The persona's own files (default: ~/.ants/<persona>).
+    /// The ant's own files (default: ~/.ants/<ant>).
     #[arg(long)]
     home: Option<PathBuf>,
     /// Role instructions shared in the roster and prepended to every prompt.
@@ -86,19 +86,19 @@ pub struct PersonaOptions {
     /// Cost a thread may spend between messages from the human, in the harness's unit such as USD (default: no cap).
     #[arg(long)]
     max_thread_cost: Option<f64>,
-    /// Tokens the persona may spend in a UTC day (default: no cap).
+    /// Tokens the ant may spend in a UTC day (default: no cap).
     #[arg(long)]
     max_daily_tokens: Option<u64>,
-    /// Cost the persona may spend in a UTC day (default: no cap).
+    /// Cost the ant may spend in a UTC day (default: no cap).
     #[arg(long)]
     max_daily_cost: Option<f64>,
-    /// Tag the persona is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
+    /// Tag the ant is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
     /// the file's `capabilities`.
     #[arg(long = "capability", value_name = "TAG", value_delimiter = ',')]
     capabilities: Vec<String>,
 }
 
-impl PersonaOptions {
+impl AntOptions {
     /// Whether any setting is given.
     pub fn sets_any(&self) -> bool {
         self.workdir.is_some()
@@ -125,8 +125,8 @@ impl PersonaOptions {
             || !self.capabilities.is_empty()
     }
 
-    /// The persona with the flags given on the command line in place of its own settings.
-    pub fn apply(&self, mut p: Persona) -> Persona {
+    /// The ant with the flags given on the command line in place of its own settings.
+    pub fn apply(&self, mut p: Ant) -> Ant {
         if let Some(dir) = &self.workdir {
             p.workdir.clone_from(dir);
         }
@@ -193,63 +193,54 @@ fn env_pair(text: &str) -> Result<(String, String), String> {
 
 #[derive(Debug, PartialEq)]
 enum Source {
-    Flags(PersonaId),
+    Flags(UserId),
     File(PathBuf),
 }
 
-/// `--config` (or `ANTS_CONFIG`) names the file; otherwise `--persona` alone means the flags describe it, and with
+/// `--config` (or `ANTS_CONFIG`) names the file; otherwise `--ant` alone means the flags describe it, and with
 /// neither the file at `default_path` is used.
 fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
-    Ok(match (&args.config, &args.persona) {
+    Ok(match (&args.config, &args.ant) {
         (Some(path), _) => Source::File(path.clone()),
-        (None, Some(persona)) => Source::Flags(persona.clone()),
+        (None, Some(ant)) => Source::Flags(ant.clone()),
         (None, None) if default_path.exists() => Source::File(default_path.to_owned()),
-        (None, None) => bail!("no --persona given and no config file at {}", default_path.display()),
+        (None, None) => bail!("no --ant given and no config file at {}", default_path.display()),
     })
 }
 
-/// The personas to serve.
-pub fn personas(args: &DaemonArgs, default_path: &Path) -> Result<Vec<Persona>> {
+/// The ants to serve.
+pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Vec<Ant>> {
     match source(args, default_path)? {
-        Source::Flags(name) => Ok(vec![args.options.apply(Persona::new(name, std::env::current_dir()?))]),
+        Source::Flags(name) => Ok(vec![args.options.apply(Ant::new(name, std::env::current_dir()?))]),
         Source::File(path) => pick(config::load(&path)?, args, &path),
     }
 }
 
-fn pick(all: Vec<Persona>, args: &DaemonArgs, path: &Path) -> Result<Vec<Persona>> {
-    match &args.persona {
+fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
+    match &args.ant {
         Some(name) => {
             let p = all
                 .into_iter()
                 .find(|p| &p.name == name)
-                .with_context(|| format!("persona {name} is not in {}", path.display()))?;
+                .with_context(|| format!("ant {name} is not in {}", path.display()))?;
             Ok(vec![args.options.apply(p)])
         }
         None if args.options.sets_any() => {
-            bail!(
-                "persona flags such as --workdir apply to one persona; add --persona to pick it from {}",
-                path.display()
-            )
+            bail!("ant flags such as --workdir apply to one ant; add --ant to pick it from {}", path.display())
         }
         None => Ok(all),
     }
 }
 
-/// Daemon configs, with `nats` as the server, `js_domain` as the JetStream domain and, for a lone persona, `creds` as
-/// the credentials where the persona sets none. Several personas cannot share one set of credentials, so `creds` is
+/// Daemon configs, with `nats` as the server, `js_domain` as the JetStream domain and, for a lone ant, `creds` as
+/// the credentials where the ant sets none. Several ants cannot share one set of credentials, so `creds` is
 /// ignored for them.
-pub fn configs(
-    personas: Vec<Persona>,
-    nats: &str,
-    creds: Option<PathBuf>,
-    js_domain: Option<JsDomain>,
-) -> Result<Vec<Config>> {
-    let lone = personas.len() == 1;
+pub fn configs(ants: Vec<Ant>, nats: &str, creds: Option<PathBuf>, js_domain: Option<JsDomain>) -> Result<Vec<Config>> {
+    let lone = ants.len() == 1;
     if !lone && creds.is_some() {
-        tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several personas; set creds per persona instead");
+        tracing::warn!("ignoring --creds (ANTS_CREDS) while serving several ants; set creds per ant instead");
     }
-    personas
-        .into_iter()
+    ants.into_iter()
         .map(|mut p| {
             if lone && p.creds.is_none() {
                 p.creds.clone_from(&creds);
@@ -262,7 +253,7 @@ pub fn configs(
         .collect()
 }
 
-/// Serve every persona until Ctrl-C, each over its own NATS connection. A persona that fails is reported and the
+/// Serve every ant until Ctrl-C, each over its own NATS connection. An ant that fails is reported and the
 /// others keep running; it is an error only when none is left.
 pub async fn run(mut configs: Vec<Config>) -> Result<()> {
     if configs.len() == 1 {
@@ -270,11 +261,11 @@ pub async fn run(mut configs: Vec<Config>) -> Result<()> {
     }
     let total = configs.len();
     let runs = configs.into_iter().map(|config| {
-        let span = tracing::info_span!("persona", name = %config.persona);
+        let span = tracing::info_span!("ant", name = %config.ant);
         async move {
             let result = ants_daemon::run(config).await;
             if let Err(e) = &result {
-                tracing::error!(error = format!("{e:#}"), "persona stopped");
+                tracing::error!(error = format!("{e:#}"), "ant stopped");
             }
             result.is_ok()
         }
@@ -282,7 +273,7 @@ pub async fn run(mut configs: Vec<Config>) -> Result<()> {
     });
     let served = futures::future::join_all(runs).await.into_iter().filter(|ok| *ok).count();
     if served == 0 {
-        bail!("none of the {total} personas could be served");
+        bail!("none of the {total} ants could be served");
     }
     Ok(())
 }
@@ -306,8 +297,8 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
-    fn persona(name: &str) -> Persona {
-        let mut p = Persona::new(name.parse().unwrap(), here());
+    fn ant(name: &str) -> Ant {
+        let mut p = Ant::new(name.parse().unwrap(), here());
         p.nats = Some(format!("nats://{name}:4222"));
         p.creds = Some(PathBuf::from(format!("{name}.creds")));
         p
@@ -317,21 +308,21 @@ mod tests {
     fn picks_the_source() {
         let existing = here().join("Cargo.toml");
         let missing = here().join("no-such-config.toml");
-        assert_eq!(source(&args("--persona dev-a"), &existing).unwrap(), Source::Flags("dev-a".parse().unwrap()));
+        assert_eq!(source(&args("--ant dev-a"), &existing).unwrap(), Source::Flags("dev-a".parse().unwrap()));
         assert_eq!(source(&args(""), &existing).unwrap(), Source::File(existing.clone()));
-        assert_eq!(source(&args("--config c.toml --persona dev-a"), &missing).unwrap(), Source::File("c.toml".into()));
+        assert_eq!(source(&args("--config c.toml --ant dev-a"), &missing).unwrap(), Source::File("c.toml".into()));
         let err = source(&args(""), &missing).unwrap_err().to_string();
-        assert!(err.contains("no --persona given") && err.contains("no-such-config.toml"), "{err}");
+        assert!(err.contains("no --ant given") && err.contains("no-such-config.toml"), "{err}");
     }
 
     #[test]
-    fn flags_override_the_picked_persona() {
-        let all = vec![persona("dev-a"), persona("dev-b")];
+    fn flags_override_the_picked_ant() {
+        let all = vec![ant("dev-a"), ant("dev-b")];
         let path = Path::new("config.toml");
         let picked = pick(
             all.clone(),
             &args(
-                "--persona dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp \
+                "--ant dev-b --max-harnesses 1 --allow-tools --allow read --capability rust,nats --capability acp \
                  --max-tool-calls 20 --max-daily-cost 7.5",
             ),
             path,
@@ -347,15 +338,15 @@ mod tests {
         assert_eq!(picked[0].prompt_timeout_secs, config::DEFAULT_PROMPT_TIMEOUT_SECS);
 
         assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
-        let err = pick(all.clone(), &args("--persona dev-c"), path).unwrap_err().to_string();
-        assert!(err.contains("persona dev-c is not in config.toml"), "{err}");
+        let err = pick(all.clone(), &args("--ant dev-c"), path).unwrap_err().to_string();
+        assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
         let err = pick(all, &args("--workdir ."), path).unwrap_err().to_string();
-        assert!(err.contains("add --persona"), "{err}");
+        assert!(err.contains("add --ant"), "{err}");
     }
 
     #[test]
     fn the_file_wins_over_global_flags() {
-        let mut bare = persona("dev-a");
+        let mut bare = ant("dev-a");
         bare.nats = None;
         bare.creds = None;
         let cli_creds = Some(PathBuf::from("cli.creds"));
@@ -365,27 +356,27 @@ mod tests {
         assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
         assert_eq!(one[0].js_domain, Some(cli_domain.clone()));
 
-        let mut own = persona("dev-a");
+        let mut own = ant("dev-a");
         own.js_domain = Some(own_domain.clone());
         let one = configs(vec![own], "nats://cli:4222", cli_creds.clone(), Some(cli_domain)).unwrap();
         assert_eq!(one[0].nats_url, "nats://dev-a:4222");
         assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
         assert_eq!(one[0].js_domain, Some(own_domain));
 
-        let two = configs(vec![bare, persona("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
+        let two = configs(vec![bare, ant("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
     }
 
     #[test]
-    fn model_flags_override_only_the_selected_persona() {
-        let mut p = persona("dev-a");
+    fn model_flags_override_only_the_selected_ant() {
+        let mut p = ant("dev-a");
         p.model = Some("old-model".to_owned());
         p.reasoning_effort = Some("low".to_owned());
         p.context = Some("default".to_owned());
         let picked = pick(
-            vec![p.clone(), persona("dev-b")],
-            &args("--persona dev-a --model smart --reasoning-effort high --context long_context"),
+            vec![p.clone(), ant("dev-b")],
+            &args("--ant dev-a --model smart --reasoning-effort high --context long_context"),
             Path::new("config.toml"),
         )
         .unwrap();
@@ -396,13 +387,13 @@ mod tests {
         assert_eq!(only_model.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(only_model.context.as_deref(), Some("default"));
         for line in ["--model smart", "--reasoning-effort high", "--context long_context"] {
-            assert!(pick(vec![persona("dev-a")], &args(line), Path::new("config.toml")).is_err());
+            assert!(pick(vec![ant("dev-a")], &args(line), Path::new("config.toml")).is_err());
         }
     }
 
     #[test]
     fn tool_flags_override_only_the_selected_settings() {
-        let mut p = persona("dev-a");
+        let mut p = ant("dev-a");
         p.whoami = Some("file-role".to_owned());
         p.memory = Some("file-memory".to_owned());
         p.tasks = Some("file-tasks".to_owned());
@@ -410,7 +401,7 @@ mod tests {
         p.env.insert("KEEP".to_owned(), "keep".to_owned());
         let picked = pick(
             vec![p],
-            &args("--persona dev-a --whoami custom-role --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
+            &args("--ant dev-a --whoami custom-role --memory custom-memory --env TASK_DB=cli.db --env EXTRA=a=b"),
             Path::new("config.toml"),
         )
         .unwrap();
@@ -420,10 +411,9 @@ mod tests {
         assert_eq!(picked[0].env["TASK_DB"], "cli.db");
         assert_eq!(picked[0].env["KEEP"], "keep");
         assert_eq!(picked[0].env["EXTRA"], "a=b");
-        let clear =
-            Cmd::try_parse_from(["daemon", "--persona", "dev-a", "--whoami", "", "--tasks", "", "--env", "EMPTY="])
-                .unwrap()
-                .args;
+        let clear = Cmd::try_parse_from(["daemon", "--ant", "dev-a", "--whoami", "", "--tasks", "", "--env", "EMPTY="])
+            .unwrap()
+            .args;
         let cleared = clear.options.apply(picked[0].clone());
         assert_eq!(cleared.whoami.as_deref(), Some(""));
         assert_eq!(cleared.tasks.as_deref(), Some(""));
@@ -431,7 +421,7 @@ mod tests {
         assert!(Cmd::try_parse_from(["daemon", "--env", "=value"]).is_err());
         assert!(Cmd::try_parse_from(["daemon", "--env", "NAME"]).is_err());
         for line in ["--whoami role", "--memory notes", "--tasks tickets", "--env NAME=value"] {
-            assert!(pick(vec![persona("dev-a")], &args(line), Path::new("config.toml")).is_err());
+            assert!(pick(vec![ant("dev-a")], &args(line), Path::new("config.toml")).is_err());
         }
     }
 }

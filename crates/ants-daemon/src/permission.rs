@@ -1,4 +1,4 @@
-//! Answers to a harness's permission requests: the persona's allowlist first, then the humans and the persona's
+//! Answers to a harness's permission requests: the ant's allowlist first, then the humans and the ant's
 //! chain, else reject.
 //!
 //! # Allowlist rules
@@ -95,7 +95,7 @@ fn mcp_tool(title: &str) -> Option<&str> {
     (!server.is_empty() && !tool.is_empty()).then_some(tool)
 }
 
-/// Tool requests a persona may run without asking; see the [module docs](self) for the rules.
+/// Tool requests an ant may run without asking; see the [module docs](self) for the rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Allowlist(Vec<Rule>);
 
@@ -114,7 +114,7 @@ impl Allowlist {
     }
 }
 
-/// The humans and the persona's chain, or whoever stands in: decide tool requests outside the allowlist.
+/// The humans and the ant's chain, or whoever stands in: decide tool requests outside the allowlist.
 pub trait Approver: Send + Sync {
     /// The decision on `tool`, requested on `thread`, among the `options` the harness offers. Never fails: anything
     /// that goes wrong, a timeout included, is [`Verdict::Reject`].

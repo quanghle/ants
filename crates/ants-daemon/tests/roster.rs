@@ -6,20 +6,20 @@ use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
 use ants_daemon::roster::{self, Registration, Workload};
-use ants_proto::{Activity, PersonaId, RosterEntry};
+use ants_proto::{Activity, RosterEntry, UserId};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::kv;
 
-fn entry(persona: &str) -> RosterEntry {
-    entry_on(persona, "test")
+fn entry(ant: &str) -> RosterEntry {
+    entry_on(ant, "test")
 }
 
 /// An entry of a daemon run of its own on `machine`.
-fn entry_on(persona: &str, machine: &str) -> RosterEntry {
+fn entry_on(ant: &str, machine: &str) -> RosterEntry {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let now = chrono::Utc::now();
     RosterEntry {
-        persona: persona.parse().unwrap(),
+        ant: ant.parse().unwrap(),
         machine: machine.to_owned(),
         instance: Some(format!("run-{}", RUNS.fetch_add(1, Ordering::Relaxed))),
         harness: "copilot".to_owned(),
@@ -35,15 +35,15 @@ fn entry_on(persona: &str, machine: &str) -> RosterEntry {
     }
 }
 
-async fn read(kv: &kv::Store, persona: &str) -> Option<RosterEntry> {
-    kv.get(persona).await.unwrap().map(|v| serde_json::from_slice(&v).unwrap())
+async fn read(kv: &kv::Store, ant: &str) -> Option<RosterEntry> {
+    kv.get(ant).await.unwrap().map(|v| serde_json::from_slice(&v).unwrap())
 }
 
-/// Poll until `persona`'s entry is gone, or fail after `limit`.
-async fn wait_gone(kv: &kv::Store, persona: &str, limit: Duration) -> Duration {
+/// Poll until `ant`'s entry is gone, or fail after `limit`.
+async fn wait_gone(kv: &kv::Store, ant: &str, limit: Duration) -> Duration {
     let start = Instant::now();
-    while read(kv, persona).await.is_some() {
-        assert!(start.elapsed() < limit, "{persona} still listed after {limit:?}");
+    while read(kv, ant).await.is_some() {
+        assert!(start.elapsed() < limit, "{ant} still listed after {limit:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     start.elapsed()
@@ -52,7 +52,7 @@ async fn wait_gone(kv: &kv::Store, persona: &str, limit: Duration) -> Duration {
 #[tokio::test]
 async fn entries_refresh_leave_and_expire() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_roster(&js, ttl).await.unwrap();
     let beat = Duration::from_millis(300);
@@ -83,9 +83,9 @@ async fn entries_refresh_leave_and_expire() {
 }
 
 #[tokio::test]
-async fn listing_gives_every_entry_by_persona() {
+async fn listing_gives_every_entry_by_ant() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
     assert!(roster::list_entries(&kv).await.unwrap().is_empty());
 
@@ -93,19 +93,19 @@ async fn listing_gives_every_entry_by_persona() {
     let _b = Registration::start(kv.clone(), entry("dev-b"), beat).await.unwrap();
     let _a = Registration::start(kv.clone(), entry("dev-a"), beat).await.unwrap();
     kv.put("junk", "not an entry".into()).await.unwrap();
-    let listed: Vec<_> = roster::list_entries(&kv).await.unwrap().into_iter().map(|e| e.persona.to_string()).collect();
+    let listed: Vec<_> = roster::list_entries(&kv).await.unwrap().into_iter().map(|e| e.ant.to_string()).collect();
     assert_eq!(listed, ["dev-a", "dev-b"]);
 }
 
-/// Poll until `persona`'s entry shows `activity`, or fail after `limit`.
-async fn wait_activity(kv: &kv::Store, persona: &str, activity: Activity, limit: Duration) -> RosterEntry {
+/// Poll until `ant`'s entry shows `activity`, or fail after `limit`.
+async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Duration) -> RosterEntry {
     let start = Instant::now();
     loop {
-        let entry = read(kv, persona).await.expect("listed");
+        let entry = read(kv, ant).await.expect("listed");
         if entry.activity == Some(activity) {
             return entry;
         }
-        assert!(start.elapsed() < limit, "{persona} not {activity:?} after {limit:?}: {entry:?}");
+        assert!(start.elapsed() < limit, "{ant} not {activity:?} after {limit:?}: {entry:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -113,7 +113,7 @@ async fn wait_activity(kv: &kv::Store, persona: &str, activity: Activity, limit:
 #[tokio::test]
 async fn turning_working_or_idle_shows_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     workload.set_harnesses(1);
@@ -134,7 +134,7 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
 #[tokio::test]
 async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
 
@@ -184,7 +184,7 @@ async fn wait_lost(registration: &Registration, limit: Duration) {
 #[tokio::test]
 async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
     // No heartbeat comes during the test: the watch of the entry does it all.
@@ -226,7 +226,7 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 #[tokio::test]
 async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &PersonaId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
     let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
     let (every, beat) = (Duration::from_millis(100), Duration::from_millis(200));
 

@@ -1,4 +1,4 @@
-//! Token and cost caps per thread and per persona, counted from the spend harnesses report.
+//! Token and cost caps per thread and per ant, counted from the spend harnesses report.
 //!
 //! Cost comes from ACP `usage_update` notifications, which carry the cumulative cost of a session; the increase over
 //! the last reading of the thread's session is what a prompt spent. A reading below the last one, or from another
@@ -6,19 +6,19 @@
 //! responses, one prompt's worth each. A harness that reports neither, such as Copilot CLI, is never capped.
 //!
 //! What a thread spent since a human's last message on it is kept in the KV bucket `ants_sessions` under
-//! `<persona>.<thread>.spend`, and what the persona spent in a UTC day under `<persona>.day.<YYYY-MM-DD>`, so both
-//! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the persona's
+//! `<ant>.<thread>.spend`, and what the ant spent in a UTC day under `<ant>.day.<YYYY-MM-DD>`, so both
+//! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the ant's
 //! allowance comes back at 00:00 UTC.
 //!
 //! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, and the threads
-//! whose escalation has a deadline under `<persona>.escalations.deadlines`.
+//! whose escalation has a deadline under `<ant>.escalations.deadlines`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::SessionId;
 use ants_proto::{
-    ChannelId, Escalation, PersonaId, ThreadId, daily_spend_key, escalation_deadlines_key, thread_spend_key,
+    ChannelId, Escalation, ThreadId, UserId, daily_spend_key, escalation_deadlines_key, thread_spend_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
@@ -34,9 +34,9 @@ pub struct Caps {
     pub thread_tokens: Option<u64>,
     /// Cost a thread may spend between messages from a human, in the harness's unit (USD for Claude).
     pub thread_cost: Option<f64>,
-    /// Tokens the persona may spend in a UTC day.
+    /// Tokens the ant may spend in a UTC day.
     pub daily_tokens: Option<u64>,
-    /// Cost the persona may spend in a UTC day.
+    /// Cost the ant may spend in a UTC day.
     pub daily_cost: Option<f64>,
 }
 
@@ -68,7 +68,7 @@ pub struct Pending {
     pub escalation: Escalation,
     /// Whom it went to, its leader first; empty when it went to the thread's owner, else the default human.
     #[serde(default)]
-    pub to: Vec<PersonaId>,
+    pub to: Vec<UserId>,
     /// The leader's message that gave the thread a fresh budget and allowance at this level, if one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renewed_by: Option<Uuid>,
@@ -77,11 +77,11 @@ pub struct Pending {
     pub deadline: Option<i64>,
     /// The thread's owner, a human, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<PersonaId>,
+    pub owner: Option<UserId>,
     /// What the escalation is about, for the escalations that follow it up.
     #[serde(default)]
     pub summary: String,
-    /// The channel of the thread, when the persona got stuck on a post there: the leader's answer is posted back to it.
+    /// The channel of the thread, when the ant got stuck on a post there: the leader's answer is posted back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
 }
@@ -131,12 +131,12 @@ impl Store {
     }
 }
 
-/// What the persona and its threads spent, against their caps.
+/// What the ant and its threads spent, against their caps.
 pub struct Ledger {
     caps: Caps,
-    persona: PersonaId,
+    ant: UserId,
     store: Store,
-    /// The persona's spend of the day it is for; held while it is read or stored, so updates do not cross.
+    /// The ant's spend of the day it is for; held while it is read or stored, so updates do not cross.
     day: tokio::sync::Mutex<Option<(String, DaySpend)>>,
     /// The escalation deadlines by thread, once read; held while a thread's spend is read and stored.
     threads: tokio::sync::Mutex<Option<BTreeMap<ThreadId, i64>>>,
@@ -144,17 +144,17 @@ pub struct Ledger {
 
 impl Ledger {
     /// Spend kept in the KV bucket [`ants_proto::SESSIONS_BUCKET`].
-    pub fn kv(kv: kv::Store, persona: PersonaId, caps: Caps) -> Self {
-        Self::with_store(Store::Kv(Box::new(kv)), persona, caps)
+    pub fn kv(kv: kv::Store, ant: UserId, caps: Caps) -> Self {
+        Self::with_store(Store::Kv(Box::new(kv)), ant, caps)
     }
 
     /// Spend kept in this process only.
-    pub fn memory(persona: PersonaId, caps: Caps) -> Self {
-        Self::with_store(Store::Memory(Arc::default()), persona, caps)
+    pub fn memory(ant: UserId, caps: Caps) -> Self {
+        Self::with_store(Store::Memory(Arc::default()), ant, caps)
     }
 
-    fn with_store(store: Store, persona: PersonaId, caps: Caps) -> Self {
-        Self { caps, persona, store, day: tokio::sync::Mutex::default(), threads: tokio::sync::Mutex::default() }
+    fn with_store(store: Store, ant: UserId, caps: Caps) -> Self {
+        Self { caps, ant, store, day: tokio::sync::Mutex::default(), threads: tokio::sync::Mutex::default() }
     }
 
     /// The thread starts over from nothing spent.
@@ -177,7 +177,7 @@ impl Ledger {
 
     /// The thread's escalation, if it has one.
     pub async fn pending(&self, thread: &ThreadId) -> Result<Option<Pending>> {
-        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.persona, thread)).await?;
+        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
         Ok(spent.escalation)
     }
 
@@ -194,7 +194,7 @@ impl Ledger {
     /// A message from `leader` answering the thread's escalation: the first one at the escalation's level gives the
     /// thread a fresh allowance and ends the deadline. Returns whether `by`, that message, did (again, when it is
     /// delivered again).
-    pub async fn renew(&self, thread: &ThreadId, leader: &PersonaId, by: Uuid) -> Result<bool> {
+    pub async fn renew(&self, thread: &ThreadId, leader: &UserId, by: Uuid) -> Result<bool> {
         self.update(thread, |spent| match &mut spent.escalation {
             Some(p) if p.escalation.is_leader(leader) && !p.at_owner() && p.renewed_by.is_none_or(|id| id == by) => {
                 let changed = p.renewed_by != Some(by) || p.deadline.is_some();
@@ -213,7 +213,7 @@ impl Ledger {
         &self,
         thread: &ThreadId,
         escalation: &Escalation,
-        to: Vec<PersonaId>,
+        to: Vec<UserId>,
         deadline: Option<i64>,
     ) -> Result<bool> {
         self.update(thread, |spent| match &mut spent.escalation {
@@ -243,20 +243,20 @@ impl Ledger {
     async fn update<R>(&self, thread: &ThreadId, change: impl FnOnce(&mut ThreadSpend) -> (bool, R)) -> Result<R> {
         let mut index = self.threads.lock().await;
         let index = self.load_index(&mut index).await?;
-        let key = thread_spend_key(&self.persona, thread);
+        let key = thread_spend_key(&self.ant, thread);
         let mut spent: ThreadSpend = self.store.get(key.clone()).await?;
         let (changed, result) = change(&mut spent);
         let deadline = spent.escalation.as_ref().and_then(|p| p.deadline);
         let listed = index.get(thread).copied();
         if let Some(deadline) = deadline.filter(|d| Some(*d) != listed) {
             index.insert(thread.clone(), deadline);
-            self.store.put(escalation_deadlines_key(&self.persona), index).await?;
+            self.store.put(escalation_deadlines_key(&self.ant), index).await?;
         }
         if changed {
             self.store.put(key, &spent).await?;
         }
         if deadline.is_none() && index.remove(thread).is_some() {
-            self.store.put(escalation_deadlines_key(&self.persona), index).await?;
+            self.store.put(escalation_deadlines_key(&self.ant), index).await?;
         }
         Ok(result)
     }
@@ -266,12 +266,12 @@ impl Ledger {
         index: &'a mut Option<BTreeMap<ThreadId, i64>>,
     ) -> Result<&'a mut BTreeMap<ThreadId, i64>> {
         if index.is_none() {
-            *index = Some(self.store.get(escalation_deadlines_key(&self.persona)).await?);
+            *index = Some(self.store.get(escalation_deadlines_key(&self.ant)).await?);
         }
         Ok(index.as_mut().expect("loaded"))
     }
 
-    /// The cap the thread or the persona has reached, if any.
+    /// The cap the thread or the ant has reached, if any.
     pub async fn reached(&self, thread: &ThreadId) -> Result<Option<String>> {
         self.reached_on(thread, &today()).await
     }
@@ -285,7 +285,7 @@ impl Ledger {
         if !self.caps.any() {
             return Ok(None);
         }
-        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.persona, thread)).await?;
+        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
         let mut day = self.day.lock().await;
         let daily = self.load_day(&mut day, today).await?;
         Ok(self.check(&spent, daily))
@@ -313,15 +313,15 @@ impl Ledger {
         if tokens > 0 || cost > 0.0 {
             daily.tokens += tokens;
             daily.cost += cost;
-            self.store.put(daily_spend_key(&self.persona, today), daily).await?;
+            self.store.put(daily_spend_key(&self.ant, today), daily).await?;
         }
         Ok(self.check(&spent, daily))
     }
 
-    /// The persona's spend on `today`, read from the store when the day held is another one.
+    /// The ant's spend on `today`, read from the store when the day held is another one.
     async fn load_day<'a>(&self, day: &'a mut Option<(String, DaySpend)>, today: &str) -> Result<&'a mut DaySpend> {
         if day.as_ref().is_none_or(|(d, _)| d != today) {
-            let spent = self.store.get(daily_spend_key(&self.persona, today)).await?;
+            let spent = self.store.get(daily_spend_key(&self.ant, today)).await?;
             *day = Some((today.to_owned(), spent));
         }
         Ok(&mut day.as_mut().expect("loaded").1)
@@ -331,7 +331,7 @@ impl Ledger {
         let caps = &self.caps;
         let since = "since a human's last message";
         let resets = "today; resets at 00:00 UTC";
-        let persona = &self.persona;
+        let ant = &self.ant;
         if let Some(cap) = caps.thread_tokens.filter(|cap| thread.tokens >= *cap) {
             return Some(format!("Thread token cap reached ({} of {cap} tokens {since})", thread.tokens));
         }
@@ -339,10 +339,10 @@ impl Ledger {
             return Some(format!("Thread cost cap reached ({:.2} of {cap:.2} {since})", thread.cost));
         }
         if let Some(cap) = caps.daily_tokens.filter(|cap| day.tokens >= *cap) {
-            return Some(format!("Daily token cap of {persona} reached ({} of {cap} tokens {resets})", day.tokens));
+            return Some(format!("Daily token cap of {ant} reached ({} of {cap} tokens {resets})", day.tokens));
         }
         if let Some(cap) = caps.daily_cost.filter(|cap| day.cost >= *cap) {
-            return Some(format!("Daily cost cap of {persona} reached ({:.2} of {cap:.2} {resets})", day.cost));
+            return Some(format!("Daily cost cap of {ant} reached ({:.2} of {cap:.2} {resets})", day.cost));
         }
         None
     }
@@ -376,7 +376,7 @@ mod tests {
 
     const DAY: &str = "2026-11-13";
 
-    fn persona() -> PersonaId {
+    fn ant() -> UserId {
         "dev-a".parse().unwrap()
     }
 
@@ -391,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn cost_readings_count_what_each_adds() {
         let caps = Caps { thread_cost: Some(1.0), ..Caps::default() };
-        let ledger = Ledger::memory(persona(), caps);
+        let ledger = Ledger::memory(ant(), caps);
         let t = thread(1);
         assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap(), None);
         assert_eq!(ledger.record_on(&t, &cost("s1", 0.5), DAY).await.unwrap(), None);
@@ -403,9 +403,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_message_from_the_human_frees_the_thread_but_not_the_persona() {
+    async fn a_message_from_the_human_frees_the_thread_but_not_the_ant() {
         let caps = Caps { thread_tokens: Some(100), daily_tokens: Some(250), ..Caps::default() };
-        let ledger = Ledger::memory(persona(), caps);
+        let ledger = Ledger::memory(ant(), caps);
         let (t1, t2) = (thread(1), thread(2));
         let reached = ledger.record_on(&t1, &Spend::Tokens(120), DAY).await.unwrap().unwrap();
         assert!(reached.starts_with("Thread token cap reached (120 of 100"), "{reached}");
@@ -422,10 +422,10 @@ mod tests {
     async fn spend_survives_a_restart_and_the_daily_allowance_comes_back_the_next_day() {
         let caps = Caps { thread_cost: Some(10.0), daily_cost: Some(1.2), ..Caps::default() };
         let store = Store::Memory(Arc::default());
-        let ledger = Ledger::with_store(store.clone(), persona(), caps);
+        let ledger = Ledger::with_store(store.clone(), ant(), caps);
         ledger.record_on(&thread(1), &cost("s1", 0.75), DAY).await.unwrap();
 
-        let ledger = Ledger::with_store(store, persona(), caps);
+        let ledger = Ledger::with_store(store, ant(), caps);
         let reached = ledger.record_on(&thread(1), &cost("s1", 1.0), DAY).await.unwrap();
         assert_eq!(reached, None, "only the 0.25 added since the stored reading counts");
         let reached = ledger.record_on(&thread(2), &cost("s2", 0.5), DAY).await.unwrap().unwrap();
@@ -434,8 +434,8 @@ mod tests {
     }
 
     fn escalated(to: &[&str], deadline: Option<i64>) -> Pending {
-        let start = Escalation::new(persona(), thread(1), ants_proto::EscalationReason::TurnBudget);
-        let chain: Vec<PersonaId> = ["lead", "dev-b"].iter().map(|p| p.parse().unwrap()).collect();
+        let start = Escalation::new(ant(), thread(1), ants_proto::EscalationReason::TurnBudget);
+        let chain: Vec<UserId> = ["lead", "dev-b"].iter().map(|p| p.parse().unwrap()).collect();
         let ants_proto::Hop::Chain { escalation, .. } = start.up(&chain, 3) else { unreachable!() };
         let to = to.iter().map(|p| p.parse().unwrap()).collect();
         Pending { escalation, to, renewed_by: None, deadline, owner: None, summary: "stuck".to_owned(), channel: None }
@@ -445,8 +445,8 @@ mod tests {
     async fn spend_stored_before_escalations_still_loads() {
         let store = Store::Memory(Arc::default());
         let old = serde_json::json!({"session": "s1", "reading": 0.5, "tokens": 0, "cost": 0.5});
-        store.put(thread_spend_key(&persona(), &thread(1)), &old).await.unwrap();
-        let ledger = Ledger::with_store(store, persona(), Caps { thread_cost: Some(0.5), ..Caps::default() });
+        store.put(thread_spend_key(&ant(), &thread(1)), &old).await.unwrap();
+        let ledger = Ledger::with_store(store, ant(), Caps { thread_cost: Some(0.5), ..Caps::default() });
         assert_eq!(ledger.pending(&thread(1)).await.unwrap(), None);
         assert!(ledger.reached_on(&thread(1), DAY).await.unwrap().is_some());
     }
@@ -455,7 +455,7 @@ mod tests {
     async fn the_leader_renews_once_per_level_and_a_human_ends_the_escalation() {
         let caps = Caps { thread_tokens: Some(100), ..Caps::default() };
         let store = Store::Memory(Arc::default());
-        let ledger = Ledger::with_store(store.clone(), persona(), caps);
+        let ledger = Ledger::with_store(store.clone(), ant(), caps);
         let (t, lead, dev_b) = (thread(1), "lead".parse().unwrap(), "dev-b".parse().unwrap());
         ledger.record_on(&t, &Spend::Tokens(120), DAY).await.unwrap();
         ledger.set_pending(&t, Some(escalated(&["lead", "dev-b"], Some(5)))).await.unwrap();
@@ -470,7 +470,7 @@ mod tests {
         assert!(!ledger.renew(&t, &lead, again).await.unwrap(), "once per level");
 
         // A restart keeps the level and that its renewal was used.
-        let ledger = Ledger::with_store(store, persona(), caps);
+        let ledger = Ledger::with_store(store, ant(), caps);
         let pending = ledger.pending(&t).await.unwrap().unwrap();
         assert_eq!((pending.escalation.level, pending.renewed_by), (1, Some(answer)));
         assert!(ledger.reset(&t).await.unwrap(), "a human ends it");
@@ -484,14 +484,14 @@ mod tests {
     #[tokio::test]
     async fn a_stale_deadline_is_dropped_on_a_recheck() {
         let store = Store::Memory(Arc::default());
-        let ledger = Ledger::with_store(store.clone(), persona(), Caps::default());
+        let ledger = Ledger::with_store(store.clone(), ant(), Caps::default());
         let (t1, t2) = (thread(1), thread(2));
         ledger.set_pending(&t1, Some(escalated(&["lead"], Some(7)))).await.unwrap();
         ledger.set_pending(&t2, Some(escalated(&["lead"], Some(9)))).await.unwrap();
         // As a crash between listing the deadline and storing the escalation leaves it.
-        store.put(thread_spend_key(&persona(), &t2), &ThreadSpend::default()).await.unwrap();
+        store.put(thread_spend_key(&ant(), &t2), &ThreadSpend::default()).await.unwrap();
 
-        let ledger = Ledger::with_store(store, persona(), Caps::default());
+        let ledger = Ledger::with_store(store, ant(), Caps::default());
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t1.clone(), 7), (t2.clone(), 9)]));
         ledger.recheck(&t2).await.unwrap();
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t1, 7)]));

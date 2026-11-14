@@ -1,14 +1,14 @@
 //! The team's humans as a daemon sees them.
 //!
-//! A human is a persona listed in the [`HUMANS_BUCKET`], which only humans write; `human` and the daemon's default
+//! A human is a user listed in the [`HUMANS_BUCKET`], which only humans write; `human` and the daemon's default
 //! human (config `human`) are humans without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept
 //! current by a watch ([`Registry::watch`]). Until the bucket exists only the humans without an entry are known; the
-//! daemon looks for the bucket again every little while, since a persona may read it but not create it.
+//! daemon looks for the bucket again every little while, since an ant may read it but not create it.
 
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use ants_proto::{Envelope, HUMANS_BUCKET, HumanEntry, Humans, PersonaId, Role};
+use ants_proto::{Envelope, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
@@ -21,52 +21,52 @@ pub const RETRY: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct Registry {
     humans: Arc<RwLock<Humans>>,
-    default: PersonaId,
+    default: UserId,
 }
 
 impl Default for Registry {
     fn default() -> Self {
-        Self::new(PersonaId::human())
+        Self::new(UserId::human())
     }
 }
 
 impl Registry {
     /// A registry knowing only the humans without an entry: `human` and `default`, the default human.
-    pub fn new(default: PersonaId) -> Self {
+    pub fn new(default: UserId) -> Self {
         let registry = Self { humans: Arc::default(), default };
         registry.replace(registry.base());
         registry
     }
 
     /// The human who gets what is meant for the owner of a thread that has none.
-    pub fn default_human(&self) -> &PersonaId {
+    pub fn default_human(&self) -> &UserId {
         &self.default
     }
 
-    /// `owner`, the owner a message names for its thread, when it is a human. Any persona can name any owner, and a
-    /// persona's daemon answers what goes to the owner with a fresh turn budget: a thread a persona owned would never
+    /// `owner`, the owner a message names for its thread, when it is a human. Any ant can name any owner, and an
+    /// ant's daemon answers what goes to the owner with a fresh turn budget: a thread an ant owned would never
     /// run out of turns. So an owner that is no human is no owner.
-    pub fn human_owner(&self, owner: Option<&PersonaId>) -> Option<PersonaId> {
+    pub fn human_owner(&self, owner: Option<&UserId>) -> Option<UserId> {
         owner.filter(|owner| self.is_human(owner)).cloned()
     }
 
     /// The human who gets what is meant for the owner `owner` names: it when a human ([`Registry::human_owner`]),
     /// else the default human.
-    pub fn owner_or_default(&self, owner: Option<&PersonaId>) -> PersonaId {
+    pub fn owner_or_default(&self, owner: Option<&UserId>) -> UserId {
         self.human_owner(owner).unwrap_or_else(|| self.default.clone())
     }
 
     /// The human who gets the escalations of `envelope`'s thread: its owner when a human, else the default human.
-    pub fn owner_of(&self, envelope: &Envelope) -> PersonaId {
+    pub fn owner_of(&self, envelope: &Envelope) -> UserId {
         self.owner_or_default(envelope.owner.as_ref())
     }
 
-    pub fn role(&self, persona: &PersonaId) -> Role {
-        self.read().role(persona)
+    pub fn role(&self, user: &UserId) -> Role {
+        self.read().role(user)
     }
 
-    pub fn is_human(&self, persona: &PersonaId) -> bool {
-        self.role(persona).is_human()
+    pub fn is_human(&self, user: &UserId) -> bool {
+        self.role(user).is_human()
     }
 
     /// The humans known now.
@@ -115,11 +115,11 @@ impl Registry {
         Ok(())
     }
 
-    /// Set the human of `key` in `humans` to `value`, or remove it. A malformed entry, or one naming another persona
+    /// Set the human of `key` in `humans` to `value`, or remove it. A malformed entry, or one naming another human
     /// than its key, is skipped and names no human.
     fn set(&self, humans: &mut Humans, key: &str, value: Option<&[u8]>) {
-        let Ok(persona) = key.parse::<PersonaId>() else {
-            tracing::warn!(key, "skipping a human entry under a key that is no persona id");
+        let Ok(human) = key.parse::<UserId>() else {
+            tracing::warn!(key, "skipping a human entry under a key that is no user id");
             return;
         };
         let added = value.map(|value| {
@@ -131,22 +131,22 @@ impl Registry {
             Some(Ok(())) => {}
             Some(Err(error)) => {
                 tracing::warn!(key, error, "skipping a human entry");
-                self.remove(humans, &persona);
+                self.remove(humans, &human);
             }
-            None => self.remove(humans, &persona),
+            None => self.remove(humans, &human),
         }
     }
 
-    fn remove(&self, humans: &mut Humans, persona: &PersonaId) {
-        if *persona != self.default {
-            humans.remove(persona);
+    fn remove(&self, humans: &mut Humans, human: &UserId) {
+        if *human != self.default {
+            humans.remove(human);
         }
     }
 
     /// The humans without an entry.
     fn base(&self) -> Humans {
         let mut humans = Humans::default();
-        let _ = humans.add(self.default.as_str(), HumanEntry { persona: self.default.clone(), registered_at: None });
+        let _ = humans.add(self.default.as_str(), HumanEntry { human: self.default.clone(), registered_at: None });
         humans
     }
 
@@ -160,7 +160,7 @@ impl Registry {
 
     /// A registry of `default` and `humans`, as if the bucket listed them.
     #[cfg(test)]
-    pub fn with(default: PersonaId, humans: &[&str]) -> Self {
+    pub fn with(default: UserId, humans: &[&str]) -> Self {
         let registry = Self::new(default);
         let mut known = registry.base();
         for name in humans {
@@ -185,44 +185,44 @@ impl Drop for Watching {
 mod tests {
     use super::*;
 
-    fn persona(name: &str) -> PersonaId {
+    fn user(name: &str) -> UserId {
         name.parse().unwrap()
     }
 
     #[test]
     fn humans_without_an_entry() {
-        let registry = Registry::new(persona("alice"));
-        assert!(registry.is_human(&PersonaId::human()));
-        assert!(registry.is_human(&persona("alice")));
-        assert!(!registry.is_human(&persona("bob")));
+        let registry = Registry::new(user("alice"));
+        assert!(registry.is_human(&UserId::human()));
+        assert!(registry.is_human(&user("alice")));
+        assert!(!registry.is_human(&user("bob")));
     }
 
     #[test]
     fn escalations_go_to_the_owner_else_the_default_human() {
-        let registry = Registry::with(persona("alice"), &["carol"]);
-        let envelope = Envelope::new(persona("bob"), persona("coder"), "hi");
-        assert_eq!(registry.owner_of(&envelope), persona("alice"));
-        let owned = envelope.clone().with_owner(Some(persona("carol")));
-        assert_eq!(registry.owner_of(&owned), persona("carol"));
-        let by_persona = envelope.with_owner(Some(persona("dev-a")));
-        assert_eq!(registry.owner_of(&by_persona), persona("alice"), "a persona owns no thread");
-        assert_eq!(registry.human_owner(by_persona.owner.as_ref()), None);
+        let registry = Registry::with(user("alice"), &["carol"]);
+        let envelope = Envelope::new(user("bob"), user("coder"), "hi");
+        assert_eq!(registry.owner_of(&envelope), user("alice"));
+        let owned = envelope.clone().with_owner(Some(user("carol")));
+        assert_eq!(registry.owner_of(&owned), user("carol"));
+        let by_ant = envelope.with_owner(Some(user("dev-a")));
+        assert_eq!(registry.owner_of(&by_ant), user("alice"), "an ant owns no thread");
+        assert_eq!(registry.human_owner(by_ant.owner.as_ref()), None);
     }
 
     #[test]
     fn entries_add_and_remove_humans() {
-        let registry = Registry::new(persona("alice"));
+        let registry = Registry::new(user("alice"));
         let mut humans = registry.base();
-        let entry = |name: &str| serde_json::to_vec(&HumanEntry::new(persona(name))).unwrap();
+        let entry = |name: &str| serde_json::to_vec(&HumanEntry::new(user(name))).unwrap();
         registry.set(&mut humans, "carol", Some(&entry("carol")));
         registry.set(&mut humans, "dave", Some(&entry("carol")));
         registry.set(&mut humans, "erin", Some(b"not json"));
-        assert!(humans.contains(&persona("carol")));
-        assert!(!humans.contains(&persona("dave")), "an entry naming another persona is forged");
-        assert!(!humans.contains(&persona("erin")));
+        assert!(humans.contains(&user("carol")));
+        assert!(!humans.contains(&user("dave")), "an entry naming another human is forged");
+        assert!(!humans.contains(&user("erin")));
         registry.set(&mut humans, "carol", None);
         registry.set(&mut humans, "alice", None);
-        assert!(!humans.contains(&persona("carol")));
-        assert!(humans.contains(&persona("alice")), "the default human stays a human");
+        assert!(!humans.contains(&user("carol")));
+        assert!(humans.contains(&user("alice")), "the default human stays a human");
     }
 }

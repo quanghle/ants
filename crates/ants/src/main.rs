@@ -1,5 +1,6 @@
-//! `ants`: talk to agent teams over NATS from the terminal, and run the persona daemon.
+//! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
+mod add;
 mod approve;
 mod auth;
 mod bridge;
@@ -9,7 +10,6 @@ mod humans;
 mod inbox;
 mod leaf;
 mod outbox;
-mod persona;
 mod roster;
 mod serve;
 
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation, JsDomain, Machine,
-    PersonaId, PlanPost, StatusEvent, StatusUpdate, ThreadId, subject,
+    PlanPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats: String,
 
-    /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-persona permissions.
+    /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
@@ -47,17 +47,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Send a message as the CLI's human, who owns the thread. Starts with @persona to pick the recipient; the
+    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; the
     /// messenger gets it otherwise.
     Ask {
-        /// Continue an existing thread. The message still prompts only its recipient (@persona, else the
-        /// messenger), not the thread's other personas.
+        /// Continue an existing thread. The message still prompts only its recipient (@ant, else the
+        /// messenger), not the thread's other ants.
         #[arg(long)]
         thread: Option<ThreadId>,
         /// Wait for the first reply on the thread, print it and mark it read.
         #[arg(long)]
         wait: bool,
-        /// `@persona` (optional), then the message.
+        /// `@ant` (optional), then the message.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
@@ -81,14 +81,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List the personas being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
+    /// List the ants being served: harness, machine, capabilities, escalation chain, last heartbeat, and whether it
     /// is recent.
     Roster {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
     },
-    /// Post to a channel as the CLI's human. An @persona in the text wakes only that member; a post that @mentions
+    /// Post to a channel as the CLI's human. An @ant in the text wakes only that member; a post that @mentions
     /// nobody goes to the channel's messenger, which wakes the members the post concerns. A new thread belongs to the
     /// human who posts it, and the turn budget it runs out of comes back to that human.
     Post {
@@ -104,11 +104,11 @@ enum Command {
         /// Seconds to wait for posts with `--wait`.
         #[arg(long, value_name = "SECS", default_value_t = 600, requires = "wait")]
         timeout: u64,
-        /// The post; each @persona mention wakes that member.
+        /// The post; each @ant mention wakes that member.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
-    /// Channels: named groups of personas that humans post to with `ants post`.
+    /// Channels: named groups of ants that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Show the notes of a thread, or post to them as the CLI's human, which gives them a fresh turn budget. Thread
@@ -118,22 +118,22 @@ enum Command {
         /// The post. Without it, show the notes.
         words: Vec<String>,
     },
-    /// Print ants traffic as it happens, escalations with their level, leader and personas visited, or the live
-    /// progress of a persona: state, reply text, tool calls and plan.
+    /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
+    /// progress of an ant: state, reply text, tool calls and plan.
     Watch {
-        /// Subject filter, or a persona to follow its progress on every thread.
+        /// Subject filter, or an ant to follow its progress on every thread.
         #[arg(default_value = subject::ALL)]
         subject: String,
-        /// With a persona, follow only this thread.
+        /// With an ant, follow only this thread.
         thread: Option<ThreadId>,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
     /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
-    /// Tool requests personas escalate: list the pending ones, show one, or answer it. Every human sees every
-    /// request; the first decision wins, a human's or that of an agent of the persona's escalation chain.
+    /// Tool requests ants escalate: list the pending ones, show one, or answer it. Every human sees every
+    /// request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
     Approve {
-        /// Request as `<persona>/<id>`, or a bare id when only one persona has it; a unique start of the id will do.
+        /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
         /// Without it, list the pending requests.
         id: Option<String>,
         /// Answer the request. Without it, show the request.
@@ -146,16 +146,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Messages personas gave up on: inspect, replay or drop them.
+    /// Messages ants gave up on: inspect, replay or drop them.
     #[command(subcommand)]
     Dead(DeadCommand),
-    /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
+    /// Serve ant inboxes through agent harnesses: those of the config file, or one described by flags.
     Daemon(Box<serve::DaemonArgs>),
-    /// The personas of the machine's config file.
-    #[command(subcommand)]
-    Persona(PersonaCommand),
-    /// Enrollment requests from `ants persona add --enroll`, on the machine holding the account key: list them,
-    /// approve or reject one.
+    /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
+    /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
+    /// key to sign; run again with --jwt or --enroll to complete the credentials. Restart the daemon to serve the ant.
+    Add(Box<add::AddArgs>),
+    /// Enrollment requests from `ants add --enroll`, on the machine holding the account key: list them, approve or
+    /// reject one.
     #[command(subcommand)]
     Enroll(EnrollCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
@@ -170,7 +171,7 @@ enum Command {
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
-    /// Issue NATS credentials: one operator and account for the team, one user per persona or human.
+    /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
     Auth(AuthCommand),
     /// The machine's local NATS leaf node, which every ants process on it connects to.
@@ -188,24 +189,24 @@ enum ChannelCommand {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Member persona (repeatable, or comma-separated).
-        #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
-        members: Vec<PersonaId>,
-        /// Persona that triages the posts of humans that @mention nobody (default: `messenger`).
-        #[arg(long, value_parser = channel::parse_persona)]
-        messenger: Option<PersonaId>,
+        /// Member ant (repeatable, or comma-separated).
+        #[arg(long = "member", value_name = "ANT", value_delimiter = ',', value_parser = channel::parse_ant)]
+        members: Vec<UserId>,
+        /// Ant that triages the posts of humans that @mention nobody (default: `messenger`).
+        #[arg(long, value_parser = channel::parse_ant)]
+        messenger: Option<UserId>,
     },
     /// Replace the members or the messenger of a channel; what is not given stays.
     Set {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Member persona (repeatable, or comma-separated): together, the new members.
-        #[arg(long = "member", value_name = "PERSONA", value_delimiter = ',', value_parser = channel::parse_persona)]
-        members: Option<Vec<PersonaId>>,
-        /// Persona that triages the posts of humans that @mention nobody.
-        #[arg(long, value_parser = channel::parse_persona, conflicts_with = "no_messenger")]
-        messenger: Option<PersonaId>,
+        /// Member ant (repeatable, or comma-separated): together, the new members.
+        #[arg(long = "member", value_name = "ANT", value_delimiter = ',', value_parser = channel::parse_ant)]
+        members: Option<Vec<UserId>>,
+        /// Ant that triages the posts of humans that @mention nobody.
+        #[arg(long, value_parser = channel::parse_ant, conflicts_with = "no_messenger")]
+        messenger: Option<UserId>,
         /// Go back to the default messenger, `messenger`.
         #[arg(long)]
         no_messenger: bool,
@@ -215,18 +216,18 @@ enum ChannelCommand {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Personas: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_parser = channel::parse_persona)]
-        personas: Vec<PersonaId>,
+        /// Ants: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_parser = channel::parse_ant)]
+        ants: Vec<UserId>,
     },
     /// Remove members from a channel.
     Remove {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Personas: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_parser = channel::parse_persona)]
-        personas: Vec<PersonaId>,
+        /// Ants: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_parser = channel::parse_ant)]
+        ants: Vec<UserId>,
     },
     /// List the channels with the members and the messenger of each.
     List,
@@ -308,10 +309,11 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Issue credentials for a persona, allowing only the subjects of its role, or with --human for a human, a CLI
+    /// Issue credentials for an ant, allowing only the subjects of its role, or with --human for a human, a CLI
     /// user. `human` always gets a human's. Give the hub's --js-domain, if it has one, so they work with it.
     User {
-        persona: PersonaId,
+        /// The ant, or with --human the human.
+        user: UserId,
         /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
         /// the team's humans, on its first CLI connection.
         #[arg(long)]
@@ -319,42 +321,42 @@ enum AuthCommand {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
-        /// Where to write the credentials (default: <dir>/<persona>.creds), or with --public-key the JWT (default:
+        /// Where to write the credentials (default: <dir>/<user>.creds), or with --public-key the JWT (default:
         /// print it).
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Sign this public user NKey (U...), from `ants persona add` on the persona's machine, instead of generating
-        /// a key: the JWT, given to `ants persona add --jwt` there, completes the credentials.
+        /// Sign this public user NKey (U...), from `ants add` on the ant's machine, instead of generating a key:
+        /// the JWT, given to `ants add --jwt` there, completes the credentials.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
     },
-    /// Issue enrollment credentials for a new persona: they may only ask for the persona's credentials, with
-    /// `ants persona add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
+    /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
+    /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
     /// gives here. They expire after --ttl-secs.
     Enroll {
-        persona: PersonaId,
+        ant: UserId,
         /// Seconds the enrollment credentials stay valid.
         #[arg(long, value_name = "SECS", default_value_t = 3600)]
         ttl_secs: u64,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
-        /// Where to write the enrollment credentials (default: <dir>/enroll-<persona>.creds).
+        /// Where to write the enrollment credentials (default: <dir>/enroll-<ant>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
-    /// personas and humans on the machine may do and usable only by a leaf node connection.
+    /// ants and humans on the machine may do and usable only by a leaf node connection.
     Leaf {
         /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
         /// '-' and '_'.
         machine: Machine,
-        /// Persona served on the machine (repeatable). `human` counts as a human.
-        #[arg(long = "persona", value_name = "PERSONA", required_unless_present = "humans")]
-        personas: Vec<PersonaId>,
-        /// Human running the CLI on the machine (repeatable), as issued with `ants auth user NAME --human`.
-        #[arg(long = "human", value_name = "NAME")]
-        humans: Vec<PersonaId>,
+        /// Ant served on the machine (repeatable). `human` counts as a human.
+        #[arg(long = "ant", value_name = "ANT", required_unless_present = "humans")]
+        ants: Vec<UserId>,
+        /// Human running the CLI on the machine (repeatable), as issued with `ants auth user HUMAN --human`.
+        #[arg(long = "human", value_name = "HUMAN")]
+        humans: Vec<UserId>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -365,36 +367,28 @@ enum AuthCommand {
 }
 
 #[derive(Subcommand)]
-enum PersonaCommand {
-    /// List a persona in the config file and give it credentials: its user NKey is generated here and the seed stays
-    /// here. Without --jwt or --enroll, print the public key for the machine holding the account key to sign; run
-    /// again with --jwt or --enroll to complete the credentials. Restart the daemon to serve the persona.
-    Add(Box<persona::AddArgs>),
-}
-
-#[derive(Subcommand)]
 enum EnrollCommand {
-    /// List the enrollment requests heard, the latest of each persona and key; machines repeat theirs every few
+    /// List the enrollment requests heard, the latest of each ant and key; machines repeat theirs every few
     /// seconds while they wait.
     List {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Sign the credentials a persona asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
+    /// Sign the credentials an ant asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
     /// it has one, and send them to the asking machine.
     Approve {
-        persona: PersonaId,
-        /// The asking machine's public key, needed when several ask for the persona.
+        ant: UserId,
+        /// The asking machine's public key, needed when several ask for the ant.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Refuse the credentials a persona asks for, to every machine asking for it or the one of --public-key.
+    /// Refuse the credentials an ant asks for, to every machine asking for it or the one of --public-key.
     Reject {
-        persona: PersonaId,
+        ant: UserId,
         /// The asking machine's public key.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
@@ -442,21 +436,21 @@ enum LeafCommand {
         out: Option<PathBuf>,
     },
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
-    /// what its personas and humans send while the hub is out of reach, and have the hub's stream take from it what
-    /// they may send once the uplink is back. Run it again when the machine's personas or humans change. Fails if
+    /// what its ants and humans send while the hub is out of reach, and have the hub's stream take from it what
+    /// they may send once the uplink is back. Run it again when the machine's ants or humans change. Fails if
     /// the hub does not hear from the outbox within 10 s, as without `feature_flags { js_api_reply_v2: true }` on the
     /// hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
-        /// Persona served on the machine (repeatable), as given to `ants auth leaf`. `human` counts as a human.
-        #[arg(long = "persona", value_name = "PERSONA", required_unless_present_any = ["humans", "remove"])]
-        personas: Vec<PersonaId>,
+        /// Ant served on the machine (repeatable), as given to `ants auth leaf`. `human` counts as a human.
+        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "remove"])]
+        ants: Vec<UserId>,
         /// Human running the CLI on the machine (repeatable), as given to `ants auth leaf`.
-        #[arg(long = "human", value_name = "NAME")]
-        humans: Vec<PersonaId>,
+        #[arg(long = "human", value_name = "HUMAN")]
+        humans: Vec<UserId>,
         /// Stop taking anything from the machine's outbox instead.
-        #[arg(long, conflicts_with_all = ["personas", "humans"])]
+        #[arg(long, conflicts_with_all = ["ants", "humans"])]
         remove: bool,
     },
 }
@@ -534,8 +528,8 @@ async fn main() -> Result<()> {
         }
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
-            let personas = serve::personas(&args, &ants_daemon::config::default_path()?)?;
-            serve::run(serve::configs(personas, &cli.nats, cli.creds, domain.cloned())?).await
+            let ants = serve::ants(&args, &ants_daemon::config::default_path()?)?;
+            serve::run(serve::configs(ants, &cli.nats, cli.creds, domain.cloned())?).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { harness }) => {
@@ -564,8 +558,8 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { persona, human, dir, out, public_key: Some(key) }) => {
-            let jwt = auth::sign_user(&team_dir(dir)?, &persona, auth::role(&persona, human), domain, &key)?;
+        Command::Auth(AuthCommand::User { user, human, dir, out, public_key: Some(key) }) => {
+            let jwt = auth::sign_user(&team_dir(dir)?, &user, auth::role(&user, human), domain, &key)?;
             match out {
                 Some(out) => {
                     std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
@@ -575,56 +569,56 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Auth(AuthCommand::User { persona, human, dir, out, public_key: None }) => {
+        Command::Auth(AuthCommand::User { user, human, dir, out, public_key: None }) => {
             let dir = team_dir(dir)?;
-            let out = out.unwrap_or_else(|| dir.join(format!("{persona}.creds")));
-            auth::issue(&dir, &persona, auth::role(&persona, human), domain, &out)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+            auth::issue(&dir, &user, auth::role(&user, human), domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Enroll { persona, ttl_secs, dir, out }) => {
-            if persona.is_human() {
-                bail!("{persona} is the default human, not a persona");
+        Command::Auth(AuthCommand::Enroll { ant, ttl_secs, dir, out }) => {
+            if ant.is_human() {
+                bail!("{ant} is the default human, not an ant");
             }
             let dir = team_dir(dir)?;
-            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(&persona))));
+            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(&ant))));
             let ttl = std::time::Duration::from_secs(ttl_secs);
-            let expires = auth::issue_enrollment(&dir, &persona, ttl, &out)?;
+            let expires = auth::issue_enrollment(&dir, &ant, ttl, &out)?;
             let expires = chrono::DateTime::from_timestamp(i64::try_from(expires)?, 0).context("expiry")?;
             println!(
-                "{}\nvalid until {expires}; on the persona's machine: ants persona add {persona} --enroll FILE ...\n\
-                 then here: ants enroll approve {persona}",
+                "{}\nvalid until {expires}; on the ant's machine: ants add {ant} --enroll FILE ...\n\
+                 then here: ants enroll approve {ant}",
                 out.display()
             );
             Ok(())
         }
-        Command::Persona(PersonaCommand::Add(args)) => persona::add(*args, &cli.nats, domain).await,
+        Command::Add(args) => add::add(*args, &cli.nats, domain).await,
         Command::Enroll(command) => {
             let dir = |dir| team_dir(dir);
             match command {
                 EnrollCommand::List { dir: d } => {
                     enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?.list().await
                 }
-                EnrollCommand::Approve { persona, public_key, dir: d } => {
+                EnrollCommand::Approve { ant, public_key, dir: d } => {
                     let dir = dir(d)?;
                     let approver = enroll::Approver::connect(&cli.nats, &dir, enroll::LISTEN).await?;
-                    let key = approver.approve(&dir, &persona, public_key.as_deref(), domain).await?;
-                    println!("{persona} approved for {key}");
+                    let key = approver.approve(&dir, &ant, public_key.as_deref(), domain).await?;
+                    println!("{ant} approved for {key}");
                     Ok(())
                 }
-                EnrollCommand::Reject { persona, public_key, reason, dir: d } => {
+                EnrollCommand::Reject { ant, public_key, reason, dir: d } => {
                     let approver = enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?;
-                    for key in approver.reject(&persona, public_key.as_deref(), reason.as_deref()).await? {
-                        println!("{persona} rejected for {key}");
+                    for key in approver.reject(&ant, public_key.as_deref(), reason.as_deref()).await? {
+                        println!("{ant} rejected for {key}");
                     }
                     Ok(())
                 }
             }
         }
-        Command::Auth(AuthCommand::Leaf { machine, personas, humans, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, ants, humans, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &auth::members(&personas, &humans), domain, &out)?;
+            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }
@@ -661,7 +655,7 @@ async fn main() -> Result<()> {
                 "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
-                 once the leaf is up: ants leaf outbox {machine} --persona ... --human ...",
+                 once the leaf is up: ants leaf outbox {machine} --ant ... --human ...",
                 out.display()
             );
             Ok(())
@@ -679,7 +673,7 @@ async fn main() -> Result<()> {
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
             remote.run(listener).await
         }
-        Command::Leaf(LeafCommand::Outbox { machine, personas, humans, remove }) => {
+        Command::Leaf(LeafCommand::Outbox { machine, ants, humans, remove }) => {
             let nats = nats()?;
             let (_, js) = nats.connect("ants-cli").await?;
             if remove {
@@ -687,9 +681,9 @@ async fn main() -> Result<()> {
                 println!("the hub no longer takes anything from the outbox of {machine}");
             } else {
                 let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
-                outbox::admit(&leaf, &js, &machine, &auth::members(&personas, &humans)).await?;
+                outbox::admit(&leaf, &js, &machine, &auth::members(&ants, &humans)).await?;
                 outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
-                println!("outbox of {machine} ready; the hub takes from it what its personas and humans send");
+                println!("outbox of {machine} ready; the hub takes from it what its ants and humans send");
             }
             Ok(())
         }
@@ -729,15 +723,15 @@ fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Split a leading `@persona` off the words.
-fn recipient(mut words: Vec<String>) -> Result<(PersonaId, String)> {
+/// Split a leading `@ant` off the words.
+fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
     let to = match words.first().and_then(|w| w.strip_prefix('@')) {
         Some(name) => {
             let to = name.parse()?;
             words.remove(0);
             to
         }
-        None => PersonaId::messenger(),
+        None => UserId::messenger(),
     };
     if words.is_empty() {
         bail!("nothing to send");
@@ -766,7 +760,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<S
         if reply.thread_id == envelope.thread_id {
             println!("{}: {}", reply.from, reply.text);
             if !nats.me.role.is_human() {
-                // A persona's inbox consumer is its daemon's.
+                // An ant's inbox consumer is its daemon's.
                 return Ok(());
             }
             // Seen here, so `ants inbox` need not show it again. The other replies stay unread.
@@ -782,7 +776,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<S
 }
 
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
-/// a persona starts has no owner: only a human gets a thread's escalations, with a fresh turn budget.
+/// an ant starts has no owner: only a human gets a thread's escalations, with a fresh turn budget.
 fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
     let (to, text) = recipient(words)?;
     let envelope = match thread {
@@ -810,8 +804,8 @@ async fn post(
     if entry.is_none() {
         tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
     }
-    for persona in channel::idle_mentions(&post, entry.as_ref(), &humans) {
-        tracing::warn!("@{persona} is no member of #{}: the post does not wake {persona}", post.channel);
+    for ant in channel::idle_mentions(&post, entry.as_ref(), &humans) {
+        tracing::warn!("@{ant} is no member of #{}: the post does not wake {ant}", post.channel);
     }
     // Subscribe first so a fast reply is not missed.
     let mut replies = match wait {
@@ -870,25 +864,25 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             warn_unserved(&js, members.iter().flatten().chain(&messenger)).await;
             println!("{}", channel::describe(&entry));
         }
-        ChannelCommand::Add { channel, personas } => {
-            channel::check_not_human(&personas, &humans)?;
+        ChannelCommand::Add { channel, ants } => {
+            channel::check_not_human(&ants, &humans)?;
             let (entry, added) = channel::update(&kv, &channel, |entry| {
-                personas.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
+                ants.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
             })
             .await?;
-            for persona in personas.iter().filter(|p| !added.contains(p)) {
-                tracing::warn!("{persona} is already a member of #{channel}");
+            for ant in ants.iter().filter(|p| !added.contains(p)) {
+                tracing::warn!("{ant} is already a member of #{channel}");
             }
             warn_unserved(&js, &added).await;
             println!("{}", channel::describe(&entry));
         }
-        ChannelCommand::Remove { channel, personas } => {
+        ChannelCommand::Remove { channel, ants } => {
             let (entry, removed) = channel::update(&kv, &channel, |entry| {
-                personas.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
+                ants.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
             })
             .await?;
-            for persona in personas.iter().filter(|p| !removed.contains(p)) {
-                tracing::warn!("{persona} is no member of #{channel}");
+            for ant in ants.iter().filter(|p| !removed.contains(p)) {
+                tracing::warn!("{ant} is no member of #{channel}");
             }
             println!("{}", channel::describe(&entry));
         }
@@ -928,15 +922,15 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
 }
 
 /// Warn about members and messengers no daemon serves now, rather than refuse them: one may start later.
-async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, personas: impl IntoIterator<Item = &'a PersonaId>) {
-    let personas: Vec<&PersonaId> = personas.into_iter().collect();
-    if personas.is_empty() {
+async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, ants: impl IntoIterator<Item = &'a UserId>) {
+    let ants: Vec<&UserId> = ants.into_iter().collect();
+    if ants.is_empty() {
         return;
     }
     match roster::list(js).await {
         Ok(roster) => {
-            for persona in channel::unserved(personas, &roster) {
-                tracing::warn!("{persona} is not in the roster: no daemon serves {persona} now");
+            for ant in channel::unserved(ants, &roster) {
+                tracing::warn!("{ant} is not in the roster: no daemon serves {ant} now");
             }
         }
         Err(e) => tracing::debug!("not checking the roster: {e:#}"),
@@ -946,7 +940,7 @@ async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, personas: impl I
 async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
-        bail!("the credentials of {me} are a persona's, whose inbox its daemon reads; `ants inbox` reads a human's");
+        bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
     }
     let (client, js) = nats.connect("ants-inbox").await?;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
@@ -1017,7 +1011,7 @@ async fn dead_letters(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
     Ok(())
 }
 
-/// One line of `ants dead list`: sequence, persona, thread, sender, deliveries, time, error and the start of the text.
+/// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text.
 fn dead_row(seq: u64, letter: &DeadLetter) -> String {
     let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
     let (thread, from, text) = match &letter.envelope {
@@ -1026,7 +1020,7 @@ fn dead_row(seq: u64, letter: &DeadLetter) -> String {
     };
     format!(
         "{seq}\t{}\t{thread}\t{from}\t{}x\t{time}\t{}\t{}",
-        letter.persona,
+        letter.ant,
         letter.deliveries,
         excerpt(&letter.error, 60),
         excerpt(text, 60)
@@ -1062,12 +1056,12 @@ async fn plan_room(nats: &Nats<'_>, thread: ThreadId, words: Vec<String>) -> Res
     Ok(())
 }
 
-/// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for a persona (one token), its
+/// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
 fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
-    match target.parse::<PersonaId>().ok() {
-        Some(persona) => Ok(thread.map_or_else(|| subject::status_of(&persona), |t| subject::status(&persona, t))),
-        None if thread.is_some() => bail!("a thread can only follow a persona, not the subject filter {target:?}"),
+    match target.parse::<UserId>().ok() {
+        Some(ant) => Ok(thread.map_or_else(|| subject::status_of(&ant), |t| subject::status(&ant, t))),
+        None if thread.is_some() => bail!("a thread can only follow an ant, not the subject filter {target:?}"),
         None => Ok(target.to_owned()),
     }
 }
@@ -1092,12 +1086,12 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
             let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
             printer.line(&format!("[{thread}] {from} -> thread notes ({left} turns left){forged}: {}", post.text))
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
-            printer.line(&format!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error))
+            printer.line(&format!("dead letter of {} after {} deliveries: {}", d.ant, d.deliveries, d.error))
         } else if let Ok(r) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
             printer.line(&request_line(&r, &forged(r.check_subject(&msg.subject).is_ok())))
         } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
             let forged = forged(d.subject() == msg.subject.as_str());
-            printer.line(&format!("{}/{}{forged}: answered {}", d.persona, d.request_id, approve::spelling(d.verdict)))
+            printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, approve::spelling(d.verdict)))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };
@@ -1108,15 +1102,15 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
     Ok(())
 }
 
-/// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck persona and thread,
-/// leader and the personas visited; an agent's approval decision in place of its text.
+/// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
+/// leader and the ants visited; an agent's approval decision in place of its text.
 fn envelope_line(e: &Envelope, forged: &str) -> String {
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
     if let Some(d) = &e.approval {
         return format!(
             "{head} decides {} on approval request {}/{}",
             approve::spelling(d.verdict),
-            d.persona,
+            d.ant,
             d.request_id
         );
     }
@@ -1132,7 +1126,7 @@ fn escalation_note(x: &Escalation) -> String {
         Some(id) => format!("{} {}/{id}", x.reason.as_str(), x.stuck),
         None => x.reason.as_str().to_owned(),
     };
-    let visited = x.visited.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(" > ");
+    let visited = x.visited.iter().map(UserId::as_str).collect::<Vec<_>>().join(" > ");
     let (level, stuck, thread, leader) = (x.level, &x.stuck, &x.thread_id, &x.leader);
     format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}")
 }
@@ -1140,8 +1134,8 @@ fn escalation_note(x: &Escalation) -> String {
 /// A tool request as `ants watch` prints it.
 fn request_line(r: &ApprovalRequest, forged: &str) -> String {
     let options = r.options.iter().map(|v| approve::spelling(*v)).collect::<Vec<_>>().join("|");
-    let (thread, persona, id) = (&r.thread_id, &r.persona, r.id);
-    format!("[{thread}] {persona}{forged} asks approval {persona}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
+    let (thread, ant, id) = (&r.thread_id, &r.ant, r.id);
+    format!("[{thread}] {ant}{forged} asks approval {ant}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
 
 /// A channel post as `ants watch` prints it.
@@ -1150,11 +1144,11 @@ fn channel_line(post: &ChannelPost, forged: &str) -> String {
     format!("[{thread}] {from} -> #{channel} ({left} turns left){forged}: {}", post.text)
 }
 
-/// Renders watched traffic, continuing a persona's streamed text on one line until something else arrives.
+/// Renders watched traffic, continuing an ant's streamed text on one line until something else arrives.
 #[derive(Default)]
 struct Printer {
     /// Whose text the output ends with, unterminated.
-    streaming: Option<(PersonaId, ThreadId, &'static str)>,
+    streaming: Option<(UserId, ThreadId, &'static str)>,
 }
 
 impl Printer {
@@ -1165,7 +1159,7 @@ impl Printer {
     }
 
     fn status(&mut self, event: &StatusEvent, forged: &str) -> String {
-        let (who, thread) = (&event.persona, &event.thread_id);
+        let (who, thread) = (&event.ant, &event.thread_id);
         let (verb, text) = match &event.update {
             StatusUpdate::Message { text } => ("says", text),
             StatusUpdate::Thought { text } => ("thinks", text),
@@ -1223,12 +1217,12 @@ mod tests {
     #[test]
     fn messenger_is_the_default_recipient() {
         let (to, text) = recipient(words("who owns billing?")).unwrap();
-        assert_eq!((to, text.as_str()), (PersonaId::messenger(), "who owns billing?"));
+        assert_eq!((to, text.as_str()), (UserId::messenger(), "who owns billing?"));
     }
 
     #[test]
     fn an_ask_comes_from_and_belongs_to_the_cli_human() {
-        let alice: PersonaId = "alice".parse().unwrap();
+        let alice: UserId = "alice".parse().unwrap();
         let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
         let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
         assert_eq!((&ask.from, ask.to.as_str(), ask.owner.as_ref()), (&alice, "dev-b", Some(&alice)));
@@ -1238,15 +1232,15 @@ mod tests {
     }
 
     #[test]
-    fn an_ask_with_a_persona_s_credentials_has_no_owner() {
-        let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Persona };
+    fn an_ask_with_an_ant_s_credentials_has_no_owner() {
+        let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Ant };
         let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
         assert_eq!((&ask.from, ask.owner), (&me.id, None));
     }
 
     #[test]
     fn dead_rows_show_the_message_or_the_bad_payload() {
-        let mut ask = Envelope::new(PersonaId::human(), "dev-a".parse().unwrap(), "build it\nand test it");
+        let mut ask = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "build it\nand test it");
         ask.thread_id = "t1".parse().unwrap();
         let letter = DeadLetter::of_envelope("dev-a".parse().unwrap(), 3, 5, "harness crashed", ask);
         let row = dead_row(12, &letter);
@@ -1258,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_follows_a_persona_or_a_subject_filter() {
+    fn watch_follows_an_ant_or_a_subject_filter() {
         let t1: ThreadId = "t1".parse().unwrap();
         assert_eq!(watch_filter("dev-a", None).unwrap(), "ants.status.dev-a.*");
         assert_eq!(watch_filter("dev-a", Some(&t1)).unwrap(), "ants.status.dev-a.t1");
@@ -1269,7 +1263,7 @@ mod tests {
 
     #[test]
     fn streamed_text_continues_on_one_line() {
-        let (a, t1): (PersonaId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
+        let (a, t1): (UserId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
         let event = |update| StatusEvent::new(a.clone(), t1.clone(), update);
         let says = |text: &str| event(StatusUpdate::Message { text: text.to_owned() });
         let mut printer = Printer::default();
@@ -1308,7 +1302,7 @@ mod tests {
 
     #[test]
     fn watched_escalations_show_level_reason_leader_and_visited() {
-        let p = |s: &str| -> PersonaId { s.parse().unwrap() };
+        let p = |s: &str| -> UserId { s.parse().unwrap() };
         let t1: ThreadId = "t1".parse().unwrap();
         let start = Escalation::new(p("dev-a"), t1.clone(), ants_proto::EscalationReason::TurnBudget);
         let ants_proto::Hop::Chain { escalation, .. } = start.up(&[p("lead"), p("dev-b")], 3) else { panic!("up") };
@@ -1341,6 +1335,13 @@ mod tests {
             envelope_line(&decided, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
+    }
+
+    #[test]
+    fn add_is_a_top_level_command() {
+        let cli = Cli::try_parse_from(["ants", "add", "dev-a", "--enroll", "enroll-dev-a.creds"]).unwrap();
+        assert!(matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a"));
+        assert!(Cli::try_parse_from(["ants", "ant", "add", "dev-a"]).is_err());
     }
 
     #[test]

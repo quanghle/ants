@@ -1,30 +1,30 @@
-//! `ants approve`: the tool requests personas escalate to the humans, and their answers.
+//! `ants approve`: the tool requests ants escalate to the humans, and their answers.
 //!
 //! Requests and decisions both live in the ANTS stream, so the pending ones are read back by subject, without consuming
-//! anything: every human sees every request on `ants.approvals.<persona>` that has not expired and has no decision on
-//! `ants.approvals.<persona>.<request id>`. An expired request needs no answer: its persona already rejected it. The
-//! persona of a request is the one its subject names, as credentials pin it there; a request whose body names another
+//! anything: every human sees every request on `ants.approvals.<ant>` that has not expired and has no decision on
+//! `ants.approvals.<ant>.<request id>`. An expired request needs no answer: its ant already rejected it. The
+//! ant of a request is the one its subject names, as credentials pin it there; a request whose body names another
 //! is skipped with a warning.
 //!
 //! Any human decides, and the first decision wins: a decision is stored only while the request's subject holds none
-//! ([`answer`]), so of two humans answering at once, the second is told the request was already answered. The persona
+//! ([`answer`]), so of two humans answering at once, the second is told the request was already answered. The ant
 //! acts on the stored decision, not on the first it hears, since a refused publish still reaches subscribers.
 //!
-//! An agent of the persona's escalate_to may decide too: its decision travels as an envelope to the persona's inbox,
-//! `ants.inbox.<persona>.<agent>`, where humans read it back. A request such a decision came to first, as the stream
+//! An agent of the ant's escalate_to may decide too: its decision travels as an envelope to the ant's inbox,
+//! `ants.inbox.<ant>.<agent>`, where humans read it back. A request such a decision came to first, as the stream
 //! ordered them and before the request expired, is decided too ([`State::DecidedByAgent`]), and a human's later answer
-//! is refused. The chain is the persona's roster entry's, else the one kept in `ants_chains`, as the persona takes a
+//! is refused. The chain is the ant's roster entry's, else the one kept in `ants_chains`, as the ant takes a
 //! decision only from its own chain.
 //!
-//! Request ids are unique only per persona: any persona can publish a request reusing another's id. So a request is
-//! written `<persona>/<id>`, and a bare id (or start of one) matching requests of several personas is refused with
+//! Request ids are unique only per ant: any ant can publish a request reusing another's id. So a request is
+//! written `<ant>/<id>`, and a bare id (or start of one) matching requests of several ants is refused with
 //! the qualified ids to choose from.
 
 use std::collections::HashMap;
 
 use ants_daemon::chains;
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, PersonaId, ROSTER_BUCKET, RosterEntry, STREAM, Uuid,
+    ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, ROSTER_BUCKET, RosterEntry, STREAM, UserId, Uuid,
     Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
@@ -71,9 +71,9 @@ pub enum State {
     Pending,
     /// A human's decision.
     Decided(ApprovalDecision),
-    /// The decision of an agent of the persona's escalate_to, the one named.
-    DecidedByAgent(PersonaId, ApprovalDecision),
-    /// No decision in time; the persona rejected it.
+    /// The decision of an agent of the ant's escalate_to, the one named.
+    DecidedByAgent(UserId, ApprovalDecision),
+    /// No decision in time; the ant rejected it.
     Expired,
 }
 
@@ -91,30 +91,29 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
         match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
             Ok(request) => match request.check_subject(&msg.subject) {
                 Ok(()) => requests.push((msg.sequence, request)),
-                Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping a request for another persona"),
+                Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping a request for another ant"),
             },
             Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping unreadable approval request"),
         }
     }
 }
 
-/// The escalate_to of `persona`, whose agents may decide its requests: its roster entry's, else the chain kept in
+/// The escalate_to of `ant`, whose agents may decide its requests: its roster entry's, else the chain kept in
 /// `ants_chains`, else none.
-async fn chain_of(js: &jetstream::Context, persona: &PersonaId) -> Result<Vec<PersonaId>> {
+async fn chain_of(js: &jetstream::Context, ant: &UserId) -> Result<Vec<UserId>> {
     if let Ok(kv) = js.get_key_value(ROSTER_BUCKET).await
-        && let Some(value) =
-            kv.get(persona.as_str()).await.with_context(|| format!("reading {persona} in the roster"))?
+        && let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))?
     {
         match serde_json::from_slice::<RosterEntry>(&value).map_err(anyhow::Error::from).and_then(|entry| {
-            entry.check_key(persona.as_str())?;
+            entry.check_key(ant.as_str())?;
             Ok(entry)
         }) {
             Ok(entry) => return Ok(entry.escalate_to),
-            Err(e) => tracing::warn!(%persona, error = %e, "skipping a roster entry"),
+            Err(e) => tracing::warn!(%ant, error = %e, "skipping a roster entry"),
         }
     }
     match js.get_key_value(CHAINS_BUCKET).await {
-        Ok(kv) => Ok(chains::read(&kv, persona).await?.unwrap_or_default()),
+        Ok(kv) => Ok(chains::read(&kv, ant).await?.unwrap_or_default()),
         Err(_) => Ok(Vec::new()),
     }
 }
@@ -122,14 +121,14 @@ async fn chain_of(js: &jetstream::Context, persona: &PersonaId) -> Result<Vec<Pe
 /// A decision an agent of the requester's escalate_to sent to its inbox.
 #[derive(Debug, Clone)]
 struct AgentDecision {
-    by: PersonaId,
+    by: UserId,
     decision: ApprovalDecision,
     sent_at: DateTime<Utc>,
 }
 
 impl AgentDecision {
-    /// The decision as `request`'s persona takes it, if it came in time: a verdict not offered counts as a rejection.
-    fn on(&self, request: &ApprovalRequest) -> Option<(PersonaId, ApprovalDecision)> {
+    /// The decision as `request`'s ant takes it, if it came in time: a verdict not offered counts as a rejection.
+    fn on(&self, request: &ApprovalRequest) -> Option<(UserId, ApprovalDecision)> {
         if self.sent_at >= request.expires_at {
             return None;
         }
@@ -139,12 +138,12 @@ impl AgentDecision {
     }
 }
 
-/// The first decision on each request of `persona` that an agent of `chain` sent to its inbox, by request id, from
+/// The first decision on each request of `ant` that an agent of `chain` sent to its inbox, by request id, from
 /// stream sequence `from` up to `until` (excluded), as far as the stream holds messages.
 async fn agent_decisions(
     stream: &Stream,
-    persona: &PersonaId,
-    chain: &[PersonaId],
+    ant: &UserId,
+    chain: &[UserId],
     from: u64,
     until: Option<u64>,
 ) -> Result<HashMap<Uuid, AgentDecision>> {
@@ -152,13 +151,13 @@ async fn agent_decisions(
     if chain.is_empty() {
         return Ok(found);
     }
-    let inbox = subject::inbox_of(persona);
+    let inbox = subject::inbox_of(ant);
     let mut next = from;
     while until.is_none_or(|until| next < until) {
         let msg = match stream.get_first_raw_message_by_subject(&inbox, next).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => break,
-            Err(e) => return Err(e).with_context(|| format!("reading the inbox of {persona}")),
+            Err(e) => return Err(e).with_context(|| format!("reading the inbox of {ant}")),
         };
         next = msg.sequence + 1;
         if until.is_some_and(|until| msg.sequence >= until) {
@@ -166,8 +165,8 @@ async fn agent_decisions(
         }
         let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
         let Some(decision) = &envelope.approval else { continue };
-        // The subject pins the sender; the persona takes decisions on its own requests from its own chain only.
-        let ours = &envelope.to == persona && &decision.persona == persona;
+        // The subject pins the sender; the ant takes decisions on its own requests from its own chain only.
+        let ours = &envelope.to == ant && &decision.ant == ant;
         if ours && envelope.check_subject(&msg.subject).is_ok() && envelope.is_from_chain(chain) {
             found.entry(decision.request_id).or_insert_with(|| AgentDecision {
                 by: envelope.from.clone(),
@@ -196,8 +195,8 @@ async fn decisions(stream: &Stream, request: &ApprovalRequest) -> Result<(Option
         };
         last = msg.sequence;
         match serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
-            Ok(d) if d.request_id == request.id && d.persona == request.persona => return Ok((Some(d), last)),
-            // The persona ignores these too, so the request is still open.
+            Ok(d) if d.request_id == request.id && d.ant == request.ant => return Ok((Some(d), last)),
+            // The ant ignores these too, so the request is still open.
             _ => tracing::warn!(seq = msg.sequence, "ignoring a malformed decision"),
         }
     }
@@ -223,10 +222,10 @@ async fn state_at(
     now: DateTime<Utc>,
 ) -> Result<(State, u64)> {
     let (decision, last) = decisions(stream, request).await?;
-    // An agent's decision counts only before a human's: the persona takes the first.
+    // An agent's decision counts only before a human's: the ant takes the first.
     let until = decision.is_some().then_some(last);
-    let chain = chain_of(js, &request.persona).await?;
-    let agent = agent_decisions(stream, &request.persona, &chain, seq + 1, until).await?;
+    let chain = chain_of(js, &request.ant).await?;
+    let agent = agent_decisions(stream, &request.ant, &chain, seq + 1, until).await?;
     let state = match (agent.get(&request.id).and_then(|d| d.on(request)), decision) {
         (Some((by, decision)), _) => State::DecidedByAgent(by, decision),
         (None, Some(decision)) => State::Decided(decision),
@@ -237,7 +236,7 @@ async fn state_at(
 }
 
 /// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human or an agent
-/// of the persona's escalate_to.
+/// of the ant's escalate_to.
 pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
     let mut undecided = Vec::new();
     for (seq, request) in requests(stream).await? {
@@ -246,40 +245,40 @@ pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc
             undecided.push((seq, request));
         }
     }
-    // One read of each persona's inbox, from its oldest undecided request on.
-    let mut decided: HashMap<PersonaId, HashMap<Uuid, AgentDecision>> = HashMap::new();
+    // One read of each ant's inbox, from its oldest undecided request on.
+    let mut decided: HashMap<UserId, HashMap<Uuid, AgentDecision>> = HashMap::new();
     for (seq, request) in &undecided {
-        if decided.contains_key(&request.persona) {
+        if decided.contains_key(&request.ant) {
             continue;
         }
-        let chain = chain_of(js, &request.persona).await?;
-        let found = agent_decisions(stream, &request.persona, &chain, seq + 1, None).await?;
-        decided.insert(request.persona.clone(), found);
+        let chain = chain_of(js, &request.ant).await?;
+        let found = agent_decisions(stream, &request.ant, &chain, seq + 1, None).await?;
+        decided.insert(request.ant.clone(), found);
     }
     Ok(undecided
         .into_iter()
         .map(|(_, request)| request)
-        .filter(|r| decided.get(&r.persona).and_then(|d| d.get(&r.id)).and_then(|d| d.on(r)).is_none())
+        .filter(|r| decided.get(&r.ant).and_then(|d| d.get(&r.id)).and_then(|d| d.on(r)).is_none())
         .collect())
 }
 
-/// How a request is written on the command line: `<persona>/<id>`. Persona names and ids never contain `/`.
+/// How a request is written on the command line: `<ant>/<id>`. Ant names and ids never contain `/`.
 pub fn qualified(request: &ApprovalRequest) -> String {
-    format!("{}/{}", request.persona, request.id)
+    format!("{}/{}", request.ant, request.id)
 }
 
-/// What `ants approve` was given to pick a request: a start of its id, and the persona when written `<persona>/<id>`.
+/// What `ants approve` was given to pick a request: a start of its id, and the ant when written `<ant>/<id>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
-    pub persona: Option<PersonaId>,
+    pub ant: Option<UserId>,
     pub id: String,
 }
 
 impl Query {
     pub fn parse(text: &str) -> Result<Self> {
         let text = text.trim();
-        let (persona, id) = match text.split_once('/') {
-            Some((persona, id)) => (Some(persona.parse::<PersonaId>()?), id),
+        let (ant, id) = match text.split_once('/') {
+            Some((ant, id)) => (Some(ant.parse::<UserId>()?), id),
             None => (None, text),
         };
         let id = id.to_ascii_lowercase();
@@ -289,18 +288,18 @@ impl Query {
         if !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
             bail!("{id} is not a request id: hex digits and dashes only");
         }
-        Ok(Self { persona, id })
+        Ok(Self { ant, id })
     }
 
     fn matches(&self, request: &ApprovalRequest) -> bool {
-        self.persona.as_ref().is_none_or(|p| *p == request.persona) && request.id.to_string().starts_with(&self.id)
+        self.ant.as_ref().is_none_or(|p| *p == request.ant) && request.id.to_string().starts_with(&self.id)
     }
 }
 
 impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.persona {
-            Some(persona) => write!(f, "{persona}/{}", self.id),
+        match &self.ant {
+            Some(ant) => write!(f, "{ant}/{}", self.id),
             None => f.write_str(&self.id),
         }
     }
@@ -318,14 +317,12 @@ pub fn select(requests: Vec<ApprovalRequest>, query: &Query) -> Result<ApprovalR
             if n > LISTED {
                 names.push_str(&format!(" and {} more", n - LISTED));
             }
-            bail!(
-                "{n} approval requests match {query}: {names}; give more of the id or name the persona as <persona>/<id>"
-            )
+            bail!("{n} approval requests match {query}: {names}; give more of the id or name the ant as <ant>/<id>")
         }
     }
 }
 
-/// The one request `id` picks: a unique start of its id, optionally written `<persona>/<id>`. Returns it with its stream
+/// The one request `id` picks: a unique start of its id, optionally written `<ant>/<id>`. Returns it with its stream
 /// sequence.
 pub async fn find(stream: &Stream, id: &str) -> Result<(u64, ApprovalRequest)> {
     let query = Query::parse(id)?;
@@ -370,7 +367,7 @@ async fn check(
             bail!("request {} was already answered by {by}: {}", qualified(request), spelling(d.verdict))
         }
         (State::Expired, _) => {
-            bail!("request {} expired at {}; {} rejected it", qualified(request), request.expires_at, request.persona)
+            bail!("request {} expired at {}; {} rejected it", qualified(request), request.expires_at, request.ant)
         }
     };
     if !request.options.contains(&verdict) {
@@ -425,7 +422,7 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-/// One line of the pending list: `<persona>/<id>`, thread, tool, files, options and time left.
+/// One line of the pending list: `<ant>/<id>`, thread, tool, files, options and time left.
 fn row(request: &ApprovalRequest, now: DateTime<Utc>) -> String {
     let files = if request.tool.locations.is_empty() { "-".to_owned() } else { request.tool.locations.join(",") };
     format!(
@@ -443,8 +440,8 @@ fn row(request: &ApprovalRequest, now: DateTime<Utc>) -> String {
 /// The whole request, with its tool input and how to answer it.
 fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> String {
     let mut out = format!(
-        "request  {}\npersona  {}\nthread   {}\ntool     {}: {}\n",
-        request.id, request.persona, request.thread_id, request.tool.kind, request.tool.title
+        "request  {}\nant      {}\nthread   {}\ntool     {}: {}\n",
+        request.id, request.ant, request.thread_id, request.tool.kind, request.tool.title
     );
     for location in &request.tool.locations {
         out.push_str(&format!("file     {location}\n"));
@@ -497,7 +494,7 @@ pub async fn run(nats: &crate::Nats<'_>, args: Args) -> Result<()> {
     match (&args.id, args.answer) {
         (Some(id), Some(verdict)) => {
             let decision = answer(&js, &stream, id, verdict.into(), Utc::now()).await?;
-            println!("answered request {}/{}: {}", decision.persona, decision.request_id, spelling(decision.verdict));
+            println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
         }
         (Some(id), None) => {
             let (seq, request) = find(&stream, id).await?;
@@ -522,9 +519,9 @@ pub async fn run(nats: &crate::Nats<'_>, args: Args) -> Result<()> {
                 while let Some(msg) = live.next().await {
                     let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
                     if let Err(e) = request.check_subject(&msg.subject) {
-                        tracing::warn!(error = %e, "skipping a request for another persona");
+                        tracing::warn!(error = %e, "skipping a request for another ant");
                     } else if !request.is_expired(Utc::now())
-                        && !listed.iter().any(|r| r.id == request.id && r.persona == request.persona)
+                        && !listed.iter().any(|r| r.id == request.id && r.ant == request.ant)
                     {
                         show(&request)?;
                     }
@@ -545,9 +542,9 @@ mod tests {
     use super::*;
     use crate::auth::tests::Server;
 
-    fn request(persona: &PersonaId, title: &str, offered: Vec<Verdict>, timeout: Duration) -> ApprovalRequest {
+    fn request(ant: &UserId, title: &str, offered: Vec<Verdict>, timeout: Duration) -> ApprovalRequest {
         let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };
-        ApprovalRequest::new(persona.clone(), ThreadId::generate(), tool, offered, timeout)
+        ApprovalRequest::new(ant.clone(), ThreadId::generate(), tool, offered, timeout)
     }
 
     fn titles(requests: &[ApprovalRequest]) -> Vec<&str> {
@@ -558,8 +555,8 @@ mod tests {
     #[tokio::test]
     async fn pending_requests_are_listed_and_answered() {
         let Some(server) = Server::start() else { return };
-        let dev_a: PersonaId = "dev-a".parse().unwrap();
-        let (_, human) = server.connect(&PersonaId::human()).await;
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         let (_, agent) = server.connect(&dev_a).await;
         let minute = Duration::from_secs(60);
@@ -570,7 +567,7 @@ mod tests {
             bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
         }
         // dev-b publishes only on its own subject, so a request there naming dev-a is forged.
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let (_, intruder) = server.connect(&dev_b).await;
         let forged = request(&dev_a, "git push --force", vec![Verdict::AllowAlways], minute);
         bus::publish_json(&intruder, subject::approvals(&dev_b), &forged, None).await.unwrap();
@@ -599,19 +596,19 @@ mod tests {
     }
 
     /// dev-b reuses the id of dev-a's request under its own name: a bare id is refused with both qualified ids, and
-    /// `<persona>/<id>` answers the right one, on that persona's subject.
+    /// `<ant>/<id>` answers the right one, on that ant's subject.
     #[tokio::test]
-    async fn a_persona_qualified_id_picks_among_colliding_ids() {
+    async fn an_ant_qualified_id_picks_among_colliding_ids() {
         let Some(server) = Server::start() else { return };
-        let (dev_a, dev_b): (PersonaId, PersonaId) = ("dev-a".parse().unwrap(), "dev-b".parse().unwrap());
-        let (_, human) = server.connect(&PersonaId::human()).await;
+        let (dev_a, dev_b): (UserId, UserId) = ("dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         let minute = Duration::from_secs(60);
         let real = request(&dev_a, "git push", vec![Verdict::AllowOnce], minute);
         let mut copy = request(&dev_b, "rm -rf /", vec![Verdict::AllowOnce], minute);
         copy.id = real.id;
-        for (persona, r) in [(&dev_a, &real), (&dev_b, &copy)] {
-            let (_, agent) = server.connect(persona).await;
+        for (ant, r) in [(&dev_a, &real), (&dev_b, &copy)] {
+            let (_, agent) = server.connect(ant).await;
             bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
         }
 
@@ -624,7 +621,7 @@ mod tests {
 
         let decision =
             answer(&human, &stream, &format!("dev-a/{}", &id[..8]), Verdict::AllowOnce, Utc::now()).await.unwrap();
-        assert_eq!((&decision.persona, decision.request_id), (&dev_a, real.id));
+        assert_eq!((&decision.ant, decision.request_id), (&dev_a, real.id));
         let stored = stream.get_last_raw_message_by_subject(&real.decision_subject()).await.unwrap();
         assert_eq!(stored.subject.as_str(), format!("ants.approvals.dev-a.{id}"));
         assert_eq!(titles(&pending(&human, &stream, Utc::now()).await.unwrap()), ["rm -rf /"]);
@@ -636,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn every_human_sees_every_request_and_the_first_decision_wins() {
         let Some(server) = Server::start() else { return };
-        let (alice, bob, dev_a): (PersonaId, PersonaId, PersonaId) =
+        let (alice, bob, dev_a): (UserId, UserId, UserId) =
             ("alice".parse().unwrap(), "bob".parse().unwrap(), "dev-a".parse().unwrap());
         let (_, a_js) = server.connect_as(&alice, Role::Human).await;
         let (_, b_js) = server.connect_as(&bob, Role::Human).await;
@@ -663,7 +660,7 @@ mod tests {
             assert_eq!(state(js, stream, seq, &push, Utc::now()).await.unwrap(), State::Decided(first.clone()));
             assert!(pending(js, stream, Utc::now()).await.unwrap().is_empty());
         }
-        // The persona hears alice's decision, and acts on the one stored, which is alice's too.
+        // The ant hears alice's decision, and acts on the one stored, which is alice's too.
         let msg = tokio::time::timeout(Duration::from_secs(5), heard.next()).await.unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<ApprovalDecision>(&msg.payload).unwrap(), first);
         let agent_stream = agent.get_stream_no_info(STREAM).await.unwrap();
@@ -676,8 +673,8 @@ mod tests {
     #[tokio::test]
     async fn a_request_an_agent_of_the_chain_decided_is_no_longer_pending() {
         let Some(server) = Server::start() else { return };
-        let [dev_a, lead, dev_c]: [PersonaId; 3] = ["dev-a", "lead", "dev-c"].map(|p| p.parse().unwrap());
-        let (_, human) = server.connect(&PersonaId::human()).await;
+        let [dev_a, lead, dev_c]: [UserId; 3] = ["dev-a", "lead", "dev-c"].map(|p| p.parse().unwrap());
+        let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         bus::ensure_chains(&human).await.unwrap();
         let (_, agent) = server.connect(&dev_a).await;
@@ -689,11 +686,11 @@ mod tests {
         for r in [&push, &rm, &cat] {
             bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
         }
-        let decide_as = async |js: &jetstream::Context, from: &PersonaId, r: &ApprovalRequest, verdict| {
+        let decide_as = async |js: &jetstream::Context, from: &UserId, r: &ApprovalRequest, verdict| {
             let envelope = Envelope::decision(
                 r.thread_id.clone(),
                 from.clone(),
-                ApprovalDecision::new(r.id, r.persona.clone(), verdict),
+                ApprovalDecision::new(r.id, r.ant.clone(), verdict),
             );
             bus::publish_json(js, envelope.subject(), &envelope, None).await.unwrap();
         };
@@ -720,22 +717,22 @@ mod tests {
     }
 
     #[test]
-    fn a_query_names_a_known_persona_and_a_request_id() {
+    fn a_query_names_a_known_ant_and_a_request_id() {
         let minute = Duration::from_secs(60);
-        let dev_a: PersonaId = "dev-a".parse().unwrap();
+        let dev_a: UserId = "dev-a".parse().unwrap();
         let known = vec![request(&dev_a, "git push", vec![], minute)];
         let id = known[0].id.to_string();
         let pick = |text: &str| Query::parse(text).and_then(|q| select(known.clone(), &q)).map_err(|e| e.to_string());
         assert_eq!(
             pick(&format!(" DEV-A/{} ", id.to_uppercase())).unwrap_err(),
-            "invalid persona id \"DEV-A\": use 1-64 of a-z, 0-9 and '-', starting with a letter or digit"
+            "invalid user id \"DEV-A\": use 1-64 of a-z, 0-9 and '-', starting with a letter or digit"
         );
         assert_eq!(pick(&format!("dev-a/{}", id.to_uppercase())), Ok(known[0].clone()));
         assert_eq!(pick(&format!("dev-c/{id}")).unwrap_err(), format!("no approval request dev-c/{id}"));
         assert_eq!(pick("0000").unwrap_err(), "no approval request 0000");
         assert_eq!(pick("dev-a/").unwrap_err(), "no request id given");
         assert!(pick("dev-a/dev-b/0").unwrap_err().contains("is not a request id"));
-        assert!(pick("/0").unwrap_err().contains("invalid persona id"));
+        assert!(pick("/0").unwrap_err().contains("invalid user id"));
     }
 
     #[test]

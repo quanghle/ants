@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET,
-    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, ROSTER_BUCKET, SESSIONS_BUCKET,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -26,17 +26,17 @@ pub const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// traffic. Reconnects are unlimited by default.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 
-/// Connect to NATS as `persona`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
+/// Connect to NATS as `user`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
 /// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`, and
 /// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]).
 pub async fn connect(
     url: &str,
     creds: Option<&Path>,
     js_domain: Option<&JsDomain>,
-    persona: &PersonaId,
+    user: &UserId,
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
-    let client = options(creds, persona, name)
+    let client = options(creds, user, name)
         .await?
         .connect(url)
         .await
@@ -59,13 +59,13 @@ pub async fn connect_retrying(
     url: &str,
     creds: Option<&Path>,
     js_domain: Option<&JsDomain>,
-    persona: &PersonaId,
+    user: &UserId,
     name: &str,
     stop: impl Future<Output = ()>,
 ) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
     // A denied request just times out; the server's error naming it arrives through the event callback.
     let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
-    let options = options(creds, persona, name).await?.event_callback(move |event| {
+    let options = options(creds, user, name).await?.event_callback(move |event| {
         let denied_tx = denied_tx.clone();
         async move {
             if let Event::ServerError(async_nats::ServerError::Other(e)) = &event
@@ -117,11 +117,11 @@ pub async fn connect_retrying(
     }
 }
 
-async fn options(creds: Option<&Path>, persona: &PersonaId, name: &str) -> Result<async_nats::ConnectOptions> {
+async fn options(creds: Option<&Path>, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {
     let options = async_nats::ConnectOptions::new()
         .name(name)
         .ping_interval(PING_INTERVAL)
-        .custom_inbox_prefix(inbox_prefix(persona))
+        .custom_inbox_prefix(inbox_prefix(user))
         .event_callback(|event| async move { log_event(event) });
     match creds {
         Some(path) => {
@@ -183,7 +183,7 @@ fn stream_config() -> stream::Config {
         subjects: STREAM_SUBJECTS.iter().map(|s| (*s).to_owned()).collect(),
         storage: stream::StorageType::File,
         max_age: RETENTION,
-        // A persona reads the decision stored on its approval requests with a direct get (`approvals`).
+        // An ant reads the decision stored on its approval requests with a direct get (`approvals`).
         allow_direct: true,
         republish: Some(stored_inbox()),
         ..Default::default()
@@ -206,7 +206,7 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     }
     js.create_key_value(kv::Config {
         bucket: ROSTER_BUCKET.to_owned(),
-        description: "Personas being served, refreshed by daemon heartbeats".to_owned(),
+        description: "Ants being served, refreshed by daemon heartbeats".to_owned(),
         history: 1,
         max_age: ttl,
         // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
@@ -290,14 +290,14 @@ pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
 }
 
 /// The KV bucket of the escalation chains ([`CHAINS_BUCKET`]), created when missing and the credentials allow it (the
-/// human's). Entries never expire: a chain outlives its persona's roster entry.
+/// human's). Entries never expire: a chain outlives its ant's roster entry.
 pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(CHAINS_BUCKET).await {
         return Ok(store);
     }
     js.create_key_value(kv::Config {
         bucket: CHAINS_BUCKET.to_owned(),
-        description: "Escalation chains of the personas, each written by its daemon".to_owned(),
+        description: "Escalation chains of the ants, each written by its daemon".to_owned(),
         history: 1,
         storage: stream::StorageType::File,
         ..Default::default()
@@ -322,21 +322,21 @@ async fn ensure_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store>
     .with_context(|| format!("creating the {bucket} bucket (with credentials, `ants init` as the human creates it)"))
 }
 
-/// Messages from the durable consumer of `persona`'s inbox, which is created if missing and updated if its settings
+/// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings
 /// changed (such as the filter of a consumer from before inbox subjects named the sender). At most `max_ack_pending`
 /// messages are in hand at once.
 pub async fn inbox_consumer(
     stream: &stream::Stream,
-    persona: &PersonaId,
+    ant: &UserId,
     ack_wait: Duration,
     max_deliver: i64,
     max_ack_pending: i64,
 ) -> Result<pull::Stream> {
-    let name = ants_proto::inbox_consumer(persona);
+    let name = ants_proto::inbox_consumer(ant);
     let consumer: PullConsumer = stream
         .create_consumer(pull::Config {
             durable_name: Some(name.clone()),
-            filter_subject: subject::inbox_of(persona),
+            filter_subject: subject::inbox_of(ant),
             ack_policy: consumer::AckPolicy::Explicit,
             ack_wait,
             max_deliver,
@@ -348,17 +348,17 @@ pub async fn inbox_consumer(
     Ok(consumer.messages().await?)
 }
 
-/// Messages from the durable consumer `chan-<persona>` of every channel post, with the settings of
-/// [`inbox_consumer`]; the daemon picks out the posts meant for the persona. A new consumer starts with the posts
+/// Messages from the durable consumer `chan-<ant>` of every channel post, with the settings of
+/// [`inbox_consumer`]; the daemon picks out the posts meant for the ant. A new consumer starts with the posts
 /// stored from then on, so a first start does not answer a channel's history.
 pub async fn chan_consumer(
     stream: &stream::Stream,
-    persona: &PersonaId,
+    ant: &UserId,
     ack_wait: Duration,
     max_deliver: i64,
     max_ack_pending: i64,
 ) -> Result<pull::Stream> {
-    let name = ants_proto::chan_consumer(persona);
+    let name = ants_proto::chan_consumer(ant);
     let consumer: PullConsumer = stream
         .create_consumer(pull::Config {
             durable_name: Some(name.clone()),
@@ -378,11 +378,7 @@ pub async fn chan_consumer(
 /// The durable consumer of the inbox of `human`, created if missing. A reply stays in it, unread, until acked. Any
 /// number may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
 /// consumer from before inbox subjects named the sender gets the current filter.
-pub async fn human_inbox_consumer(
-    stream: &stream::Stream,
-    human: &PersonaId,
-    ack_wait: Duration,
-) -> Result<PullConsumer> {
+pub async fn human_inbox_consumer(stream: &stream::Stream, human: &UserId, ack_wait: Duration) -> Result<PullConsumer> {
     let name = ants_proto::inbox_consumer(human);
     let config = pull::Config {
         durable_name: Some(name.clone()),
@@ -470,30 +466,30 @@ pub async fn store_acked<T: serde::Serialize>(
     Ok(None)
 }
 
-/// Messages to a persona as they come, from [`live_inbox`].
+/// Messages to a user as they come, from [`live_inbox`].
 pub type LiveInbox = Pin<Box<dyn Stream<Item = async_nats::Message> + Send>>;
 
 /// How many messages [`live_inbox`] remembers to take each once.
 const SEEN: usize = 1024;
 
-/// Messages to `persona` as they come, each once, on their inbox subject: published there, and as the hub's stream
+/// Messages to `user` as they come, each once, on their inbox subject: published there, and as the hub's stream
 /// stored them ([`subject::stored_inbox`]). A message sourced from a leaf's outbox comes only the second way, and so
 /// does any message while the stream lacks the republishing `ants init` sets up. Subscribed before it returns, so
 /// nothing published after that is missed.
-pub async fn live_inbox(client: &async_nats::Client, persona: &PersonaId) -> Result<LiveInbox> {
-    let live = client.subscribe(subject::inbox_of(persona)).await?;
-    let stored = client.subscribe(subject::stored_inbox(persona)).await?;
-    let persona = persona.clone();
-    let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &persona)));
+pub async fn live_inbox(client: &async_nats::Client, user: &UserId) -> Result<LiveInbox> {
+    let live = client.subscribe(subject::inbox_of(user)).await?;
+    let stored = client.subscribe(subject::stored_inbox(user)).await?;
+    let user = user.clone();
+    let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &user)));
     let mut seen = Seen::default();
     Ok(Box::pin(futures::stream::select(live, stored).filter(move |msg| std::future::ready(seen.first(msg)))))
 }
 
-/// A stored message republished to `persona`, back on the inbox subject it was stored under.
-fn as_published(mut msg: async_nats::Message, persona: &PersonaId) -> Option<async_nats::Message> {
+/// A stored message republished to `user`, back on the inbox subject it was stored under.
+fn as_published(mut msg: async_nats::Message, user: &UserId) -> Option<async_nats::Message> {
     let subject = msg.headers.as_ref()?.get(async_nats::header::NATS_SUBJECT)?.as_str().to_owned();
     let (to, _) = subject::parse_inbox(&subject)?;
-    if to != *persona {
+    if to != *user {
         return None;
     }
     msg.subject = subject.into();
@@ -563,7 +559,7 @@ mod tests {
     use super::*;
     use ants_test_support::{NatsServer, free_port, have};
 
-    fn dev() -> PersonaId {
+    fn dev() -> UserId {
         "dev-a".parse().unwrap()
     }
 
@@ -678,7 +674,7 @@ mod tests {
     }
 
     /// A waiter takes each message once, live, as the stream stored it, or both in either order, and nothing the
-    /// stream stored for another persona.
+    /// stream stored for another user.
     #[test]
     fn a_live_inbox_takes_each_message_once() {
         let msg = |subject: &str, headers: &[(&str, &str)], payload: &'static str| async_nats::Message {
@@ -710,7 +706,7 @@ mod tests {
         assert!(!seen.first(&msg("ants.inbox.dev-a.human", &[("Nats-Stream", STREAM)], "3")));
         assert!(seen.first(&msg("ants.inbox.dev-a.human", &[], "4")));
 
-        assert!(stored("ants.inbox.dev-b.human", "5").is_none(), "another persona's");
+        assert!(stored("ants.inbox.dev-b.human", "5").is_none(), "another user's");
         assert!(as_published(msg("_INBOX.dev-a.stored.human", &[], "{}"), &dev()).is_none(), "without its subject");
     }
 }

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
-# machine), the persona daemon (`ants daemon --config`) and, for an uplink through a private Dev Tunnel,
+# machine), the ant daemon (`ants daemon --config`) and, for an uplink through a private Dev Tunnel,
 # `devtunnel connect`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
 #
 #   scripts/install-units.sh                         # install nats-server and the daemon and (re)start them
@@ -11,7 +11,7 @@
 #           --nats-server PATH       nats-server binary (default: nats-server on PATH)
 #           --nats-conf FILE         nats-server configuration (default: ~/.config/ants/leaf.conf)
 #           --config FILE            daemon config file (default: ~/.ants/config.toml)
-#           --no-daemon              only the nats-server service, on a machine without personas
+#           --no-daemon              only the nats-server service, on a machine without ants
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
 #           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
 #           --devtunnel-token FILE   connect with the access token in FILE, read at each start, instead of the CLI

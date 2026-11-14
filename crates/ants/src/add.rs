@@ -1,31 +1,31 @@
-//! `ants persona add`: list a persona in the machine's config file and give it credentials, its user NKey generated
+//! `ants add`: list an ant in the machine's config file and give it credentials, its user NKey generated
 //! here and its seed kept here. The account key signs the public key elsewhere: out of band with
 //! `ants auth user NAME --public-key` and `--jwt`, or over NATS with `--enroll` and `ants enroll approve`.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use ants_daemon::config::{self, Persona, Summary};
-use ants_proto::{ENROLL_REPEAT, JsDomain, PersonaId};
+use ants_daemon::config::{self, Ant, Summary};
+use ants_proto::{ENROLL_REPEAT, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
 
 use crate::auth;
 use crate::enroll;
-use crate::serve::PersonaOptions;
+use crate::serve::AntOptions;
 
 /// The server `--nats` defaults to.
 const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
 
 #[derive(clap::Args, Debug)]
 pub struct AddArgs {
-    /// The persona: lowercase letters, digits and '-'.
-    pub name: PersonaId,
-    /// Config file to list the persona in (default: ~/.ants/config.toml).
+    /// The ant: lowercase letters, digits and '-'.
+    pub name: UserId,
+    /// Config file to list the ant in (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// Where to write the persona's credentials (default: the `creds` of its entry, or
-    /// ~/.config/ants/auth/<persona>.creds). The seed waits beside them, as <name>.nk, until they are complete.
+    /// Where to write the ant's credentials (default: the `creds` of its entry, or
+    /// ~/.config/ants/auth/<ant>.creds). The seed waits beside them, as <name>.nk, until they are complete.
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Complete the credentials with the user JWT `ants auth user NAME --public-key ...` printed: the JWT, a file
@@ -41,14 +41,14 @@ pub struct AddArgs {
     #[arg(long, value_name = "URL", requires = "enroll")]
     pub hub: Option<String>,
     #[command(flatten)]
-    pub options: PersonaOptions,
+    pub options: AntOptions,
 }
 
-/// Run `ants persona add` with the global `--nats` and `--js-domain`.
+/// Run `ants add` with the global `--nats` and `--js-domain`.
 pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Result<()> {
     let name = &args.name;
     if name.is_human() {
-        bail!("{name} is the default human, not a persona");
+        bail!("{name} is the default human, not an ant");
     }
     let path = match &args.config {
         Some(path) => path.clone(),
@@ -107,26 +107,26 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
             println!(
                 "serve it: restart `ants daemon`, or its service (macOS: launchctl kickstart -k gui/$(id -u)/ants.daemon, \
                  Linux: systemctl --user restart ants-daemon)\n\
-                 behind a leaf node, add {name} to the uplink: `ants auth leaf MACHINE --persona ...` on the machine \
-                 holding the account key, then `ants leaf outbox MACHINE --persona ...`"
+                 behind a leaf node, add {name} to the uplink: `ants auth leaf MACHINE --ant ...` on the machine \
+                 holding the account key, then `ants leaf outbox MACHINE --ant ...`"
             );
         }
         None => println!(
             "public key of {name}: {public_key}\n\
              complete its credentials, either:\n  \
              out of band: run `ants auth user {name} --public-key {public_key}` where the account key is, then \
-             `ants persona add {name} --jwt <JWT>` here\n  \
+             `ants add {name} --jwt <JWT>` here\n  \
              over NATS: run `ants auth enroll {name}` where the account key is, copy the file here, run \
-             `ants persona add {name} --enroll <FILE>` and approve with `ants enroll approve {name}` there"
+             `ants add {name} --enroll <FILE>` and approve with `ants enroll approve {name}` there"
         ),
     }
     Ok(())
 }
 
-/// The `[[persona]]` entry of a persona new to the file: the flags' settings, its credentials at `out`, and the server
+/// The `[[ant]]` entry of an ant new to the file: the flags' settings, its credentials at `out`, and the server
 /// and JetStream domain where they differ from the file's.
 fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: Option<&JsDomain>) -> Result<String> {
-    let mut p = args.options.apply(Persona::new(args.name.clone(), std::env::current_dir()?));
+    let mut p = args.options.apply(Ant::new(args.name.clone(), std::env::current_dir()?));
     p.workdir = p.workdir.canonicalize().with_context(|| format!("workdir {}", p.workdir.display()))?;
     if let Some(home) = &p.home {
         p.home = Some(std::path::absolute(home)?);
@@ -147,7 +147,7 @@ fn seed_path(creds: &Path) -> PathBuf {
     creds.with_extension("nk")
 }
 
-/// The persona's user key: the one of its credentials at `out`, or the one waiting beside them, or a new one, written
+/// The ant's user key: the one of its credentials at `out`, or the one waiting beside them, or a new one, written
 /// there.
 fn user_key(out: &Path) -> Result<KeyPair> {
     if let Ok(text) = std::fs::read_to_string(out) {
@@ -180,14 +180,14 @@ fn read_jwt(arg: &str) -> Result<String> {
     Ok(auth::creds_jwt(&text).unwrap_or(text.trim()).to_owned())
 }
 
-/// Check that `jwt` is the user JWT of `persona` for `public_key`.
-fn check_jwt(jwt: &str, persona: &PersonaId, public_key: &str) -> Result<()> {
+/// Check that `jwt` is the user JWT of `ant` for `public_key`.
+fn check_jwt(jwt: &str, ant: &UserId, public_key: &str) -> Result<()> {
     let claims = auth::verified(jwt).context("--jwt")?;
     if claims.sub != public_key {
-        bail!("the JWT is for the key {}, not {public_key}, the key of {persona} here", claims.sub);
+        bail!("the JWT is for the key {}, not {public_key}, the key of {ant} here", claims.sub);
     }
-    if claims.name != persona.as_str() {
-        bail!("the JWT names {}, not {persona}", claims.name);
+    if claims.name != ant.as_str() {
+        bail!("the JWT names {}, not {ant}", claims.name);
     }
     Ok(())
 }
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn the_seed_stays_until_the_jwt_completes_the_credentials() {
-        let dir = ants_test_support::scratch_dir("persona-key").canonicalize().unwrap();
+        let dir = ants_test_support::scratch_dir("ant-key").canonicalize().unwrap();
         let out = dir.join("auth/dev-a.creds");
         let user = user_key(&out).unwrap();
         assert_eq!(user_key(&out).unwrap().public_key(), user.public_key(), "the waiting seed is reused");
@@ -211,11 +211,11 @@ mod tests {
 
         let team = dir.join("team");
         auth::init(&team).unwrap();
-        let dev_a: PersonaId = "dev-a".parse().unwrap();
-        let jwt = auth::sign_user(&team, &dev_a, ants_proto::Role::Persona, None, &user.public_key()).unwrap();
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let jwt = auth::sign_user(&team, &dev_a, ants_proto::Role::Ant, None, &user.public_key()).unwrap();
         check_jwt(&jwt, &dev_a, &user.public_key()).unwrap();
         let account = KeyPair::new_account().public_key();
-        let err = auth::sign_user(&team, &dev_a, ants_proto::Role::Persona, None, &account).unwrap_err().to_string();
+        let err = auth::sign_user(&team, &dev_a, ants_proto::Role::Ant, None, &account).unwrap_err().to_string();
         assert!(err.contains("not the public key of a user"), "{err}");
         let other = KeyPair::new_user().public_key();
         assert!(check_jwt(&jwt, &dev_a, &other).unwrap_err().to_string().contains("not"));
@@ -243,8 +243,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_listed_persona_gets_its_credentials_later() {
-        let dir = ants_test_support::scratch_dir("persona-add").canonicalize().unwrap();
+    async fn a_listed_ant_gets_its_credentials_later() {
+        let dir = ants_test_support::scratch_dir("ant-add").canonicalize().unwrap();
         let config = dir.join("config.toml");
         std::fs::write(&config, "# mine\nprovider = \"copilot\"\n").unwrap();
         let (config_arg, out) = (config.to_str().unwrap(), dir.join("keys/dev-a.creds"));
@@ -253,7 +253,7 @@ mod tests {
             .await
             .unwrap();
         let listed = std::fs::read_to_string(&config).unwrap();
-        assert!(listed.starts_with("# mine\nprovider = \"copilot\"\n\n[[persona]]\nname = \"dev-a\"\n"), "{listed}");
+        assert!(listed.starts_with("# mine\nprovider = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\n"), "{listed}");
         let dev_a = config::load(&config).unwrap().into_iter().find(|p| p.name.as_str() == "dev-a").unwrap();
         assert_eq!(
             (dev_a.creds.as_deref(), dev_a.model.as_deref(), dev_a.nats),
@@ -266,8 +266,8 @@ mod tests {
         let team = dir.join("team");
         auth::init(&team).unwrap();
         let user = auth::read_seed(&seed_path(&out)).unwrap();
-        let dev_a: PersonaId = "dev-a".parse().unwrap();
-        let jwt = auth::sign_user(&team, &dev_a, ants_proto::Role::Persona, None, &user.public_key()).unwrap();
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let jwt = auth::sign_user(&team, &dev_a, ants_proto::Role::Ant, None, &user.public_key()).unwrap();
         run(&["dev-a", "--config", config_arg, "--jwt", &jwt]).await.unwrap();
         assert_eq!(std::fs::read_to_string(&config).unwrap(), listed, "listed once");
         let creds = std::fs::read_to_string(&out).unwrap();

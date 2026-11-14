@@ -1,4 +1,4 @@
-//! The inbox loop of one persona.
+//! The inbox loop of one ant.
 //!
 //! Messages of one thread are handled one at a time, in order; different threads run concurrently, each in its own
 //! harness from the pool.
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans,
-    JsDomain, PersonaId, State, ThreadId, subject,
+    JsDomain, State, ThreadId, UserId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -38,7 +38,7 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(20);
 /// Redelivery window: a message in hand of a daemon that crashed, or sent into a dead link, comes back this long after
 /// its last progress ack.
 const ACK_WAIT: Duration = ack_wait(PROGRESS_EVERY);
-/// Attempts a message gets before it becomes a dead letter on `ants.dead.<persona>`.
+/// Attempts a message gets before it becomes a dead letter on `ants.dead.<ant>`.
 const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
 const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
@@ -60,25 +60,25 @@ const fn ack_wait(progress_every: Duration) -> Duration {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub persona: PersonaId,
+    pub ant: UserId,
     pub nats_url: String,
-    /// Credentials file of the persona, when the server requires them.
+    /// Credentials file of the ant, when the server requires them.
     pub creds: Option<PathBuf>,
     /// JetStream domain of the hub, if it has one.
     pub js_domain: Option<JsDomain>,
     /// Directory the harness works in.
     pub workdir: PathBuf,
-    /// The persona's own files (usually `~/.ants/<persona>`).
+    /// The ant's own files (usually `~/.ants/<ant>`).
     pub home: PathBuf,
-    /// Persona, memory and task instructions prepended to every prompt.
+    /// Role, memory and task instructions prepended to every prompt.
     pub instructions: String,
-    /// The persona's role instructions, shared in the roster.
+    /// The ant's role instructions, shared in the roster.
     pub whoami: Option<String>,
     pub env: BTreeMap<String, String>,
     pub harness: HarnessKind,
     pub model_settings: ModelSettings,
     /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
-    /// goes to the human on `ants.approvals.<persona>`.
+    /// goes to the human on `ants.approvals.<ant>`.
     pub allow: Vec<String>,
     /// How long a tool request waits for the human before it is rejected.
     pub approval_timeout: Duration,
@@ -86,27 +86,27 @@ pub struct Config {
     pub max_harnesses: usize,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
-    /// Capabilities the persona advertises in the roster.
+    /// Capabilities the ant advertises in the roster.
     pub capabilities: Vec<String>,
     /// Limits on every prompt.
     pub limits: PromptLimits,
-    /// Token and cost caps of each thread and of the persona.
+    /// Token and cost caps of each thread and of the ant.
     pub caps: Caps,
-    /// Serve the persona only while holding its roster entry, as the built-in messenger does: wait while another
+    /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
     /// daemon lists it, and hand over to a daemon that puts it later ([`roster::hold`]).
     pub defer_to_others: bool,
     /// The default human, who gets escalations and notices of threads with no owner.
-    pub human: PersonaId,
-    /// The persona's escalation chain, published in the roster, and its limits.
+    pub human: UserId,
+    /// The ant's escalation chain, published in the roster, and its limits.
     pub escalation: Chain,
 }
 
-/// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
+/// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
-/// that defers to others ([`Config::defer_to_others`]) and hands the persona over waits for its turn again.
+/// that defers to others ([`Config::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
     while serve(&config).await? == Served::HandedOver {
-        tracing::info!("another daemon serves the persona; waiting for it to stop");
+        tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
     Ok(())
 }
@@ -115,19 +115,19 @@ pub async fn run(config: Config) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 enum Served {
     Stopped,
-    /// Another daemon took over the persona's roster entry.
+    /// Another daemon took over the ant's roster entry.
     HandedOver,
 }
 
-/// Serve the persona's inbox until Ctrl-C, or until another daemon takes over its roster entry.
+/// Serve the ant's inbox until Ctrl-C, or until another daemon takes over its roster entry.
 async fn serve(config: &Config) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = bus::connect_retrying(
         &config.nats_url,
         config.creds.as_deref(),
         config.js_domain.as_ref(),
-        &config.persona,
-        &format!("antsd-{}", config.persona),
+        &config.ant,
+        &format!("antsd-{}", config.ant),
         async {
             if stop_signal().await.is_err() {
                 std::future::pending::<()>().await;
@@ -155,17 +155,17 @@ async fn serve(config: &Config) -> Result<Served> {
             }
         }
     }
-    let approver = NatsApprover::new(client.clone(), js.clone(), config.persona.clone(), config.approval_timeout)
+    let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
         .with_chain(config.escalation.clone());
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone())));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
-    let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.persona.clone()));
+    let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.ant.clone()));
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js).await?;
-    let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.persona.clone(), config.caps));
+    let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps));
     let escalator = Escalator::new(
-        config.persona.clone(),
+        config.ant.clone(),
         config.escalation.clone(),
         roster.clone(),
         humans.clone(),
@@ -175,11 +175,11 @@ async fn serve(config: &Config) -> Result<Served> {
     .with_chains(crate::chains::jetstream_chains(js.clone()))
     .with_plan_room(escalation::jetstream_plan_sender(js.clone()));
     let escalator = std::sync::Arc::new(escalator);
-    if let Err(e) = crate::chains::publish(&js, &config.persona, &config.escalation.escalate_to).await {
+    if let Err(e) = crate::chains::publish(&js, &config.ant, &config.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
     }
     let mut mcp = Mcp::start(
-        config.persona.clone(),
+        config.ant.clone(),
         &config.home,
         outbox,
         roster.clone(),
@@ -188,7 +188,7 @@ async fn serve(config: &Config) -> Result<Served> {
         Some(escalator.clone()),
     )
     .await?;
-    mcp.listen(bus::live_inbox(&client, &config.persona).await?);
+    mcp.listen(bus::live_inbox(&client, &config.ant).await?);
     let launch = Launch::new(
         config.harness,
         config.workdir.clone(),
@@ -199,17 +199,17 @@ async fn serve(config: &Config) -> Result<Served> {
     .with_instructions(config.instructions.clone())
     .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
-    let threads = Threads::new(js.clone(), config.persona.clone(), sessions_kv.clone());
-    let sessions = SessionStore::kv(sessions_kv, config.persona.clone());
-    let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.persona.clone());
+    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
+    let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
+    let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.ant.clone());
     let answered = Answered::new(&config.home);
     answered.prune(bus::RETENTION).await;
     let buried = Buried::new(&config.home);
     buried.prune(bus::RETENTION).await;
     let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
-    let messages = bus::inbox_consumer(&stream, &config.persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let (channels, posts) = match channels(&js, &stream, &config.persona, in_hand).await {
+    let messages = bus::inbox_consumer(&stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let (channels, posts) = match channels(&js, &stream, &config.ant, in_hand).await {
         Ok((channels, posts)) => (channels, Some(posts)),
         Err(e) => {
             tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
@@ -223,7 +223,7 @@ async fn serve(config: &Config) -> Result<Served> {
         None => roster::register(&js, entry, workload.clone()).await?,
     };
     tracing::info!(
-        persona = %config.persona,
+        ant = %config.ant,
         harness = %config.harness,
         model_settings = ?config.model_settings,
         workdir = %config.workdir.display(),
@@ -242,7 +242,7 @@ async fn serve(config: &Config) -> Result<Served> {
     let inbox = Inbox {
         client: &client,
         js: &js,
-        persona: &config.persona,
+        ant: &config.ant,
         pool: &pool,
         attempts: &attempts,
         answered: &answered,
@@ -275,7 +275,7 @@ async fn serve(config: &Config) -> Result<Served> {
             tokio::select! {
                 () = ctrl_c() => stopping.set(true),
                 () = registration.lost(), if first => {
-                    tracing::info!("another daemon took over the persona; taking no more messages");
+                    tracing::info!("another daemon took over the ant; taking no more messages");
                 }
             }
         }
@@ -294,15 +294,15 @@ async fn serve(config: &Config) -> Result<Served> {
     Ok(Served::Stopped)
 }
 
-/// The channels, and the posts to them through the persona's channel consumer.
+/// The channels, and the posts to them through the ant's channel consumer.
 async fn channels(
     js: &jetstream::Context,
     stream: &jetstream::stream::Stream,
-    persona: &PersonaId,
+    ant: &UserId,
     in_hand: i64,
 ) -> Result<(Channels, jetstream::consumer::pull::Stream)> {
     let channels = Channels::watch(bus::ensure_channels(js).await?).await?;
-    let posts = bus::chan_consumer(stream, persona, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let posts = bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
     Ok((channels, posts))
 }
 
@@ -323,7 +323,7 @@ async fn stop_signal() -> std::io::Result<()> {
 
 type InHand = (Incoming, jetstream::Message);
 
-/// A message to answer: one in the inbox, or a channel post that wakes the persona, read as a message from its author
+/// A message to answer: one in the inbox, or a channel post that wakes the ant, read as a message from its author
 /// ([`channel::as_envelope`]).
 struct Incoming {
     envelope: Envelope,
@@ -335,7 +335,7 @@ struct Incoming {
 
 struct Posted {
     post: ChannelPost,
-    /// The channel's entry, when the persona is to triage the post as its messenger.
+    /// The channel's entry, when the ant is to triage the post as its messenger.
     triage: Option<ChannelEntry>,
 }
 
@@ -360,20 +360,20 @@ struct Retry {
 struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
-    persona: &'a PersonaId,
+    ant: &'a UserId,
     pool: &'a Pool,
     attempts: &'a Attempts,
     answered: &'a Answered,
     /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
     buried: &'a Buried,
     mcp: Option<&'a Mcp>,
-    /// Takes the decisions agents of the persona's chain send on its tool requests.
+    /// Takes the decisions agents of the ant's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
     limits: PromptLimits,
     ledger: &'a Ledger,
-    /// Sends what the persona cannot settle up its chain, and notes the answers.
+    /// Sends what the ant cannot settle up its chain, and notes the answers.
     escalator: &'a Escalator,
     /// The plan rooms, where the members of an escalation group other than its leader answer.
     rooms: &'a dyn Rooms,
@@ -388,7 +388,7 @@ struct Inbox<'a> {
 
 impl Inbox<'_> {
     /// Handle messages, from the inbox and channel posts, until they end or `stop` resolves, then finish the prompts in
-    /// flight unless it resolves again. `channels` says which posts are meant for the persona.
+    /// flight unless it resolves again. `channels` says which posts are meant for the ant.
     async fn serve<S, E, F>(
         &self,
         mut messages: S,
@@ -525,8 +525,8 @@ impl Inbox<'_> {
         Some(Incoming { envelope, post: None, resume: None })
     }
 
-    /// The channel post `msg` to answer, if it wakes the persona ([`channel::wake`]). Any other is acked at once: the
-    /// persona's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
+    /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
+    /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
     /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. The post kept names
     /// its thread's owner ([`ChannelPost::thread_owner`]), a human.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
@@ -544,12 +544,12 @@ impl Inbox<'_> {
             }
         };
         let humans = self.humans.humans();
-        let mut wake = channel::wake(self.persona, channels.get(&post.channel), &post, &humans);
+        let mut wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
         let unseen = channels.get(&post.channel).is_none() && post.mentions.is_empty() && humans.contains(&post.from);
-        if wake == Wake::Skip && (post.mentions(self.persona) && post.from != *self.persona || unseen) {
-            // The post may have overtaken the change that made the persona a member, or created the channel.
+        if wake == Wake::Skip && (post.mentions(self.ant) && post.from != *self.ant || unseen) {
+            // The post may have overtaken the change that made the ant a member, or created the channel.
             channels.refresh(&post.channel).await;
-            wake = channel::wake(self.persona, channels.get(&post.channel), &post, &humans);
+            wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
         }
         if wake == Wake::Skip {
             if let Err(e) = msg.ack().await {
@@ -559,7 +559,7 @@ impl Inbox<'_> {
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         post.owner = post.thread_owner(&humans);
-        let envelope = channel::as_envelope(&post, self.persona);
+        let envelope = channel::as_envelope(&post, self.ant);
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })), resume: None })
     }
 
@@ -586,7 +586,7 @@ impl Inbox<'_> {
     /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload.
     async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
         tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
-        if let Err(e) = dead::bury(self.js, self.persona, msg, None, error).await {
+        if let Err(e) = dead::bury(self.js, self.ant, msg, None, error).await {
             // Never redelivered, dead letter or not.
             tracing::warn!(error = format!("{e:#}"), "dead-lettering");
             if let Err(e) = msg.ack_with(AckKind::Term).await {
@@ -649,7 +649,7 @@ impl Inbox<'_> {
         };
         let Err(e) = result else { return (thread, None) };
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
-        status::state(self.client, self.persona, &thread, State::Failed);
+        status::state(self.client, self.ant, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
         if attempt != Attempt::Early {
             match self.bury(&incoming, &msg, &format!("{e:#}")).await {
@@ -670,12 +670,12 @@ impl Inbox<'_> {
         (thread, retry)
     }
 
-    /// Store `msg` as a dead letter, escalating it up the persona's chain (in the end to the thread's owner, else the
+    /// Store `msg` as a dead letter, escalating it up the ant's chain (in the end to the thread's owner, else the
     /// default human), and terminate it. A channel post names its thread's owner ([`Inbox::admit_post`]), and its
     /// envelope does too. The dead letter of a channel post keeps its payload.
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
-        let dead = dead::letter_for(self.persona, msg, envelope, error)?;
+        let dead = dead::letter_for(self.ant, msg, envelope, error)?;
         self.bury_letter(incoming, msg, &dead).await
     }
 
@@ -696,11 +696,11 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// Note the message the persona is about to answer with its escalator: a human's ends the thread's escalation and
+    /// Note the message the ant is about to answer with its escalator: a human's ends the thread's escalation and
     /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
-    /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the persona got
+    /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the ant got
     /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
-    /// Returns whether to answer the message: a member's notice that it sent the persona's escalation higher is the
+    /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
         let human = self.humans.is_human(&incoming.envelope.from);
@@ -750,8 +750,8 @@ impl Inbox<'_> {
             None => None,
         };
         let spent = match (&incoming.post, &read) {
-            (Some(posted), Some(read)) => posted.post.reply(self.persona.clone(), "", &read.later, &humans).err(),
-            _ => envelope.reply(self.persona.clone(), "", self.humans.role(&envelope.from)).err(),
+            (Some(posted), Some(read)) => posted.post.reply(self.ant.clone(), "", &read.later, &humans).err(),
+            _ => envelope.reply(self.ant.clone(), "", self.humans.role(&envelope.from)).err(),
         };
         if let Some(ProtoError::BudgetExhausted(_)) = spent {
             // Out of turns: escalate the thread instead of spending another prompt.
@@ -777,7 +777,7 @@ impl Inbox<'_> {
         }
 
         tracing::info!(%thread, from = %envelope.from, cut_off, "prompting");
-        status::state(self.client, self.persona, thread, State::Working);
+        status::state(self.client, self.ant, thread, State::Working);
 
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
@@ -785,7 +785,7 @@ impl Inbox<'_> {
         let mut stop_tx = Some(stop_tx);
         let mut reached = None;
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
-        let mut status = Status::new(self.client, self.persona, thread);
+        let mut status = Status::new(self.client, self.ant, thread);
         let mut flush =
             tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let late = match self.mcp {
@@ -794,7 +794,7 @@ impl Inbox<'_> {
         };
         let text = match (&incoming.post, &read) {
             (Some(posted), Some(read)) => self.channel_prompt(posted, read, &humans).await,
-            _ => match escalation::group_note(self.persona, envelope) {
+            _ => match escalation::group_note(self.ant, envelope) {
                 Some(note) => format!("{note}\n\n{}", envelope.text),
                 None => envelope.text.clone(),
             },
@@ -864,7 +864,7 @@ impl Inbox<'_> {
                         read.later
                     }
                 };
-                match posted.post.reply(self.persona.clone(), text.as_str(), &later, &humans) {
+                match posted.post.reply(self.ant.clone(), text.as_str(), &later, &humans) {
                     Ok(post) => Reply::Post(post),
                     Err(ProtoError::BudgetExhausted(_)) => {
                         // The answer is not posted: the escalation carries it.
@@ -878,16 +878,16 @@ impl Inbox<'_> {
                 }
             }
             _ if let Some(channel) = &incoming.resume => {
-                let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.persona.clone(), text);
+                let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
                 Reply::Post(post.with_owner(envelope.owner.clone()).spend(envelope.turn_budget)?)
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
-                let mut reply = envelope.reply(self.persona.clone(), text, self.humans.role(&envelope.from))?;
-                match escalation::route(self.persona, envelope).map(|(_, route)| route) {
+                let mut reply = envelope.reply(self.ant.clone(), text, self.humans.role(&envelope.from))?;
+                match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Room) => {
                         let (room, budget) = (self.rooms, envelope.turn_budget);
-                        match plan::spend(room, thread, self.persona, &reply.text, budget).await? {
+                        match plan::spend(room, thread, self.ant, &reply.text, budget).await? {
                             Some(post) => Reply::Plan(post),
                             None => {
                                 let why = "Thread notes out of turns before the answer was posted";
@@ -926,7 +926,7 @@ impl Inbox<'_> {
     async fn channel_prompt(&self, posted: &Posted, read: &Context, humans: &Humans) -> String {
         let post = &posted.post;
         let left = post.turns_left(&read.later, humans).saturating_sub(1);
-        let Some(entry) = &posted.triage else { return channel::prompt(self.persona, post, read, left) };
+        let Some(entry) = &posted.triage else { return channel::prompt(self.ant, post, read, left) };
         let roster = (self.roster)().await.unwrap_or_else(|e| {
             tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
             Vec::new()
@@ -944,7 +944,7 @@ impl Inbox<'_> {
         // Store the reply before acking: a crash in between redelivers rather than loses the message. A plan post is
         // in its room already.
         if !matches!(reply, Reply::Plan(_)) {
-            bus::store(self.js, reply.subject(), reply, &reply_id(self.persona, request)).await?;
+            bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
         }
         if incoming.post.is_some()
             && let Err(e) = self.threads.seen(&request.thread_id, seq).await
@@ -966,7 +966,7 @@ impl Inbox<'_> {
             }
             Err(e) => return Err(e),
         }
-        status::state(self.client, self.persona, reply.thread_id(), State::Idle);
+        status::state(self.client, self.ant, reply.thread_id(), State::Idle);
         Ok(())
     }
 
@@ -978,7 +978,7 @@ impl Inbox<'_> {
         })
     }
 
-    /// Escalate the thread for `reason` up the persona's chain, in the end to its owner, else the default human
+    /// Escalate the thread for `reason` up the ant's chain, in the end to its owner, else the default human
     /// ([`Escalator::escalate`]): `why` it needs a decision, and the message or post it was on, and an `unposted`
     /// answer. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
     async fn escalate(
@@ -997,11 +997,11 @@ impl Inbox<'_> {
         };
         let mut text = format!("{why}; needs a decision. {last}:\n{}", envelope.text);
         if let Some(answer) = unposted {
-            text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.persona));
+            text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.ant));
         }
-        let mut notice = envelope.follow_up(self.persona.clone(), human, text);
+        let mut notice = envelope.follow_up(self.ant.clone(), human, text);
         notice.in_reply_to = Some(envelope.id);
-        let id = format!("escalation-{}-{seq}", self.persona);
+        let id = format!("escalation-{}-{seq}", self.ant);
         let stuck = Stuck::new(reason, notice, id, Some(envelope));
         let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone());
         let escalated = self.escalator.escalate(Stuck { channel, ..stuck }).await?;
@@ -1059,9 +1059,9 @@ fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
     cut_off.into_iter().chain(late).chain([text.to_owned()]).collect::<Vec<_>>().join("\n\n")
 }
 
-/// The message id of `persona`'s reply to `request`: the same for every attempt at it.
-fn reply_id(persona: &PersonaId, request: &Envelope) -> String {
-    format!("reply-{persona}-{}", request.id)
+/// The message id of `ant`'s reply to `request`: the same for every attempt at it.
+fn reply_id(ant: &UserId, request: &Envelope) -> String {
+    format!("reply-{ant}-{}", request.id)
 }
 
 /// Whether `msg` came through the channel consumer.
@@ -1113,7 +1113,7 @@ mod tests {
         answered: Answered,
         buried: Buried,
         markers: jetstream::kv::Store,
-        dev: PersonaId,
+        dev: UserId,
         limits: PromptLimits,
         ledger: Arc<Ledger>,
         /// dev-a's escalation chain.
@@ -1136,14 +1136,14 @@ mod tests {
 
         /// dev-a's side of `server`, connected through `url`, with the hub's JetStream in `js_domain`.
         async fn connect(server: Server, url: &str, js_domain: Option<&JsDomain>) -> (Self, async_nats::Subscriber) {
-            let dev: PersonaId = "dev-a".parse().unwrap();
+            let dev: UserId = "dev-a".parse().unwrap();
             let (client, js) = bus::connect(url, None, js_domain, &dev, "test").await.unwrap();
             let stream = bus::ensure_stream(&js).await.unwrap();
             let markers = bus::ensure_attempts(&js).await.unwrap();
             let attempts = Attempts::new(markers.clone(), dev.clone());
             let answered = Answered::new(&server.dir().join("dev-a"));
             let buried = Buried::new(&server.dir().join("dev-a"));
-            let replies = client.subscribe(subject::inbox_of(&PersonaId::human())).await.unwrap();
+            let replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
             client.flush().await.unwrap();
             let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
             let limits = PromptLimits::default();
@@ -1178,21 +1178,21 @@ mod tests {
 
         /// Send `text` from the human, returning the envelope and its stream sequence.
         async fn send(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
-            self.send_from(PersonaId::human(), thread, text).await
+            self.send_from(UserId::human(), thread, text).await
         }
 
-        async fn send_from(&self, from: PersonaId, thread: &ThreadId, text: &str) -> (Envelope, u64) {
+        async fn send_from(&self, from: UserId, thread: &ThreadId, text: &str) -> (Envelope, u64) {
             let envelope = Envelope::on_thread(thread.clone(), from, self.dev.clone(), text);
             let seq = bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
             (envelope, seq)
         }
 
-        /// Publish `persona` in the roster with `escalate_to` as its chain.
-        async fn put_roster(&self, persona: &PersonaId, escalate_to: &[PersonaId]) {
+        /// Publish `ant` in the roster with `escalate_to` as its chain.
+        async fn put_roster(&self, ant: &UserId, escalate_to: &[UserId]) {
             let roster = bus::ensure_roster(&self.js, ants_proto::ROSTER_TTL).await.unwrap();
             let now = chrono::Utc::now();
             let entry = ants_proto::RosterEntry {
-                persona: persona.clone(),
+                ant: ant.clone(),
                 machine: "m".to_owned(),
                 instance: None,
                 harness: "copilot".to_owned(),
@@ -1212,7 +1212,7 @@ mod tests {
         /// Publish `text` from `from` on `thread` with no turns left, carrying `escalation`.
         async fn send_spent(
             &self,
-            from: &PersonaId,
+            from: &UserId,
             thread: &ThreadId,
             text: &str,
             escalation: Option<&ants_proto::Escalation>,
@@ -1248,7 +1248,7 @@ mod tests {
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
-                persona: &self.dev,
+                ant: &self.dev,
                 pool,
                 attempts: &self.attempts,
                 answered: &self.answered,
@@ -1474,8 +1474,8 @@ mod tests {
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let thread = ThreadId::generate();
         // dev-b sends on its own subject, but the envelope claims the human sent it.
-        let forged = Envelope::on_thread(thread.clone(), PersonaId::human(), bus.dev.clone(), "forged");
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let forged = Envelope::on_thread(thread.clone(), UserId::human(), bus.dev.clone(), "forged");
+        let dev_b: UserId = "dev-b".parse().unwrap();
         crate::bus::publish_json(&bus.js, subject::inbox(&bus.dev, &dev_b), &forged, None).await.unwrap();
         bus.send(&thread, "genuine").await;
 
@@ -1499,7 +1499,7 @@ mod tests {
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let thread = ThreadId::generate();
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let decision = ants_proto::ApprovalDecision::new(
             ants_proto::Uuid::new_v4(),
             bus.dev.clone(),
@@ -1523,22 +1523,21 @@ mod tests {
     #[tokio::test]
     async fn inbox_consumers_from_before_sender_subjects_get_the_new_filter() {
         let Some((bus, _)) = Bus::start().await else { return };
-        let human = PersonaId::human();
-        for persona in [&bus.dev, &human] {
-            let name = ants_proto::inbox_consumer(persona);
+        let human = UserId::human();
+        for user in [&bus.dev, &human] {
+            let name = ants_proto::inbox_consumer(user);
             let old = jetstream::consumer::pull::Config {
                 durable_name: Some(name.clone()),
-                filter_subject: format!("ants.inbox.{persona}"),
+                filter_subject: format!("ants.inbox.{user}"),
                 ..Default::default()
             };
             bus.stream.create_consumer(old).await.unwrap();
         }
         drop(crate::bus::inbox_consumer(&bus.stream, &bus.dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap());
         crate::bus::human_inbox_consumer(&bus.stream, &human, ACK_WAIT).await.unwrap();
-        for persona in [&bus.dev, &human] {
-            let mut consumer: PullConsumer =
-                bus.stream.get_consumer(&ants_proto::inbox_consumer(persona)).await.unwrap();
-            assert_eq!(consumer.info().await.unwrap().config.filter_subject, subject::inbox_of(persona));
+        for user in [&bus.dev, &human] {
+            let mut consumer: PullConsumer = bus.stream.get_consumer(&ants_proto::inbox_consumer(user)).await.unwrap();
+            assert_eq!(consumer.info().await.unwrap().config.filter_subject, subject::inbox_of(user));
         }
     }
 
@@ -1681,7 +1680,7 @@ mod tests {
         bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
         bus.client.flush().await.unwrap();
         let t1 = ThreadId::generate();
@@ -1711,7 +1710,7 @@ mod tests {
     async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
         bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), Caps { thread_cost: Some(1.0), ..Caps::default() }));
-        let alice: PersonaId = "alice".parse().unwrap();
+        let alice: UserId = "alice".parse().unwrap();
         // The registry looks for the bucket before it exists, then finds it.
         let _watching = bus.humans.watch(bus.js.clone(), Duration::from_millis(50));
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1723,7 +1722,7 @@ mod tests {
 
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
         let mut to_alice = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
         bus.client.flush().await.unwrap();
@@ -1756,14 +1755,14 @@ mod tests {
         assert_eq!(log.lock().unwrap().answered, ["go on"]);
     }
 
-    fn personas<const N: usize>(names: [&str; N]) -> [PersonaId; N] {
+    fn ants<const N: usize>(names: [&str; N]) -> [UserId; N] {
         names.map(|name| name.parse().unwrap())
     }
 
-    async fn inboxes<const N: usize>(bus: &Bus, personas: &[PersonaId; N]) -> [async_nats::Subscriber; N] {
+    async fn inboxes<const N: usize>(bus: &Bus, ants: &[UserId; N]) -> [async_nats::Subscriber; N] {
         let mut subscribers = Vec::new();
-        for persona in personas {
-            subscribers.push(bus.client.subscribe(subject::inbox_of(persona)).await.unwrap());
+        for ant in ants {
+            subscribers.push(bus.client.subscribe(subject::inbox_of(ant)).await.unwrap());
         }
         bus.client.flush().await.unwrap();
         subscribers.try_into().unwrap_or_else(|_| unreachable!())
@@ -1772,7 +1771,7 @@ mod tests {
     #[tokio::test]
     async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_level() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
-        let [lead, dev_b, boss, carol] = personas(["lead", "dev-b", "boss", "carol"]);
+        let [lead, dev_b, boss, carol] = ants(["lead", "dev-b", "boss", "carol"]);
         bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, ..Chain::default() };
         bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
         let [mut to_lead, mut to_dev_b, mut to_boss] =
@@ -1823,13 +1822,13 @@ mod tests {
     #[tokio::test]
     async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_with_fresh_turns() {
         let Some((mut bus, _)) = Bus::start().await else { return };
-        let [lead, dev_b] = personas(["lead", "dev-b"]);
+        let [lead, dev_b] = ants(["lead", "dev-b"]);
         bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
         let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (ops, mut posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
-        let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
+        let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
         bus.post(&root).await;
         let mut spent = root.reply(dev_b.clone(), "@dev-a agree?", &[], &Humans::default()).unwrap();
         spent.turn_budget = 0;
@@ -1840,7 +1839,7 @@ mod tests {
             let notice = next_envelope(&mut to_lead).await;
             let one = notice.escalation.as_deref().expect("the escalation").clone();
             assert_eq!(notice.thread_id, root.thread_id);
-            let mut answer = notice.reply(lead.clone(), "go on", Role::Persona).unwrap();
+            let mut answer = notice.reply(lead.clone(), "go on", Role::Ant).unwrap();
             answer = answer.with_escalation(Some(one));
             answer.turn_budget = 0;
             bus::publish_json(&bus.js, answer.subject(), &answer, None).await.unwrap();
@@ -1872,7 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
-        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
         bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None };
         bus.put_roster(&lead, &[boss]).await;
         let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
@@ -1893,7 +1892,7 @@ mod tests {
             assert_eq!(notice.text, text);
             assert_eq!(notice.escalation.as_deref(), Some(&*one), "the human sees how far it went");
 
-            // A human's answer ends the escalation: the next spend starts at the persona's chain again.
+            // A human's answer ends the escalation: the next spend starts at the ant's chain again.
             bus.send(&t1, "carry on").await;
             assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "carry on".to_owned()));
             bus.send_spent(&carol, &t1, "stuck again", None).await;
@@ -1909,7 +1908,7 @@ mod tests {
     #[tokio::test]
     async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
         let Some((mut bus, _to_human)) = Bus::start().await else { return };
-        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
         bus.chain =
             Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
         bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
@@ -1938,7 +1937,7 @@ mod tests {
     }
 
     /// `stuck`'s escalation on `thread`, gone up `chains`, one per level.
-    fn escalated(stuck: &PersonaId, thread: &ThreadId, chains: &[&[PersonaId]]) -> ants_proto::Escalation {
+    fn escalated(stuck: &UserId, thread: &ThreadId, chains: &[&[UserId]]) -> ants_proto::Escalation {
         let mut escalation = ants_proto::Escalation::new(stuck.clone(), thread.clone(), EscalationReason::TurnBudget);
         for chain in chains {
             let ants_proto::Hop::Chain { escalation: up, .. } = escalation.up(chain, 5) else { panic!("a chain") };
@@ -1952,9 +1951,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_leader_answers_the_stuck_persona_and_members_answer_in_the_plan_room() {
+    async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_plan_room() {
         let Some((bus, _to_human)) = Bus::start().await else { return };
-        let [lead, carol, boss] = personas(["lead", "carol", "boss"]);
+        let [lead, carol, boss] = ants(["lead", "carol", "boss"]);
         bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
         let [mut to_carol, mut to_lead, mut to_boss] =
             inboxes(&bus, &[carol.clone(), lead.clone(), boss.clone()]).await;
@@ -2020,7 +2019,7 @@ mod tests {
     #[tokio::test]
     async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_it() {
         let Some((mut bus, _to_human)) = Bus::start().await else { return };
-        let [lead, boss, carol] = personas(["lead", "boss", "carol"]);
+        let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
         let after = Duration::from_secs(600);
         bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(after), ..Chain::default() };
         bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
@@ -2045,7 +2044,7 @@ mod tests {
             bus.until_acked(seq).await;
             let pending = bus.ledger.pending(&t1).await.unwrap().expect("the escalation");
             assert_eq!((pending.escalation.level, &pending.to, pending.renewed_by), (2, &vec![boss.clone()], None));
-            assert!(pending.deadline.is_some(), "the stuck persona keeps the deadline");
+            assert!(pending.deadline.is_some(), "the stuck ant keeps the deadline");
 
             // Stuck again before boss answers: boss gets it again, not lead.
             bus.send_spent(&carol, &t1, "still stuck", None).await;
@@ -2077,7 +2076,7 @@ mod tests {
         let Some((bus, mut to_human)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
         bus.client.flush().await.unwrap();
         // dev-b names itself the owner, so an escalation would reach it with a fresh budget, again and again.
@@ -2095,7 +2094,7 @@ mod tests {
             let reply = next_envelope(&mut to_dev_b).await;
             assert_eq!((reply.in_reply_to, reply.owner), (Some(ask.id), None), "the owner is not passed on");
             let escalation = next_envelope(&mut to_human).await;
-            assert_eq!((&escalation.to, &escalation.owner), (&PersonaId::human(), &None));
+            assert_eq!((&escalation.to, &escalation.owner), (&UserId::human(), &None));
             assert!(escalation.text.starts_with("Turn budget spent; needs a decision."), "{}", escalation.text);
             ctrl_c.add_permits(1);
         };
@@ -2197,7 +2196,7 @@ mod tests {
                 format!("jetstream {{ store_dir: {:?}, domain: m1 }}\ninclude \"uplink.conf\"\n", dir.join("js"))
             })
             .unwrap();
-            let human = PersonaId::human();
+            let human = UserId::human();
             let (_, hub_js) = bus::connect(&hub.url, None, None, &human, "test").await.unwrap();
             bus::ensure_stream(&hub_js).await.unwrap();
             let (local, local_js) = bus::connect(&leaf.url, None, None, &human, "test").await.unwrap();
@@ -2256,7 +2255,7 @@ mod tests {
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
-        let ask = Envelope::on_thread(t1.clone(), PersonaId::human(), bus.dev.clone(), "hold a");
+        let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
         let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
         let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
 
@@ -2301,7 +2300,7 @@ mod tests {
         let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
         let (launch, log, gate) = fake::launch(true);
         let t1 = ThreadId::generate();
-        let ask = Envelope::on_thread(t1.clone(), PersonaId::human(), bus.dev.clone(), "doomed a");
+        let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed a");
         let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
         let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
         let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
@@ -2340,7 +2339,7 @@ mod tests {
         let letters = dead::list(&stream).await.unwrap();
         assert_eq!(letters.len(), 1, "{letters:?}");
         assert_eq!(letters[0].1, kept, "the dead letter of the last attempt");
-        let notice = stream.get_last_raw_message_by_subject(&subject::inbox(&PersonaId::human(), &bus.dev)).await;
+        let notice = stream.get_last_raw_message_by_subject(&subject::inbox(&UserId::human(), &bus.dev)).await;
         let notice: Envelope = serde_json::from_slice(&notice.unwrap().payload).unwrap();
         assert_eq!((&notice.thread_id, notice.in_reply_to), (&t1, Some(ask.id)));
         assert!(notice.text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notice.text);
@@ -2353,7 +2352,7 @@ mod tests {
         let Some((mut bus, mut replies)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
         // Two ask_agent calls on t1 that gave up, remembered across a restart.
         let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
@@ -2368,7 +2367,7 @@ mod tests {
         let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms, bus.humans.clone(), None).await;
         bus.mcp = Some(mcp.unwrap());
         for ask in &asks {
-            let reply = ask.reply(dev_b.clone(), "late", Role::Persona).unwrap();
+            let reply = ask.reply(dev_b.clone(), "late", Role::Ant).unwrap();
             bus::publish_json(&bus.js, reply.subject(), &reply, None).await.unwrap();
         }
         bus.send(&t1, "a").await;
@@ -2393,7 +2392,7 @@ mod tests {
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
-        let root = ChannelPost::new(ops.clone(), PersonaId::human(), "deploy friday?");
+        let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
         bus.post(&root).await;
         let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?", &[], &Humans::default()).unwrap();
         let ask_seq = bus.post(&ask).await;
@@ -2412,10 +2411,10 @@ mod tests {
         assert!(first[0].contains("human: deploy friday?\n") && first[0].ends_with("nobody."), "{}", first[0]);
         assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
 
-        // After a restart, only what was posted since shows, without the persona's own reply.
-        let more = root.reply(PersonaId::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
+        // After a restart, only what was posted since shows, without the ant's own reply.
+        let more = root.reply(UserId::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
         bus.post(&more).await;
-        let again = root.reply(PersonaId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
+        let again = root.reply(UserId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
         let again_seq = bus.post(&again).await;
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
@@ -2432,12 +2431,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn posts_that_do_not_wake_the_persona_are_acked_without_a_prompt() {
+    async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
         let Some((bus, mut human)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
-        let (dev_b, human_id) = ("dev-b".parse::<PersonaId>().unwrap(), PersonaId::human());
+        let (dev_b, human_id) = ("dev-b".parse::<UserId>().unwrap(), UserId::human());
         bus.channel("lab", &["dev-b"]).await;
         bus.post(&ChannelPost::new("lab".parse().unwrap(), human_id.clone(), "@dev-a not a member")).await;
         bus.post(&ChannelPost::new(ops.clone(), human_id.clone(), "@dev-b another member")).await;
@@ -2475,7 +2474,7 @@ mod tests {
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b", "dev-c"]).await;
-        let human_id = PersonaId::human();
+        let human_id = UserId::human();
         let mut review = ChannelPost::new(ops.clone(), human_id.clone(), "@dev-a @dev-b @dev-c review");
         review.turn_budget = 3;
         bus.post(&review).await;
@@ -2522,7 +2521,7 @@ mod tests {
         let roster = bus::ensure_roster(&bus.js, ants_proto::ROSTER_TTL).await.unwrap();
         let now = chrono::Utc::now();
         let dev_b = ants_proto::RosterEntry {
-            persona: "dev-b".parse().unwrap(),
+            ant: "dev-b".parse().unwrap(),
             machine: "m".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -2537,7 +2536,7 @@ mod tests {
             escalate_to: Vec::new(),
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
-        let post = ChannelPost::new(entry.channel.clone(), PersonaId::human(), "the build is red");
+        let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");
         let seq = bus.post(&post).await;
 
         let ctrl_c = Arc::new(Semaphore::new(0));
@@ -2558,7 +2557,7 @@ mod tests {
     #[tokio::test]
     async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns() {
         let Some((mut bus, _)) = Bus::start().await else { return };
-        bus.humans = Registry::with(PersonaId::human(), &["alice"]);
+        bus.humans = Registry::with(UserId::human(), &["alice"]);
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         // dev-a is the channel's messenger and a member.
@@ -2568,7 +2567,7 @@ mod tests {
         entry.messenger = Some(bus.dev.clone());
         bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
         let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
-        let alice: PersonaId = "alice".parse().unwrap();
+        let alice: UserId = "alice".parse().unwrap();
         let mut alice_inbox = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
         bus.client.flush().await.unwrap();
         // No owner on it, as from before posts carried one: alice, a human, started the thread.

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{Envelope, PersonaId, ThreadId};
+use ants_proto::{Envelope, ThreadId, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::{self, AckKind};
@@ -44,7 +44,7 @@ pub struct Inbox {
 
 impl Inbox {
     /// The inbox of `human`.
-    pub async fn open(js: &jetstream::Context, human: &PersonaId) -> Result<Self> {
+    pub async fn open(js: &jetstream::Context, human: &UserId) -> Result<Self> {
         let stream = bus::ensure_stream(js).await?;
         let consumer = bus::human_inbox_consumer(&stream, human, ACK_WAIT).await?;
         Ok(Self { client: js.client(), consumer, held: BTreeMap::new(), taken: 0 })
@@ -157,7 +157,7 @@ impl Inbox {
 
 /// Mark `reply`, already shown by `ants ask --wait`, read in the inbox of `human`. JetStream may store it a moment
 /// after it was delivered, so a miss is retried briefly. Returns whether it was found unread.
-pub async fn mark_read(js: &jetstream::Context, human: &PersonaId, reply: &Envelope) -> Result<bool> {
+pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope) -> Result<bool> {
     let mut inbox = Inbox::open(js, human).await?;
     let select = Select { thread: Some(reply.thread_id.clone()), limit: Some(1), peek: false };
     let mut found = false;
@@ -191,7 +191,7 @@ mod tests {
     }
 
     async fn read(js: &jetstream::Context, select: Select) -> Vec<Envelope> {
-        let mut inbox = Inbox::open(js, &PersonaId::human()).await.unwrap();
+        let mut inbox = Inbox::open(js, &UserId::human()).await.unwrap();
         let unread = inbox.unread(&select).await.unwrap();
         inbox.release().await.unwrap();
         unread
@@ -201,19 +201,17 @@ mod tests {
     #[tokio::test]
     async fn replies_stay_unread_until_shown() {
         let Some(server) = Server::start() else { return };
-        let dev_a: PersonaId = "dev-a".parse().unwrap();
-        let (_, human) = server.connect(&PersonaId::human()).await;
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
         bus::ensure_stream(&human).await.unwrap();
         let (_, agent) = server.connect(&dev_a).await;
-        let asks = [
-            Envelope::new(PersonaId::human(), dev_a.clone(), "a"),
-            Envelope::new(PersonaId::human(), dev_a.clone(), "b"),
-        ];
+        let asks =
+            [Envelope::new(UserId::human(), dev_a.clone(), "a"), Envelope::new(UserId::human(), dev_a.clone(), "b")];
         for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three")] {
             bus::publish(&agent, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
         let forged = asks[0].reply(dev_a.clone(), "forged", Role::Human).unwrap();
-        let subject = ants_proto::subject::inbox(&PersonaId::human(), &PersonaId::human());
+        let subject = ants_proto::subject::inbox(&UserId::human(), &UserId::human());
         bus::publish_json(&human, subject, &forged, None).await.unwrap();
 
         let peek = Select { peek: true, ..Default::default() };
@@ -227,9 +225,9 @@ mod tests {
 
         let last = asks[0].reply(dev_a.clone(), "four", Role::Human).unwrap();
         bus::publish(&agent, &last).await.unwrap();
-        assert!(mark_read(&human, &PersonaId::human(), &last).await.unwrap(), "ask --wait marks its reply read");
+        assert!(mark_read(&human, &UserId::human(), &last).await.unwrap(), "ask --wait marks its reply read");
         assert_eq!(texts(&read(&human, Select::default()).await), ["three"]);
         assert!(read(&human, Select::default()).await.is_empty());
-        assert!(!mark_read(&human, &PersonaId::human(), &last).await.unwrap());
+        assert!(!mark_read(&human, &UserId::human(), &last).await.unwrap());
     }
 }

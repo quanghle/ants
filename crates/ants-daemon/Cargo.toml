@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The persona daemon: JetStream inbox consumer and ACP harness pool"
+description = "The ant daemon: JetStream inbox consumer and ACP harness pool"
 
 [dependencies]
 agent-client-protocol = { version = "5.2.0", features = ["process", "unstable_end_turn_token_usage"] }

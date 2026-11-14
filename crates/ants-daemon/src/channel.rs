@@ -1,8 +1,8 @@
 //! Channels as a member's daemon sees them.
 //!
 //! The daemon watches the channels bucket ([`Channels`]) and takes every channel post through its consumer
-//! `chan-<persona>`. A post wakes the persona only when [`wake`] says so; the rest are acked without a prompt. A prompt
-//! on a channel thread shows the posts on the thread the persona has not been shown yet ([`Threads::context`]): the
+//! `chan-<ant>`. A post wakes the ant only when [`wake`] says so; the rest are acked without a prompt. A prompt
+//! on a channel thread shows the posts on the thread the ant has not been shown yet ([`Threads::context`]): the
 //! stream sequence of the last post shown is kept per thread in the sessions bucket, so a restarted daemon goes on from
 //! there. The reply is posted on the same thread, spending one of its turns.
 //!
@@ -14,8 +14,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, PersonaId, RosterEntry, STREAM, ThreadId, Uuid,
-    chan_reader, channel_seen_key, subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId, UserId, Uuid, chan_reader,
+    channel_seen_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -117,23 +117,23 @@ impl Channels {
     }
 }
 
-/// What a channel post asks of a persona.
+/// What a channel post asks of an ant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
-    /// Nothing: it is acked without a prompt, and shown with the persona's next prompt on its thread.
+    /// Nothing: it is acked without a prompt, and shown with the ant's next prompt on its thread.
     Skip,
-    /// An answer: the post @mentions the persona, a member.
+    /// An answer: the post @mentions the ant, a member.
     Mentioned,
-    /// A triage: the post is a human's, mentions nobody, and the persona is the channel's messenger.
+    /// A triage: the post is a human's, mentions nobody, and the ant is the channel's messenger.
     Triage,
 }
 
-/// What `post` asks of `persona`, given the entry of its channel and the `humans`: a prompt only when it @mentions the
-/// persona, a member, or when the persona is the channel's messenger and it is a post of a human that mentions nobody;
-/// never for the persona's own.
-pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost, humans: &Humans) -> Wake {
+/// What `post` asks of `ant`, given the entry of its channel and the `humans`: a prompt only when it @mentions the
+/// ant, a member, or when the ant is the channel's messenger and it is a post of a human that mentions nobody;
+/// never for the ant's own.
+pub fn wake(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost, humans: &Humans) -> Wake {
     let Some(entry) = entry else { return Wake::Skip };
-    if post.from == *persona || !entry.woken(post, humans).contains(persona) {
+    if post.from == *ant || !entry.woken(post, humans).contains(ant) {
         Wake::Skip
     } else if post.mentions.is_empty() {
         Wake::Triage
@@ -142,14 +142,14 @@ pub fn wake(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPos
     }
 }
 
-/// `post` as an inbox message from its author to `persona`, owned by the thread's owner the post carries: what the
+/// `post` as an inbox message from its author to `ant`, owned by the thread's owner the post carries: what the
 /// attempt markers, caps, escalations and tools of the thread go by.
-pub fn as_envelope(post: &ChannelPost, persona: &PersonaId) -> Envelope {
+pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
     Envelope {
         id: post.id,
         thread_id: post.thread_id.clone(),
         from: post.from.clone(),
-        to: persona.clone(),
+        to: ant.clone(),
         text: post.text.clone(),
         turn_budget: post.turn_budget,
         in_reply_to: None,
@@ -173,7 +173,7 @@ pub struct Context {
 
 /// Picks the context of a prompt from the posts of a channel, read in stream order.
 struct Collect<'a> {
-    persona: &'a PersonaId,
+    ant: &'a UserId,
     humans: &'a Humans,
     thread: &'a ThreadId,
     /// Stream sequence of the post being answered: the context ends before it, and the later posts start after it.
@@ -184,8 +184,8 @@ struct Collect<'a> {
 }
 
 impl<'a> Collect<'a> {
-    fn new(persona: &'a PersonaId, humans: &'a Humans, thread: &'a ThreadId, at: u64) -> Self {
-        Self { persona, humans, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
+    fn new(ant: &'a UserId, humans: &'a Humans, thread: &'a ThreadId, at: u64) -> Self {
+        Self { ant, humans, thread, at, posts: VecDeque::new(), skipped: 0, later: Vec::new() }
     }
 
     /// Take the post at stream sequence `seq`.
@@ -201,7 +201,7 @@ impl<'a> Collect<'a> {
             self.later.push(post);
             return;
         }
-        if post.from == *self.persona {
+        if post.from == *self.ant {
             return;
         }
         if self.posts.len() == MAX_CONTEXT {
@@ -216,16 +216,16 @@ impl<'a> Collect<'a> {
     }
 }
 
-/// The prompt for `post`, which @mentions `persona`, after the `context` of its thread. `left` is the turns the thread
+/// The prompt for `post`, which @mentions `ant`, after the `context` of its thread. `left` is the turns the thread
 /// keeps after the reply.
-pub fn prompt(persona: &PersonaId, post: &ChannelPost, context: &Context, left: u32) -> String {
+pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) -> String {
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    text.push_str(&format!("[ants] Post from {} mentioning {persona}:\n{}\n\n", post.from, post.text));
+    text.push_str(&format!("[ants] Post from {} mentioning {ant}:\n{}\n\n", post.from, post.text));
     text.push_str(&format!(
         "[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
-         ({left} left after it). An @persona mention in it wakes that member of the channel; mentioning nobody wakes \
+         ({left} left after it). An @ant mention in it wakes that member of the channel; mentioning nobody wakes \
          nobody."
     ));
     text
@@ -237,7 +237,7 @@ pub fn resume_note(channel: &ChannelId, thread: &ThreadId, left: u32) -> String 
     format!(
         "[ants] The escalation's leader answered with fresh turns for thread {thread} of #{channel}. The final answer \
          of this turn is posted to #{channel} on that thread and spends one of its turns ({left} left after it). An \
-         @persona mention in it wakes that member of the channel; mentioning nobody wakes nobody."
+         @ant mention in it wakes that member of the channel; mentioning nobody wakes nobody."
     )
 }
 
@@ -271,8 +271,8 @@ pub fn triage_prompt(
 }
 
 /// `member` with its role and capabilities from the roster, or as offline when the roster lacks it.
-fn member_line(member: &PersonaId, roster: &[RosterEntry]) -> String {
-    let Some(entry) = roster.iter().find(|e| e.persona == *member) else {
+fn member_line(member: &UserId, roster: &[RosterEntry]) -> String {
+    let Some(entry) = roster.iter().find(|e| e.ant == *member) else {
         return format!("@{member} (offline: not in the roster)");
     };
     let mut line = format!("@{member}");
@@ -301,26 +301,26 @@ fn context_text(context: &Context) -> String {
     text
 }
 
-/// Reads channel threads back for a persona and keeps which posts it was shown.
+/// Reads channel threads back for an ant and keeps which posts it was shown.
 pub struct Threads {
     js: jetstream::Context,
-    persona: PersonaId,
-    /// The sessions bucket, under the persona's own keys.
+    ant: UserId,
+    /// The sessions bucket, under the ant's own keys.
     seen: kv::Store,
     /// One read at a time: they share the reader's consumer.
     reading: tokio::sync::Mutex<()>,
 }
 
 impl Threads {
-    pub fn new(js: jetstream::Context, persona: PersonaId, sessions: kv::Store) -> Self {
-        Self { js, persona, seen: sessions, reading: tokio::sync::Mutex::new(()) }
+    pub fn new(js: jetstream::Context, ant: UserId, sessions: kv::Store) -> Self {
+        Self { js, ant, seen: sessions, reading: tokio::sync::Mutex::new(()) }
     }
 
     /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with `earlier`, also those before
-    /// it that the persona has not been shown: after the last one shown, or since the thread started, without its own.
+    /// it that the ant has not been shown: after the last one shown, or since the thread started, without its own.
     /// The posts of `humans` renew the thread's turns. The read ends at the last post stored as it starts.
     pub async fn context(&self, post: &ChannelPost, seq: u64, earlier: bool, humans: &Humans) -> Result<Context> {
-        let mut collect = Collect::new(&self.persona, humans, &post.thread_id, seq);
+        let mut collect = Collect::new(&self.ant, humans, &post.thread_id, seq);
         let after = consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 };
         let seen = if earlier && !post.starts_thread() { Some(self.last_seen(&post.thread_id).await?) } else { None };
         let start = match seen {
@@ -333,7 +333,7 @@ impl Threads {
             },
         };
         let _one = self.reading.lock().await;
-        let name = chan_reader(&self.persona);
+        let name = chan_reader(&self.ant);
         // A consumer left by an interrupted read would carry on where it stopped.
         let _ = self.js.delete_consumer_from_stream(&name, STREAM).await;
         let config = consumer::pull::Config {
@@ -357,19 +357,18 @@ impl Threads {
         Ok(collect.done())
     }
 
-    /// Stream sequence of the last post on `thread` the persona was shown.
+    /// Stream sequence of the last post on `thread` the ant was shown.
     async fn last_seen(&self, thread: &ThreadId) -> Result<Option<u64>> {
-        let value =
-            self.seen.get(channel_seen_key(&self.persona, thread)).await.context("reading the last post seen")?;
+        let value = self.seen.get(channel_seen_key(&self.ant, thread)).await.context("reading the last post seen")?;
         Ok(value.and_then(|v| std::str::from_utf8(&v).ok()?.parse().ok()))
     }
 
-    /// Note that the persona was shown the posts on `thread` up to stream sequence `seq`.
+    /// Note that the ant was shown the posts on `thread` up to stream sequence `seq`.
     pub async fn seen(&self, thread: &ThreadId, seq: u64) -> Result<()> {
         if self.last_seen(thread).await?.is_some_and(|seen| seen >= seq) {
             return Ok(());
         }
-        let key = channel_seen_key(&self.persona, thread);
+        let key = channel_seen_key(&self.ant, thread);
         self.seen.put(key, seq.to_string().into()).await.context("storing the last post seen")?;
         Ok(())
     }
@@ -411,7 +410,7 @@ pub fn thread_start(thread: &ThreadId) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
-    fn p(s: &str) -> PersonaId {
+    fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 
@@ -427,8 +426,8 @@ mod tests {
         Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))])
     }
 
-    fn wakes(persona: &PersonaId, entry: Option<&ChannelEntry>, post: &ChannelPost) -> Wake {
-        wake(persona, entry, post, &humans())
+    fn wakes(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost) -> Wake {
+        wake(ant, entry, post, &humans())
     }
 
     fn post(from: &str, text: &str) -> ChannelPost {
@@ -445,13 +444,13 @@ mod tests {
         assert_eq!(wakes(&a, Some(&entry), &post("dev-a", "@dev-a note to self")), Wake::Skip, "its own post");
         assert_eq!(wakes(&a, None, &post("human", "@dev-a deploy")), Wake::Skip, "no such channel");
         assert_eq!(wakes(&p("dev-c"), Some(&entry), &post("human", "@dev-c deploy")), Wake::Skip, "no member");
-        let other = ChannelPost::new("dev".parse().unwrap(), PersonaId::human(), "@dev-a deploy");
+        let other = ChannelPost::new("dev".parse().unwrap(), UserId::human(), "@dev-a deploy");
         assert_eq!(wakes(&a, Some(&entry), &other), Wake::Skip, "another channel's entry");
     }
 
     #[test]
     fn the_messenger_triages_the_human_posts_that_mention_nobody() {
-        let (mut entry, messenger) = (ops(), PersonaId::messenger());
+        let (mut entry, messenger) = (ops(), UserId::messenger());
         let untagged = post("human", "the build is red");
         assert_eq!(wakes(&messenger, Some(&entry), &untagged), Wake::Triage, "the default messenger, no member");
         assert_eq!(wakes(&p("dev-a"), Some(&entry), &untagged), Wake::Skip, "members wait for its mentions");
@@ -472,7 +471,7 @@ mod tests {
         let (entry, root) = (ops(), post("human", "the build is red"));
         let now = chrono::Utc::now();
         let a = RosterEntry {
-            persona: p("dev-a"),
+            ant: p("dev-a"),
             machine: "m".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -570,7 +569,7 @@ mod tests {
              human: deploy friday?\n\n\
              [ants] Post from dev-b mentioning dev-a:\n@dev-a agree?\n\n\
              [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (6 \
-             left after it). An @persona mention in it wakes that member of the channel; mentioning nobody wakes \
+             left after it). An @ant mention in it wakes that member of the channel; mentioning nobody wakes \
              nobody.",
             root.thread_id
         );

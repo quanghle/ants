@@ -1,28 +1,28 @@
-//! The daemon config file, `~/.ants/config.toml`: the personas one daemon process serves.
+//! The daemon config file, `~/.ants/config.toml`: the ants one daemon process serves.
 //!
 //! ```toml
-//! provider = "copilot"              # default harness of every persona; also serves the built-in messenger
-//! nats = "wss://hub.example/nats"   # default server for every persona
-//! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per persona
-//! human = "alice"                   # default human, for escalations of threads with no owner; also per persona
+//! provider = "copilot"              # default harness of every ant; also serves the built-in messenger
+//! nats = "wss://hub.example/nats"   # default server for every ant
+//! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
+//! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
 //!
-//! [[persona]]
+//! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
 //! creds = "~/.config/ants/auth/dev-a.creds"
-//! escalate_to = ["lead", "dev-b"]   # escalations go to these personas first, lead leading
+//! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! ```
 //!
 //! `~` expands to the home directory; other relative paths are relative to the file's directory.
 //!
-//! A file with `provider` also serves the built-in messenger ([`builtin_messenger`]) unless it lists a persona named
+//! A file with `provider` also serves the built-in messenger ([`builtin_messenger`]) unless it lists an ant named
 //! `messenger`; `provider` alone is a complete file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{JsDomain, PersonaId};
+use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer};
 
@@ -53,21 +53,21 @@ fn home_dir() -> Result<PathBuf> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
-    /// Default harness of the file's personas, and the harness of the built-in messenger.
+    /// Default harness of the file's ants, and the harness of the built-in messenger.
     #[serde(default, deserialize_with = "some_harness")]
     provider: Option<HarnessKind>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
-    human: Option<PersonaId>,
-    #[serde(default, rename = "persona")]
-    personas: Vec<Persona>,
+    human: Option<UserId>,
+    #[serde(default, rename = "ant")]
+    ants: Vec<Ant>,
 }
 
-/// One persona the daemon serves, as the config file (or the command line) describes it.
+/// One ant the daemon serves, as the config file (or the command line) describes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Persona {
-    pub name: PersonaId,
+pub struct Ant {
+    pub name: UserId,
     /// NATS server; the file's top-level `nats`, then `--nats`, when absent.
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
@@ -75,7 +75,7 @@ pub struct Persona {
     pub js_domain: Option<JsDomain>,
     /// The default human, who gets what is meant for the owner of a thread that has none: escalations, dead-letter
     /// notices. The file's top-level `human`, then `human`, when absent.
-    pub human: Option<PersonaId>,
+    pub human: Option<UserId>,
     pub workdir: PathBuf,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
@@ -118,13 +118,13 @@ pub struct Persona {
     pub max_thread_tokens: Option<u64>,
     /// Cost a thread may spend between messages from a human, in the harness's unit.
     pub max_thread_cost: Option<f64>,
-    /// Tokens the persona may spend in a UTC day.
+    /// Tokens the ant may spend in a UTC day.
     pub max_daily_tokens: Option<u64>,
-    /// Cost the persona may spend in a UTC day.
+    /// Cost the ant may spend in a UTC day.
     pub max_daily_cost: Option<f64>,
-    /// Personas the persona's escalations go to before any human, the first one leading; published in the roster.
+    /// Ants the ant's escalations go to before any human, the first one leading; published in the roster.
     #[serde(default)]
-    pub escalate_to: Vec<PersonaId>,
+    pub escalate_to: Vec<UserId>,
     /// Chain levels an escalation climbs before it goes to the thread's owner.
     #[serde(default = "default_max_escalation_hops")]
     pub max_escalation_hops: u32,
@@ -168,9 +168,9 @@ fn some_harness<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HarnessKind>, 
     String::deserialize(d)?.parse().map(Some).map_err(serde::de::Error::custom)
 }
 
-impl Persona {
-    /// A persona with default settings.
-    pub fn new(name: PersonaId, workdir: PathBuf) -> Self {
+impl Ant {
+    /// An ant with default settings.
+    pub fn new(name: UserId, workdir: PathBuf) -> Self {
         Self {
             name,
             nats: None,
@@ -217,12 +217,12 @@ impl Persona {
         model_settings.validate(harness)?;
         if self.builtin {
             std::fs::create_dir_all(&self.workdir)
-                .with_context(|| format!("persona {}: creating workdir {}", self.name, self.workdir.display()))?;
+                .with_context(|| format!("ant {}: creating workdir {}", self.name, self.workdir.display()))?;
         }
         let workdir = self
             .workdir
             .canonicalize()
-            .with_context(|| format!("persona {}: workdir {}", self.name, self.workdir.display()))?;
+            .with_context(|| format!("ant {}: workdir {}", self.name, self.workdir.display()))?;
         let home = match self.home {
             Some(home) => home,
             None => home_dir()?.join(".ants").join(self.name.as_str()),
@@ -231,7 +231,7 @@ impl Persona {
             nats_url: self.nats.unwrap_or_else(|| default_nats.to_owned()),
             creds: self.creds,
             js_domain: self.js_domain,
-            human: self.human.unwrap_or_else(PersonaId::human),
+            human: self.human.unwrap_or_else(UserId::human),
             workdir,
             home,
             instructions,
@@ -259,20 +259,20 @@ impl Persona {
                 max_hops: self.max_escalation_hops,
                 after: Some(Duration::from_secs(self.escalate_after_secs)).filter(|t| !t.is_zero()),
             },
-            persona: self.name,
+            ant: self.name,
             defer_to_others: self.builtin,
         })
     }
 
-    /// The escalation chain names other personas, each once.
+    /// The escalation chain names other ants, each once.
     fn validate_chain(&self) -> Result<()> {
         let mut seen = BTreeSet::new();
         for member in &self.escalate_to {
             if *member == self.name {
-                bail!("persona {}: escalate_to names the persona itself", self.name);
+                bail!("ant {}: escalate_to names the ant itself", self.name);
             }
             if !seen.insert(member) {
-                bail!("persona {}: escalate_to lists {member} twice", self.name);
+                bail!("ant {}: escalate_to lists {member} twice", self.name);
             }
         }
         Ok(())
@@ -280,7 +280,7 @@ impl Persona {
 
     fn prompt_instructions(&self) -> String {
         [
-            (format!("persona {}", self.name), self.whoami.as_deref()),
+            (format!("role {}", self.name), self.whoami.as_deref()),
             ("memory".to_owned(), self.memory.as_deref()),
             ("tasks".to_owned(), self.tasks.as_deref()),
         ]
@@ -302,74 +302,74 @@ fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
-/// The persona a file with `provider` serves unless it lists one named `messenger`: the provider's harness with its
-/// default model, reasoning effort and context, and otherwise the settings of a persona that sets nothing. Its home and
+/// The ant a file with `provider` serves unless it lists one named `messenger`: the provider's harness with its
+/// default model, reasoning effort and context, and otherwise the settings of an ant that sets nothing. Its home and
 /// workdir are `~/.ants/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
-pub fn builtin_messenger(provider: HarnessKind, home: &Path) -> Persona {
-    let name = PersonaId::messenger();
+pub fn builtin_messenger(provider: HarnessKind, home: &Path) -> Ant {
+    let name = UserId::messenger();
     let dir = home.join(".ants").join(name.as_str());
     let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
-    Persona {
+    Ant {
         harness: Some(provider),
         home: Some(dir.clone()),
         creds: creds.is_file().then_some(creds),
         builtin: true,
-        ..Persona::new(name, dir)
+        ..Ant::new(name, dir)
     }
 }
 
 /// Read and check the config file at `path`.
-pub fn load(path: &Path) -> Result<Vec<Persona>> {
+pub fn load(path: &Path) -> Result<Vec<Ant>> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
     parse(&text, &std::path::absolute(path)?, &home_dir()?)
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `provider`, `nats`, `js_domain` and `human`, check that names are unique and workdirs exist,
-/// and add the built-in messenger when `provider` is set and no persona is named `messenger`.
-pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Persona>> {
+/// and add the built-in messenger when `provider` is set and no ant is named `messenger`.
+pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Ant>> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
-    if file.personas.is_empty() && file.provider.is_none() {
-        bail!("config {}: no provider and no [[persona]] entries", path.display());
+    if file.ants.is_empty() && file.provider.is_none() {
+        bail!("config {}: no provider and no [[ant]] entries", path.display());
     }
     if let Some(provider) = file.provider
-        && !file.personas.iter().any(|p| p.name == PersonaId::messenger())
+        && !file.ants.iter().any(|ant| ant.name == UserId::messenger())
     {
-        file.personas.push(builtin_messenger(provider, home));
+        file.ants.push(builtin_messenger(provider, home));
     }
     let base = path.parent().unwrap_or(Path::new("."));
     let mut names = BTreeSet::new();
-    let mut personas = Vec::with_capacity(file.personas.len());
-    for mut p in file.personas {
-        if !names.insert(p.name.clone()) {
-            bail!("config {}: persona {} is listed twice", path.display(), p.name);
+    let mut ants = Vec::with_capacity(file.ants.len());
+    for mut ant in file.ants {
+        if !names.insert(ant.name.clone()) {
+            bail!("config {}: ant {} is listed twice", path.display(), ant.name);
         }
-        validate_env(&p.env)?;
-        p.validate_chain().with_context(|| format!("config {}", path.display()))?;
-        if p.harness.is_none() {
-            p.harness = file.provider;
+        validate_env(&ant.env)?;
+        ant.validate_chain().with_context(|| format!("config {}", path.display()))?;
+        if ant.harness.is_none() {
+            ant.harness = file.provider;
         }
-        if !p.builtin {
+        if !ant.builtin {
             let abs = |dir: &Path| resolve(dir, base, home);
-            p.workdir = abs(&p.workdir).canonicalize().with_context(|| {
-                format!("config {}: persona {}: workdir {}", path.display(), p.name, p.workdir.display())
+            ant.workdir = abs(&ant.workdir).canonicalize().with_context(|| {
+                format!("config {}: ant {}: workdir {}", path.display(), ant.name, ant.workdir.display())
             })?;
-            p.home = p.home.as_deref().map(abs);
-            p.creds = p.creds.as_deref().map(abs);
+            ant.home = ant.home.as_deref().map(abs);
+            ant.creds = ant.creds.as_deref().map(abs);
         }
-        if p.nats.is_none() {
-            p.nats.clone_from(&file.nats);
+        if ant.nats.is_none() {
+            ant.nats.clone_from(&file.nats);
         }
-        if p.js_domain.is_none() {
-            p.js_domain.clone_from(&file.js_domain);
+        if ant.js_domain.is_none() {
+            ant.js_domain.clone_from(&file.js_domain);
         }
-        if p.human.is_none() {
-            p.human.clone_from(&file.human);
+        if ant.human.is_none() {
+            ant.human.clone_from(&file.human);
         }
-        personas.push(p);
+        ants.push(ant);
     }
-    Ok(personas)
+    Ok(ants)
 }
 
 fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
@@ -379,13 +379,13 @@ fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     }
 }
 
-/// What adding a persona needs to know of a config file: its top-level `nats` and `js_domain`, and the personas it
+/// What adding an ant needs to know of a config file: its top-level `nats` and `js_domain`, and the ants it
 /// lists with their credentials, resolved as [`parse`] does. Nothing else is checked.
 #[derive(Debug, Default, PartialEq)]
 pub struct Summary {
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
-    pub personas: Vec<(PersonaId, Option<PathBuf>)>,
+    pub ants: Vec<(UserId, Option<PathBuf>)>,
 }
 
 impl Summary {
@@ -401,14 +401,14 @@ impl Summary {
     fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
         let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
-        let personas = file.personas.into_iter().map(|p| (p.name, p.creds.map(|c| resolve(&c, base, home)))).collect();
-        Ok(Self { nats: file.nats, js_domain: file.js_domain, personas })
+        let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
+        Ok(Self { nats: file.nats, js_domain: file.js_domain, ants })
     }
 
-    /// The credentials the file names for `persona`: `None` when it does not list the persona, `Some(None)` when its
+    /// The credentials the file names for `ant`: `None` when it does not list the ant, `Some(None)` when its
     /// entry names none.
-    pub fn creds_of(&self, persona: &PersonaId) -> Option<Option<&Path>> {
-        self.personas.iter().find(|(name, _)| name == persona).map(|(_, creds)| creds.as_deref())
+    pub fn creds_of(&self, ant: &UserId) -> Option<Option<&Path>> {
+        self.ants.iter().find(|(name, _)| name == ant).map(|(_, creds)| creds.as_deref())
     }
 }
 
@@ -441,82 +441,82 @@ pub fn append(path: &Path, entry: &str) -> Result<()> {
     std::fs::rename(&new, path).with_context(|| format!("writing config {}", path.display()))
 }
 
-/// The `[[persona]]` table of `p` for the config file: its name, workdir and the settings that differ from those of
-/// [`Persona::new`], paths as they are.
-pub fn entry(p: &Persona) -> Result<String> {
-    let default = Persona::new(p.name.clone(), p.workdir.clone());
-    let mut out = String::from("[[persona]]\n");
+/// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
+/// [`Ant::new`], paths as they are.
+pub fn entry(ant: &Ant) -> Result<String> {
+    let default = Ant::new(ant.name.clone(), ant.workdir.clone());
+    let mut out = String::from("[[ant]]\n");
     let mut set = |key: &str, value: String| out.push_str(&format!("{key} = {value}\n"));
     let path = |path: &Path| {
-        path.to_str().map(toml_string).with_context(|| format!("persona {}: {} is no UTF-8", p.name, path.display()))
+        path.to_str().map(toml_string).with_context(|| format!("ant {}: {} is no UTF-8", ant.name, path.display()))
     };
     let strings =
         |items: &mut dyn Iterator<Item = &str>| format!("[{}]", items.map(toml_string).collect::<Vec<_>>().join(", "));
-    set("name", toml_string(p.name.as_str()));
-    let texts = [("nats", &p.nats), ("model", &p.model), ("reasoning_effort", &p.reasoning_effort)];
-    for (key, value) in texts.into_iter().chain([("context", &p.context)]) {
+    set("name", toml_string(ant.name.as_str()));
+    let texts = [("nats", &ant.nats), ("model", &ant.model), ("reasoning_effort", &ant.reasoning_effort)];
+    for (key, value) in texts.into_iter().chain([("context", &ant.context)]) {
         if let Some(value) = value {
             set(key, toml_string(value));
         }
     }
-    if let Some(creds) = &p.creds {
+    if let Some(creds) = &ant.creds {
         set("creds", path(creds)?);
     }
-    if let Some(domain) = &p.js_domain {
+    if let Some(domain) = &ant.js_domain {
         set("js_domain", toml_string(domain.as_str()));
     }
-    if let Some(human) = &p.human {
+    if let Some(human) = &ant.human {
         set("human", toml_string(human.as_str()));
     }
-    set("workdir", path(&p.workdir)?);
-    if let Some(home) = &p.home {
+    set("workdir", path(&ant.workdir)?);
+    if let Some(home) = &ant.home {
         set("home", path(home)?);
     }
-    for (key, value) in [("whoami", &p.whoami), ("memory", &p.memory), ("tasks", &p.tasks)] {
+    for (key, value) in [("whoami", &ant.whoami), ("memory", &ant.memory), ("tasks", &ant.tasks)] {
         if let Some(value) = value {
             set(key, toml_string(value));
         }
     }
-    if !p.env.is_empty() {
+    if !ant.env.is_empty() {
         let pairs: Vec<String> =
-            p.env.iter().map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v))).collect();
+            ant.env.iter().map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v))).collect();
         set("env", format!("{{ {} }}", pairs.join(", ")));
     }
-    if let Some(harness) = p.harness {
+    if let Some(harness) = ant.harness {
         set("harness", toml_string(harness.name()));
     }
-    if p.allow_tools {
+    if ant.allow_tools {
         set("allow_tools", "true".to_owned());
     }
-    if !p.allow.is_empty() {
-        set("allow", strings(&mut p.allow.iter().map(String::as_str)));
+    if !ant.allow.is_empty() {
+        set("allow", strings(&mut ant.allow.iter().map(String::as_str)));
     }
-    if !p.capabilities.is_empty() {
-        set("capabilities", strings(&mut p.capabilities.iter().map(String::as_str)));
+    if !ant.capabilities.is_empty() {
+        set("capabilities", strings(&mut ant.capabilities.iter().map(String::as_str)));
     }
-    if !p.escalate_to.is_empty() {
-        set("escalate_to", strings(&mut p.escalate_to.iter().map(PersonaId::as_str)));
+    if !ant.escalate_to.is_empty() {
+        set("escalate_to", strings(&mut ant.escalate_to.iter().map(UserId::as_str)));
     }
     let numbers = [
-        ("approval_timeout_secs", p.approval_timeout_secs, default.approval_timeout_secs),
-        ("max_harnesses", p.max_harnesses as u64, default.max_harnesses as u64),
-        ("idle_timeout_secs", p.idle_timeout_secs, default.idle_timeout_secs),
-        ("prompt_timeout_secs", p.prompt_timeout_secs, default.prompt_timeout_secs),
-        ("max_tool_calls", p.max_tool_calls as u64, default.max_tool_calls as u64),
-        ("max_escalation_hops", p.max_escalation_hops.into(), default.max_escalation_hops.into()),
-        ("escalate_after_secs", p.escalate_after_secs, default.escalate_after_secs),
+        ("approval_timeout_secs", ant.approval_timeout_secs, default.approval_timeout_secs),
+        ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),
+        ("idle_timeout_secs", ant.idle_timeout_secs, default.idle_timeout_secs),
+        ("prompt_timeout_secs", ant.prompt_timeout_secs, default.prompt_timeout_secs),
+        ("max_tool_calls", ant.max_tool_calls as u64, default.max_tool_calls as u64),
+        ("max_escalation_hops", ant.max_escalation_hops.into(), default.max_escalation_hops.into()),
+        ("escalate_after_secs", ant.escalate_after_secs, default.escalate_after_secs),
     ];
     for (key, value, default) in numbers {
         if value != default {
             set(key, value.to_string());
         }
     }
-    for (key, value) in [("max_thread_tokens", p.max_thread_tokens), ("max_daily_tokens", p.max_daily_tokens)] {
+    for (key, value) in [("max_thread_tokens", ant.max_thread_tokens), ("max_daily_tokens", ant.max_daily_tokens)] {
         if let Some(value) = value {
             set(key, value.to_string());
         }
     }
-    for (key, value) in [("max_thread_cost", p.max_thread_cost), ("max_daily_cost", p.max_daily_cost)] {
+    for (key, value) in [("max_thread_cost", ant.max_thread_cost), ("max_daily_cost", ant.max_daily_cost)] {
         if let Some(value) = value {
             set(key, toml_float(value));
         }
@@ -562,20 +562,20 @@ mod tests {
     }
 
     /// Parse as if the file sat in this crate's directory, with the workspace root as home.
-    fn parse_here(text: &str) -> Result<Vec<Persona>> {
+    fn parse_here(text: &str) -> Result<Vec<Ant>> {
         let dir = manifest_dir();
         parse(text, &dir.join("config.toml"), dir.parent().unwrap().parent().unwrap())
     }
 
     #[test]
-    fn parses_several_personas() {
-        let personas = parse_here(
+    fn parses_several_ants() {
+        let ants = parse_here(
             r#"
             nats = "wss://hub.example/nats"
             js_domain = "hub"
             human = "alice"
 
-            [[persona]]
+            [[ant]]
             name = "dev-a"
             workdir = "~/crates/ants"
             creds = "~/auth/dev-a.creds"
@@ -601,7 +601,7 @@ Review changes for correctness."""
             max_escalation_hops = 2
             escalate_after_secs = 0
 
-            [[persona]]
+            [[ant]]
             name = "dev-b"
             nats = "nats://127.0.0.1:4222"
             human = "bob"
@@ -610,11 +610,11 @@ Review changes for correctness."""
         )
         .unwrap();
         let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
-        let a = &personas[0];
+        let a = &ants[0];
         assert_eq!(a.name.as_str(), "dev-a");
         assert_eq!(a.nats.as_deref(), Some("wss://hub.example/nats"));
         assert_eq!(a.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
-        assert_eq!(a.human.as_ref().map(PersonaId::as_str), Some("alice"));
+        assert_eq!(a.human.as_ref().map(UserId::as_str), Some("alice"));
         assert_eq!(a.workdir, root.join("crates/ants").canonicalize().unwrap());
         assert_eq!(a.creds, Some(root.join("auth/dev-a.creds")));
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
@@ -632,7 +632,7 @@ Review changes for correctness."""
         assert_eq!(config.whoami.as_deref(), Some("Maintain the Rust backend.\nReview changes for correctness."));
         assert_eq!(
             config.instructions,
-            "[ants persona dev-a]\nMaintain the Rust backend.\nReview changes for correctness.\n\n\
+            "[ants role dev-a]\nMaintain the Rust backend.\nReview changes for correctness.\n\n\
              [ants memory]\nUse the memory MCP server.\n\n[ants tasks]\nUse the tracker CLI."
         );
         assert_eq!(config.env.get("TRACKER_DB").map(String::as_str), Some("/srv/ants/dev-a/tasks.db"));
@@ -643,18 +643,15 @@ Review changes for correctness."""
             Chain { escalate_to: vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()], max_hops: 2, after: None };
         assert_eq!(config.escalation, chain, "0 waits for the leader for good");
 
-        let b = personas[1].clone();
+        let b = ants[1].clone();
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
         assert_eq!(b.workdir, manifest_dir().join("src").canonicalize().unwrap());
-        let defaults = Persona::new(b.name.clone(), b.workdir.clone());
-        assert_eq!(
-            b,
-            Persona { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults }
-        );
+        let defaults = Ant::new(b.name.clone(), b.workdir.clone());
+        assert_eq!(b, Ant { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults });
 
         let config = b.into_config("nats://unused").unwrap();
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
-        assert_eq!(config.human.as_str(), "bob", "a persona's own default human comes first");
+        assert_eq!(config.human.as_str(), "bob", "an ant's own default human comes first");
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
         assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
         assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
@@ -671,22 +668,22 @@ Review changes for correctness."""
 
     #[test]
     fn whoami_memory_and_tasks_are_independent_and_can_be_cleared() {
-        let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
-        p.whoami = Some("Maintain the backend.".to_owned());
-        p.memory = Some("Use notes.".to_owned());
-        assert_eq!(p.prompt_instructions(), "[ants persona dev-a]\nMaintain the backend.\n\n[ants memory]\nUse notes.");
-        p.whoami = Some(String::new());
-        assert_eq!(p.prompt_instructions(), "[ants memory]\nUse notes.");
-        p.memory = Some(String::new());
-        p.tasks = Some("Use tickets.".to_owned());
-        assert_eq!(p.prompt_instructions(), "[ants tasks]\nUse tickets.");
-        p.whoami = Some(" \n".to_owned());
-        p.tasks = Some(" \n".to_owned());
-        assert!(p.prompt_instructions().is_empty());
+        let mut ant = Ant::new("dev-a".parse().unwrap(), manifest_dir());
+        ant.whoami = Some("Maintain the backend.".to_owned());
+        ant.memory = Some("Use notes.".to_owned());
+        assert_eq!(ant.prompt_instructions(), "[ants role dev-a]\nMaintain the backend.\n\n[ants memory]\nUse notes.");
+        ant.whoami = Some(String::new());
+        assert_eq!(ant.prompt_instructions(), "[ants memory]\nUse notes.");
+        ant.memory = Some(String::new());
+        ant.tasks = Some("Use tickets.".to_owned());
+        assert_eq!(ant.prompt_instructions(), "[ants tasks]\nUse tickets.");
+        ant.whoami = Some(" \n".to_owned());
+        ant.tasks = Some(" \n".to_owned());
+        assert!(ant.prompt_instructions().is_empty());
     }
 
     #[test]
-    fn invalid_native_settings_fail_before_starting_a_persona() {
+    fn invalid_native_settings_fail_before_starting_an_ant() {
         for (harness, model, effort, context, error) in [
             (HarnessKind::Copilot, Some(" "), None, None, "model must not be blank"),
             (HarnessKind::Claude, None, Some(""), None, "reasoning_effort must not be blank"),
@@ -695,12 +692,12 @@ Review changes for correctness."""
             (HarnessKind::Claude, Some("smart[1m]"), None, Some("default"), "conflicts"),
             (HarnessKind::Antigravity, None, None, Some("long_context"), "no separate context selector"),
         ] {
-            let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
-            p.harness = Some(harness);
-            p.model = model.map(str::to_owned);
-            p.reasoning_effort = effort.map(str::to_owned);
-            p.context = context.map(str::to_owned);
-            let err = p.into_config("nats://unused").unwrap_err().to_string();
+            let mut ant = Ant::new("dev-a".parse().unwrap(), manifest_dir());
+            ant.harness = Some(harness);
+            ant.model = model.map(str::to_owned);
+            ant.reasoning_effort = effort.map(str::to_owned);
+            ant.context = context.map(str::to_owned);
+            let err = ant.into_config("nats://unused").unwrap_err().to_string();
             assert!(err.contains(error), "{err}");
         }
     }
@@ -708,13 +705,13 @@ Review changes for correctness."""
     #[test]
     fn rejects_invalid_environment_without_exposing_values() {
         for (name, value) in [("", "secret"), ("bad=name", "secret"), ("bad\0name", "secret"), ("NAME", "secret\0")] {
-            let mut p = Persona::new("dev-a".parse().unwrap(), manifest_dir());
-            p.env.insert(name.to_owned(), value.to_owned());
-            let err = p.into_config("nats://unused").unwrap_err().to_string();
+            let mut ant = Ant::new("dev-a".parse().unwrap(), manifest_dir());
+            ant.env.insert(name.to_owned(), value.to_owned());
+            let err = ant.into_config("nats://unused").unwrap_err().to_string();
             assert!(err.contains("invalid harness environment variable"), "{err}");
             assert!(!err.contains("secret"), "{err}");
         }
-        let err = parse_here("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nenv = { 'bad=name' = 'secret' }")
+        let err = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nenv = { 'bad=name' = 'secret' }")
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid harness environment variable"), "{err}");
@@ -722,23 +719,23 @@ Review changes for correctness."""
 
     #[test]
     fn falls_back_to_the_default_server_and_human() {
-        let personas = parse_here("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-        assert_eq!((&personas[0].nats, &personas[0].human), (&None, &None));
-        let config = personas[0].clone().into_config("nats://leaf:4222").unwrap();
-        assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", PersonaId::human()));
+        let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+        assert_eq!((&ants[0].nats, &ants[0].human), (&None, &None));
+        let config = ants[0].clone().into_config("nats://leaf:4222").unwrap();
+        assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
         let err = parse_here("human = \"Not A Name\"\nprovider = \"copilot\"").unwrap_err();
         assert!(format!("{err:#}").contains("human"), "{err:#}");
     }
 
     #[test]
     fn provider_is_the_default_harness_and_serves_the_builtin_messenger() {
-        let personas = parse_here(
+        let ants = parse_here(
             "provider = \"claude\"\njs_domain = \"hub\"\n\
-             [[persona]]\nname = \"dev-a\"\nworkdir = \".\"\n\
-             [[persona]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
         )
         .unwrap();
-        let harnesses: Vec<_> = personas.iter().map(|p| (p.name.as_str(), p.harness, p.builtin)).collect();
+        let harnesses: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness, ant.builtin)).collect();
         assert_eq!(
             harnesses,
             [
@@ -748,16 +745,16 @@ Review changes for correctness."""
             ]
         );
         let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
-        let messenger = &personas[2];
+        let messenger = &ants[2];
         let dir = root.join(".ants/messenger");
         assert_eq!((&messenger.workdir, messenger.home.as_ref()), (&dir, Some(&dir)));
         assert_eq!(messenger.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
-        let stock = Persona {
+        let stock = Ant {
             harness: Some(HarnessKind::Claude),
             home: Some(dir.clone()),
             js_domain: messenger.js_domain.clone(),
             builtin: true,
-            ..Persona::new(PersonaId::messenger(), dir)
+            ..Ant::new(UserId::messenger(), dir)
         };
         assert_eq!(messenger, &stock, "provider defaults for model, reasoning effort and context; stock settings");
 
@@ -768,18 +765,18 @@ Review changes for correctness."""
 
     #[test]
     fn a_listed_messenger_replaces_the_builtin_one() {
-        let personas = parse_here("provider = \"claude\"\n[[persona]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
-        assert_eq!(personas.len(), 1);
-        assert_eq!((personas[0].harness, personas[0].builtin), (Some(HarnessKind::Claude), false));
-        assert_eq!(personas[0].workdir, manifest_dir().canonicalize().unwrap());
+        let ants = parse_here("provider = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
+        assert_eq!(ants.len(), 1);
+        assert_eq!((ants[0].harness, ants[0].builtin), (Some(HarnessKind::Claude), false));
+        assert_eq!(ants[0].workdir, manifest_dir().canonicalize().unwrap());
     }
 
     #[test]
     fn without_provider_there_is_no_builtin_messenger() {
-        let personas = parse_here("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-        assert_eq!(personas.len(), 1);
-        assert_eq!(personas[0].harness, None);
-        let config = personas[0].clone().into_config("nats://unused").unwrap();
+        let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+        assert_eq!(ants.len(), 1);
+        assert_eq!(ants[0].harness, None);
+        let config = ants[0].clone().into_config("nats://unused").unwrap();
         assert_eq!((config.harness, config.defer_to_others), (HarnessKind::Copilot, false));
     }
 
@@ -802,20 +799,18 @@ Review changes for correctness."""
     #[test]
     fn rejects_bad_files() {
         let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
-        let twice =
-            err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\n[[persona]]\nname = \"dev-a\"\nworkdir = \".\"");
-        assert!(twice.contains("persona dev-a is listed twice"), "{twice}");
+        let twice = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"");
+        assert!(twice.contains("ant dev-a is listed twice"), "{twice}");
         assert!(twice.contains("config.toml"), "{twice}");
-        let missing = err("[[persona]]\nname = \"dev-a\"\nworkdir = \"no/such/dir\"");
+        let missing = err("[[ant]]\nname = \"dev-a\"\nworkdir = \"no/such/dir\"");
         assert!(missing.contains("workdir no/such/dir"), "{missing}");
-        assert!(err("nats = \"nats://x\"").contains("no provider and no [[persona]] entries"));
+        assert!(err("nats = \"nats://x\"").contains("no provider and no [[ant]] entries"));
         assert!(err("provider = \"vim\"").contains("unknown harness"));
-        assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
-        assert!(err("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
-        assert!(err("[[persona]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
-        let chain =
-            |names: &str| err(&format!("[[persona]]\nname = \"dev-a\"\nworkdir = \".\"\nescalate_to = {names}"));
-        assert!(chain("[\"dev-a\"]").contains("escalate_to names the persona itself"));
+        assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
+        assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
+        assert!(err("[[ant]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
+        let chain = |names: &str| err(&format!("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nescalate_to = {names}"));
+        assert!(chain("[\"dev-a\"]").contains("escalate_to names the ant itself"));
         assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
         assert!(chain("[\"Lead!\"]").contains("parsing config"));
     }
@@ -823,12 +818,12 @@ Review changes for correctness."""
     #[test]
     fn entries_read_back_as_written() {
         let workdir = manifest_dir().canonicalize().unwrap();
-        let plain = Persona::new("dev-a".parse().unwrap(), workdir.clone());
+        let plain = Ant::new("dev-a".parse().unwrap(), workdir.clone());
         let text = entry(&plain).unwrap();
-        assert_eq!(text, format!("[[persona]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
+        assert_eq!(text, format!("[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
         assert_eq!(parse_here(&text).unwrap(), [plain]);
 
-        let mut full = Persona::new("dev-b".parse().unwrap(), workdir);
+        let mut full = Ant::new("dev-b".parse().unwrap(), workdir);
         full.nats = Some("wss://hub.example/nats".to_owned());
         full.creds = Some(PathBuf::from("/keys/dev b.creds"));
         full.js_domain = Some("hub".parse().unwrap());
@@ -854,22 +849,22 @@ Review changes for correctness."""
     fn appending_keeps_the_file_as_it_was_and_checks_it() {
         let dir = ants_test_support::scratch_dir("config-append").canonicalize().unwrap();
         let path = dir.join("ants/config.toml");
-        let add = |name: &str| append(&path, &entry(&Persona::new(name.parse().unwrap(), dir.clone())).unwrap());
+        let add = |name: &str| append(&path, &entry(&Ant::new(name.parse().unwrap(), dir.clone())).unwrap());
         add("dev-a").unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
-        assert!(first.starts_with("[[persona]]\nname = \"dev-a\""), "{first}");
+        assert!(first.starts_with("[[ant]]\nname = \"dev-a\""), "{first}");
 
-        let old = "# the team\nprovider = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[persona]]\nname = \"dev-a\"\n\
+        let old = "# the team\nprovider = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[ant]]\nname = \"dev-a\"\n\
                    workdir = \".\"\ncreds = \"keys/dev-a.creds\"";
         std::fs::write(&path, old).unwrap();
         add("dev-b").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with(&format!("{old}\n\n[[persona]]\nname = \"dev-b\"")), "{text}");
-        let names: Vec<_> = load(&path).unwrap().into_iter().map(|p| p.name.to_string()).collect();
+        assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
+        let names: Vec<_> = load(&path).unwrap().into_iter().map(|ant| ant.name.to_string()).collect();
         assert_eq!(names, ["dev-a", "dev-b", "messenger"]);
 
         let err = format!("{:#}", add("dev-a").unwrap_err());
-        assert!(err.contains("persona dev-a is listed twice"), "{err}");
+        assert!(err.contains("ant dev-a is listed twice"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "left as it was");
 
         let summary = Summary::load(&path).unwrap();

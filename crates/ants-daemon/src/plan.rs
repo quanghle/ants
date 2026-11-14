@@ -1,13 +1,13 @@
 //! Thread notes (plan rooms in the code): a thread's posts live in the ANTS stream on `ants.plan.<thread>.<from>`.
 //!
-//! A reader reads a room back through its own consumer `plan-<persona>`, created for the read and deleted after it, so
+//! A reader reads a room back through its own consumer `plan-<user>`, created for the read and deleted after it, so
 //! its credentials need not let it touch any other consumer. Posts whose sender or thread disagrees with their subject
 //! are dropped. A post states the stream sequence of the room's last post it saw, so two agents spending the same turn
 //! cannot both succeed: the second one reads the room again.
 
 use std::time::Duration;
 
-use ants_proto::{PersonaId, PlanPost, STREAM, ThreadId, plan_consumer, subject};
+use ants_proto::{PlanPost, STREAM, ThreadId, UserId, plan_consumer, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, consumer};
@@ -50,13 +50,13 @@ pub trait Rooms: Send + Sync {
 /// Plan rooms in the ANTS stream, as `reader` sees them.
 pub struct JetStreamRooms {
     js: jetstream::Context,
-    reader: PersonaId,
+    reader: UserId,
     /// One read at a time: they share the reader's consumer.
     reading: tokio::sync::Mutex<()>,
 }
 
 impl JetStreamRooms {
-    pub fn new(js: jetstream::Context, reader: PersonaId) -> Self {
+    pub fn new(js: jetstream::Context, reader: UserId) -> Self {
         Self { js, reader, reading: tokio::sync::Mutex::new(()) }
     }
 }
@@ -75,7 +75,7 @@ impl Rooms for JetStreamRooms {
 }
 
 /// The room of `thread`, read through the consumer of `reader`. Only one read per reader may run at a time.
-pub async fn read(js: &jetstream::Context, reader: &PersonaId, thread: &ThreadId) -> Result<Room> {
+pub async fn read(js: &jetstream::Context, reader: &UserId, thread: &ThreadId) -> Result<Room> {
     let name = plan_consumer(reader);
     // A consumer left by an interrupted read would carry on where it stopped.
     let _ = js.delete_consumer_from_stream(&name, STREAM).await;
@@ -150,7 +150,7 @@ pub async fn publish(js: &jetstream::Context, post: &PlanPost, last_seq: Option<
 pub async fn spend(
     rooms: &dyn Rooms,
     thread: &ThreadId,
-    from: &PersonaId,
+    from: &UserId,
     text: &str,
     budget: u32,
 ) -> Result<Option<PlanPost>> {

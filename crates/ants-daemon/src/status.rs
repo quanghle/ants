@@ -1,11 +1,11 @@
-//! Live progress on `ants.status.<persona>.<thread>`: core NATS, best effort.
+//! Live progress on `ants.status.<ant>.<thread>`: core NATS, best effort.
 //!
 //! Nothing here waits on the server. An update the client cannot take at once is dropped, so a slow or lost link
 //! never holds up a prompt, an ack or the harness.
 
 use std::time::Duration;
 
-use ants_proto::{PersonaId, State, StatusEvent, StatusUpdate, ThreadId};
+use ants_proto::{State, StatusEvent, StatusUpdate, ThreadId, UserId};
 use futures::FutureExt as _;
 
 /// How long streamed text is joined before it goes out.
@@ -15,9 +15,9 @@ const MAX_JOINED: usize = 4096;
 /// Updates a prompt may have waiting between the harness and the publisher; more are dropped.
 pub const BUFFER: usize = 256;
 
-/// Publish `update` for `persona` on `thread`, or drop it.
-pub fn publish(client: &async_nats::Client, persona: &PersonaId, thread: &ThreadId, update: StatusUpdate) {
-    let event = StatusEvent::new(persona.clone(), thread.clone(), update);
+/// Publish `update` for `ant` on `thread`, or drop it.
+pub fn publish(client: &async_nats::Client, ant: &UserId, thread: &ThreadId, update: StatusUpdate) {
+    let event = StatusEvent::new(ant.clone(), thread.clone(), update);
     let payload = match serde_json::to_vec(&event) {
         Ok(payload) => payload,
         Err(e) => return tracing::debug!(error = %e, "encoding a status update"),
@@ -30,22 +30,22 @@ pub fn publish(client: &async_nats::Client, persona: &PersonaId, thread: &Thread
 }
 
 /// Publish the thread's state.
-pub fn state(client: &async_nats::Client, persona: &PersonaId, thread: &ThreadId, state: State) {
-    publish(client, persona, thread, StatusUpdate::State { state });
+pub fn state(client: &async_nats::Client, ant: &UserId, thread: &ThreadId, state: State) {
+    publish(client, ant, thread, StatusUpdate::State { state });
 }
 
 /// The status of one prompt, joining streamed text so a reply goes out in a few updates rather than one per token.
 pub struct Status<'a> {
     client: &'a async_nats::Client,
-    persona: &'a PersonaId,
+    ant: &'a UserId,
     thread: &'a ThreadId,
     /// Text not sent yet: message or thought.
     joined: Option<StatusUpdate>,
 }
 
 impl<'a> Status<'a> {
-    pub fn new(client: &'a async_nats::Client, persona: &'a PersonaId, thread: &'a ThreadId) -> Self {
-        Self { client, persona, thread, joined: None }
+    pub fn new(client: &'a async_nats::Client, ant: &'a UserId, thread: &'a ThreadId) -> Self {
+        Self { client, ant, thread, joined: None }
     }
 
     /// Add an update. Text joins the text before it of the same type; anything else sends that text first, so the
@@ -60,7 +60,7 @@ impl<'a> Status<'a> {
             }
             (_, update) => {
                 self.flush();
-                publish(self.client, self.persona, self.thread, update);
+                publish(self.client, self.ant, self.thread, update);
             }
         }
         if let Some(StatusUpdate::Message { text } | StatusUpdate::Thought { text }) = &self.joined
@@ -73,7 +73,7 @@ impl<'a> Status<'a> {
     /// Send the text joined so far.
     pub fn flush(&mut self) {
         if let Some(update) = self.joined.take() {
-            publish(self.client, self.persona, self.thread, update);
+            publish(self.client, self.ant, self.thread, update);
         }
     }
 }
@@ -89,14 +89,14 @@ mod tests {
     async fn text_is_joined_until_something_else_comes() {
         let Some(server) = Server::start() else { return };
         let client = async_nats::connect(&server.url).await.unwrap();
-        let (persona, thread): (PersonaId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
-        let mut sub = client.subscribe(ants_proto::subject::status(&persona, &thread)).await.unwrap();
+        let (ant, thread): (UserId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
+        let mut sub = client.subscribe(ants_proto::subject::status(&ant, &thread)).await.unwrap();
         client.flush().await.unwrap();
 
         let says = |text: &str| StatusUpdate::Message { text: text.to_owned() };
         let thinks = StatusUpdate::Thought { text: "hmm".to_owned() };
         let tool = StatusUpdate::Tool { id: "c1".to_owned(), title: None, tool_kind: None, status: None };
-        let mut status = Status::new(&client, &persona, &thread);
+        let mut status = Status::new(&client, &ant, &thread);
         for update in [says("a"), says("b"), thinks.clone(), tool.clone(), says("c")] {
             status.push(update);
         }

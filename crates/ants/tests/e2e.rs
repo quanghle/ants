@@ -69,7 +69,7 @@ fn exercise_daemon(custom_tools: bool) {
         std::fs::write(
             &config,
             format!(
-                "[[persona]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                "[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
                  memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
@@ -79,7 +79,7 @@ fn exercise_daemon(custom_tools: bool) {
         .unwrap();
         command.arg("--config").arg(config);
     } else {
-        command.args(["--persona", "dev-a"]).arg("--home").arg(&home).arg("--workdir").arg(&dir);
+        command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(&dir);
     }
     let daemon = command
         .env("PATH", &bin)
@@ -99,7 +99,7 @@ fn exercise_daemon(custom_tools: bool) {
     assert!(ask.status.success(), "ants ask: {}\ndaemon log:\n{}", String::from_utf8_lossy(&ask.stderr), daemon_log());
     assert!(stdout.starts_with("thread "), "{stdout}");
     let expected = if custom_tools {
-        "dev-a: stub: [ants persona dev-a]\nMaintain the Rust backend.\n\n\
+        "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
          [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
          hello there\ncustom.db; BD_DB=unmanaged.db; BD_REMOTE=\n\
          model=stub-model; effort=high; context=long_context\n"
@@ -112,7 +112,7 @@ fn exercise_daemon(custom_tools: bool) {
     let roster = run(ants(&["roster", "--json"]));
     assert!(roster.status.success(), "ants roster: {}", String::from_utf8_lossy(&roster.stderr));
     let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
-    assert_eq!(entry["persona"], "dev-a");
+    assert_eq!(entry["ant"], "dev-a");
     if custom_tools {
         assert_eq!(entry["whoami"], "Maintain the Rust backend.");
         assert!(!String::from_utf8_lossy(&roster.stdout).contains("Use the notes tool."));
@@ -268,7 +268,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let served_from = || {
         let roster = run(ants(&["roster", "--json"]));
         let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
-        assert_eq!(entry["persona"], "messenger");
+        assert_eq!(entry["ant"], "messenger");
         entry["workdir"].as_str().unwrap().to_owned()
     };
     let ask = |text: &str| {
@@ -279,9 +279,9 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
 
     let _builtin = daemon("builtin", "provider = \"copilot\"\n");
     wait_for("builtin", "serving inbox", 1);
-    let listed = daemon("listed", &format!("[[persona]]\nname = \"messenger\"\nworkdir = {dir:?}\n"));
+    let listed = daemon("listed", &format!("[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"));
     wait_for("listed", "serving inbox", 1);
-    wait_for("builtin", "another daemon took over the persona", 1);
+    wait_for("builtin", "another daemon took over the ant", 1);
     assert_eq!(served_from(), dir.canonicalize().unwrap().display().to_string(), "{}", logs());
     ask("first");
 

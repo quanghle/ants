@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{ChannelPost, Envelope, PersonaId, PlanPost, ThreadId, Uuid, attempt_key};
+use ants_proto::{ChannelPost, Envelope, PlanPost, ThreadId, UserId, Uuid, attempt_key};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
@@ -65,21 +65,20 @@ struct Record {
     reply: Option<Reply>,
 }
 
-/// The attempt markers of one persona, under its own keys.
+/// The attempt markers of one ant, under its own keys.
 pub struct Attempts {
     kv: kv::Store,
-    persona: PersonaId,
+    ant: UserId,
 }
 
 impl Attempts {
-    pub fn new(kv: kv::Store, persona: PersonaId) -> Self {
-        Self { kv, persona }
+    pub fn new(kv: kv::Store, ant: UserId) -> Self {
+        Self { kv, ant }
     }
 
     /// What an earlier attempt at `envelope`, stored at stream sequence `seq`, left.
     pub async fn get(&self, seq: u64, envelope: &Envelope) -> Result<Option<Marker>> {
-        let Some(value) = self.kv.get(attempt_key(&self.persona, seq)).await.context("reading the attempt marker")?
-        else {
+        let Some(value) = self.kv.get(attempt_key(&self.ant, seq)).await.context("reading the attempt marker")? else {
             return Ok(None);
         };
         let record: Record = match serde_json::from_slice(&value) {
@@ -109,19 +108,19 @@ impl Attempts {
 
     /// Remove the marker of a message that is acked or dead-lettered. A failure only leaves it to expire.
     pub async fn forget(&self, seq: u64) {
-        if let Err(e) = self.kv.delete(attempt_key(&self.persona, seq)).await {
+        if let Err(e) = self.kv.delete(attempt_key(&self.ant, seq)).await {
             tracing::warn!(seq, error = %e, "removing the attempt marker");
         }
     }
 
     async fn put(&self, seq: u64, record: &Record) -> Result<()> {
-        self.kv.put(attempt_key(&self.persona, seq), serde_json::to_vec(record)?.into()).await?;
+        self.kv.put(attempt_key(&self.ant, seq), serde_json::to_vec(record)?.into()).await?;
         Ok(())
     }
 }
 
 /// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
-/// per message, named after its envelope id, holding the reply, in `<home>/answered` of the persona.
+/// per message, named after its envelope id, holding the reply, in `<home>/answered` of the ant.
 pub struct Answered(Notes);
 
 impl Answered {
@@ -151,7 +150,7 @@ impl Answered {
 }
 
 /// Notes a daemon keeps on the machine itself about messages it could not ack: one JSON file per message, named after
-/// its envelope id, in a directory of the persona's home.
+/// its envelope id, in a directory of the ant's home.
 pub struct Notes {
     dir: PathBuf,
 }

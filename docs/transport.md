@@ -19,7 +19,7 @@ service) or **researched** (documentation or source reading only).
 | Leaf node → TCP port forward (stand-in for `devtunnel connect`) → hub leafnode port | verified |
 | `ants` itself behind an HTTP forward proxy | not possible: async-nats has no proxy support; a leaf node has |
 | JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain: `--js-domain` (ants-v6w), verified |
-| Leaf uplink credentials bounding what a machine's personas may do | `ants auth leaf` (ants-hmf), verified |
+| Leaf uplink credentials bounding what a machine's ants and humans may do | `ants auth leaf` (ants-hmf), verified |
 | Leaf configuration from `ants leaf config`, uplink switched by rewriting it and `SIGHUP` | verified (ants-32g.2) |
 | Store and forward: a leaf's outbox, sourced by the hub once the uplink is back | `ants leaf outbox` (ants-0ul), verified |
 | Reconnect after proxy restart, forwarder drop and silent link loss; durable consumer resumes | verified |
@@ -125,7 +125,7 @@ leafnodes {
   remotes: [{
     urls: ["wss://hub.example.com/nats"]     # or ["nats-leaf://127.0.0.1:7422"] through `devtunnel connect`
     account: <ants account public key>       # the account in server.conf
-    credentials: "leaf-macbook.creds"        # from `ants auth leaf macbook --persona ... --js-domain hub`
+    credentials: "leaf-macbook.creds"        # from `ants auth leaf macbook --ant ... --js-domain hub`
     # tls { ca_file: "ca.pem" }              # private CA only
     # proxy { url: "http://proxy.corp:3128" }  # HTTP CONNECT forward proxy; optional username and password
   }]
@@ -140,13 +140,13 @@ leaf retries its remote every one to two seconds while the uplink is down, and r
 Constraints found:
 
 - **Leaf credentials.** The remote needs a user in the team account. Its permissions bound everything the machine can
-  do on the hub; the per-persona permissions are enforced by the leaf, which authenticates local clients against the
+  do on the hub; the per-user permissions are enforced by the leaf, which authenticates local clients against the
   same `server.conf`. `ants auth leaf` issues it (ants-hmf, see "Leaf uplink credentials" below).
 - **JetStream across a leaf node.** A leaf without JetStream denies the non-domain JetStream API `$JS.API.>` on its
   leaf connection (source: `leafnode.go`; verified: `ants init` on the leaf fails with "jetstream unavailable").
   Publishing into the stream still works, since its acks are plain replies. Two ways out, both verified:
   - Give the hub `jetstream { domain: hub }` and make clients use it, so they publish to `$JS.hub.API.>`: a consumer
-    on the leaf using `jetstream::with_domain(client, "hub")` created its consumer and received messages. Persona
+    on the leaf using `jetstream::with_domain(client, "hub")` created its consumer and received messages. User
     permissions must then allow `$JS.hub.API.…` as well as `$JS.API.…`; ack subjects stay `$JS.ACK.ANTS.…`. Mapping
     the domain on the leaf with `default_js_domain: { <account>: hub }` does not work for a JetStream-enabled account.
     This is what ants does (ants-v6w, see "JetStream domain" below).
@@ -171,7 +171,7 @@ Constraints found:
 ## JetStream domain
 
 The hub's `jetstream { domain: hub }` is the one setting. Every ants process takes it as `--js-domain hub`,
-`ANTS_JS_DOMAIN=hub` or `js_domain = "hub"` in the daemon config file (top level or per persona), and then sends all
+`ANTS_JS_DOMAIN=hub` or `js_domain = "hub"` in the daemon config file (top level or per ant), and then sends all
 JetStream API requests, KV puts and deletes included, to `$JS.hub.API.…` (`bus::jetstream`). Without it nothing
 changes: `$JS.API.…` as before, which works only on the hub itself.
 
@@ -190,16 +190,16 @@ Verified with nats-server 2.15.3:
 ## Leaf uplink credentials
 
 ```sh
-ants auth leaf macbook --persona dev-a --persona dev-b --persona human --human alice --js-domain hub
+ants auth leaf macbook --ant dev-a --ant dev-b --human human --human alice --js-domain hub
 # -> ~/.config/ants/auth/leaf-macbook.creds, for leafnodes.remotes[].credentials on macbook
 ```
 
-The leaf user may do what the listed personas and humans may do together (`Permissions::for_leaf`, the union of
-`Permissions::for_persona` in each one's role), with the domain forms of `--js-domain`; list each human that runs the
-CLI on the machine, `human` with `--persona` and any other with `--human NAME`. Its
+The leaf user may do what the listed ants and humans may do together (`Permissions::for_leaf`, the union of
+`Permissions::for_user` in each one's role), with the domain forms of `--js-domain`; list each human that runs the
+CLI on the machine with `--human NAME`, `human` included (`--ant human` also counts as a human). Its
 JWT sets `allowed_connection_types: [LEAFNODE, LEAFNODE_WS]`, so it works only as a leaf uplink (over TCP or
-`wss://`), never as a client that could act as all those personas at once. Issue it again when the machine's
-personas change. Beyond the personas' subjects it carries only the hub's sourcing of the machine's outbox (see "Store
+`wss://`), never as a client that could act as all those ants at once. Issue it again when the machine's
+ants or humans change. Beyond the listed users' subjects it carries only the hub's sourcing of the machine's outbox (see "Store
 and forward on a leaf node"): the outbox's own `ants.out.` subjects never cross the uplink.
 
 How nats-server applies a leaf user's permissions (source: `leafnode.go`, `processLeafNodeConnect`, and verified):
@@ -255,13 +255,13 @@ server restarts):
 1. The hub's intake stream `ANTS_IN` sources every outbox through the machine's domain
    (`external.api: $JS.<machine>.API`, `deliver: $JS.S.<machine>`) and stores each message under
    `ants.in.<machine>.`, so nothing a machine sends can pass for another machine or land in `ANTS` directly.
-2. `ANTS` sources from `ANTS_IN`, for each machine and persona, only what the persona may publish itself
-   (`ants.in.<machine>.ants.out.inbox.*.<persona>`, `...plan.*.<persona>`, `...chan.*.<persona>` and, for a persona
-   that is no human, `...dead.<persona>`; the human's `inbox.>`), and transforms
+2. `ANTS` sources from `ANTS_IN`, for each machine and each user listed for it, ant or human, only what that user may
+   publish itself (`ants.in.<machine>.ants.out.inbox.*.<user>`, `...plan.*.<user>`, `...chan.*.<user>` and, for an
+   ant, `...dead.<ant>`; a human's `inbox.>`), and transforms
    it back to the usual subject. The rest stays in the intake, where only the human can read it.
 
-Source filters of one stream must not overlap, so when the human is on a machine its `inbox.>` covers the other
-personas' inbox subjects there, and they get only their plan and channel subjects. Every message keeps its `Nats-Msg-Id` (the
+Source filters of one stream must not overlap, so when a human is on a machine its `inbox.>` covers the other
+users' inbox subjects there, and they get only their plan and channel subjects. Every message keeps its `Nats-Msg-Id` (the
 envelope or post id): a sourced copy of a message `ANTS` already took within its duplicate window (2 minutes) is
 dropped.
 
@@ -272,7 +272,7 @@ machine's outbox"); a daemon logs a warning. Everything else needs the hub at on
 
 - Consumers and their acks, and stream reads (`ants watch --replay`, `ants dead list`/`replay`): they read the hub's
   stream.
-- Plan posts that expect a sequence (a persona's `post_plan`): the expected last subject sequence is optimistic
+- Plan posts that expect a sequence (an ant's `post_plan`): the expected last subject sequence is optimistic
   concurrency, and only the hub's stream, at the time of the post, can tell the poster whether it won the turn. A
   buffered copy would land minutes later against a newer room, where the hub could only drop a post the poster was
   told was kept. Plan posts without an expected sequence are buffered.
@@ -285,19 +285,19 @@ machine's outbox"); a daemon logs a warning. Everything else needs the hub at on
   advisories and stream, so the hub is up whenever they are written.
 
 A dead letter in the outbox leaves its message unfinished: the notice on the thread needs the escalation state in
-`ants_sessions` and the termination needs the hub. The daemon notes the dead letter in `<home>/buried` of the persona
+`ants_sessions` and the termination needs the hub. The daemon notes the dead letter in `<home>/buried` of the ant
 (`<envelope id>.json`, by envelope id like `answered`); the message's next delivery after the uplink is back, even to a
 restarted daemon, buries the noted letter again without another prompt. The hub's stream drops the copy by its
 `Nats-Msg-Id` (`dead-<stream sequence>`) and the daemon sends the notice and terminates the message, once. A daemon
 buries a message on its last attempt, and the consumer allows one more delivery after that one, which then carries the
 noted letter to the hub (see Limits for a letter kept on that extra delivery).
 
-A message `ANTS` sources is stored without being published on its subject, so live waiters (`ants ask --wait`, a
-persona's waiting `ask_agent`, a persona waiting for its escalation chain's decision) would miss it; only the inbox
+A message `ANTS` sources is stored without being published on its subject, so live waiters (`ants ask --wait`, an
+ant's waiting `ask_agent`, an ant waiting for its escalation chain's decision) would miss it; only the inbox
 consumers would see it (ants-5zr). `ANTS` therefore republishes every inbox message it stores, sourced or not
 (`republish: { src: "ants.inbox.*.*", dest: "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}" }`), to
-`_INBOX.<recipient>.stored.<sender>`. Every set of credentials already reads its own `_INBOX.<persona>.>` and no other's,
-and a leaf's uplink carries those of its personas; no credentials publish under `_INBOX.<persona>.stored`, so only the
+`_INBOX.<recipient>.stored.<sender>`. Every set of credentials already reads its own `_INBOX.<user>.>` and no other's,
+and a leaf's uplink carries those of its ants and humans; no credentials publish under `_INBOX.<user>.stored`, so only the
 server does. A waiter (`bus::live_inbox`) subscribes to both the inbox subject and the republished one, puts a
 republished message back on the subject in its `Nats-Subject` header and takes each message once, by `Nats-Msg-Id`
 (every inbox message carries its envelope id), or by payload without one, over the last 1024 messages: a message
@@ -305,18 +305,18 @@ published directly comes both ways, in either order, one kept in an outbox only 
 uplink is down live on the leaf and later republished. `ants init` adds the republish to an older stream; until then a
 daemon warns and waiters hear only what is published directly. Republishing is a single extra publish per stored inbox
 message, without a consumer per waiter; a consumer would also have to be created on the hub before each wait and
-needs consumer rights a persona does not have on its inbox.
+needs consumer rights an ant does not have on its inbox.
 
 Set up, as a human, with the leaf up and connected:
 
 ```sh
-ants leaf outbox macbook --persona dev-a --persona dev-b --persona human --human alice   # again when they change
-ants leaf outbox macbook --remove                                                       # stop taking from it
+ants leaf outbox macbook --ant dev-a --ant dev-b --human human --human alice   # again when they change
+ants leaf outbox macbook --remove                                              # stop taking from it
 ```
 
 It creates or updates the outbox through the hub (`$JS.macbook.API`), creates `ANTS_IN` with a source for the machine
 if missing, and replaces the machine's sources of `ANTS`, keeping those that did not change. New ones start after
-what `ANTS_IN` holds at the time, so earlier messages of a newly admitted persona stay out. It then waits up to
+what `ANTS_IN` holds at the time, so earlier messages of a newly admitted ant stay out. It then waits up to
 10 s for `ANTS_IN`'s source of the outbox to become active and fails if it does not, naming the hub's missing
 `feature_flags { js_api_reply_v2: true }` (ants-78l); the setup stays in place, and the source resumes once the hub
 has the flag. Running it again checks again.
@@ -343,12 +343,12 @@ Found while building it (nats-server 2.15.3, source reading and verified):
   `ants.plan.>` and `ants.chan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
   allowance of the uplink under it (`canSubscribeInternal`), and `ReverseMatch` (`sublist.go`, `getAllNodes`) skips an
   allowance with `*` before its last token, such as dev-a's `ants.inbox.*.dev-a`. Only the human's `ants.inbox.>`
-  would match, and no persona's plan or channel subjects. So the uplink credentials also carry one literal subject of each
-  persona's inbox, plan and channel pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`,
+  would match, and no ant's plan or channel subjects. So the uplink credentials also carry one literal subject of each
+  ant's inbox, plan and channel pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`,
   `ants.chan.dev-a.dev-a`), which the pattern allows
-  anyway (uplink credentials issued without them need `ants auth leaf` again). With that, a persona's messages,
-  replies, plan and channel posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; a
-  persona not on the uplink still gets "no stream" at once, since the leaf forwards only what the uplink may publish
+  anyway (uplink credentials issued without them need `ants auth leaf` again). With that, an ant's messages,
+  replies, plan and channel posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; an
+  ant not on the uplink still gets "no stream" at once, since the leaf forwards only what the uplink may publish
   (`a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload` in `crates/ants/src/leaf.rs`).
 - **The leaf's domain must differ from the hub's**, or the leaf would answer the hub's API itself.
 
@@ -371,14 +371,14 @@ Limits:
   when the hub stores the message misses it, and finds it later through the inbox consumer (`ants inbox`, the
   daemon's next delivery).
 - A daemon that replies while the uplink is down cannot ack the request. The reply goes to the outbox, under a
-  message id made of the persona and the request's envelope id, and the daemon notes the request in `<home>/answered`
-  of the persona; the redelivery after the uplink is back, even to a restarted daemon, is acked without being answered
+  message id made of the ant and the request's envelope id, and the daemon notes the request in `<home>/answered`
+  of the ant; the redelivery after the uplink is back, even to a restarted daemon, is acked without being answered
   again (ants-fv1). async-nats's `double_ack` takes the "no responders" status the client gets then for a
   confirmation, so the daemon acks with a request of its own (`bus::double_ack`). Verified by
   `a_reply_kept_in_the_outbox_answers_its_message_once` in `crates/ants-daemon/src/daemon.rs`.
-- Messages a persona put in the outbox before `ants leaf outbox` admitted it stay in the intake. A machine set up
-  before dead letters were buffered needs `ants leaf outbox` again for `ANTS` to take its dead letters, and persona
-  credentials issued before need `ants auth user` again to publish on `ants.out.dead.<persona>`.
+- Messages an ant put in the outbox before `ants leaf outbox` admitted it stay in the intake. A machine set up
+  before dead letters were buffered needs `ants leaf outbox` again for `ANTS` to take its dead letters, and ant
+  credentials issued before need `ants auth user` again to publish on `ants.out.dead.<ant>`.
 - A dead letter stored in the outbox on the message's extra delivery (the last attempt never finished) has no
   delivery left to send its notice and terminate the message. JetStream gives up on the message and publishes a
   max-deliveries advisory: a running `ants dead watch` dead-letters it from the hub, with the same `Nats-Msg-Id`, and
@@ -462,14 +462,14 @@ up to the daemon's ack wait. The daemon sends progress acks every 20 s for each 
 whose daemon crashed or never received it waits out the ack wait; one whose progress acks were lost on the silent
 link comes back while still in hand, and the daemon ignores that copy.
 
-`ants daemon` waits for a persona's server that is unreachable at start, as the local leaf node when launchd starts
+`ants daemon` waits for an ant's server that is unreachable at start, as the local leaf node when launchd starts
 both services at once (ants-lz9): a refused, timed-out or unresolved connection is retried after 1 s, then twice as
 long each time up to 30 s, with a warning naming the URL (user and password masked), until it connects or the daemon
 is stopped. Once connected it waits the same way for JetStream (ants-84b): the local leaf listens before its uplink
 has joined the hub, and until then a `$JS.<domain>.API` request gets no responders (or times out while the link comes
 up), so the daemon asks for stream `ANTS`'s info until JetStream answers, even that the stream is missing. Rejected
 credentials, an unreadable credentials file, a malformed URL, TLS errors and a JetStream request the credentials do
-not permit (the server's permissions violation, which the request itself only sees as a timeout) fail the persona at
+not permit (the server's permissions violation, which the request itself only sees as a timeout) fail the ant at
 once. The loop is explicit rather than async-nats `retry_on_initial_connect`, which returns a client before it has
 connected, so the JetStream calls that follow would wait out their timeouts, and which keeps retrying rejected
 credentials as well. The other `ants` commands still fail at once.

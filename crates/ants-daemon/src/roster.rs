@@ -1,10 +1,10 @@
-//! The persona's entry in the roster, kept alive by heartbeats.
+//! The ant's entry in the roster, kept alive by heartbeats.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ants_proto::{Activity, PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
+use ants_proto::{Activity, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::Utc;
@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use crate::bus;
 use crate::daemon::Config;
 
-/// A persona listed in the roster. Dropping it stops the heartbeats, so the entry expires;
+/// An ant listed in the roster. Dropping it stops the heartbeats, so the entry expires;
 /// [`Registration::deregister`] removes it at once.
 pub struct Registration {
     kv: kv::Store,
@@ -31,7 +31,7 @@ pub struct Registration {
 pub struct Workload {
     handling: AtomicUsize,
     harnesses: AtomicUsize,
-    /// Wakes the heartbeats when the persona turns idle or working, so the roster shows it before the next beat.
+    /// Wakes the heartbeats when the ant turns idle or working, so the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -80,11 +80,11 @@ impl Drop for Working<'_> {
     }
 }
 
-/// The roster entry of the persona of `config` on this machine, started now.
+/// The roster entry of the ant of `config` on this machine, started now.
 pub async fn entry(config: &Config) -> RosterEntry {
     let now = Utc::now();
     RosterEntry {
-        persona: config.persona.clone(),
+        ant: config.ant.clone(),
         machine: machine().await,
         instance: Some(uuid::Uuid::new_v4().to_string()),
         harness: config.harness.to_string(),
@@ -111,7 +111,7 @@ pub async fn register(
     Registration::start_with(kv, entry, ROSTER_HEARTBEAT, Some(workload)).await
 }
 
-/// Whether a daemon may start serving a persona as `ours` without serving it twice, when the persona's roster entry is
+/// Whether a daemon may start serving an ant as `ours` without serving it twice, when the ant's roster entry is
 /// `current`: only if the roster lists none, or `ours` itself (a put whose answer was lost). An entry stays in the
 /// roster until its daemon stops or it goes [`ROSTER_TTL`] without a heartbeat, by the server's clock, so no clocks are
 /// compared. Two daemons on one machine are told apart by [`RosterEntry::instance`].
@@ -119,7 +119,7 @@ pub fn may_start(current: Option<&RosterEntry>, ours: &RosterEntry) -> bool {
     current.is_none_or(|e| e.instance.is_some() && e.instance == ours.instance)
 }
 
-/// What one look at a persona's roster entry came to.
+/// What one look at an ant's roster entry came to.
 enum Claim {
     /// The entry was put, at this revision.
     Put(u64),
@@ -174,12 +174,12 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
             Ok(Claim::Put(revision)) => return Ok(revision),
             Ok(Claim::Held { machine, instance }) => {
                 if waiting_for.as_ref() != Some(&instance) {
-                    tracing::info!(persona = key, machine, "waiting while another daemon serves it");
+                    tracing::info!(ant = key, machine, "waiting while another daemon serves it");
                     waiting_for = Some(instance);
                 }
             }
-            Ok(Claim::Raced) => tracing::info!(persona = key, "roster entry changed; looking again"),
-            Err(e) => tracing::warn!(persona = key, error = format!("{e:#}"), "looking at the roster; trying again"),
+            Ok(Claim::Raced) => tracing::info!(ant = key, "roster entry changed; looking again"),
+            Err(e) => tracing::warn!(ant = key, error = format!("{e:#}"), "looking at the roster; trying again"),
         }
     }
 }
@@ -279,10 +279,10 @@ async fn keep_held(
                 held.send_replace(Some(put));
             }
             Ok(None) => break,
-            Err(e) => tracing::warn!(persona = %entry.persona, error = format!("{e:#}"), "roster heartbeat"),
+            Err(e) => tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "roster heartbeat"),
         }
     }
-    tracing::info!(persona = %entry.persona, "another daemon took over the roster entry");
+    tracing::info!(ant = %entry.ant, "another daemon took over the roster entry");
     held.send_replace(None);
 }
 
@@ -310,7 +310,7 @@ impl Registration {
         Self::start_with(kv, entry, every, None).await
     }
 
-    /// Like [`Registration::start`], with `workload` stamped on every put, and an extra put as soon as the persona
+    /// Like [`Registration::start`], with `workload` stamped on every put, and an extra put as soon as the ant
     /// turns idle or working.
     pub async fn start_with(
         kv: kv::Store,
@@ -331,7 +331,7 @@ impl Registration {
             loop {
                 due(&mut ticks, workload.as_deref(), &mut entry).await;
                 if let Err(e) = put(&beat_kv, &entry).await {
-                    tracing::warn!(persona = %entry.persona, error = format!("{e:#}"), "roster heartbeat");
+                    tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "roster heartbeat");
                 }
             }
         });
@@ -352,7 +352,7 @@ impl Registration {
         let changes = match kv.watch(&key).await {
             Ok(changes) => Some(changes),
             Err(e) => {
-                tracing::warn!(persona = key, error = %e, "watching the roster entry; the heartbeats still notice another daemon");
+                tracing::warn!(ant = key, error = %e, "watching the roster entry; the heartbeats still notice another daemon");
                 None
             }
         };
@@ -394,7 +394,7 @@ impl Registration {
             }
         };
         if let Err(e) = deleted {
-            tracing::warn!(persona = %self.key, error = %e, "leaving the roster; the entry expires on its own");
+            tracing::warn!(ant = %self.key, error = %e, "leaving the roster; the entry expires on its own");
         }
     }
 }
@@ -405,8 +405,8 @@ impl Drop for Registration {
     }
 }
 
-/// The entries in the roster, by persona. An entry removed while listing is left out, and a malformed one is skipped
-/// with a warning. So is one naming another persona than its key: credentials vouch only for the key.
+/// The entries in the roster, by ant. An entry removed while listing is left out, and a malformed one is skipped
+/// with a warning. So is one naming another ant than its key: credentials vouch only for the key.
 pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
     let mut keys: Vec<String> = kv.keys().await.context("listing the roster")?.try_collect().await?;
     keys.sort();
@@ -416,7 +416,7 @@ pub async fn list_entries(kv: &kv::Store) -> Result<Vec<RosterEntry>> {
         match serde_json::from_slice::<RosterEntry>(&value) {
             Ok(entry) => match entry.check_key(&key) {
                 Ok(()) => entries.push(entry),
-                Err(e) => tracing::warn!(key, error = %e, "skipping a roster entry for another persona"),
+                Err(e) => tracing::warn!(key, error = %e, "skipping a roster entry for another ant"),
             },
             Err(e) => tracing::warn!(key, error = %e, "skipping a malformed roster entry"),
         }
@@ -430,13 +430,10 @@ pub fn has_capability(entry: &RosterEntry, capability: &str) -> bool {
     entry.capabilities.iter().any(|c| c.trim().eq_ignore_ascii_case(capability))
 }
 
-/// The persona a request needing `capability` goes to: of the entries other than `asking` that advertise it, the
-/// first by persona id, so the same roster always gives the same answer.
-pub fn pick<'a>(entries: &'a [RosterEntry], capability: &str, asking: &PersonaId) -> Option<&'a RosterEntry> {
-    entries
-        .iter()
-        .filter(|e| &e.persona != asking && has_capability(e, capability))
-        .min_by(|a, b| a.persona.cmp(&b.persona))
+/// The ant a request needing `capability` goes to: of the entries other than `asking` that advertise it, the
+/// first by id, so the same roster always gives the same answer.
+pub fn pick<'a>(entries: &'a [RosterEntry], capability: &str, asking: &UserId) -> Option<&'a RosterEntry> {
+    entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by(|a, b| a.ant.cmp(&b.ant))
 }
 
 async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {
@@ -463,14 +460,14 @@ pub async fn machine() -> String {
 mod tests {
     use super::*;
 
-    fn entry(persona: &str, capabilities: &[&str]) -> RosterEntry {
-        entry_on(persona, "m", capabilities)
+    fn entry(ant: &str, capabilities: &[&str]) -> RosterEntry {
+        entry_on(ant, "m", capabilities)
     }
 
-    fn entry_on(persona: &str, machine: &str, capabilities: &[&str]) -> RosterEntry {
+    fn entry_on(ant: &str, machine: &str, capabilities: &[&str]) -> RosterEntry {
         let now = Utc::now();
         RosterEntry {
-            persona: persona.parse().unwrap(),
+            ant: ant.parse().unwrap(),
             machine: machine.to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -508,24 +505,24 @@ mod tests {
     }
 
     #[test]
-    fn pick_is_the_first_other_persona_with_the_whole_tag() {
+    fn pick_is_the_first_other_ant_with_the_whole_tag() {
         let entries = [
             entry("ops", &["rust-ops"]),
             entry("dev-c", &[" Rust "]),
             entry("dev-b", &["rust"]),
             entry("dev-a", &["rust"]),
         ];
-        let me: PersonaId = "dev-a".parse().unwrap();
-        let picked = |capability| pick(&entries, capability, &me).map(|e| e.persona.as_str());
+        let me: UserId = "dev-a".parse().unwrap();
+        let picked = |capability| pick(&entries, capability, &me).map(|e| e.ant.as_str());
         assert_eq!(picked("rust"), Some("dev-b"));
         assert_eq!(picked("RUST "), Some("dev-b"));
         assert_eq!(picked("rust-ops"), Some("ops"));
         assert_eq!(picked("ops"), None, "tags match whole, not in part");
-        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap()).map(|e| e.persona.as_str()), Some("dev-a"));
+        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap()).map(|e| e.ant.as_str()), Some("dev-a"));
     }
 
     #[test]
-    fn starts_unless_another_daemon_lists_the_persona() {
+    fn starts_unless_another_daemon_lists_the_ant() {
         let run = |machine, instance: Option<&str>| RosterEntry {
             instance: instance.map(str::to_owned),
             ..entry_on("messenger", machine, &[])

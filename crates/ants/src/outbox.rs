@@ -5,8 +5,9 @@
 //!
 //! 1. The hub's intake ([`INTAKE_STREAM`]) sources each machine's outbox through the machine's JetStream domain and
 //!    stores everything under the machine's prefix ([`subject::intake`]), so a machine cannot pass for another.
-//! 2. The hub's [`STREAM`] sources from the intake, per machine and persona, only the subjects the persona may publish
-//!    itself ([`Machine::admitted`]), back on their usual subjects. Anything else a machine claims stays in the intake.
+//! 2. The hub's [`STREAM`] sources from the intake, per machine and user (ant or human), only the subjects the user
+//!    may publish itself ([`Machine::admitted`]), back on their usual subjects. Anything else a machine claims stays in
+//!    the intake.
 //!
 //! A machine's credentials thus never decide what the hub's stream stores: only a human, who sets up both hops here,
 //! does. Each message keeps its `Nats-Msg-Id`, so the hub's stream drops a buffered copy of a message it already took
@@ -15,7 +16,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{INTAKE_STREAM, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, PersonaId, Role, STREAM, subject};
+use ants_proto::{INTAKE_STREAM, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, Role, STREAM, UserId, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -31,12 +32,7 @@ pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
 
 /// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
-pub async fn connect(
-    url: &str,
-    creds: Option<&Path>,
-    human: &PersonaId,
-    machine: &Machine,
-) -> Result<async_nats::Client> {
+pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &Machine) -> Result<async_nats::Client> {
     let mut options =
         async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox(human));
     if let Some(path) = creds {
@@ -46,7 +42,7 @@ pub async fn connect(
     options.connect(url).await.with_context(|| format!("connecting to NATS at {url}"))
 }
 
-/// Set up store and forward for `machine`, on which `members` run, personas and humans each in its role
+/// Set up store and forward for `machine`, on which `members` run, ants and humans each in its role
 /// ([`crate::auth::members`]): create or update the machine's outbox on its leaf node (which must be connected),
 /// through `leaf` from [`connect`], and have the hub's stream take from it what those members may send. Admissions of
 /// members no longer listed are dropped; those already in place are kept as they are.
@@ -54,9 +50,9 @@ pub async fn admit(
     leaf: &async_nats::Client,
     hub: &Context,
     machine: &Machine,
-    members: &[(PersonaId, Role)],
+    members: &[(UserId, Role)],
 ) -> Result<()> {
-    anyhow::ensure!(!members.is_empty(), "a machine needs at least one persona or human");
+    anyhow::ensure!(!members.is_empty(), "a machine needs at least one ant or human");
     let mut leaf = jetstream::with_domain(leaf.clone(), machine.as_str());
     leaf.set_timeout(LEAF_TIMEOUT);
     leaf.create_or_update_stream(outbox_config()).await.with_context(|| {
@@ -208,18 +204,18 @@ fn outbox_of(source: &Source, machine: &Machine) -> bool {
 /// The hub stream's sources for `machine`: one per member, so admitting or dropping one leaves the others as they
 /// are. The filters of one stream's sources may not overlap, so when humans run on the machine, the admission of the
 /// first of them by name takes every inbox subject and the others' only their plan and channel posts.
-fn admissions(machine: &Machine, members: &[(PersonaId, Role)], start: u64) -> Vec<Source> {
-    let mut members: Vec<&(PersonaId, Role)> = members.iter().collect();
+fn admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<Source> {
+    let mut members: Vec<&(UserId, Role)> = members.iter().collect();
     members.sort_by(|(a, _), (b, _)| a.cmp(b));
     members.dedup_by(|(a, _), (b, _)| a == b);
     let inboxes = members.iter().find(|(_, role)| role.is_human()).map(|(human, _)| human);
     members
         .iter()
-        .map(|(persona, role)| Source {
+        .map(|(user, role)| Source {
             name: INTAKE_STREAM.to_owned(),
             start_sequence: Some(start),
             subject_transforms: machine
-                .admitted(persona, *role, inboxes.is_none_or(|human| human == persona))
+                .admitted(user, *role, inboxes.is_none_or(|human| human == user))
                 .into_iter()
                 .map(|(source, destination)| SubjectTransform { source, destination })
                 .collect(),
@@ -273,7 +269,7 @@ mod tests {
         js.get_stream(name).await.unwrap().info().await.unwrap().state.messages
     }
 
-    /// A real hub and leaf node: what a persona on the leaf sends while the uplink is down waits in the leaf's
+    /// A real hub and leaf node: what an ant on the leaf sends while the uplink is down waits in the leaf's
     /// outbox and lands in the hub's stream once, after the uplink is back, and reaches a live waiter then; what the
     /// machine may not send stays out.
     #[tokio::test]
@@ -285,14 +281,14 @@ mod tests {
         let team = hub.dir().join("auth");
         let domain: JsDomain = "hub".parse().unwrap();
         let m1: Machine = "m1".parse().unwrap();
-        let (human, dev_a, dev_b): (PersonaId, PersonaId, PersonaId) =
-            (PersonaId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
-        let creds = |p: &PersonaId| {
+        let (human, dev_a, dev_b): (UserId, UserId, UserId) =
+            (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        let creds = |p: &UserId| {
             let out = hub.dir().join(format!("{p}.creds"));
             auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
             out
         };
-        let connect = async |url: &str, p: &PersonaId| {
+        let connect = async |url: &str, p: &UserId| {
             let (client, mut js) = bus::connect(url, Some(&creds(p)), Some(&domain), p, "test").await.unwrap();
             js.set_timeout(Duration::from_secs(2));
             (client, js)
@@ -302,7 +298,7 @@ mod tests {
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         // The CLI runs on m1 too.
-        let alice: PersonaId = "alice".parse().unwrap();
+        let alice: UserId = "alice".parse().unwrap();
         let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
         auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);
@@ -437,7 +433,7 @@ mod tests {
         let team = hub.dir().join("auth");
         let domain: JsDomain = "hub".parse().unwrap();
         let m1: Machine = "m1".parse().unwrap();
-        let human = PersonaId::human();
+        let human = UserId::human();
         let human_creds = hub.dir().join("human.creds");
         auth::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
         let (_h, h_js) = bus::connect(&hub.url, Some(&human_creds), Some(&domain), &human, "test").await.unwrap();
@@ -502,8 +498,8 @@ mod tests {
     #[test]
     fn with_humans_on_a_machine_no_two_admissions_overlap() {
         let m1: Machine = "m1".parse().unwrap();
-        let personas = ["dev-a".parse().unwrap(), PersonaId::human(), "dev-b".parse().unwrap()];
-        let sources = admissions(&m1, &auth::members(&personas, &[]), 7);
+        let ants = ["dev-a".parse().unwrap(), UserId::human(), "dev-b".parse().unwrap()];
+        let sources = admissions(&m1, &auth::members(&ants, &[]), 7);
         assert_eq!(
             filters(&sources),
             [
@@ -522,8 +518,8 @@ mod tests {
         assert!(!from_machine(&sources[0], &"m".parse().unwrap()));
 
         // With a second human, the first by name takes every inbox subject; each human posts under its own name.
-        let alice: PersonaId = "alice".parse().unwrap();
-        let sources = admissions(&m1, &auth::members(&personas, &[alice.clone(), alice]), 7);
+        let alice: UserId = "alice".parse().unwrap();
+        let sources = admissions(&m1, &auth::members(&ants, &[alice.clone(), alice]), 7);
         assert_eq!(
             filters(&sources),
             [

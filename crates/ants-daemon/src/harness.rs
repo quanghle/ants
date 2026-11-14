@@ -81,7 +81,7 @@ impl HarnessKind {
     }
 }
 
-/// Explicit per-persona settings; absent values keep the harness's defaults.
+/// Explicit per-ant settings; absent values keep the harness's defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelSettings {
     pub model: Option<String>,
@@ -217,7 +217,7 @@ impl Launch {
         Self { mcp: Some(mcp), ..self }
     }
 
-    /// Prepend persona instructions to every prompt, including after session/load.
+    /// Prepend the ant's instructions to every prompt, including after session/load.
     pub fn with_instructions(self, instructions: String) -> Self {
         Self { instructions, ..self }
     }

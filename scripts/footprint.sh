@@ -1,5 +1,5 @@
 #!/bin/sh
-# Resident memory of an idle antsd serving one persona, against a throwaway nats-server.
+# Resident memory of an idle antsd serving one ant, against a throwaway nats-server.
 #
 #   scripts/footprint.sh                          # idle RSS; fails at or above 20 MB
 #   scripts/footprint.sh --ask "reply with ok"    # also one harness session (runs the real harness)
@@ -7,7 +7,7 @@
 # Options:  --ants PATH     ants binary (default: $ANTS_BIN, else target/release/ants, built when missing)
 #           --port N        nats-server port (default: $FOOTPRINT_PORT or 14722)
 #           --max-mb N      idle RSS limit in MB (default: $FOOTPRINT_MAX_MB or 20)
-#           --ask TEXT      send TEXT to the persona and measure again with its harness session live
+#           --ask TEXT      send TEXT to the ant and measure again with its harness session live
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
 #           default: $TMPDIR or /tmp), FOOTPRINT_SAMPLES (idle samples, 1 s apart, default 5),
 #           FOOTPRINT_ASK_TIMEOUT (seconds, default 180)
@@ -121,7 +121,7 @@ nats_pid=$!
 wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
 
 url=nats://127.0.0.1:$port
-ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --persona footprint \
+ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --ant footprint \
     --workdir "$work/workdir" --home "$work/home" >"$work/daemon.log" 2>&1 &
 daemon_pid=$!
 wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"

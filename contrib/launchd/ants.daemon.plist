@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- ants: the persona daemon (antsd), serving the personas of its config file through the local nats-server.
+<!-- ants: the ant daemon (antsd), serving the ants of its config file through the local nats-server.
      scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.daemon.plist.
      launchd has no start order: until ants.nats listens, the daemon waits, retrying the connection. KeepAlive and
      ThrottleInterval cover other failures.

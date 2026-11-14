@@ -1,8 +1,8 @@
 //! Team credentials for NATS decentralized auth: one operator, one account holding the ants stream, and one user per
-//! persona or human whose JWT carries the permissions of [`Permissions::for_persona`] in its role.
+//! ant or human whose JWT carries the permissions of [`Permissions::for_user`] in its role.
 //!
 //! The operator and account seeds stay in the team directory on the machine that issues credentials. The server
-//! needs only `server.conf`; each machine gets the `.creds` file of the personas it runs, and its leaf node the uplink
+//! needs only `server.conf`; each machine gets the `.creds` file of the ants it runs, and its leaf node the uplink
 //! credentials of [`issue_leaf`].
 //!
 //! When the hub has a JetStream domain, credentials are issued for it: they allow the JetStream API as
@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_proto::{JsDomain, Machine, Permissions, PersonaId, Role};
+use ants_proto::{JsDomain, Machine, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -50,35 +50,35 @@ pub fn init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The role `ants auth user` issues: a human's with `--human`, and for the default human whatever the flag; else a
-/// persona's.
-pub fn role(persona: &PersonaId, human: bool) -> Role {
-    if human { Role::Human } else { Role::by_default(persona) }
+/// The role `ants auth user` issues: a human's with `--human`, and for the default human whatever the flag; else an
+/// ant's.
+pub fn role(user: &UserId, human: bool) -> Role {
+    if human { Role::Human } else { Role::by_default(user) }
 }
 
-/// The personas and humans served on a machine, each in its role, without repeats: a name given as both is a human.
-pub fn members(personas: &[PersonaId], humans: &[PersonaId]) -> Vec<(PersonaId, Role)> {
-    let mut members: Vec<(PersonaId, Role)> = humans.iter().map(|h| (h.clone(), Role::Human)).collect();
-    for persona in personas {
-        if !members.iter().any(|(m, _)| m == persona) {
-            members.push((persona.clone(), Role::by_default(persona)));
+/// The ants and humans served on a machine, each in its role, without repeats: a name given as both is a human.
+pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
+    let mut members: Vec<(UserId, Role)> = humans.iter().map(|h| (h.clone(), Role::Human)).collect();
+    for ant in ants {
+        if !members.iter().any(|(m, _)| m == ant) {
+            members.push((ant.clone(), Role::by_default(ant)));
         }
     }
     members
 }
 
-/// Issue a new user for `persona` in `role`, for the hub's JetStream domain if it has one, and write its `.creds` file
-/// to `out`. Earlier credentials stay valid.
-pub fn issue(dir: &Path, persona: &PersonaId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+/// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
+/// write its `.creds` file to `out`. Earlier credentials stay valid.
+pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let user = KeyPair::new_user();
-    let permissions = Permissions::for_persona(persona, role).with_js_domain(js_domain);
-    let jwt = user_jwt(&account, &user.public_key(), persona.as_str(), permissions, json!({}), None)?;
-    write_secret(out, &creds(&jwt, &seed(&user)?))
+    let key = KeyPair::new_user();
+    let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
+    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, json!({}), None)?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
-/// `members`, personas and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
+/// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), and connect only as a leaf node, not as a client.
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
@@ -86,12 +86,12 @@ pub fn issue(dir: &Path, persona: &PersonaId, role: Role, js_domain: Option<&JsD
 pub fn issue_leaf(
     dir: &Path,
     machine: &Machine,
-    members: &[(PersonaId, Role)],
+    members: &[(UserId, Role)],
     js_domain: Option<&JsDomain>,
     out: &Path,
 ) -> Result<()> {
     if members.is_empty() {
-        bail!("a leaf node needs at least one persona or human");
+        bail!("a leaf node needs at least one ant or human");
     }
     if js_domain.is_some_and(|domain| domain.as_str() == machine.as_str()) {
         bail!("machine {machine} would take the hub's JetStream domain; name it otherwise");
@@ -105,19 +105,19 @@ pub fn issue_leaf(
     write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
-/// Sign the user JWT of `persona` in `role` for `public_key`, a user NKey generated on another machine, with the
+/// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
 /// permissions [`issue`] gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
 pub fn sign_user(
     dir: &Path,
-    persona: &PersonaId,
+    user: &UserId,
     role: Role,
     js_domain: Option<&JsDomain>,
     public_key: &str,
 ) -> Result<String> {
     check_user_key(public_key)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let permissions = Permissions::for_persona(persona, role).with_js_domain(js_domain);
-    user_jwt(&account, public_key, persona.as_str(), permissions, json!({}), None)
+    let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
+    user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)
 }
 
 /// Fail unless `public_key` is a user's public NKey, `U...`.
@@ -129,16 +129,15 @@ pub fn check_user_key(public_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Issue the enrollment credentials of `persona`, valid for `ttl`, and write their `.creds` file to `out`: they may
-/// only ask for the persona's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
+/// Issue the enrollment credentials of `ant`, valid for `ttl`, and write their `.creds` file to `out`: they may
+/// only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
 /// expire, in seconds since the epoch.
-pub fn issue_enrollment(dir: &Path, persona: &PersonaId, ttl: Duration, out: &Path) -> Result<u64> {
+pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<u64> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + ttl.as_secs().max(1);
-    let name = ants_proto::enrollment_user(persona);
-    let jwt =
-        user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(persona), json!({}), Some(exp))?;
+    let name = ants_proto::enrollment_user(ant);
+    let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), Some(exp))?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     Ok(exp)
 }
@@ -379,45 +378,45 @@ pub(crate) mod tests {
             .map(Self)
         }
 
-        fn creds(&self, persona: &PersonaId) -> PathBuf {
-            self.creds_in(persona, None)
+        fn creds(&self, user: &UserId) -> PathBuf {
+            self.creds_in(user, None)
         }
 
-        /// Credentials of `persona` issued for `domain`, as `ants auth user` without `--human` does.
-        fn creds_in(&self, persona: &PersonaId, domain: Option<&JsDomain>) -> PathBuf {
+        /// Credentials of `user` issued for `domain`, as `ants auth user` without `--human` does.
+        fn creds_in(&self, user: &UserId, domain: Option<&JsDomain>) -> PathBuf {
             let suffix = domain.map(|d| format!("-{d}")).unwrap_or_default();
-            let out = self.dir().join(format!("{persona}{suffix}.creds"));
-            issue(&self.dir().join("auth"), persona, role(persona, false), domain, &out).unwrap();
+            let out = self.dir().join(format!("{user}{suffix}.creds"));
+            issue(&self.dir().join("auth"), user, role(user, false), domain, &out).unwrap();
             out
         }
 
-        pub(crate) async fn connect(&self, persona: &PersonaId) -> (Client, jetstream::Context) {
-            self.connect_as(persona, role(persona, false)).await
+        pub(crate) async fn connect(&self, user: &UserId) -> (Client, jetstream::Context) {
+            self.connect_as(user, role(user, false)).await
         }
 
-        /// Credentials of `persona` issued in `role`.
-        pub(crate) fn creds_as(&self, persona: &PersonaId, role: Role) -> PathBuf {
-            let creds = self.dir().join(format!("{persona}-{role:?}.creds"));
-            issue(&self.dir().join("auth"), persona, role, None, &creds).unwrap();
+        /// Credentials of `user` issued in `role`.
+        pub(crate) fn creds_as(&self, user: &UserId, role: Role) -> PathBuf {
+            let creds = self.dir().join(format!("{user}-{role:?}.creds"));
+            issue(&self.dir().join("auth"), user, role, None, &creds).unwrap();
             creds
         }
 
-        /// A connection with credentials of `persona` issued in `role`.
-        pub(crate) async fn connect_as(&self, persona: &PersonaId, role: Role) -> (Client, jetstream::Context) {
-            let creds = self.creds_as(persona, role);
-            let (client, mut js) = bus::connect(&self.url, Some(&creds), None, persona, "test").await.unwrap();
+        /// A connection with credentials of `user` issued in `role`.
+        pub(crate) async fn connect_as(&self, user: &UserId, role: Role) -> (Client, jetstream::Context) {
+            let creds = self.creds_as(user, role);
+            let (client, mut js) = bus::connect(&self.url, Some(&creds), None, user, "test").await.unwrap();
             // Denied JetStream requests only time out.
             js.set_timeout(Duration::from_secs(1));
             (client, js)
         }
 
         /// A connection that reports the server errors it gets, such as permission violations.
-        async fn watched(&self, persona: &PersonaId) -> (Client, mpsc::UnboundedReceiver<String>) {
+        async fn watched(&self, user: &UserId) -> (Client, mpsc::UnboundedReceiver<String>) {
             let (tx, rx) = mpsc::unbounded_channel();
-            let client = async_nats::ConnectOptions::with_credentials_file(self.creds(persona))
+            let client = async_nats::ConnectOptions::with_credentials_file(self.creds(user))
                 .await
                 .unwrap()
-                .custom_inbox_prefix(inbox_prefix(persona))
+                .custom_inbox_prefix(inbox_prefix(user))
                 .event_callback(move |event| {
                     let tx = tx.clone();
                     async move {
@@ -433,7 +432,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn p(s: &str) -> PersonaId {
+    fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 
@@ -444,9 +443,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn credentials_confine_each_persona_to_its_role() {
+    async fn credentials_confine_each_user_to_its_role() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
 
         assert!(bus::connect(&server.url, None, None, &human, "anonymous").await.is_err(), "credentials are required");
 
@@ -561,8 +560,8 @@ pub(crate) mod tests {
         let Some(server) = Server::start() else { return };
         let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
         assert_eq!(
-            (role(&alice, true), role(&alice, false), role(&PersonaId::human(), false)),
-            (Role::Human, Role::Persona, Role::Human)
+            (role(&alice, true), role(&alice, false), role(&UserId::human(), false)),
+            (Role::Human, Role::Ant, Role::Human)
         );
         let (a_client, a_js) = server.connect_as(&alice, role(&alice, true)).await;
         let (b_client, b_js) = server.connect_as(&bob, role(&bob, true)).await;
@@ -581,7 +580,7 @@ pub(crate) mod tests {
         let a_humans = crate::humans::ensure(&a_js).await.unwrap();
         let b_humans = crate::humans::ensure(&b_js).await.unwrap();
 
-        // Each human writes the humans bucket; personas read it, but never write it.
+        // Each human writes the humans bucket; ants read it, but never write it.
         for (kv, human) in [(&a_humans, &alice), (&b_humans, &bob)] {
             let entry = ants_proto::HumanEntry::new(human.clone());
             kv.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
@@ -589,11 +588,11 @@ pub(crate) mod tests {
         let d_humans = crate::humans::ensure(&d_js).await.unwrap();
         let listed: ants_proto::HumanEntry =
             serde_json::from_slice(&d_humans.get("bob").await.unwrap().unwrap()).unwrap();
-        assert_eq!((listed.check_key("bob"), listed.persona), (Ok(()), bob.clone()));
+        assert_eq!((listed.check_key("bob"), listed.human), (Ok(()), bob.clone()));
         let keys: Vec<String> = d_humans.keys().await.unwrap().try_collect().await.unwrap();
         assert_eq!(keys, ["alice", "bob"]);
         let forged = serde_json::to_vec(&ants_proto::HumanEntry::new(dev_a.clone())).unwrap();
-        assert!(d_humans.put("dev-a", forged.into()).await.is_err(), "a persona cannot list itself");
+        assert!(d_humans.put("dev-a", forged.into()).await.is_err(), "an ant cannot list itself");
         assert!(d_humans.delete("alice").await.is_err());
 
         // Both watch all traffic and read dead letters.
@@ -636,7 +635,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn plan_rooms_are_read_back_through_each_reader_own_consumer() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
         let (_h, h_js) = server.connect(&human).await;
         bus::ensure_stream(&h_js).await.unwrap();
         let (_a, a_js) = server.connect(&dev_a).await;
@@ -673,9 +672,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn personas_write_their_own_roster_entry_and_everyone_reads_the_roster() {
+    async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (human, dev_a) = (UserId::human(), p("dev-a"));
         let ttl = ants_proto::ROSTER_TTL;
 
         let (_a, a_js) = server.connect(&dev_a).await;
@@ -686,7 +685,7 @@ pub(crate) mod tests {
         let a_kv = bus::ensure_roster(&a_js, ttl).await.unwrap();
         let now = chrono::Utc::now();
         let entry = RosterEntry {
-            persona: dev_a.clone(),
+            ant: dev_a.clone(),
             machine: "m1".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -703,7 +702,7 @@ pub(crate) mod tests {
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
         assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
-        // Personas read the roster, to route requests by capability.
+        // Ants read the roster, to route requests by capability.
         let (_b, b_js) = server.connect(&p("dev-b")).await;
         let b_kv = bus::ensure_roster(&b_js, ttl).await.unwrap();
         // dev-b may write its own key only, and an entry there naming dev-a is skipped.
@@ -728,9 +727,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn personas_keep_their_own_escalation_chain_and_read_everyone_s() {
+    async fn ants_keep_their_own_escalation_chain_and_read_everyone_s() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a, lead) = (PersonaId::human(), p("dev-a"), p("lead"));
+        let (human, dev_a, lead) = (UserId::human(), p("dev-a"), p("lead"));
         let (_a, a_js) = server.connect(&dev_a).await;
         assert!(bus::ensure_chains(&a_js).await.is_err(), "only the human creates the bucket");
         let (_h, h_js) = server.connect(&human).await;
@@ -751,16 +750,16 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn personas_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
+    async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
         let ops: ChannelId = "ops".parse().unwrap();
         let (_h, h_js) = server.connect(&human).await;
         let stream = bus::init_stream(&h_js).await.unwrap();
         assert!(stream.cached_info().config.subjects.iter().any(|s| s == subject::ALL_CHANNELS));
         let (_a, a_js) = server.connect(&dev_a).await;
 
-        // Only the human creates and writes the bucket; personas read and watch it.
+        // Only the human creates and writes the bucket; ants read and watch it.
         assert!(bus::ensure_channels(&a_js).await.is_err(), "only the human creates the bucket");
         let h_kv = bus::ensure_channels(&h_js).await.unwrap();
         let mut entry = ChannelEntry::new(ops.clone());
@@ -773,7 +772,7 @@ pub(crate) mod tests {
         let mut watch = a_kv.watch_with_history(">").await.unwrap();
         assert_eq!(timeout(WAIT, watch.next()).await.unwrap().unwrap().unwrap().key, "ops");
         entry.add_member(dev_b.clone());
-        assert!(a_kv.put("ops", serde_json::to_vec(&entry).unwrap().into()).await.is_err(), "personas never write");
+        assert!(a_kv.put("ops", serde_json::to_vec(&entry).unwrap().into()).await.is_err(), "ants never write");
         assert!(a_kv.delete("ops").await.is_err());
         h_kv.delete("ops").await.unwrap();
 
@@ -837,7 +836,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn failed_messages_become_dead_letters_the_human_replays() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (human, dev_a) = (UserId::human(), p("dev-a"));
         let (h_client, h_js) = server.connect(&human).await;
         let (_, a_js) = server.connect(&dev_a).await;
 
@@ -884,7 +883,7 @@ pub(crate) mod tests {
         assert_eq!(letters.len(), 2, "{letters:?}");
         let (seq, letter) = &letters[0];
         assert_eq!(
-            (letter.persona.clone(), letter.deliveries, letter.error.as_str()),
+            (letter.ant.clone(), letter.deliveries, letter.error.as_str()),
             (dev_a.clone(), 2, "harness crashed")
         );
         assert_eq!(letter.envelope.as_ref(), Some(&ask));
@@ -912,9 +911,9 @@ pub(crate) mod tests {
         let as_dev_a = DeadLetter::of_envelope(dev_a.clone(), 90, 5, "x", forged.clone());
         assert!(bus::publish_json(&b_js, as_dev_a.subject(), &as_dev_a, None).await.is_err());
         let mut as_dev_b = DeadLetter::of_envelope(p("dev-b"), 91, 5, "x", forged);
-        as_dev_b.persona = dev_a.clone();
+        as_dev_b.ant = dev_a.clone();
         let misfiled = bus::publish_json(&b_js, subject::dead(&p("dev-b")), &as_dev_b, None).await.unwrap();
-        as_dev_b.persona = p("dev-b");
+        as_dev_b.ant = p("dev-b");
         let wrong_inbox = bus::publish_json(&b_js, as_dev_b.subject(), &as_dev_b, None).await.unwrap();
         assert_eq!(dead::list(&stream).await.unwrap().len(), 1, "the misfiled letter is skipped");
         for seq in [misfiled, wrong_inbox] {
@@ -925,7 +924,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a) = (PersonaId::human(), p("dev-a"));
+        let (human, dev_a) = (UserId::human(), p("dev-a"));
         let (h_client, h_js) = server.connect(&human).await;
         let (_, a_js) = server.connect(&dev_a).await;
         let stream = bus::init_stream(&h_js).await.unwrap();
@@ -940,7 +939,7 @@ pub(crate) mod tests {
         );
 
         let test = async {
-            // Personas may not hear the advisories: those of other consumers name messages they may not read.
+            // Ants may not hear the advisories: those of other consumers name messages they may not read.
             let (a_raw, mut errors) = server.watched(&dev_a).await;
             let _sub = a_raw.subscribe(subject::max_deliveries_advisories()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;
@@ -955,7 +954,7 @@ pub(crate) mod tests {
 
             let (dead_seq, letter) = timeout(Duration::from_secs(10), buried.recv()).await.unwrap().unwrap();
             let seq = ask_seq(&stream, &ask).await;
-            assert_eq!((letter.persona.clone(), letter.stream_seq, letter.deliveries), (dev_a.clone(), seq, 2));
+            assert_eq!((letter.ant.clone(), letter.stream_seq, letter.deliveries), (dev_a.clone(), seq, 2));
             assert_eq!(letter.envelope.as_ref(), Some(&ask));
             assert!(letter.error.contains("max-deliveries advisory"), "{}", letter.error);
             let notice: Envelope =
@@ -963,7 +962,7 @@ pub(crate) mod tests {
             assert_eq!((notice.from.clone(), notice.in_reply_to), (dev_a.clone(), Some(ask.id)));
             assert!(notice.text.contains(&format!("ants dead replay {dead_seq}")), "{}", notice.text);
             assert!(notice.text.contains("told to a human directly, past the escalation chain"), "{}", notice.text);
-            assert_eq!(notice.escalation, None, "the human's side skips the persona's chain");
+            assert_eq!(notice.escalation, None, "the human's side skips the ant's chain");
 
             // A later advisory of the same message, past the duplicate window, finds the dead letter.
             let advisory = dead::MaxDeliveries {
@@ -992,8 +991,8 @@ pub(crate) mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    async fn connect_to(url: &str, creds: &Path, domain: Option<&JsDomain>, persona: &PersonaId) -> jetstream::Context {
-        let (_, mut js) = bus::connect(url, Some(creds), domain, persona, "test").await.unwrap();
+    async fn connect_to(url: &str, creds: &Path, domain: Option<&JsDomain>, user: &UserId) -> jetstream::Context {
+        let (_, mut js) = bus::connect(url, Some(creds), domain, user, "test").await.unwrap();
         js.set_timeout(Duration::from_secs(1));
         js
     }
@@ -1010,7 +1009,7 @@ pub(crate) mod tests {
             return;
         };
         let domain: JsDomain = "hub".parse().unwrap();
-        let (human, dev_a, dev_b) = (PersonaId::human(), p("dev-a"), p("dev-b"));
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
         let team = hub.dir().join("auth");
 
         let (h_client, mut h_js) =

@@ -1,39 +1,39 @@
-//! Escalating tool requests to the humans, and to the persona's chain, over NATS.
+//! Escalating tool requests to the humans, and to the ant's chain, over NATS.
 //!
-//! The daemon subscribes to `ants.approvals.<persona>.<request id>`, then publishes the [`ApprovalRequest`] to
-//! `ants.approvals.<persona>`, where the stream keeps it, so an `ants approve` started later still finds it. Any human
+//! The daemon subscribes to `ants.approvals.<ant>.<request id>`, then publishes the [`ApprovalRequest`] to
+//! `ants.approvals.<ant>`, where the stream keeps it, so an `ants approve` started later still finds it. Any human
 //! publishes the [`ApprovalDecision`] to the request's own subject, which only humans may write to; the first decision
 //! stored wins. No decision before `expires_at` rejects the request.
 //!
 //! A decision heard on the subject is only a sign that one was published: core NATS delivers a publish the stream then
 //! refuses, as when `ants approve` loses to another human's decision, and the two may arrive in either order. So the
-//! persona acts on the decision the stream stored on the subject, read back with a direct get of its last message
-//! (`$JS.API.DIRECT.GET.ANTS.<decision subject>`, which credentials allow for the persona's own requests only); while
+//! ant acts on the decision the stream stored on the subject, read back with a direct get of its last message
+//! (`$JS.API.DIRECT.GET.ANTS.<decision subject>`, which credentials allow for the ant's own requests only); while
 //! none is stored it looks again every [`RECHECK`]. `ants approve` stores a decision only while the subject holds none,
-//! so the last stored is the first. The stored decision is not republished to a subject of its own: a persona can point
+//! so the last stored is the first. The stored decision is not republished to a subject of its own: an ant can point
 //! a push consumer at any subject outside the stream, and nats-server does not check its deliver subject against the
-//! persona's permissions, so only a subject the stream captures, or a reply to the persona's own request, cannot be
-//! forged. A stream without direct gets, from before them, or credentials without the permission make the persona act
+//! ant's permissions, so only a subject the stream captures, or a reply to the ant's own request, cannot be
+//! forged. A stream without direct gets, from before them, or credentials without the permission make the ant act
 //! on the first decision it hears, as it used to, with a warning: `ants init` and `ants auth user` upgrade them.
 //!
-//! # The persona's chain
+//! # The ant's chain
 //!
-//! With an `escalate_to`, the request also goes to every persona of it, on `ants.inbox.<member>.<persona>`, as an
+//! With an `escalate_to`, the request also goes to every ant of it, on `ants.inbox.<member>.<ant>`, as an
 //! approval escalation at level 1 whose text shows the tool call ([`NatsApprover::with_chain`]). Any member decides
 //! with the MCP tool `decide_approval`, which sends an envelope carrying the decision to
-//! `ants.inbox.<persona>.<member>`: the subject pins the member, so persona credentials need no rights on another
-//! persona's approvals. The persona takes such a decision only from its own `escalate_to` and for a request still
+//! `ants.inbox.<ant>.<member>`: the subject pins the member, so ant credentials need no rights on another
+//! ant's approvals. The ant takes such a decision only from its own `escalate_to` and for a request still
 //! waiting ([`Envelope::chain_decision`]); it hears it on a core subscription to its inbox while waiting, and the inbox
 //! consumer, which delivers it again later, acks it without prompting ([`NatsApprover::offer`]). The first decision
 //! wins: a member's, unless a human's is stored by the time the member's arrives. The escalation does not climb further
-//! nor wait in `ants_sessions`: the request has its own time limit, and only the persona's own chain may decide it.
+//! nor wait in `ants_sessions`: the request has its own time limit, and only the ant's own chain may decide it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, Envelope, Escalation, Hop, PersonaId, STREAM, State, ThreadId, ToolCall, Uuid,
+    ApprovalDecision, ApprovalRequest, Envelope, Escalation, Hop, STREAM, State, ThreadId, ToolCall, UserId, Uuid,
     Verdict,
 };
 use anyhow::{Context as _, Result};
@@ -50,7 +50,7 @@ use crate::permission::Approver;
 /// How long a tool request waits for a human by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// How often the persona looks for the stored decision after hearing one that is not stored (yet).
+/// How often the ant looks for the stored decision after hearing one that is not stored (yet).
 pub const RECHECK: Duration = Duration::from_millis(250);
 
 /// What the stream holds on a request's decision subject.
@@ -62,20 +62,20 @@ enum Stored {
     Unknown(String),
 }
 
-/// A decision on a waiting request from an agent of the persona's chain, and who sent it.
-type FromChain = (PersonaId, ApprovalDecision);
+/// A decision on a waiting request from an agent of the ant's chain, and who sent it.
+type FromChain = (UserId, ApprovalDecision);
 
 /// The requests waiting for a decision, by id, with where a chain decision on each goes.
 type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<FromChain>)>>>;
 
-/// Asks the humans on `ants.approvals.<persona>`, and the persona's chain.
+/// Asks the humans on `ants.approvals.<ant>`, and the ant's chain.
 #[derive(Clone)]
 pub struct NatsApprover {
     client: async_nats::Client,
     js: jetstream::Context,
-    persona: PersonaId,
+    ant: UserId,
     timeout: Duration,
-    /// The persona's escalate_to and its hop limit; an empty chain asks only the humans.
+    /// The ant's escalate_to and its hop limit; an empty chain asks only the humans.
     chain: Chain,
     waiting: Waiting,
 }
@@ -96,7 +96,7 @@ impl Drop for Pending<'_> {
 enum Heard {
     /// A message on the request's decision subject.
     Human(async_nats::Message),
-    /// A decision from an agent of the persona's chain.
+    /// A decision from an agent of the ant's chain.
     Chain(FromChain),
     /// The subscription to the decision subject ended.
     Closed,
@@ -104,18 +104,18 @@ enum Heard {
 }
 
 impl NatsApprover {
-    pub fn new(client: async_nats::Client, js: jetstream::Context, persona: PersonaId, timeout: Duration) -> Self {
-        Self { client, js, persona, timeout, chain: Chain::default(), waiting: Waiting::default() }
+    pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
+        Self { client, js, ant, timeout, chain: Chain::default(), waiting: Waiting::default() }
     }
 
-    /// The same, also asking every persona of `chain`'s escalate_to, which may decide too.
+    /// The same, also asking every ant of `chain`'s escalate_to, which may decide too.
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
     }
 
     /// Hand `envelope`, which carries an approval decision and arrived on its own subject
     /// ([`Envelope::check_subject`]), to the request it decides, if that one still waits and the sender is in the
-    /// persona's escalate_to. Anything else is ignored: a late decision, or one from outside the chain. Never prompt
+    /// ant's escalate_to. Anything else is ignored: a late decision, or one from outside the chain. Never prompt
     /// with it.
     pub fn offer(&self, envelope: &Envelope) {
         let Some(decision) = envelope.approval.as_deref() else { return };
@@ -132,14 +132,14 @@ impl NatsApprover {
             None => tracing::warn!(
                 from = %envelope.from,
                 request = %decision.request_id,
-                "ignoring an approval decision from outside the persona's escalate_to"
+                "ignoring an approval decision from outside the ant's escalate_to"
             ),
         }
     }
 
-    /// Send `request` to every persona of the chain, as an approval escalation showing the tool call. Returns whom it
+    /// Send `request` to every ant of the chain, as an approval escalation showing the tool call. Returns whom it
     /// went to: none when the chain is empty or allows no hop.
-    async fn ask_chain(&self, request: &ApprovalRequest) -> Result<Vec<PersonaId>> {
+    async fn ask_chain(&self, request: &ApprovalRequest) -> Result<Vec<UserId>> {
         let Hop::Chain { escalation, to } =
             Escalation::of_request(request).up(&self.chain.escalate_to, self.chain.max_hops)
         else {
@@ -148,21 +148,21 @@ impl NatsApprover {
         let text = chain_text(request, &to);
         for member in &to {
             let envelope =
-                Envelope::on_thread(request.thread_id.clone(), self.persona.clone(), member.clone(), text.clone())
+                Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), member.clone(), text.clone())
                     .with_escalation(Some(escalation.clone()));
-            let id = format!("approval-{}-{}-{member}", self.persona, request.id);
+            let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
         }
         Ok(to)
     }
 
     async fn ask(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> Result<Verdict> {
-        let request = ApprovalRequest::new(self.persona.clone(), thread, tool, options, self.timeout);
+        let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout);
         // Subscribe first, so a quick answer is not missed.
         let mut decisions = self.client.subscribe(request.decision_subject()).await?;
         let mut inbox = match self.chain.escalate_to.is_empty() {
             true => None,
-            false => Some(bus::live_inbox(&self.client, &self.persona).await?),
+            false => Some(bus::live_inbox(&self.client, &self.ant).await?),
         };
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
         self.waiting.lock().expect("waiting requests").insert(request.id, (request.clone(), chain_decided));
@@ -176,10 +176,10 @@ impl NatsApprover {
         tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
         match self.ask_chain(&request).await {
             Ok(to) if to.is_empty() => {}
-            Ok(to) => tracing::info!(request = %request.id, ?to, "asked the persona's chain too"),
-            Err(e) => tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the persona's chain"),
+            Ok(to) => tracing::info!(request = %request.id, ?to, "asked the ant's chain too"),
+            Err(e) => tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain"),
         }
-        crate::status::state(&self.client, &self.persona, &request.thread_id, State::WaitingApproval);
+        crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
         let wait = async {
             // The first decision heard for the request, acted on only if the stream cannot be asked.
             let mut heard: Option<ApprovalDecision> = None;
@@ -218,7 +218,7 @@ impl NatsApprover {
                             return request.decide(human.verdict).verdict;
                         }
                         let verdict = decision.verdict.as_str();
-                        tracing::info!(request = %request.id, %from, verdict, "decided by the persona's chain");
+                        tracing::info!(request = %request.id, %from, verdict, "decided by the ant's chain");
                         return decision.verdict;
                     }
                     Heard::Closed => return Verdict::Reject,
@@ -246,7 +246,7 @@ impl NatsApprover {
             tracing::info!(request = %request.id, "approval request expired; rejecting");
             Verdict::Reject
         });
-        crate::status::state(&self.client, &self.persona, &request.thread_id, State::Working);
+        crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
     }
 
@@ -270,7 +270,7 @@ impl NatsApprover {
         }
     }
 
-    /// The decision on `request` that `msg`, heard on the persona's inbox, carries from an agent of its chain, if any.
+    /// The decision on `request` that `msg`, heard on the ant's inbox, carries from an agent of its chain, if any.
     fn chain_decision(&self, request: &ApprovalRequest, msg: &async_nats::Message) -> Option<FromChain> {
         let envelope = serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.approval.is_some())?;
         if let Err(e) = envelope.check_subject(&msg.subject) {
@@ -280,7 +280,7 @@ impl NatsApprover {
         let decided = envelope.chain_decision(request, &self.chain.escalate_to);
         if decided.is_none() && envelope.approval.as_ref().is_some_and(|d| d.request_id == request.id) {
             let (from, request) = (&envelope.from, request.id);
-            tracing::warn!(%from, %request, "ignoring an approval decision from outside the persona's escalate_to");
+            tracing::warn!(%from, %request, "ignoring an approval decision from outside the ant's escalate_to");
         }
         Some((envelope.from, decided?))
     }
@@ -294,15 +294,15 @@ async fn next_message(subscriber: &mut Option<bus::LiveInbox>) -> Option<async_n
     }
 }
 
-/// What every persona of the chain, `to`, gets about `request`: how to decide it, and the tool call.
-fn chain_text(request: &ApprovalRequest, to: &[PersonaId]) -> String {
+/// What every ant of the chain, `to`, gets about `request`: how to decide it, and the tool call.
+fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
     let verdicts: Vec<&str> = request.options.iter().map(|v| v.as_str()).collect();
-    let to: Vec<&str> = to.iter().map(PersonaId::as_str).collect();
-    let (persona, id, thread) = (&request.persona, request.id, &request.thread_id);
+    let to: Vec<&str> = to.iter().map(UserId::as_str).collect();
+    let (ant, id, thread) = (&request.ant, request.id, &request.thread_id);
     let mut text = format!(
-        "[ants] Approval request {id} on thread {thread}: {persona} asks to run a tool outside its allowlist. Sent to \
+        "[ants] Approval request {id} on thread {thread}: {ant} asks to run a tool outside its allowlist. Sent to \
          {}; any of them decides with the decide_approval tool ({}). Humans may decide too, with `ants approve \
-         {persona}/{id}`; the first decision wins. Without one by {} the request is rejected.\n\nTool: {} ({})",
+         {ant}/{id}`; the first decision wins. Without one by {} the request is rejected.\n\nTool: {} ({})",
         to.join(", "),
         verdicts.join(", "),
         request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -322,7 +322,7 @@ fn chain_text(request: &ApprovalRequest, to: &[PersonaId]) -> String {
 fn decided(request: &ApprovalRequest, payload: &[u8]) -> Option<ApprovalDecision> {
     serde_json::from_slice::<ApprovalDecision>(payload)
         .ok()
-        .filter(|d| d.request_id == request.id && d.persona == request.persona)
+        .filter(|d| d.request_id == request.id && d.ant == request.ant)
 }
 
 impl Approver for NatsApprover {
@@ -362,21 +362,21 @@ mod tests {
     #[tokio::test]
     async fn the_human_decides_and_silence_rejects() {
         let Some(server) = Server::start() else { return };
-        let persona: PersonaId = "dev-a".parse().unwrap();
+        let ant: UserId = "dev-a".parse().unwrap();
         let thread: ThreadId = "t1".parse().unwrap();
-        let (client, js) = bus::connect(&server.url, None, None, &persona, "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
         bus::ensure_stream(&js).await.unwrap();
-        let (human, human_js) = bus::connect(&server.url, None, None, &PersonaId::human(), "human").await.unwrap();
-        let mut requests = human.subscribe(subject::approvals(&persona)).await.unwrap();
-        let mut statuses = human.subscribe(subject::status(&persona, &thread)).await.unwrap();
+        let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+        let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+        let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
         subscribed(&human_js).await;
 
-        let approver = NatsApprover::new(client.clone(), js.clone(), persona.clone(), Duration::from_secs(10));
+        let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(10));
         let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
         let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options));
         let msg = timeout(Duration::from_secs(5), requests.next()).await.unwrap().unwrap();
         let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
-        assert_eq!((&request.persona, &request.thread_id, &request.tool), (&persona, &thread, &tool()));
+        assert_eq!((&request.ant, &request.thread_id, &request.tool), (&ant, &thread, &tool()));
         assert_eq!(request.options, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
         let status = timeout(Duration::from_secs(5), statuses.next()).await.unwrap().unwrap();
         let status: ants_proto::StatusEvent = serde_json::from_slice(&status.payload).unwrap();
@@ -396,11 +396,11 @@ mod tests {
         assert_eq!(stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap().sequence, 1);
         assert!(stream.get_last_raw_message_by_subject(&decision.subject()).await.is_ok());
 
-        let impatient = NatsApprover::new(client, js, persona, Duration::from_millis(300));
+        let impatient = NatsApprover::new(client, js, ant, Duration::from_millis(300));
         assert_eq!(impatient.decide(thread, tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
     }
 
-    /// A decision the stream refuses, as `ants approve` loses to another human's, still reaches the persona.
+    /// A decision the stream refuses, as `ants approve` loses to another human's, still reaches the ant.
     async fn publish_refused(human: &async_nats::Client, decision: &ApprovalDecision) {
         let mut headers = async_nats::HeaderMap::new();
         // Nothing is stored on the subject yet, so the stream refuses this.
@@ -411,21 +411,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_persona_acts_on_the_stored_decision_not_the_first_heard() {
+    async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
         let Some(server) = Server::start() else { return };
-        let persona: PersonaId = "dev-a".parse().unwrap();
+        let ant: UserId = "dev-a".parse().unwrap();
         let thread: ThreadId = "t1".parse().unwrap();
-        let (client, js) = bus::connect(&server.url, None, None, &persona, "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
         let stream = bus::ensure_stream(&js).await.unwrap();
-        let (human, human_js) = bus::connect(&server.url, None, None, &PersonaId::human(), "human").await.unwrap();
-        let mut requests = human.subscribe(subject::approvals(&persona)).await.unwrap();
+        let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+        let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
         subscribed(&human_js).await;
         let mut next_request = async || {
             let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
             serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap()
         };
 
-        let approver = NatsApprover::new(client.clone(), js.clone(), persona.clone(), WAIT);
+        let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), WAIT);
         let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
         let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options.clone()));
         let request = next_request().await;
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), winner);
 
         // A decision that is never stored leaves the request to expire.
-        let impatient = NatsApprover::new(client.clone(), js.clone(), persona.clone(), Duration::from_secs(1));
+        let impatient = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(1));
         let decided = tokio::spawn(impatient.decide(thread.clone(), tool(), options.clone()));
         publish_refused(&human, &next_request().await.decide(Verdict::AllowOnce)).await;
         assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
     }
 
-    fn chain(escalate_to: &[&PersonaId]) -> Chain {
+    fn chain(escalate_to: &[&UserId]) -> Chain {
         Chain { escalate_to: escalate_to.iter().map(|p| (*p).clone()).collect(), ..Chain::default() }
     }
 
@@ -468,24 +468,24 @@ mod tests {
     #[tokio::test]
     async fn the_chain_hears_the_request_and_only_its_decision_counts() {
         let Some(server) = Server::start() else { return };
-        let (persona, lead, other): (PersonaId, PersonaId, PersonaId) =
+        let (ant, lead, other): (UserId, UserId, UserId) =
             ("dev-a".parse().unwrap(), "lead".parse().unwrap(), "dev-c".parse().unwrap());
         let thread: ThreadId = "t1".parse().unwrap();
-        let (client, js) = bus::connect(&server.url, None, None, &persona, "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
         bus::ensure_stream(&js).await.unwrap();
-        let (human, human_js) = bus::connect(&server.url, None, None, &PersonaId::human(), "human").await.unwrap();
-        let mut requests = human.subscribe(subject::approvals(&persona)).await.unwrap();
+        let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+        let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
         let mut asked = human.subscribe(subject::inbox_of(&lead)).await.unwrap();
         subscribed(&human_js).await;
 
-        let approver = NatsApprover::new(client, js, persona.clone(), WAIT).with_chain(chain(&[&lead]));
+        let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
         let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
         let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
         let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
         let msg = timeout(WAIT, asked.next()).await.unwrap().unwrap();
         let notice: Envelope = serde_json::from_slice(&msg.payload).unwrap();
         notice.check_subject(&msg.subject).unwrap();
-        assert_eq!((&notice.from, &notice.thread_id), (&persona, &thread));
+        assert_eq!((&notice.from, &notice.thread_id), (&ant, &thread));
         let escalation = notice.escalation.as_deref().unwrap();
         assert_eq!(
             (escalation.reason, escalation.request_id, escalation.level),
@@ -495,12 +495,12 @@ mod tests {
 
         // Outside the chain, forged, or for another request: ignored.
         let decide =
-            |from: &PersonaId, decision: ApprovalDecision| Envelope::decision(thread.clone(), from.clone(), decision);
+            |from: &UserId, decision: ApprovalDecision| Envelope::decision(thread.clone(), from.clone(), decision);
         let foreign = decide(&other, request.decide(Verdict::AllowOnce));
         send(&human_js, foreign.subject(), &foreign).await;
         let forged = decide(&lead, request.decide(Verdict::AllowOnce));
         send(&human_js, foreign.subject(), &forged).await;
-        let elsewhere = decide(&lead, ApprovalDecision::new(Uuid::new_v4(), persona.clone(), Verdict::AllowOnce));
+        let elsewhere = decide(&lead, ApprovalDecision::new(Uuid::new_v4(), ant.clone(), Verdict::AllowOnce));
         send(&human_js, elsewhere.subject(), &elsewhere).await;
         tokio::time::sleep(RECHECK * 2).await;
         assert!(!decided.is_finished(), "no decision from the chain yet");
@@ -515,14 +515,14 @@ mod tests {
     #[tokio::test]
     async fn the_first_decision_wins_whoever_makes_it() {
         let Some(server) = Server::start() else { return };
-        let (persona, lead): (PersonaId, PersonaId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
+        let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
         let thread: ThreadId = "t1".parse().unwrap();
-        let (client, js) = bus::connect(&server.url, None, None, &persona, "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
         bus::ensure_stream(&js).await.unwrap();
-        let (human, human_js) = bus::connect(&server.url, None, None, &PersonaId::human(), "human").await.unwrap();
-        let mut requests = human.subscribe(subject::approvals(&persona)).await.unwrap();
+        let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+        let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
         subscribed(&human_js).await;
-        let approver = NatsApprover::new(client, js, persona.clone(), WAIT).with_chain(chain(&[&lead]));
+        let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
         let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
         let decide = |request: &ApprovalRequest, verdict| {
             Envelope::decision(thread.clone(), lead.clone(), request.decide(verdict))
@@ -551,7 +551,7 @@ mod tests {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             runtime.block_on(async {
-                let (_human, js) = bus::connect(&url, None, None, &PersonaId::human(), "human-2").await.unwrap();
+                let (_human, js) = bus::connect(&url, None, None, &UserId::human(), "human-2").await.unwrap();
                 js.publish(human_says.subject(), serde_json::to_vec(&human_says).unwrap().into())
                     .await
                     .unwrap()

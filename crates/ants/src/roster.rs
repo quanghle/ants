@@ -1,9 +1,9 @@
-//! `ants roster`: the personas being served, and whether their daemons still beat.
+//! `ants roster`: the ants being served, and whether their daemons still beat.
 
 use std::time::Duration;
 
 use ants_daemon::{bus, roster};
-use ants_proto::{PersonaId, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry};
+use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -48,18 +48,18 @@ fn short(duration: Duration) -> String {
     }
 }
 
-/// The persona's escalation chain, leader first, or `-` for none.
+/// The ant's escalation chain, leader first, or `-` for none.
 fn chain(entry: &RosterEntry) -> String {
     if entry.escalate_to.is_empty() {
         return "-".to_owned();
     }
-    entry.escalate_to.iter().map(PersonaId::as_str).collect::<Vec<_>>().join(",")
+    entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// The roster as a table: one row per persona under a header, columns padded to line up.
+/// The roster as a table: one row per ant under a header, columns padded to line up.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     let header = [
-        "PERSONA",
+        "ANT",
         "STATE",
         "ACTIVITY",
         "HARNESSES",
@@ -75,7 +75,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     let rows: Vec<[String; 11]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
-                e.persona.to_string(),
+                e.ant.to_string(),
                 State::of(e, now).as_str().to_owned(),
                 e.activity.map_or("-", |a| a.as_str()).to_owned(),
                 e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
@@ -130,7 +130,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
             println!("{}", self::json(entry, now)?);
         }
     } else if entries.is_empty() {
-        println!("no personas registered");
+        println!("no ants registered");
     } else {
         println!("{}", table(&entries, now));
     }
@@ -145,9 +145,9 @@ mod tests {
     use super::*;
     use crate::auth::tests::Server;
 
-    fn entry(persona: &str, started: i64, beat: i64, now: DateTime<Utc>) -> RosterEntry {
+    fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> RosterEntry {
         RosterEntry {
-            persona: persona.parse().unwrap(),
+            ant: ant.parse().unwrap(),
             machine: "m1".to_owned(),
             instance: None,
             harness: "copilot".to_owned(),
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(
             rows[0],
             [
-                "PERSONA",
+                "ANT",
                 "STATE",
                 "ACTIVITY",
                 "HARNESSES",
@@ -214,32 +214,32 @@ mod tests {
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];
         let json: serde_json::Value = serde_json::from_str(&super::json(&led, now).unwrap()).unwrap();
-        assert_eq!((json["persona"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
+        assert_eq!((json["ant"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
         assert_eq!(json["escalate_to"], serde_json::json!(["lead"]));
     }
 
     /// With the human's credentials, so it also checks that they read the roster.
     #[tokio::test]
-    async fn the_human_lists_registered_personas() {
+    async fn the_human_lists_registered_ants() {
         let Some(server) = Server::start() else { return };
-        let (_, human) = server.connect(&PersonaId::human()).await;
+        let (_, human) = server.connect(&UserId::human()).await;
         assert!(list(&human).await.unwrap().is_empty(), "an empty roster, created on first use");
 
         let mut registrations = Vec::new();
         let now = Utc::now();
-        for persona in ["dev-b", "dev-a"] {
-            let (_, js) = server.connect(&persona.parse().unwrap()).await;
+        for ant in ["dev-b", "dev-a"] {
+            let (_, js) = server.connect(&ant.parse().unwrap()).await;
             let kv = bus::ensure_roster(&js, ROSTER_TTL).await.unwrap();
-            let entry = entry(persona, 60, 0, now);
+            let entry = entry(ant, 60, 0, now);
             registrations.push(Registration::start(kv, entry, ROSTER_HEARTBEAT).await.unwrap());
         }
         let listed = list(&human).await.unwrap();
-        let personas: Vec<&str> = listed.iter().map(|e| e.persona.as_str()).collect();
-        assert_eq!(personas, ["dev-a", "dev-b"]);
+        let ants: Vec<&str> = listed.iter().map(|e| e.ant.as_str()).collect();
+        assert_eq!(ants, ["dev-a", "dev-b"]);
         assert_eq!(listed[0], entry("dev-a", 60, 0, now));
 
         registrations.remove(0).deregister().await;
         let listed = list(&human).await.unwrap();
-        assert_eq!(listed.iter().map(|e| e.persona.as_str()).collect::<Vec<_>>(), ["dev-a"]);
+        assert_eq!(listed.iter().map(|e| e.ant.as_str()).collect::<Vec<_>>(), ["dev-a"]);
     }
 }

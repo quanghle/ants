@@ -297,7 +297,7 @@ mod tests {
     use std::time::Duration;
 
     use ants_daemon::{bus, plan};
-    use ants_proto::{ChannelPost, Envelope, PersonaId, PlanPost, Role};
+    use ants_proto::{ChannelPost, Envelope, PlanPost, Role, UserId};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
 
@@ -337,7 +337,7 @@ mod tests {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Persona)], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], None, &creds).unwrap();
         (dir, creds)
     }
 
@@ -383,9 +383,9 @@ mod tests {
         let proxy = Some("socks5://proxy:1080");
         assert!(err(Leaf { proxy, ..leaf(&tcp, &creds, &server_conf) }).contains("HTTP CONNECT"));
 
-        let persona = dir.join("dev-a.creds");
-        auth::issue(&dir, &"dev-a".parse().unwrap(), Role::Persona, None, &persona).unwrap();
-        assert!(err(leaf(&tcp, &persona, &server_conf)).contains("not leaf uplink credentials"));
+        let ant = dir.join("dev-a.creds");
+        auth::issue(&dir, &"dev-a".parse().unwrap(), Role::Ant, None, &ant).unwrap();
+        assert!(err(leaf(&tcp, &ant, &server_conf)).contains("not leaf uplink credentials"));
         let other = scratch_dir("leaf-other-team");
         auth::init(&other).unwrap();
         assert!(err(leaf(&tcp, &creds, &other.join(auth::SERVER_CONF))).contains("does not trust"));
@@ -437,8 +437,8 @@ mod tests {
         };
         let team = hub.dir().join("auth");
         let domain: JsDomain = "hub".parse().unwrap();
-        let (human, dev_a) = (PersonaId::human(), "dev-a".parse::<PersonaId>().unwrap());
-        let creds = |p: &PersonaId| {
+        let (human, dev_a) = (UserId::human(), "dev-a".parse::<UserId>().unwrap());
+        let creds = |p: &UserId| {
             let out = hub.dir().join(format!("{p}.creds"));
             auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
             out
@@ -446,7 +446,7 @@ mod tests {
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Persona)], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);
@@ -476,7 +476,7 @@ mod tests {
         let stored = bus::store(&a_js, chan.subject(), &chan, &chan.id.to_string()).await.unwrap();
         assert_eq!(stored, bus::Stored::Hub, "channel post not stored directly");
         // The interest widens nothing: dev-b, not on the uplink, still cannot reach the hub's stream from the leaf.
-        let dev_b: PersonaId = "dev-b".parse().unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
         let (_b, mut b_js) =
             bus::connect(&leaf_node.url, Some(&creds(&dev_b)), Some(&domain), &dev_b, "test").await.unwrap();
         b_js.set_timeout(Duration::from_secs(1));

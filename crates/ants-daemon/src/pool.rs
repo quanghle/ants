@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::SessionId;
-use ants_proto::{PersonaId, ThreadId, session_key};
+use ants_proto::{ThreadId, UserId, session_key};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use tokio::sync::Notify;
@@ -19,15 +19,15 @@ use crate::harness::{Launch, Prompt, Reply, Session};
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
 pub enum SessionStore {
-    /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the persona's own keys.
-    Kv { kv: Box<kv::Store>, persona: PersonaId },
+    /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the ant's own keys.
+    Kv { kv: Box<kv::Store>, ant: UserId },
     /// In this process only, shared by clones.
     Memory(Arc<Mutex<HashMap<ThreadId, SessionId>>>),
 }
 
 impl SessionStore {
-    pub fn kv(kv: kv::Store, persona: PersonaId) -> Self {
-        Self::Kv { kv: Box::new(kv), persona }
+    pub fn kv(kv: kv::Store, ant: UserId) -> Self {
+        Self::Kv { kv: Box::new(kv), ant }
     }
 
     pub fn memory() -> Self {
@@ -37,8 +37,8 @@ impl SessionStore {
     /// The session the thread last ran in, if any.
     pub async fn get(&self, thread: &ThreadId) -> Result<Option<SessionId>> {
         match self {
-            Self::Kv { kv, persona } => {
-                let value = kv.get(session_key(persona, thread)).await.context("reading the session of the thread")?;
+            Self::Kv { kv, ant } => {
+                let value = kv.get(session_key(ant, thread)).await.context("reading the session of the thread")?;
                 Ok(value.and_then(|v| String::from_utf8(v.to_vec()).ok()).map(SessionId::new))
             }
             Self::Memory(map) => Ok(map.lock().expect("session store").get(thread).cloned()),
@@ -47,8 +47,8 @@ impl SessionStore {
 
     pub async fn put(&self, thread: &ThreadId, session: &SessionId) -> Result<()> {
         match self {
-            Self::Kv { kv, persona } => {
-                kv.put(session_key(persona, thread), session.to_string().into())
+            Self::Kv { kv, ant } => {
+                kv.put(session_key(ant, thread), session.to_string().into())
                     .await
                     .context("storing the session of the thread")?;
             }
@@ -526,14 +526,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persona_and_tool_instructions_reach_every_prompt_and_resumed_session() {
+    async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
         let (launch, log, _) = fake::launch(true);
-        let mut persona = crate::config::Persona::new("dev-a".parse().unwrap(), env!("CARGO_MANIFEST_DIR").into());
-        persona.whoami = Some("Maintain the Rust backend.".to_owned());
-        persona.memory = Some("Use notes.".to_owned());
-        persona.tasks = Some("Use tickets.".to_owned());
-        let config = persona.into_config("nats://unused").unwrap();
-        let instructions = "[ants persona dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
+        let mut ant = crate::config::Ant::new("dev-a".parse().unwrap(), env!("CARGO_MANIFEST_DIR").into());
+        ant.whoami = Some("Maintain the Rust backend.".to_owned());
+        ant.memory = Some("Use notes.".to_owned());
+        ant.tasks = Some("Use tickets.".to_owned());
+        let config = ant.into_config("nats://unused").unwrap();
+        let instructions =
+            "[ants role dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
         let pool = Pool::new(launch.with_instructions(config.instructions), SessionStore::memory(), 1, IDLE);
         for (thread_id, text, session) in [(1, "one", "s1"), (1, "two", "s1"), (2, "three", "s2"), (1, "four", "s1")] {
             assert_eq!(
