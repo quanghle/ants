@@ -3042,8 +3042,10 @@ mod tests {
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        // Different threads, so answered in either order.
         let answered = log.lock().unwrap().answered.clone();
-        assert!(answered.len() == 2 && answered[1].contains("build green"), "{answered:?}");
+        let has = |text: &str| answered.iter().any(|prompt| prompt.contains(text));
+        assert!(answered.len() == 2 && has("build red") && has("build green"), "{answered:?}");
         let quiet = Duration::from_millis(200);
         assert!(timeout(quiet, to_human.next()).await.is_err(), "the unowned answer goes nowhere");
         assert!(timeout(quiet, to_hook.next()).await.is_err(), "nothing goes to the webhook's inbox");
