@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
-use crate::worktrees::Worktrees;
+use crate::worktrees::{Branch, Pruned, Worktrees};
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
@@ -127,22 +127,26 @@ impl Pool {
     }
 
     /// Remove the worktrees of threads with no live harness whose session is no longer in the store, at once and then
-    /// every `every`. Never returns; pending for good without worktrees.
-    pub async fn prune_worktrees_every(&self, every: Duration) {
+    /// every `every`, handing the branches kept for their commits to `kept`. Never returns; pending for good without
+    /// worktrees.
+    pub async fn prune_worktrees_every(&self, every: Duration, kept: impl AsyncFn(Vec<Branch>)) {
         if self.worktrees.is_none() {
             return std::future::pending().await;
         }
         let mut tick = tokio::time::interval(every);
         loop {
             tick.tick().await;
-            self.prune_worktrees().await;
+            let pruned = self.prune_worktrees().await;
+            if !pruned.kept.is_empty() {
+                kept(pruned.kept).await;
+            }
         }
     }
 
-    /// Remove the worktrees of threads with no live harness whose session is no longer in the store. Returns how many
-    /// were removed. A store that cannot be read removes none.
-    pub async fn prune_worktrees(&self) -> usize {
-        let Some(worktrees) = &self.worktrees else { return 0 };
+    /// Remove the worktrees of threads with no live harness whose session is no longer in the store. A store that
+    /// cannot be read removes none.
+    pub async fn prune_worktrees(&self) -> Pruned {
+        let Some(worktrees) = &self.worktrees else { return Pruned::default() };
         worktrees
             .prune(async |thread: &ThreadId| {
                 let live = self.slots().contains_key(thread);
@@ -158,6 +162,12 @@ impl Pool {
                 }
             })
             .await
+    }
+
+    /// The thread's branch, when the thread works in its own worktree and the branch holds commits not in the
+    /// repository's `HEAD` ([`Worktrees::ahead`]).
+    pub async fn branch_ahead(&self, thread: &ThreadId) -> Option<Branch> {
+        self.worktrees.as_ref().filter(|_| self.isolate)?.ahead(thread).await
     }
 
     /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap
@@ -541,10 +551,22 @@ mod tests {
         pool.prompt(&thread(1), "c").await.unwrap();
         let (t1, t2) = (home.join("worktrees/t1"), home.join("worktrees/t2"));
         assert_eq!(log.lock().unwrap().cwds, [t1.clone(), t2.clone(), t1.clone()], "session/load in the same worktree");
-        assert_eq!(pool.prune_worktrees().await, 0, "sessions still stored");
+        crate::worktrees::tests::commit(&t2, "work of t2");
+        assert_eq!(pool.branch_ahead(&thread(1)).await, None);
+        assert_eq!(
+            pool.branch_ahead(&thread(2)).await.map(|b| (b.name, b.commits)),
+            Some(("ants/dev-a/t2".to_owned(), 1))
+        );
+        assert_eq!(pool.prune_worktrees().await.removed, 0, "sessions still stored");
         let SessionStore::Memory(sessions) = &store else { unreachable!() };
         sessions.lock().unwrap().clear();
-        assert_eq!(pool.prune_worktrees().await, 1, "only the thread without a live harness");
+        let pruned = pool.prune_worktrees().await;
+        assert_eq!(pruned.removed, 1, "only the thread without a live harness");
+        assert_eq!(
+            pruned.kept.iter().map(|b| &b.thread).collect::<Vec<_>>(),
+            [&thread(2)],
+            "its branch holds a commit"
+        );
         assert!(t1.is_dir() && !t2.exists());
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
@@ -563,11 +585,13 @@ mod tests {
         pool.prompt(&thread(1), "a").await.unwrap();
         pool.prompt(&thread(3), "b").await.unwrap();
         assert_eq!(log.lock().unwrap().cwds, [repo.clone(), repo.clone()], "threads share the workdir");
-        assert_eq!(pool.prune_worktrees().await, 1, "only the thread with no session and no live harness");
+        crate::worktrees::tests::commit(&home.join("worktrees/t1"), "work of t1");
+        assert_eq!(pool.branch_ahead(&thread(1)).await, None, "the thread works in the workdir");
+        assert_eq!(pool.prune_worktrees().await.removed, 1, "only the thread with no session and no live harness");
         let SessionStore::Memory(sessions) = &store else { unreachable!() };
         sessions.lock().unwrap().clear();
         pool.evict_idle(Instant::now() + IDLE * 2);
-        assert_eq!(pool.prune_worktrees().await, 1);
+        assert_eq!(pool.prune_worktrees().await.removed, 1);
         assert!(!home.join("worktrees/t1").exists() && !home.join("worktrees/t3").exists());
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
