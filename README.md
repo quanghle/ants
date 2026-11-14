@@ -85,9 +85,12 @@ ants watch                                          # live traffic
 ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, plan
 ```
 
-The minimum config file is one line, `provider = "copilot"` (or `"claude"`, `"antigravity"`) in `~/.ants/config.toml`:
-`ants daemon` with no flags then serves the built-in messenger, which takes `ants ask` without `@ant` (see
-[Messenger](#messenger)).
+The minimum config file is an empty `~/.ants/config.toml`, or one line choosing the harness, `harness = "claude"` (or
+`"copilot"`, the default, or `"antigravity"`): `ants daemon` with no flags then serves the built-in messenger, which
+takes `ants ask` without `@ant` (see [Messenger](#messenger)).
+
+Durations, in flags and config keys alike, are whole numbers with a unit, `s`, `m`, `h` or `d`, largest unit first:
+`90s`, `10m`, `1h30m`, or a bare `0`. A number without a unit is rejected.
 
 `ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`. A team across machines adds
 credentials ([Credentials](#credentials)), a leaf node per machine ([Leaf nodes](#leaf-nodes)), a config file listing
@@ -147,7 +150,7 @@ envelope per line.
 
 The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
 prompted concurrently; messages on one thread are handled one at a time, in order, and a failed one is retried before
-the rest of its thread. A thread's harness stops after `--idle-timeout-secs` (default 600) without a message, and its
+the rest of its thread. A thread's harness stops after `--idle-timeout` (default 10m) without a message, and its
 session resumes with ACP `session/load` on the next one. A harness with a prompt in flight is never stopped: when all
 are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
 at once, and their messages are redelivered later). SIGTERM, as service managers send, stops it like Ctrl-C.
@@ -188,17 +191,18 @@ daemon resumes it too. `ants init` (or a daemon without credentials) creates the
 ## Config file
 
 One daemon process can serve several ants, each over its own NATS connection with its own credentials. List them
-in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`. The minimum file
-names a provider and serves the built-in messenger alone (see [Messenger](#messenger)):
+in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`. The minimum file is
+empty, or names the harness, and serves the built-in messenger alone (see [Messenger](#messenger)):
 
 ```toml
-provider = "copilot"                       # or "claude", "antigravity"
+harness = "copilot"                        # the default; or "claude", "antigravity"
 ```
 
 A fuller file:
 
 ```toml
-provider = "copilot"                       # default harness of every ant; serves the built-in messenger
+harness = "copilot"                        # default harness of every ant and of the built-in messenger
+messenger = true                           # default: serve the built-in messenger (see Messenger)
 nats = "wss://hub.example/nats"            # server for every ant that sets none
 js_domain = "hub"                          # the hub's JetStream domain, if it has one (see Leaf nodes)
 human = "alice"                            # default human, see Escalations; default "human"; also per ant
@@ -207,7 +211,7 @@ human = "alice"                            # default human, see Escalations; def
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "claude"                         # default: provider, else "copilot"; or "antigravity"
+harness = "claude"                         # default: the top-level harness, else "copilot"; or "antigravity"
 model = "gpt-6.1-sol"                      # optional; exact model ID offered by the harness
 reasoning_effort = "high"                  # optional; a value offered by the selected model
 context = "long_context"                  # optional; provider-native tier/window, not a token cap
@@ -217,18 +221,18 @@ memory = "Use the notes MCP server for durable memory."  # optional, any tool av
 tasks = "Use the tracker CLI for task tracking."         # optional, independent of memory
 env = { TRACKER_DB = "/srv/ants/dev-a/tasks.db" }         # optional harness environment overrides
 allow = ["read", "search"]                 # tool allowlist, see Tool permissions
-approval_timeout_secs = 300                # default
+approval_timeout = "5m"                    # default
 capabilities = ["rust", "review"]          # advertised in the roster
 max_harnesses = 4                          # default
-idle_timeout_secs = 600                    # default
+idle_timeout = "10m"                       # default
 allow_tools = false                        # default
-prompt_timeout_secs = 1800                 # default; 0 for no limit (see Limits and caps)
+prompt_timeout = "30m"                     # default; "0" for no limit (see Limits and caps)
 max_tool_calls = 300                       # default; 0 for no limit
 max_thread_cost = 5.0                      # default: no cap; also max_thread_tokens
 max_daily_cost = 50.0                      # default: no cap; also max_daily_tokens
 escalate_to = ["lead", "dev-b"]            # optional escalation chain, the first one leads (see Escalations)
 max_escalation_hops = 3                    # default
-escalate_after_secs = 1800                 # default; 0 waits for the leader indefinitely
+escalate_after = "30m"                     # default; "0" waits for the leader indefinitely
 
 [[ant]]
 name = "dev-b"
@@ -238,7 +242,8 @@ creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
 `~` expands to the home directory; other relative paths are relative to the file. Names must be unique and unknown
-keys are errors. A file needs `provider` or at least one `[[ant]]`. An ant that fails to start (a missing credentials file, credentials the server rejects) is logged and
+keys are errors. Durations are TOML strings such as `"90s"`, `"10m"` or `"1h30m"`. A file that sets
+`messenger = false` needs at least one `[[ant]]`. An ant that fails to start (a missing credentials file, credentials the server rejects) is logged and
 the others keep running; the daemon exits with an error only when none could start. An ant whose server cannot be
 reached yet waits for it: the connection is retried after 1 s, then twice as long each time up to 30 s, with a warning
 naming the URL. Once connected it waits the same way for JetStream to answer, as a leaf node whose uplink has not joined
@@ -251,7 +256,7 @@ How flags and the file combine:
 - `ants daemon --ant dev-a` ignores that default file and takes the ant from the flags (`--workdir`, `--home`,
   `--harness`, `--max-harnesses`, ...), as before.
 - `ants daemon --config FILE --ant dev-a` serves only `dev-a` from `FILE`; ant flags given override its entries.
-- `ants daemon --config FILE --ant messenger` serves only the built-in messenger of a file with `provider`.
+- `ants daemon --config FILE --ant messenger` serves only the built-in messenger of a file.
 - In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
   `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one ant is served.
   `nats`, `js_domain` and `human` may also be set per ant.
@@ -285,7 +290,7 @@ prompting: the thread's escalation moves to that level, waiting for its leader, 
 that level's members. A level past `max_escalation_hops` (default 3), a chain leading back to an ant already visited,
 or a leader without a chain hands the thread to the owner, with the escalation and the reason. Until the leader answers,
 an ant stuck again on the thread sends the same members the new notice. Members offline are not skipped: their
-inboxes keep the escalation. When the leader does not answer within `escalate_after_secs` (default 1800, as long as a
+inboxes keep the escalation. When the leader does not answer within `escalate_after` (default 30m, as long as a
 prompt may run; 0 waits indefinitely), the ant that escalated sends it one level higher. Only a human's message on
 the thread ends its escalation, and the next one starts at the ant's own chain again. The thread's escalation, its
 level, whether the leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
@@ -339,7 +344,7 @@ context capacity. Provider settings and credentials remain managed by the harnes
 
 ### Prompt limits and spending caps
 
-Every prompt has a time limit, `--prompt-timeout-secs` (default 1800, tool requests waiting for the human included),
+Every prompt has a time limit, `--prompt-timeout` (default 30m, tool requests waiting for the human included; 0 for none),
 and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spending can be capped per thread,
 `--max-thread-tokens` and `--max-thread-cost`, and per ant per UTC day, `--max-daily-tokens` and
 `--max-daily-cost`; there are no spending caps by default. The config file keys have the same names with underscores.
@@ -385,7 +390,7 @@ ants auth leaf macbook --ant dev-a --ant dev-b --ant messenger --human human --j
 # on macbook
 cargo install --path crates/ants                                          # ~/.cargo/bin/ants
 ants leaf config macbook --uplink wss://hub.example.com/nats             # ~/.config/ants/leaf.conf
-$EDITOR ~/.ants/config.toml                                               # provider, js_domain = "hub", the ants; see Config file
+$EDITOR ~/.ants/config.toml                                               # harness, js_domain = "hub", the ants; see Config file
 scripts/install-units.sh                                                  # installs and starts both services
 export ANTS_JS_DOMAIN=hub ANTS_CREDS=~/.config/ants/auth/human.creds      # for the CLI, in the shell profile
 ants leaf outbox macbook --ant dev-a --ant dev-b --ant messenger --human human  # store and forward, see Leaf nodes
@@ -532,7 +537,7 @@ run of characters:
 
 Allowed requests are answered "allow once". Every other request goes to the humans: the daemon publishes an
 `ApprovalRequest` to `ants.approvals.<ant>` (kept in the stream), sets the thread's status to `waiting_approval`,
-and waits `--approval-timeout-secs` (default 300) for an `ApprovalDecision` on `ants.approvals.<ant>.<request id>`.
+and waits `--approval-timeout` (default 5m) for an `ApprovalDecision` on `ants.approvals.<ant>.<request id>`.
 Only human credentials may publish decisions there. The verdict is `allow_once`, `allow_always` (the harness
 remembers it for the session) or `reject`; no decision in time rejects the request.
 
@@ -624,7 +629,8 @@ user`.
 `ants daemon`, whose job is to route: it finds the ant for a request by the capabilities in the roster, with
 `list_ants` and `route`, and answers with that ant's reply.
 
-A daemon whose config file sets `provider` serves a built-in messenger on that provider, with the provider's default
+A daemon serves a built-in messenger unless its config file sets `messenger = false` or lists an ant named
+`messenger`. It runs on the file's top-level `harness` (default `copilot`), with that harness's default
 model, reasoning effort and context and the settings of an ant that sets nothing else: no allowlist, capabilities
 or `whoami`, the file's `nats` and `js_domain`. Its home and workdir are `~/.ants/messenger`, created on start, and its
 credentials `~/.config/ants/auth/messenger.creds` (`ants auth user messenger`) when that file exists; with no other
@@ -931,7 +937,8 @@ nats-server resolves `include` relative to the including file, even for a path t
 
 `ants add` sets up an ant on the machine that runs it, without copying any seed: it generates the ant's
 user NKey there, keeps the seed there and lists the ant in the config file (`--config`, `ANTS_CONFIG`, default
-`~/.ants/config.toml`, created when missing; the text already there stays as it is). The flags of `ants daemon`
+`~/.ants/config.toml`, created when missing; the text already there stays as it is; a file it creates also serves
+the built-in messenger unless `messenger = false` is added). The flags of `ants daemon`
 (`--workdir`, default the current directory, `--harness`, `--model`, `--whoami`, `--capability`, ...) set up the
 entry; `--nats` and `--js-domain` go into it when they differ from the file's. The credentials go to `--out`, default
 `~/.config/ants/auth/<ant>.creds`; until they are complete the seed waits beside them as `<ant>.nk` (mode
@@ -954,7 +961,7 @@ ants enroll approve dev-c --js-domain hub                  # where the account k
 issuer (over NATS, by the account that signed the enrollment credentials). An ant already listed takes no flags:
 the command then only completes its credentials, at the `creds` of its entry.
 
-Enrollment credentials (`ants auth enroll NAME`, `--ttl-secs`, default 3600) expire, and allow only publishing on
+Enrollment credentials (`ants auth enroll NAME`, `--ttl`, default 1h) expire, and allow only publishing on
 `ants.enroll.<ant>` and subscribing to `ants.enroll.<ant>.reply` (`Permissions::for_enrollment`): they cannot
 ask for another name, hear another's answer, or read any message. An `EnrollRequest` carries the ant, the public
 key and the host name; requests are core NATS and stored nowhere, so `ants add --enroll` repeats its request

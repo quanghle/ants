@@ -69,7 +69,7 @@ fn exercise_daemon(custom_tools: bool) {
         std::fs::write(
             &config,
             format!(
-                "[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
                  memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
@@ -277,7 +277,7 @@ fn the_builtin_messenger_hands_over_to_a_listed_one() {
         assert!(stdout.contains("messenger: stub:") && stdout.contains(text), "{stdout}\n{}", logs());
     };
 
-    let _builtin = daemon("builtin", "provider = \"copilot\"\n");
+    let _builtin = daemon("builtin", "harness = \"copilot\"\n");
     wait_for("builtin", "serving inbox", 1);
     let listed = daemon("listed", &format!("[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"));
     wait_for("listed", "serving inbox", 1);
