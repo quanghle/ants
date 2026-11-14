@@ -795,6 +795,58 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn an_ant_cli_reads_back_only_its_own_inbox_through_spares_of_its_inbox_consumer() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+        let (_h, h_js) = server.connect(&human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        let (_a, a_js) = server.connect(&dev_a).await;
+        let (_b, b_js) = server.connect(&dev_b).await;
+        // dev-a's daemon takes its inbox through inbox-dev-a.
+        let mut daemon =
+            bus::inbox_consumer(&bus::ensure_stream(&a_js).await.unwrap(), &dev_a, WAIT, 5, 1).await.unwrap();
+        let to_a = Envelope::new(dev_b.clone(), dev_a.clone(), "for dev-a");
+        bus::publish(&b_js, &to_a).await.unwrap();
+        bus::publish(&a_js, &Envelope::new(dev_a.clone(), dev_b.clone(), "for dev-b")).await.unwrap();
+
+        // dev-a's CLI reads its own inbox back, ids and all, more reads at once than there are spares.
+        let (inbox, filter) = (ants_proto::inbox_consumer(&dev_a), subject::inbox_of(&dev_a));
+        let reads = (0..2 * ants_proto::SPARE_READERS).map(|_| async {
+            let mut got = Vec::new();
+            let all = jetstream::consumer::DeliverPolicy::All;
+            ants_daemon::reading::read_back_messages(&a_js, &inbox, Reading::Spare, &filter, all, |_, _, msg| {
+                got.push(msg);
+                std::ops::ControlFlow::Continue(())
+            })
+            .await
+            .map(|()| got)
+        });
+        for read in futures::future::join_all(reads).await {
+            let [msg] = &read.unwrap()[..] else { panic!("one message to dev-a") };
+            assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), to_a);
+            let id = msg.headers.as_ref().and_then(|h| h.get(async_nats::header::NATS_MESSAGE_ID));
+            assert_eq!(id.map(|id| id.as_str().to_owned()), Some(to_a.id.to_string()));
+        }
+        let msg = timeout(WAIT, daemon.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), to_a, "the daemon still takes it");
+
+        // The spares filter dev-a's own inbox only, and dev-b's are not dev-a's.
+        let spare = |of: &UserId, filter: String| jetstream::consumer::pull::Config {
+            name: ants_proto::spare_readers(&ants_proto::inbox_consumer(of)).next(),
+            filter_subject: filter,
+            ..Default::default()
+        };
+        for (of, filter) in [
+            (&dev_a, subject::inbox_of(&dev_b)),
+            (&dev_a, subject::ALL_NOTES.to_owned()),
+            (&dev_b, subject::inbox_of(&dev_b)),
+        ] {
+            let config = spare(of, filter.clone());
+            assert!(a_js.create_consumer_on_stream(config, STREAM).await.is_err(), "{of}'s spare on {filter}");
+        }
+    }
+
+    #[tokio::test]
     async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a) = (UserId::human(), p("dev-a"));
