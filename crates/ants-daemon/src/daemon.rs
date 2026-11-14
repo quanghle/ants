@@ -181,13 +181,14 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
             }
         }
     }
+    let humans = Registry::new(config.human.clone());
+    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
-        .with_chain(config.escalation.clone());
+        .with_chain(config.escalation.clone())
+        .with_humans(humans.clone());
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone())));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
     let notes = std::sync::Arc::new(crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()));
-    let humans = Registry::new(config.human.clone());
-    let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps));
     let escalator = Escalator::new(
@@ -1273,6 +1274,7 @@ impl Inbox<'_> {
         status::state(self.client, self.ant, thread, State::Working);
 
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
+        let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, stop) = tokio::sync::oneshot::channel();
         let mut stop_tx = Some(stop_tx);
