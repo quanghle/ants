@@ -39,7 +39,9 @@ ants ask --thread <thread> @dev-a "follow-up on the same thread"
 `messenger` when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
 reconnected.
 
-Quote the message text as one shell argument. Make requests self-contained: the ant shares neither this session's
+Quote the message text as one shell argument. For a multiline message, write it to a file and pass `--file PATH`
+(or pipe it with `--file -`), keeping `@ant` as a word: `ants ask @dev-a --file request.md`; `ants post` takes
+`--file` too. Do not use `--edit`, which opens an interactive editor. Make requests self-contained: the ant shares neither this session's
 context nor files outside its own `workdir`.
 
 ## Receive

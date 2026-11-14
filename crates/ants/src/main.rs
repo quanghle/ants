@@ -5,6 +5,7 @@ mod auth;
 mod bridge;
 mod channel;
 mod completions;
+mod compose;
 mod defaults;
 mod doctor;
 mod enroll;
@@ -93,8 +94,10 @@ enum Command {
         thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
-        /// `@ant` (optional), then the message.
-        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
+        #[command(flatten)]
+        input: compose::Input,
+        /// `@ant` (optional), then the message, unless --file or --edit gives it.
+        #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
     },
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
@@ -166,8 +169,10 @@ enum Command {
         thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
-        /// The post; each @ant mention wakes that member.
-        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
+        #[command(flatten)]
+        input: compose::Input,
+        /// The post, unless --file or --edit gives it; each @ant mention wakes that member.
+        #[arg(num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
     },
     /// Channels: named groups of ants that humans post to with `ants post`.
@@ -1092,7 +1097,7 @@ async fn run() -> Result<()> {
     let domain = cli.js_domain.as_ref();
     let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
-        Command::Ask { thread, replies, words } => ask(&nats()?, thread, &replies, words).await,
+        Command::Ask { thread, replies, input, words } => ask(&nats()?, thread, &replies, &input, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek };
             Box::pin(show_inbox(&nats()?, select, thread, follow, json)).await
@@ -1106,8 +1111,8 @@ async fn run() -> Result<()> {
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
-        Command::Post { channel, thread, replies, words } => {
-            Box::pin(post(&nats()?, channel, thread, &replies, words)).await
+        Command::Post { channel, thread, replies, input, words } => {
+            Box::pin(post(&nats()?, channel, thread, &replies, &input, words)).await
         }
         Command::Channel(ChannelCommand::Serve { upgrade }) => {
             Box::pin(upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade)).await
@@ -1861,8 +1866,8 @@ fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Split a leading `@ant` off the words.
-fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
+/// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
+fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(UserId, String)> {
     let to = match words.first().and_then(|w| w.strip_prefix('@')) {
         Some(name) => {
             let to = name.parse()?;
@@ -1871,18 +1876,21 @@ fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
         }
         None => UserId::messenger(),
     };
-    if words.is_empty() {
-        bail!("nothing to send");
-    }
-    Ok((to, words.join(" ")))
+    Ok((to, input.text(words)?))
 }
 
-async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, words: Vec<String>) -> Result<()> {
+async fn ask(
+    nats: &Nats<'_>,
+    thread: Option<thread::Pick>,
+    replies: &Replies,
+    input: &compose::Input,
+    words: Vec<String>,
+) -> Result<()> {
     // Refuse a message with nothing to send before connecting.
-    recipient(words.clone())?;
+    let (to, text) = recipient(words, input)?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
-    let envelope = ask_envelope(&nats.me, thread, words)?;
+    let envelope = ask_envelope(&nats.me, thread, to, text);
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = match replies.wait || replies.follow {
@@ -1960,13 +1968,12 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
 /// an ant starts has no owner: only a human gets a thread's escalations, with a fresh turn budget. A human's owner is
 /// recorded for the thread and the recipient before the message goes out ([`owners::record`]); the first record of a
 /// thread to an ant stays.
-fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
-    let (to, text) = recipient(words)?;
+fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, to: UserId, text: String) -> Envelope {
     let envelope = match thread {
         Some(thread) => Envelope::on_thread(thread, me.id.clone(), to, text),
         None => Envelope::new(me.id.clone(), to, text),
     };
-    Ok(envelope.with_owner(me.role.is_human().then(|| me.id.clone())))
+    envelope.with_owner(me.role.is_human().then(|| me.id.clone()))
 }
 
 async fn post(
@@ -1974,12 +1981,10 @@ async fn post(
     channel: ChannelId,
     thread: Option<thread::Pick>,
     replies: &Replies,
+    input: &compose::Input,
     words: Vec<String>,
 ) -> Result<()> {
-    let text = words.join(" ");
-    if text.trim().is_empty() {
-        bail!("nothing to post");
-    }
+    let text = input.text(words)?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let humans = humans::load(&js, &nats.me).await;
@@ -2608,13 +2613,13 @@ mod tests {
 
     #[test]
     fn leading_at_picks_the_recipient() {
-        let (to, text) = recipient(words("@dev-b check the build")).unwrap();
+        let (to, text) = recipient(words("@dev-b check the build"), &compose::Input::default()).unwrap();
         assert_eq!((to.as_str(), text.as_str()), ("dev-b", "check the build"));
     }
 
     #[test]
     fn messenger_is_the_default_recipient() {
-        let (to, text) = recipient(words("who owns billing?")).unwrap();
+        let (to, text) = recipient(words("who owns billing?"), &compose::Input::default()).unwrap();
         assert_eq!((to, text.as_str()), (UserId::messenger(), "who owns billing?"));
     }
 
@@ -2622,17 +2627,17 @@ mod tests {
     fn an_ask_comes_from_and_belongs_to_the_cli_human() {
         let alice: UserId = "alice".parse().unwrap();
         let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
-        let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
+        let ask = ask_envelope(&me, None, "dev-b".parse().unwrap(), "check the build".into());
         assert_eq!((&ask.from, ask.to.as_str(), ask.owner.as_ref()), (&alice, "dev-b", Some(&alice)));
         let thread: ThreadId = "t1".parse().unwrap();
-        let follow_up = ask_envelope(&me, Some(thread.clone()), words("and the docs")).unwrap();
+        let follow_up = ask_envelope(&me, Some(thread.clone()), "dev-b".parse().unwrap(), "and the docs".into());
         assert_eq!((follow_up.thread_id, follow_up.owner), (thread, Some(alice)));
     }
 
     #[test]
     fn an_ask_with_an_ant_s_credentials_has_no_owner() {
         let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Ant };
-        let ask = ask_envelope(&me, None, words("@dev-b check the build")).unwrap();
+        let ask = ask_envelope(&me, None, "dev-b".parse().unwrap(), "check the build".into());
         assert_eq!((&ask.from, ask.owner), (&me.id, None));
     }
 
@@ -2957,7 +2962,10 @@ mod tests {
 
     #[test]
     fn a_recipient_alone_is_an_error() {
-        assert!(recipient(words("@dev-b")).is_err());
-        assert!(recipient(words("@Bad.Name hi")).is_err());
+        let input = compose::Input::default();
+        assert!(recipient(words("@dev-b"), &input).is_err());
+        assert!(recipient(words("@Bad.Name hi"), &input).is_err());
+        let file = compose::Input { file: Some("-".into()), edit: false };
+        assert!(recipient(words("@dev-b more"), &file).unwrap_err().to_string().contains("not both"));
     }
 }
