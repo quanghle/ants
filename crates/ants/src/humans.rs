@@ -6,7 +6,7 @@ use std::path::Path;
 use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
-use async_nats::jetstream::{self, kv, stream};
+use async_nats::jetstream::{self, kv};
 use data_encoding::BASE64URL_NOPAD;
 use futures::TryStreamExt as _;
 use serde_json::Value;
@@ -17,15 +17,9 @@ pub async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(HUMANS_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: HUMANS_BUCKET.to_owned(),
-        description: "Humans of the team, written by humans".to_owned(),
-        history: 1,
-        storage: stream::StorageType::File,
-        ..Default::default()
-    })
-    .await
-    .context("creating the humans bucket (with credentials, `ants init` as a human creates it)")
+    js.create_key_value(ants_daemon::hub::humans_config())
+        .await
+        .context("creating the humans bucket (with credentials, `ants init` as a human creates it)")
 }
 
 /// Who the CLI acts as: the user its credentials name, a human or an ant, or `human` without credentials.
@@ -81,6 +75,32 @@ impl Device {
         let claims = creds_claims(text)?;
         let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
         Ok(Self { id: DeviceId::from_tags(tags), marks_read: may_publish(&claims, &subject::read_marker(me)) })
+    }
+}
+
+/// What the credentials let the CLI publish, so JetStream API requests they would have denied, which only time out,
+/// are not made.
+#[derive(Debug, Clone)]
+pub struct Rights {
+    /// The claims of the user JWT; None without credentials, which allow everything.
+    claims: Option<Value>,
+}
+
+impl Rights {
+    /// The rights of the credentials file `creds`.
+    pub fn from_creds(creds: Option<&Path>) -> Result<Self> {
+        let Some(path) = creds else { return Ok(Self { claims: None }) };
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+        let claims = creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
+        Ok(Self { claims: Some(claims) })
+    }
+
+    /// Whether they allow publishing `subject`: listed as it is, or no publish allow list at all.
+    pub fn may_publish(&self, subject: &str) -> bool {
+        match &self.claims {
+            Some(claims) if claims["nats"]["pub"]["allow"].is_array() => may_publish(claims, subject),
+            _ => true,
+        }
     }
 }
 

@@ -8,9 +8,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, OWNERS_BUCKET, ROSTER_BUCKET,
-    Role, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId,
-    inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, Role,
+    SESSIONS_BUCKET, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -20,6 +19,7 @@ use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
 
 use crate::direct_kv::DirectKv;
+use crate::hub;
 use crate::reading::{self, Reading};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
@@ -210,44 +210,15 @@ pub fn jetstream(client: async_nats::Client, js_domain: Option<&JsDomain>) -> je
     }
 }
 
-fn stream_config() -> stream::Config {
-    stream::Config {
-        name: STREAM.to_owned(),
-        subjects: STREAM_SUBJECTS.iter().map(|s| (*s).to_owned()).collect(),
-        storage: stream::StorageType::File,
-        max_age: RETENTION,
-        // An ant reads the decision stored on its approval requests with a direct get (`approvals`).
-        allow_direct: true,
-        republish: Some(stored_inbox()),
-        ..Default::default()
-    }
-}
-
-fn stored_inbox() -> stream::Republish {
-    stream::Republish {
-        source: STORED_INBOX_SOURCE.to_owned(),
-        destination: STORED_INBOX_DESTINATION.to_owned(),
-        headers_only: false,
-    }
-}
-
 /// Open the roster bucket, creating it if missing with entries that expire `ttl` after their last put. Only the
 /// human's credentials may create it; an existing bucket keeps its own max age.
 pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(ROSTER_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: ROSTER_BUCKET.to_owned(),
-        description: "Ants being served, refreshed by daemon heartbeats".to_owned(),
-        history: 1,
-        max_age: ttl,
-        // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
-        storage: stream::StorageType::Memory,
-        ..Default::default()
-    })
-    .await
-    .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
+    js.create_key_value(hub::roster_config(ttl))
+        .await
+        .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// The `ANTS` stream for `user`, without its info, which no ant's or webhook's credentials allow: with a subjects
@@ -260,7 +231,7 @@ pub async fn open_stream(js: &jetstream::Context, user: &UserId) -> Result<strea
         Ok(_) => {}
         Err(e) if e.kind() == ConsumerInfoErrorKind::NotFound => {}
         Err(e) if e.kind() == ConsumerInfoErrorKind::StreamNotFound => {
-            js.create_stream(stream_config())
+            js.create_stream(hub::stream_config())
                 .await
                 .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")?;
         }
@@ -274,7 +245,7 @@ pub async fn open_stream(js: &jetstream::Context, user: &UserId) -> Result<strea
 /// warning: [`init_stream`] upgrades it.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = js
-        .get_or_create_stream(stream_config())
+        .get_or_create_stream(hub::stream_config())
         .await
         .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")?;
     let missing = missing_subjects(&stream.cached_info().config.subjects);
@@ -284,7 +255,7 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     if !stream.cached_info().config.allow_direct {
         tracing::warn!("stream {STREAM} lacks direct gets; `ants init` as the human allows them");
     }
-    if stream.cached_info().config.republish.as_ref() != Some(&stored_inbox()) {
+    if stream.cached_info().config.republish.as_ref() != Some(&hub::stored_inbox()) {
         tracing::warn!(
             "stream {STREAM} does not republish inbox messages, so replies kept in a leaf's outbox reach only inbox \
              consumers; `ants init` as the human sets it up"
@@ -298,13 +269,9 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
 pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = ensure_stream(js).await?;
     let mut config = stream.cached_info().config.clone();
-    let missing = missing_subjects(&config.subjects);
-    if missing.is_empty() && config.allow_direct && config.republish.as_ref() == Some(&stored_inbox()) {
+    if hub::upgrade_stream(&mut config).is_empty() {
         return Ok(stream);
     }
-    config.subjects.extend(missing);
-    config.allow_direct = true;
-    config.republish = Some(stored_inbox());
     js.update_stream(&config).await.context("upgrading the ANTS stream")?;
     Ok(js.get_stream(STREAM).await?)
 }
@@ -356,15 +323,9 @@ pub async fn ensure_channels(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(CHANNELS_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: CHANNELS_BUCKET.to_owned(),
-        description: "Channels: their members and messenger, written by the human".to_owned(),
-        history: 1,
-        storage: stream::StorageType::File,
-        ..Default::default()
-    })
-    .await
-    .context("creating the channels bucket (with credentials, `ants init` as the human creates it)")
+    js.create_key_value(hub::channels_config())
+        .await
+        .context("creating the channels bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// The KV bucket of the escalation chains ([`CHAINS_BUCKET`]), created when missing and the credentials allow it (the
@@ -373,15 +334,9 @@ pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(CHAINS_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: CHAINS_BUCKET.to_owned(),
-        description: "Escalation chains of the ants, each written by its daemon".to_owned(),
-        history: 1,
-        storage: stream::StorageType::File,
-        ..Default::default()
-    })
-    .await
-    .context("creating the chains bucket (with credentials, `ants init` as the human creates it)")
+    js.create_key_value(hub::chains_config())
+        .await
+        .context("creating the chains bucket (with credentials, `ants init` as the human creates it)")
 }
 
 /// The KV bucket of the links to channel threads ants passed on ([`LINKS_BUCKET`]), created when missing and the
@@ -404,20 +359,7 @@ pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
         }
         return Ok(());
     }
-    let mut config = stream::Config {
-        name,
-        description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
-        subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
-        max_age: RETENTION,
-        storage: stream::StorageType::File,
-        num_replicas: 1,
-        allow_direct: true,
-        deny_delete: true,
-        deny_purge: true,
-        ..Default::default()
-    };
-    crate::owners::first_records_only(&mut config);
-    let created = js.create_stream(config).await;
+    let created = js.create_stream(hub::owners_config()).await;
     created.context("creating the owners bucket (with credentials, `ants init` as the human creates it)")?;
     Ok(())
 }
@@ -431,15 +373,9 @@ async fn ensure_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store>
 }
 
 async fn create_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store> {
-    js.create_key_value(kv::Config {
-        bucket: bucket.to_owned(),
-        history: 1,
-        max_age: RETENTION,
-        storage: stream::StorageType::File,
-        ..Default::default()
+    js.create_key_value(hub::kept_config(bucket)).await.with_context(|| {
+        format!("creating the {bucket} bucket (with credentials, `ants init` as the human creates it)")
     })
-    .await
-    .with_context(|| format!("creating the {bucket} bucket (with credentials, `ants init` as the human creates it)"))
 }
 
 /// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings

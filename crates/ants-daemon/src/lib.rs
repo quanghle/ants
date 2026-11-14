@@ -14,6 +14,7 @@ pub mod dead;
 pub mod direct_kv;
 pub mod escalation;
 pub mod harness;
+pub mod hub;
 pub mod humans;
 pub mod links;
 pub mod mcp;

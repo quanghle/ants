@@ -23,10 +23,11 @@ mod tools;
 mod webhook;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_daemon::reading::Reading;
-use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes, owners};
+use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, hub, notes, owners};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
     Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId,
@@ -47,6 +48,7 @@ struct Cli {
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
     /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`.
+    /// A human's also bring the hub's stream and buckets up to date on connecting, as `ants init` does.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
 
@@ -171,8 +173,10 @@ enum Command {
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
     /// behind it on the thread still run. Needs a human's credentials.
     Cancel { ant: UserId, thread: ThreadId },
-    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
-    /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
+    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
+    /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
+    /// republishing of inbox messages, the owners bucket's duplicate window), keeping the rest of their settings. Needs
+    /// a human's credentials. Every other command run with them does the same on connecting.
     Init,
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
     /// sees every request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
@@ -859,17 +863,10 @@ async fn main() -> Result<()> {
         Command::Init => {
             let nats = nats()?;
             let (_, js) = nats.connect_only("ants-cli").await?;
-            bus::init_stream(&js).await?;
-            bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
-            bus::init_own_buckets(&js).await?;
-            bus::ensure_channels(&js).await?;
-            bus::ensure_chains(&js).await?;
-            bus::ensure_links(&js).await?;
-            bus::ensure_owners(&js).await?;
-            humans::ensure(&js).await?;
-            webhook::ensure_bucket(&js).await?;
-            inbox::ensure_bucket(&js).await?;
-            presence::ensure_bucket(&js).await?;
+            let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
+            for finding in fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")? {
+                println!("{}", finding.fixed());
+            }
             humans::register_or_warn(&js, &nats.me).await;
             println!(
                 "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
@@ -1187,19 +1184,29 @@ pub struct Nats<'a> {
     pub me: humans::Me,
     /// The device of the human the credentials were issued for.
     pub device: humans::Device,
+    rights: humans::Rights,
+    /// Whether a connection checked the hub's stream and buckets already ([`upgrade_hub`]).
+    hub_checked: AtomicBool,
 }
 
 impl<'a> Nats<'a> {
     fn new(url: &'a str, creds: Option<&'a Path>, domain: Option<&'a JsDomain>) -> Result<Self> {
         let me = humans::Me::from_creds(creds)?;
         let device = humans::Device::from_creds(creds, &me.id)?;
-        Ok(Self { url, creds, domain, me, device })
+        let rights = humans::Rights::from_creds(creds)?;
+        Ok(Self { url, creds, domain, me, device, rights, hub_checked: AtomicBool::new(false) })
     }
 
-    /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]).
+    /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]). The first
+    /// connection of a human also brings the hub's stream and buckets up to date ([`upgrade_hub`]).
     pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let (client, js) = self.connect_only(name).await?;
-        humans::register_or_warn(&js, &self.me).await;
+        let upgrade = async {
+            if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
+                upgrade_hub(&js, &self.rights).await;
+            }
+        };
+        tokio::join!(humans::register_or_warn(&js, &self.me), upgrade);
         Ok((client, js))
     }
 
@@ -1211,6 +1218,30 @@ impl<'a> Nats<'a> {
         };
         bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await
     }
+}
+
+/// Create the hub's stream and buckets that are missing and upgrade those out of date, as `ants init` does
+/// ([`hub::check`]), saying what was done. Those the credentials may not fix are reported as needing `ants init`;
+/// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
+/// alone. Returns what was fixed.
+async fn upgrade_hub(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
+    let mut fixed = Vec::new();
+    for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
+        if let hub::Problem::Unchecked(_) = finding.problem {
+            tracing::debug!("{finding}");
+        } else if !finding.rights().iter().all(|subject| rights.may_publish(subject)) {
+            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) fixes it");
+        } else {
+            match hub::apply(js, &finding).await {
+                Ok(()) => {
+                    tracing::info!("{}", finding.fixed());
+                    fixed.push(finding);
+                }
+                Err(e) => tracing::warn!("{finding}; `ants init` as a human fixes it: {e:#}"),
+            }
+        }
+    }
+    fixed
 }
 
 /// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure.
@@ -2129,6 +2160,37 @@ mod tests {
         let later = futures::stream::iter(["one", "two"]).chain(futures::stream::pending());
         let (result, seen) = shown(follow, later).await;
         assert_eq!((result.is_ok(), seen), (true, vec!["one", "two"]), "following ends at the timeout, cleanly");
+    }
+
+    /// A human's credentials bring the hub up to date; an ant's ask for nothing they are denied, which would only time
+    /// out, and fix nothing.
+    #[tokio::test]
+    async fn a_human_brings_the_hub_up_to_date() {
+        let Some(server) = auth::tests::Server::start() else { return };
+        let connect = async |user: &UserId, role| {
+            let creds = server.creds_as(user, role);
+            let (_, js) = bus::connect(&server.url, Some(&creds), None, user, "test").await.unwrap();
+            (js, humans::Rights::from_creds(Some(&creds)).unwrap())
+        };
+        let (a_js, a_rights) = connect(&"dev-a".parse().unwrap(), ants_proto::Role::Ant).await;
+        assert!(!a_rights.may_publish(&hub::Object::Sessions.info_subject()));
+        let started = tokio::time::Instant::now();
+        assert!(upgrade_hub(&a_js, &a_rights).await.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2), "no request was denied");
+
+        let (h_js, h_rights) = connect(&"alice".parse().unwrap(), ants_proto::Role::Human).await;
+        h_js.create_stream(async_nats::jetstream::stream::Config {
+            name: ants_proto::STREAM.to_owned(),
+            subjects: vec![subject::ALL_NOTES.to_owned()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let fixed: Vec<_> = upgrade_hub(&h_js, &h_rights).await.into_iter().map(|f| f.object).collect();
+        let seen: Vec<_> = hub::Object::ALL.into_iter().filter(|o| *o != hub::Object::Presence).collect();
+        assert_eq!(fixed, seen, "the old stream upgraded, every bucket a human may look up created");
+        assert!(hub::check(&h_js, |s| h_rights.may_publish(s)).await.is_empty());
+        assert!(upgrade_hub(&h_js, &h_rights).await.is_empty());
     }
 
     #[test]

@@ -27,11 +27,11 @@ use ants_daemon::schedule::Mentions;
 use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
+    WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
+use async_nats::jetstream;
 use async_nats::jetstream::stream::DirectGetErrorKind;
-use async_nats::jetstream::{self, kv, stream};
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Bytes, Incoming};
@@ -68,7 +68,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const ID_HASH_LEN: usize = 32;
 /// Least time between two warnings about rejected requests of one webhook.
 const WARN_EVERY: Duration = Duration::from_secs(60);
-/// How often a webhook that delivers puts its marker again, well within [`WEBHOOK_RETENTION`].
+/// How often a webhook that delivers puts its marker again, well within [`ants_proto::WEBHOOK_RETENTION`].
 const MARK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `~/.ants/webhooks.toml`.
@@ -77,22 +77,15 @@ pub fn default_path() -> Result<PathBuf> {
 }
 
 /// The bucket of delivered events ([`WEBHOOKS_BUCKET`]), created when missing and the credentials allow it (a
-/// human's): `ants init` creates it.
-pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
+/// human's), as `ants init` does.
+#[cfg(test)]
+pub async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Store> {
     if let Ok(store) = js.get_key_value(WEBHOOKS_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: WEBHOOKS_BUCKET.to_owned(),
-        description: "Events each webhook delivered, so retries deliver nothing new, and the webhooks' markers"
-            .to_owned(),
-        history: 1,
-        max_age: WEBHOOK_RETENTION,
-        storage: stream::StorageType::File,
-        ..Default::default()
-    })
-    .await
-    .context("creating the webhooks bucket (with credentials, `ants init` as a human creates it)")
+    js.create_key_value(ants_daemon::hub::webhooks_config())
+        .await
+        .context("creating the webhooks bucket (with credentials, `ants init` as a human creates it)")
 }
 
 // ---- config ----------------------------------------------------------------------------------------------------

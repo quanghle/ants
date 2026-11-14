@@ -5,26 +5,14 @@
 use std::collections::HashSet;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
-use ants_proto::{
-    DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, PRESENCE_TTL, Presence, UserId, presence_key,
-};
+use ants_proto::{DeviceId, Following, JsDomain, PRESENCE_BUCKET, PRESENCE_HEARTBEAT, Presence, UserId, presence_key};
 use anyhow::{Context as _, Result};
-use async_nats::jetstream::{self, kv, stream};
+use async_nats::jetstream;
 
 /// The presence bucket, created when missing and the credentials allow it (a human's). Creating it again with the
 /// same settings changes nothing, so this needs no stream info, which a human's credentials lack for it.
 pub async fn ensure_bucket(js: &jetstream::Context) -> Result<()> {
-    js.create_key_value(kv::Config {
-        bucket: PRESENCE_BUCKET.to_owned(),
-        description: "Devices of humans following their inbox or the tool requests, refreshed while they do".to_owned(),
-        history: 1,
-        max_age: PRESENCE_TTL,
-        // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
-        storage: stream::StorageType::Memory,
-        ..Default::default()
-    })
-    .await
-    .context("creating the presence bucket")?;
+    js.create_key_value(ants_daemon::hub::presence_config()).await.context("creating the presence bucket")?;
     Ok(())
 }
 
