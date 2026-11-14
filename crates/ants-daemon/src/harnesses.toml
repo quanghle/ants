@@ -8,12 +8,21 @@
 # either over the harness's. Unset, the budget is a twelfth of the window (at 4 bytes a token), else 64 KiB, and no
 # budget exceeds a quarter of the window.
 
-# GitHub Copilot CLI.
+# GitHub Copilot CLI. A failed prompt ends as a reply, `Error: Failed to get response from the AI model; retried 5
+# times (...) Last error: 429 ...`. Its weekly rate limit lasts days, so it counts as a quota.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp"]
 sign_in = "copilot login"
-quota_exhausted = ["premium request", "ai credits"]
+quota_exhausted = [
+    "premium request",
+    "ai credits",
+    "weekly rate limit",
+    "used all your copilot free",
+    "free_tier_limit",
+    "overage_limit",
+    "spend_limit_reached",
+]
 context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
 
 [harnesses.copilot.context]
@@ -21,12 +30,26 @@ default = { args = ["--context", "default"] }
 long_context = { args = ["--context", "long_context"] }
 
 # Claude Code through its ACP adapter, npm @agentclientprotocol/claude-agent-acp. Sign-in: `claude login`, or
-# ANTHROPIC_API_KEY. Its `auto` mode approves tools with a classifier, so sessions are switched to `default`.
+# ANTHROPIC_API_KEY. Its `auto` mode approves tools with a classifier, so sessions are switched to `default`. A failed
+# prompt is an ACP error with an `errorKind`: `You've hit your 5-hour limit · resets 6:43am`, `API Error: Request
+# rejected (429) · ...`, `Credit balance is too low` (`billing_error`).
 [harnesses.claude]
 command = "claude-agent-acp"
 mode = "default"
 sign_in = "claude login"
-quota_exhausted = ["hit your session limit", "hit your weekly limit", "hit your opus limit", "limit reached - resets"]
+quota_exhausted = [
+    "hit your",
+    "you've reached your",
+    "out of usage",
+    "out of extra usage",
+    "doesn't include usage",
+    "doesn't include extra usage",
+    "usage allocation has been disabled",
+    "usage limit is set to $0",
+    "requires usage credits",
+    "spend limit",
+    "billing_error",
+]
 context_overflow = ["exceed context limit"]
 window = 200000
 
@@ -36,11 +59,12 @@ default = {}
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key. Its saved `agentMode`
 # (auto unless set) runs what it deems safe unasked, so sessions are switched to `default`. No context selector: the
-# model chooses the native window.
+# model chooses the native window. A failed prompt ends as a reply of `⚠ API error (attempt N): Error 429, Message:
+# ..., Status: RESOURCE_EXHAUSTED` lines and `⚠ Agent execution terminated due to error.`
 [harnesses.antigravity]
 command = "agy"
 args = ["acp", "--disable-telemetry"]
 mode = "default"
 sign_in = "agy"
-quota_exhausted = ["daily quota"]
+quota_exhausted = ["daily quota", "ai credits balance is too low"]
 context_overflow = ["exceeds the maximum number of tokens allowed"]

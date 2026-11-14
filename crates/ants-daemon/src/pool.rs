@@ -383,8 +383,10 @@ pub(crate) mod fake {
         pub signed_out: bool,
         /// While set, session/load fails, as with a harness whose session store was cleared.
         pub lose_sessions: bool,
-        /// While set, prompts fail with this text, as a harness reporting a provider limit does.
+        /// While set, prompts stream this text and fail with it, as Claude's adapter reports a provider limit.
         pub limited: Option<String>,
+        /// Whether [`Log::limited`] ends the prompt as its reply instead, as Copilot CLI and Antigravity do.
+        pub limited_reply: bool,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
@@ -394,7 +396,7 @@ pub(crate) mod fake {
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
-    /// in; while [`Log::limited`] is, prompts fail with its text.
+    /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -463,6 +465,10 @@ pub(crate) mod fake {
                             }
                             log.prompted += 1;
                             if let Some(limited) = &log.limited {
+                                cx.send_notification(chunk(&prompt.session_id, limited))?;
+                                if log.limited_reply {
+                                    return responder.respond(PromptResponse::new(StopReason::EndTurn));
+                                }
                                 let error = agent_client_protocol::Error::internal_error().data(limited.clone());
                                 return responder.respond_with_error(error);
                             }

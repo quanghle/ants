@@ -76,6 +76,13 @@ const SHORT_QUOTA: Duration = Duration::from_mins(5);
 /// The longest wait a hint is read as.
 const MAX_HINT: Duration = Duration::from_hours(7 * 24);
 
+/// How a harness that ends a failed prompt as a reply, not an ACP error, starts each piece of it: Copilot CLI's
+/// `Error:` and `Info:` lines, Antigravity's `⚠ API error` ones, an `API Error:`.
+const ERROR_MARKERS: &[&str] = &["Error:", "API Error:", "Info:", "⚠"];
+
+/// The longest piece of a reply read as an error rather than as part of an answer.
+const ERROR_CHARS: usize = 4096;
+
 /// The most of what the harness said that a notice quotes.
 const DETAIL_CHARS: usize = 500;
 
@@ -103,7 +110,7 @@ impl std::error::Error for Limited {}
 
 /// What `detail`, an error from `harness`, says of a provider limit, if it reports one.
 pub fn classify(harness: &Harness, detail: &str) -> Option<Limited> {
-    let text = detail.to_lowercase();
+    let text = detail.to_lowercase().replace('\u{2019}', "'");
     let says = |common: &[&str], own: &[String]| {
         common.iter().any(|phrase| text.contains(phrase))
             || own.iter().any(|phrase| text.contains(&phrase.trim().to_lowercase()))
@@ -119,6 +126,14 @@ pub fn classify(harness: &Harness, detail: &str) -> Option<Limited> {
         LimitKind::RateLimit
     };
     Some(Limited { harness: harness.name().to_owned(), kind, retry_after, detail: detail.to_owned() })
+}
+
+/// Whether `chunk`, a piece of a streamed reply, reads as a harness's error or notice rather than as part of an answer:
+/// short and starting with one of [`ERROR_MARKERS`]. A reply made only of such pieces is the harness's report of a
+/// failed prompt.
+pub fn is_error_chunk(chunk: &str) -> bool {
+    let chunk = chunk.trim_start();
+    ERROR_MARKERS.iter().any(|marker| chunk.starts_with(marker)) && chunk.chars().nth(ERROR_CHARS).is_none()
 }
 
 /// Whether `text` holds a rate-limit status as a whole number after a word such as `error` or `status`.
@@ -356,50 +371,180 @@ mod tests {
         classify(&harness, detail).map(|l| (l.kind, l.retry_after))
     }
 
+    /// Claude's adapter's ACP error, as its `Display` shows it: the message, then the data.
+    fn acp_error(message: &str, kind: &str) -> String {
+        format!("Internal error: {message}: {{\n  \"errorKind\": \"{kind}\"\n}}")
+    }
+
+    /// One attempt of Antigravity's reply when Gemini answers 429, as `agy` 1.5.8 streams it.
+    fn gemini_429(attempt: u32, retry: &str, quota_id: &str, delay: &str) -> String {
+        format!(
+            "\n⚠ API error (attempt {attempt}): Error 429, Message: You exceeded your current quota, please check \
+             your plan and billing details. For more information on this error, head to: \
+             https://ai.google.dev/gemini-api/docs/rate-limits.\n* Quota exceeded for metric: \
+             generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 10, model: \
+             gemini-2.5-pro\nPlease retry in {retry}., Status: RESOURCE_EXHAUSTED, Details: \
+             [map[@type:type.googleapis.com/google.rpc.QuotaFailure violations:[map[quotaDimensions:map[location:global \
+             model:gemini-2.5-pro] quotaId:{quota_id} \
+             quotaMetric:generativelanguage.googleapis.com/generate_content_free_tier_requests quotaValue:10]]] \
+             map[@type:type.googleapis.com/google.rpc.Help links:[map[description:Learn more about Gemini API quotas \
+             url:https://ai.google.dev/gemini-api/docs/rate-limits]]] map[@type:type.googleapis.com/google.rpc.RetryInfo \
+             retryDelay:{delay}]]\n"
+        )
+    }
+
+    const AGY_TERMINATED: &str = "\n⚠ Agent execution terminated due to error.\n";
+
+    /// Copilot CLI's last reply chunk when every retry of a prompt failed.
+    fn copilot_failed(waited: &str, last: &str) -> String {
+        format!(
+            "Error: Failed to get response from the AI model; retried 5 times (total retry wait time: {waited} \
+             seconds) Last error: {last}"
+        )
+    }
+
+    /// What the harnesses said when a fake provider turned their prompts away (claude-agent-acp 0.106.0 with Claude
+    /// Code 2.1.325, Copilot CLI 1.0.112, agy 1.5.8), and what Copilot CLI's runtime says of GitHub's limits.
     #[test]
     fn provider_limits_are_told_apart_from_other_errors() {
         use LimitKind::{Quota, RateLimit};
         let secs = |s| Some(Duration::from_secs(s));
+        let agy = |retry, quota_id, delay| {
+            let mut reply: String = (1..=8).map(|n| gemini_429(n, retry, quota_id, delay)).collect();
+            reply.push_str(AGY_TERMINATED);
+            reply
+        };
         let cases = [
             (
                 "claude",
-                r#"Internal error: API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+                acp_error(
+                    "API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try \
+                     again in a moment. If it persists, check your inference gateway (127.0.0.1:18765).",
+                    "server_error",
+                ),
                 Some((RateLimit, None)),
             ),
-            ("claude", "Internal error: API Error: Request rejected (429)", Some((RateLimit, None))),
-            ("claude", "Internal error: You've hit your session limit · resets 3:45pm", Some((Quota, None))),
-            ("claude", "Claude AI usage limit reached|4102444800", Some((Quota, Some(MAX_HINT)))),
+            (
+                "claude",
+                acp_error(
+                    "API Error: Request rejected (429) · This request would exceed the rate limit for your \
+                     organization (00000000-0000-0000-0000-000000000000) of 50,000 input tokens per minute. For \
+                     details, refer to: https://docs.claude.com/en/api/rate-limits. You can see the response headers \
+                     for current usage. Please reduce the prompt length or the maximum tokens requested, or try again \
+                     later.",
+                    "rate_limit",
+                ),
+                Some((RateLimit, None)),
+            ),
+            (
+                "claude",
+                acp_error(
+                    "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please \
+                     try again later.",
+                    "rate_limit",
+                ),
+                Some((RateLimit, None)),
+            ),
+            ("claude", acp_error("You've hit your 5-hour limit · resets 6:43am (Asia/Tokyo)", "rate_limit"), Some((Quota, None))),
+            ("claude", acp_error("You\u{2019}ve reached your Fable limit for this week.", "rate_limit"), Some((Quota, None))),
+            ("claude", acp_error("Credit balance is too low", "billing_error"), Some((Quota, None))),
+            ("claude", acp_error("spend limit reached · resets Aug 8", "billing_error"), Some((Quota, None))),
+            ("claude", "Claude AI usage limit reached|4102444800".to_owned(), Some((Quota, Some(MAX_HINT)))),
+            ("claude", acp_error("API Error: 500 Internal server error", "server_error"), None),
             (
                 "copilot",
-                "Failed to get response from the AI model; retried 5 times. Last error: CAPIError: 429 429 Too Many \
-                 Requests",
+                format!("Info: Request failed due to a transient API error. Retrying...{}", copilot_failed("16.07", "529 Overloaded")),
                 Some((RateLimit, None)),
             ),
-            ("copilot", "Sorry, you have been rate-limited. Please wait 2 minutes.", Some((RateLimit, None))),
-            ("copilot", "You have exceeded your premium request allowance", Some((Quota, None))),
             (
-                "antigravity",
-                "Attempt 1 failed: You have exhausted your capacity on this model. Your quota will reset after 2h27m3s.",
-                Some((RateLimit, secs(2 * 3600 + 27 * 60 + 3))),
+                "copilot",
+                copilot_failed(
+                    "108.55",
+                    "429 Rate limit reached for gpt-5 in organization org-test on tokens per min (TPM): Limit 30000, \
+                     Used 29000, Requested 2000. Please try again in 20s. Visit \
+                     https://platform.openai.com/account/rate-limits to learn more.",
+                ),
+                Some((RateLimit, secs(20))),
             ),
             (
+                "copilot",
+                copilot_failed(
+                    "56.70",
+                    "429 You exceeded your current quota, please check your plan and billing details. For more \
+                     information on this error, read the docs: \
+                     https://platform.openai.com/docs/guides/error-codes/api-errors.",
+                ),
+                Some((Quota, None)),
+            ),
+            (
+                "copilot",
+                "You've hit the rate limit for this model. Please switch models or wait for your limit to reset (current \
+                 limit resets in ~12 minutes)."
+                    .to_owned(),
+                Some((RateLimit, secs(12 * 60))),
+            ),
+            (
+                "copilot",
+                "You've reached your weekly rate limit. (current limit resets in ~2 days)".to_owned(),
+                Some((Quota, secs(2 * 86_400))),
+            ),
+            ("copilot", "You've reached the spending limit for this session. Start a new session to continue.".to_owned(), Some((Quota, None))),
+            ("copilot", "You've used all your Copilot Free chat requests for the month.".to_owned(), Some((Quota, None))),
+            ("copilot", "No remaining quota for premium requests".to_owned(), Some((Quota, None))),
+            ("copilot", copilot_failed("3.20", "500 Internal Server Error"), None),
+            (
                 "antigravity",
-                r#"Quota exceeded for quota metric 'requests per minute'. "retryDelay": "23s""#,
+                agy("23.4s", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "23s"),
                 Some((RateLimit, secs(23))),
             ),
             (
-                "copilot",
-                "You've hit your usage limit. Upgrade to Pro or try again in 4 days 20 hours 9 minutes.",
-                Some((Quota, secs(((4 * 24 + 20) * 60 + 9) * 60))),
+                "antigravity",
+                agy("7h3m2s", "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "25382s"),
+                Some((Quota, secs(25_382))),
             ),
-            ("copilot", "Error: insufficient_quota; retry-after: 30", Some((RateLimit, secs(30)))),
-            ("copilot", "Internal error: connection reset by peer", None),
-            ("copilot", "Process exited: 2026-11-15T03:51:14.529 read line 429 of /src/429/main.rs", None),
-            ("copilot", "Internal error: doomed", None),
+            (
+                "antigravity",
+                format!(
+                    "{}{AGY_TERMINATED}",
+                    "\n⚠ API error (attempt 1): Error 503, Message: The model is overloaded. Please try again later., \
+                     Status: UNAVAILABLE, Details: []\n"
+                ),
+                Some((RateLimit, None)),
+            ),
+            (
+                "antigravity",
+                "You have exhausted your capacity on this model. Your quota will reset after 2h27m3s.".to_owned(),
+                Some((RateLimit, secs(2 * 3600 + 27 * 60 + 3))),
+            ),
+            ("antigravity", "Your AI credits balance is too low to continue.".to_owned(), Some((Quota, None))),
+            ("copilot", "Error: insufficient_quota; retry-after: 30".to_owned(), Some((RateLimit, secs(30)))),
+            ("copilot", "Internal error: connection reset by peer".to_owned(), None),
+            ("copilot", "Process exited: 2026-11-15T03:51:14.529 read line 429 of /src/429/main.rs".to_owned(), None),
         ];
         for (harness, detail, expected) in cases {
-            assert_eq!(classified(harness, detail), expected, "{detail}");
+            assert_eq!(classified(harness, &detail), expected, "{detail}");
         }
+    }
+
+    /// A reply is read as the harness's error only when every piece of it is an error or notice line, so an answer
+    /// that discusses rate limits stays an answer.
+    #[test]
+    fn error_lines_are_told_from_answers() {
+        let errors = [
+            "Info: Request failed due to a transient API error. Retrying...".to_owned(),
+            copilot_failed("16.07", "529 Overloaded"),
+            gemini_429(1, "23.4s", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "23s"),
+            AGY_TERMINATED.to_owned(),
+            "API Error: Request rejected (429)".to_owned(),
+        ];
+        for chunk in &errors {
+            assert!(is_error_chunk(chunk), "{chunk}");
+        }
+        // An answer streams in pieces, few of which start like an error line.
+        for chunk in ["Error", ": a rate limit of 429 means", "The API returned `Error: 429 Too Many Requests`"] {
+            assert!(!is_error_chunk(chunk), "{chunk}");
+        }
+        assert!(!is_error_chunk(&format!("Error: {}", "rate limit ".repeat(ERROR_CHARS))), "too long for an error");
     }
 
     #[test]
