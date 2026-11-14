@@ -246,18 +246,32 @@ mod tests {
     async fn a_listed_ant_gets_its_credentials_later() {
         let dir = ants_test_support::scratch_dir("ant-add").canonicalize().unwrap();
         let config = dir.join("config.toml");
-        std::fs::write(&config, "# mine\nprovider = \"copilot\"\n").unwrap();
+        std::fs::write(&config, "# mine\nharness = \"copilot\"\n").unwrap();
         let (config_arg, out) = (config.to_str().unwrap(), dir.join("keys/dev-a.creds"));
         let workdir = dir.to_str().unwrap();
-        run(&["dev-a", "--config", config_arg, "--out", out.to_str().unwrap(), "--workdir", workdir, "--model", "m"])
-            .await
-            .unwrap();
+        let out_arg = out.to_str().unwrap();
+        run(&[
+            "dev-a",
+            "--config",
+            config_arg,
+            "--out",
+            out_arg,
+            "--workdir",
+            workdir,
+            "--model",
+            "m",
+            "--idle-timeout",
+            "90s",
+        ])
+        .await
+        .unwrap();
         let listed = std::fs::read_to_string(&config).unwrap();
-        assert!(listed.starts_with("# mine\nprovider = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\n"), "{listed}");
+        assert!(listed.starts_with("# mine\nharness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\n"), "{listed}");
+        assert!(listed.contains("\nidle_timeout = \"1m30s\"\n"), "{listed}");
         let dev_a = config::load(&config).unwrap().into_iter().find(|p| p.name.as_str() == "dev-a").unwrap();
         assert_eq!(
-            (dev_a.creds.as_deref(), dev_a.model.as_deref(), dev_a.nats),
-            (Some(out.as_path()), Some("m"), None)
+            (dev_a.creds.as_deref(), dev_a.model.as_deref(), dev_a.nats, dev_a.idle_timeout),
+            (Some(out.as_path()), Some("m"), None, std::time::Duration::from_secs(90))
         );
         assert!(!out.exists() && seed_path(&out).exists());
 

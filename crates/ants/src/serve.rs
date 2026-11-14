@@ -1,6 +1,7 @@
 //! `ants daemon`: which ants to serve, from the config file and the command line, and serving them together.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
 use ants_daemon::{Config, HarnessKind};
@@ -61,21 +62,21 @@ pub struct AntOptions {
     /// Allow every tool request (same as `--allow '*'`). Only for trusted, sandboxed workdirs.
     #[arg(long)]
     allow_tools: bool,
-    /// Seconds a tool request outside the allowlist waits for the human's decision before it is rejected (default:
-    /// 300).
-    #[arg(long)]
-    approval_timeout_secs: Option<u64>,
+    /// How long a tool request outside the allowlist waits for the human's decision before it is rejected (a
+    /// duration such as 90s, 10m or 1h; default: 5m).
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+    approval_timeout: Option<Duration>,
     /// Most harness processes alive at once, one per active thread (default: 4).
     #[arg(long)]
     max_harnesses: Option<usize>,
-    /// Seconds without a message before a thread's harness stops; its session resumes on the next message (default:
-    /// 600).
-    #[arg(long)]
-    idle_timeout_secs: Option<u64>,
-    /// Seconds a prompt may run, tool requests waiting for the human included, before it is cancelled and the thread
-    /// goes to the human; 0 for no limit (default: 1800).
-    #[arg(long)]
-    prompt_timeout_secs: Option<u64>,
+    /// How long a thread's harness stays without a message before it stops; its session resumes on the next message
+    /// (a duration such as 90s, 10m or 1h; default: 10m).
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+    idle_timeout: Option<Duration>,
+    /// How long a prompt may run, tool requests waiting for the human included, before it is cancelled and the thread
+    /// goes to the human (a duration such as 90s, 10m or 1h; 0 for no limit; default: 30m).
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+    prompt_timeout: Option<Duration>,
     /// Tool calls a prompt may start before it is cancelled and the thread goes to the human; 0 for no limit
     /// (default: 300).
     #[arg(long)]
@@ -113,10 +114,10 @@ impl AntOptions {
             || self.context.is_some()
             || !self.allow.is_empty()
             || self.allow_tools
-            || self.approval_timeout_secs.is_some()
+            || self.approval_timeout.is_some()
             || self.max_harnesses.is_some()
-            || self.idle_timeout_secs.is_some()
-            || self.prompt_timeout_secs.is_some()
+            || self.idle_timeout.is_some()
+            || self.prompt_timeout.is_some()
             || self.max_tool_calls.is_some()
             || self.max_thread_tokens.is_some()
             || self.max_thread_cost.is_some()
@@ -157,17 +158,17 @@ impl AntOptions {
         }
         p.allow.extend(self.allow.iter().cloned());
         p.allow_tools |= self.allow_tools;
-        if let Some(secs) = self.approval_timeout_secs {
-            p.approval_timeout_secs = secs;
+        if let Some(timeout) = self.approval_timeout {
+            p.approval_timeout = timeout;
         }
         if let Some(n) = self.max_harnesses {
             p.max_harnesses = n;
         }
-        if let Some(secs) = self.idle_timeout_secs {
-            p.idle_timeout_secs = secs;
+        if let Some(timeout) = self.idle_timeout {
+            p.idle_timeout = timeout;
         }
-        if let Some(secs) = self.prompt_timeout_secs {
-            p.prompt_timeout_secs = secs;
+        if let Some(timeout) = self.prompt_timeout {
+            p.prompt_timeout = timeout;
         }
         if let Some(n) = self.max_tool_calls {
             p.max_tool_calls = n;
@@ -333,9 +334,9 @@ mod tests {
         assert_eq!((picked[0].max_harnesses, picked[0].allow_tools), (1, true));
         assert_eq!(picked[0].allow, ["read"]);
         assert_eq!(picked[0].capabilities, ["rust", "nats", "acp"]);
-        assert_eq!(picked[0].idle_timeout_secs, config::DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!(picked[0].idle_timeout, config::DEFAULT_IDLE_TIMEOUT);
         assert_eq!((picked[0].max_tool_calls, picked[0].max_daily_cost), (20, Some(7.5)));
-        assert_eq!(picked[0].prompt_timeout_secs, config::DEFAULT_PROMPT_TIMEOUT_SECS);
+        assert_eq!(picked[0].prompt_timeout, config::DEFAULT_PROMPT_TIMEOUT);
 
         assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
         let err = pick(all.clone(), &args("--ant dev-c"), path).unwrap_err().to_string();
@@ -366,6 +367,18 @@ mod tests {
         let two = configs(vec![bare, ant("dev-b")], "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
+    }
+
+    #[test]
+    fn duration_flags_need_a_unit() {
+        let p = args("--idle-timeout 90s --prompt-timeout 0 --approval-timeout 1h30m").options.apply(ant("dev-a"));
+        assert_eq!(
+            (p.idle_timeout, p.prompt_timeout, p.approval_timeout),
+            (Duration::from_secs(90), Duration::ZERO, Duration::from_secs(5_400))
+        );
+        for line in ["--idle-timeout 90", "--idle-timeout-secs 90", "--prompt-timeout 1.5h"] {
+            assert!(Cmd::try_parse_from(std::iter::once("daemon").chain(line.split_whitespace())).is_err(), "{line}");
+        }
     }
 
     #[test]

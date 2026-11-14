@@ -1,7 +1,8 @@
 //! The daemon config file, `~/.ants/config.toml`: the ants one daemon process serves.
 //!
 //! ```toml
-//! provider = "copilot"              # default harness of every ant; also serves the built-in messenger
+//! harness = "copilot"               # default harness of every ant and of the built-in messenger
+//! messenger = true                  # serve the built-in messenger (the default)
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
@@ -11,12 +12,13 @@
 //! workdir = "~/src/repo-a"
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
+//! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
 //! ```
 //!
 //! `~` expands to the home directory; other relative paths are relative to the file's directory.
 //!
-//! A file with `provider` also serves the built-in messenger ([`builtin_messenger`]) unless it lists an ant named
-//! `messenger`; `provider` alone is a complete file.
+//! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
+//! ant named `messenger`; an empty file is a complete one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,11 +36,11 @@ use crate::harness::{self, HarnessKind, ModelSettings, PromptLimits};
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
 pub const DEFAULT_MAX_HARNESSES: usize = 4;
-pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
-pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = crate::approvals::DEFAULT_TIMEOUT.as_secs();
-pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = harness::DEFAULT_PROMPT_TIMEOUT.as_secs();
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = crate::approvals::DEFAULT_TIMEOUT;
+pub const DEFAULT_PROMPT_TIMEOUT: Duration = harness::DEFAULT_PROMPT_TIMEOUT;
 pub const DEFAULT_MAX_TOOL_CALLS: usize = harness::DEFAULT_MAX_TOOL_CALLS;
-pub const DEFAULT_ESCALATE_AFTER_SECS: u64 = escalation::DEFAULT_ESCALATE_AFTER.as_secs();
+pub const DEFAULT_ESCALATE_AFTER: Duration = escalation::DEFAULT_ESCALATE_AFTER;
 
 /// `~/.ants/config.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -55,7 +57,10 @@ fn home_dir() -> Result<PathBuf> {
 struct File {
     /// Default harness of the file's ants, and the harness of the built-in messenger.
     #[serde(default, deserialize_with = "some_harness")]
-    provider: Option<HarnessKind>,
+    harness: Option<HarnessKind>,
+    /// Whether to serve the built-in messenger, unless an ant is named `messenger`.
+    #[serde(default = "yes")]
+    messenger: bool,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
@@ -87,7 +92,7 @@ pub struct Ant {
     /// Added to the harness's inherited environment.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// The file's top-level `provider`, then the default harness, when absent.
+    /// The file's top-level `harness`, then the default harness, when absent.
     #[serde(default, deserialize_with = "some_harness")]
     pub harness: Option<HarnessKind>,
     pub model: Option<String>,
@@ -99,18 +104,18 @@ pub struct Ant {
     /// Tool allowlist; see [`crate::permission`].
     #[serde(default)]
     pub allow: Vec<String>,
-    /// Seconds a tool request outside the allowlist waits for the human.
-    #[serde(default = "default_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
+    /// How long a tool request outside the allowlist waits for the human.
+    #[serde(default = "default_approval_timeout", deserialize_with = "ants_proto::duration::deserialize")]
+    pub approval_timeout: Duration,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_harnesses")]
     pub max_harnesses: usize,
-    #[serde(default = "default_idle_timeout_secs")]
-    pub idle_timeout_secs: u64,
-    /// Seconds a prompt may run before it is cancelled; 0 for no limit.
-    #[serde(default = "default_prompt_timeout_secs")]
-    pub prompt_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout", deserialize_with = "ants_proto::duration::deserialize")]
+    pub idle_timeout: Duration,
+    /// How long a prompt may run before it is cancelled; 0 for no limit.
+    #[serde(default = "default_prompt_timeout", deserialize_with = "ants_proto::duration::deserialize")]
+    pub prompt_timeout: Duration,
     /// Tool calls a prompt may start before it is cancelled; 0 for no limit.
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
@@ -128,9 +133,9 @@ pub struct Ant {
     /// Chain levels an escalation climbs before it goes to the thread's owner.
     #[serde(default = "default_max_escalation_hops")]
     pub max_escalation_hops: u32,
-    /// Seconds an escalation waits for its leader's answer before going one level higher; 0 waits for good.
-    #[serde(default = "default_escalate_after_secs")]
-    pub escalate_after_secs: u64,
+    /// How long an escalation waits for its leader's answer before going one level higher; 0 waits for good.
+    #[serde(default = "default_escalate_after", deserialize_with = "ants_proto::duration::deserialize")]
+    pub escalate_after: Duration,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -140,16 +145,20 @@ fn default_max_harnesses() -> usize {
     DEFAULT_MAX_HARNESSES
 }
 
-fn default_idle_timeout_secs() -> u64 {
-    DEFAULT_IDLE_TIMEOUT_SECS
+fn yes() -> bool {
+    true
 }
 
-fn default_approval_timeout_secs() -> u64 {
-    DEFAULT_APPROVAL_TIMEOUT_SECS
+fn default_idle_timeout() -> Duration {
+    DEFAULT_IDLE_TIMEOUT
 }
 
-fn default_prompt_timeout_secs() -> u64 {
-    DEFAULT_PROMPT_TIMEOUT_SECS
+fn default_approval_timeout() -> Duration {
+    DEFAULT_APPROVAL_TIMEOUT
+}
+
+fn default_prompt_timeout() -> Duration {
+    DEFAULT_PROMPT_TIMEOUT
 }
 
 fn default_max_tool_calls() -> usize {
@@ -160,8 +169,8 @@ fn default_max_escalation_hops() -> u32 {
     ants_proto::DEFAULT_MAX_ESCALATION_HOPS
 }
 
-fn default_escalate_after_secs() -> u64 {
-    DEFAULT_ESCALATE_AFTER_SECS
+fn default_escalate_after() -> Duration {
+    DEFAULT_ESCALATE_AFTER
 }
 
 fn some_harness<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HarnessKind>, D::Error> {
@@ -189,11 +198,11 @@ impl Ant {
             context: None,
             allow_tools: false,
             allow: Vec::new(),
-            approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+            approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
-            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            prompt_timeout_secs: DEFAULT_PROMPT_TIMEOUT_SECS,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            prompt_timeout: DEFAULT_PROMPT_TIMEOUT,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
             max_thread_tokens: None,
             max_thread_cost: None,
@@ -201,7 +210,7 @@ impl Ant {
             max_daily_cost: None,
             escalate_to: Vec::new(),
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
-            escalate_after_secs: DEFAULT_ESCALATE_AFTER_SECS,
+            escalate_after: DEFAULT_ESCALATE_AFTER,
             builtin: false,
         }
     }
@@ -240,12 +249,12 @@ impl Ant {
             harness,
             model_settings,
             max_harnesses: self.max_harnesses,
-            idle_timeout: Duration::from_secs(self.idle_timeout_secs),
+            idle_timeout: self.idle_timeout,
             allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
-            approval_timeout: Duration::from_secs(self.approval_timeout_secs),
+            approval_timeout: self.approval_timeout,
             capabilities: self.capabilities,
             limits: PromptLimits {
-                timeout: Some(Duration::from_secs(self.prompt_timeout_secs)).filter(|t| !t.is_zero()),
+                timeout: Some(self.prompt_timeout).filter(|t| !t.is_zero()),
                 max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
             },
             caps: Caps {
@@ -257,7 +266,7 @@ impl Ant {
             escalation: Chain {
                 escalate_to: self.escalate_to,
                 max_hops: self.max_escalation_hops,
-                after: Some(Duration::from_secs(self.escalate_after_secs)).filter(|t| !t.is_zero()),
+                after: Some(self.escalate_after).filter(|t| !t.is_zero()),
             },
             ant: self.name,
             defer_to_others: self.builtin,
@@ -302,16 +311,16 @@ fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
-/// The ant a file with `provider` serves unless it lists one named `messenger`: the provider's harness with its
-/// default model, reasoning effort and context, and otherwise the settings of an ant that sets nothing. Its home and
+/// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`
+/// (else the default harness) with its default model, reasoning effort and context, and otherwise the settings of an ant that sets nothing. Its home and
 /// workdir are `~/.ants/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
-pub fn builtin_messenger(provider: HarnessKind, home: &Path) -> Ant {
+pub fn builtin_messenger(harness: HarnessKind, home: &Path) -> Ant {
     let name = UserId::messenger();
     let dir = home.join(".ants").join(name.as_str());
     let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
     Ant {
-        harness: Some(provider),
+        harness: Some(harness),
         home: Some(dir.clone()),
         creds: creds.is_file().then_some(creds),
         builtin: true,
@@ -326,17 +335,15 @@ pub fn load(path: &Path) -> Result<Vec<Ant>> {
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `provider`, `nats`, `js_domain` and `human`, check that names are unique and workdirs exist,
-/// and add the built-in messenger when `provider` is set and no ant is named `messenger`.
+/// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique and workdirs
+/// exist, and add the built-in messenger unless `messenger = false` or an ant is named `messenger`.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Ant>> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
-    if file.ants.is_empty() && file.provider.is_none() {
-        bail!("config {}: no provider and no [[ant]] entries", path.display());
+    if file.ants.is_empty() && !file.messenger {
+        bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
-    if let Some(provider) = file.provider
-        && !file.ants.iter().any(|ant| ant.name == UserId::messenger())
-    {
-        file.ants.push(builtin_messenger(provider, home));
+    if file.messenger && !file.ants.iter().any(|ant| ant.name == UserId::messenger()) {
+        file.ants.push(builtin_messenger(file.harness.unwrap_or_default(), home));
     }
     let base = path.parent().unwrap_or(Path::new("."));
     let mut names = BTreeSet::new();
@@ -348,7 +355,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Ant>> {
         validate_env(&ant.env)?;
         ant.validate_chain().with_context(|| format!("config {}", path.display()))?;
         if ant.harness.is_none() {
-            ant.harness = file.provider;
+            ant.harness = file.harness;
         }
         if !ant.builtin {
             let abs = |dir: &Path| resolve(dir, base, home);
@@ -498,17 +505,24 @@ pub fn entry(ant: &Ant) -> Result<String> {
         set("escalate_to", strings(&mut ant.escalate_to.iter().map(UserId::as_str)));
     }
     let numbers = [
-        ("approval_timeout_secs", ant.approval_timeout_secs, default.approval_timeout_secs),
         ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),
-        ("idle_timeout_secs", ant.idle_timeout_secs, default.idle_timeout_secs),
-        ("prompt_timeout_secs", ant.prompt_timeout_secs, default.prompt_timeout_secs),
         ("max_tool_calls", ant.max_tool_calls as u64, default.max_tool_calls as u64),
         ("max_escalation_hops", ant.max_escalation_hops.into(), default.max_escalation_hops.into()),
-        ("escalate_after_secs", ant.escalate_after_secs, default.escalate_after_secs),
     ];
     for (key, value, default) in numbers {
         if value != default {
             set(key, value.to_string());
+        }
+    }
+    let durations = [
+        ("approval_timeout", ant.approval_timeout, default.approval_timeout),
+        ("idle_timeout", ant.idle_timeout, default.idle_timeout),
+        ("prompt_timeout", ant.prompt_timeout, default.prompt_timeout),
+        ("escalate_after", ant.escalate_after, default.escalate_after),
+    ];
+    for (key, value, default) in durations {
+        if value != default {
+            set(key, toml_string(&ants_proto::duration::format(value)));
         }
     }
     for (key, value) in [("max_thread_tokens", ant.max_thread_tokens), ("max_daily_tokens", ant.max_daily_tokens)] {
@@ -592,14 +606,14 @@ Review changes for correctness."""
             allow = ["read", "search"]
             capabilities = ["rust", "review"]
             max_harnesses = 2
-            idle_timeout_secs = 60
-            prompt_timeout_secs = 0
+            idle_timeout = "1m"
+            prompt_timeout = "0"
             max_tool_calls = 50
             max_thread_cost = 2.5
             max_daily_tokens = 1000000
             escalate_to = ["lead", "dev-b"]
             max_escalation_hops = 2
-            escalate_after_secs = 0
+            escalate_after = "0"
 
             [[ant]]
             name = "dev-b"
@@ -619,7 +633,7 @@ Review changes for correctness."""
         assert_eq!(a.creds, Some(root.join("auth/dev-a.creds")));
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
         assert_eq!((a.allow.len(), a.capabilities.len()), (2, 2));
-        assert_eq!((a.max_harnesses, a.idle_timeout_secs), (2, 60));
+        assert_eq!((a.max_harnesses, a.idle_timeout), (2, Duration::from_secs(60)));
         let config = a.clone().into_config("nats://unused").unwrap();
         assert_eq!(
             config.model_settings,
@@ -654,11 +668,11 @@ Review changes for correctness."""
         assert_eq!(config.human.as_str(), "bob", "an ant's own default human comes first");
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
         assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
-        assert_eq!(config.idle_timeout, Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS));
+        assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
         assert_eq!(config.limits, PromptLimits::default());
         assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
         assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
-        assert_eq!(config.escalation.after, Some(Duration::from_secs(DEFAULT_ESCALATE_AFTER_SECS)));
+        assert_eq!(config.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
         assert!(config.home.ends_with(".ants/dev-b"));
         assert_eq!(config.whoami, None);
         assert_eq!(config.model_settings, ModelSettings::default());
@@ -723,14 +737,14 @@ Review changes for correctness."""
         assert_eq!((&ants[0].nats, &ants[0].human), (&None, &None));
         let config = ants[0].clone().into_config("nats://leaf:4222").unwrap();
         assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
-        let err = parse_here("human = \"Not A Name\"\nprovider = \"copilot\"").unwrap_err();
+        let err = parse_here("human = \"Not A Name\"").unwrap_err();
         assert!(format!("{err:#}").contains("human"), "{err:#}");
     }
 
     #[test]
-    fn provider_is_the_default_harness_and_serves_the_builtin_messenger() {
+    fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
         let ants = parse_here(
-            "provider = \"claude\"\njs_domain = \"hub\"\n\
+            "harness = \"claude\"\njs_domain = \"hub\"\n\
              [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
         )
@@ -756,24 +770,42 @@ Review changes for correctness."""
             builtin: true,
             ..Ant::new(UserId::messenger(), dir)
         };
-        assert_eq!(messenger, &stock, "provider defaults for model, reasoning effort and context; stock settings");
+        assert_eq!(messenger, &stock, "harness defaults for model, reasoning effort and context; stock settings");
 
-        let alone = parse_here("provider = \"copilot\"").unwrap();
-        assert_eq!(alone.len(), 1, "provider alone is a complete file");
+        let alone = parse_here("harness = \"antigravity\"").unwrap();
+        assert_eq!(alone.len(), 1, "harness alone is a complete file");
         assert_eq!((alone[0].name.as_str(), alone[0].builtin), ("messenger", true));
+        assert_eq!(alone[0].harness, Some(HarnessKind::Antigravity));
+    }
+
+    #[test]
+    fn the_builtin_messenger_is_on_unless_turned_off() {
+        let empty = parse_here("").unwrap();
+        let only: Vec<_> = empty.iter().map(|ant| (ant.name.as_str(), ant.harness, ant.builtin)).collect();
+        assert_eq!(only, [("messenger", Some(HarnessKind::Copilot), true)], "the default harness");
+
+        let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+        let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
+        assert_eq!(names, ["dev-a", "messenger"]);
+
+        let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+        assert_eq!((ants.len(), ants[0].name.as_str()), (1, "dev-a"));
+
+        let err = format!("{:#}", parse_here("messenger = false\nharness = \"claude\"").unwrap_err());
+        assert!(err.contains("nothing to serve"), "{err}");
     }
 
     #[test]
     fn a_listed_messenger_replaces_the_builtin_one() {
-        let ants = parse_here("provider = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
+        let ants = parse_here("harness = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
         assert_eq!(ants.len(), 1);
         assert_eq!((ants[0].harness, ants[0].builtin), (Some(HarnessKind::Claude), false));
         assert_eq!(ants[0].workdir, manifest_dir().canonicalize().unwrap());
     }
 
     #[test]
-    fn without_provider_there_is_no_builtin_messenger() {
-        let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    fn without_a_top_level_harness_ants_get_the_default_one() {
+        let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
         assert_eq!(ants.len(), 1);
         assert_eq!(ants[0].harness, None);
         let config = ants[0].clone().into_config("nats://unused").unwrap();
@@ -804,8 +836,8 @@ Review changes for correctness."""
         assert!(twice.contains("config.toml"), "{twice}");
         let missing = err("[[ant]]\nname = \"dev-a\"\nworkdir = \"no/such/dir\"");
         assert!(missing.contains("workdir no/such/dir"), "{missing}");
-        assert!(err("nats = \"nats://x\"").contains("no provider and no [[ant]] entries"));
-        assert!(err("provider = \"vim\"").contains("unknown harness"));
+        assert!(err("harness = \"vim\"").contains("unknown harness"));
+        assert!(err("provider = \"copilot\"").contains("unknown field `provider`"));
         assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"vim\"").contains("unknown harness"));
         assert!(err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworkdirs = 1").contains("unknown field"));
         assert!(err("[[ant]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
@@ -816,12 +848,23 @@ Review changes for correctness."""
     }
 
     #[test]
+    fn durations_need_a_unit() {
+        let idle = |line: &str| parse_here(&format!("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n{line}"));
+        assert_eq!(idle("idle_timeout = \"10m\"").unwrap()[0].idle_timeout, Duration::from_secs(600));
+        for bad in ["idle_timeout_secs = 600", "idle_timeout = 600", "idle_timeout = \"600\""] {
+            assert!(idle(bad).is_err(), "{bad} loaded");
+        }
+        let err = format!("{:#}", idle("escalate_after = \"30\"").unwrap_err());
+        assert!(err.contains("a number without a unit"), "{err}");
+    }
+
+    #[test]
     fn entries_read_back_as_written() {
         let workdir = manifest_dir().canonicalize().unwrap();
         let plain = Ant::new("dev-a".parse().unwrap(), workdir.clone());
         let text = entry(&plain).unwrap();
         assert_eq!(text, format!("[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
-        assert_eq!(parse_here(&text).unwrap(), [plain]);
+        assert_eq!(parse_here(&format!("messenger = false\n{text}")).unwrap(), [plain]);
 
         let mut full = Ant::new("dev-b".parse().unwrap(), workdir);
         full.nats = Some("wss://hub.example/nats".to_owned());
@@ -838,11 +881,14 @@ Review changes for correctness."""
         full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
         full.escalate_to = vec!["lead".parse().unwrap()];
         full.max_harnesses = 1;
-        full.prompt_timeout_secs = 0;
+        full.prompt_timeout = Duration::ZERO;
+        full.idle_timeout = Duration::from_secs(5_400);
         full.max_thread_cost = Some(2.5);
         full.max_daily_tokens = Some(1000);
         let text = entry(&full).unwrap();
-        assert_eq!(parse_here(&text).unwrap(), [full]);
+        assert!(text.contains("\nidle_timeout = \"1h30m\"\nprompt_timeout = \"0\"\n"), "{text}");
+        let read: Vec<_> = parse_here(&text).unwrap().into_iter().filter(|ant| !ant.builtin).collect();
+        assert_eq!(read, [full]);
     }
 
     #[test]
@@ -854,7 +900,7 @@ Review changes for correctness."""
         let first = std::fs::read_to_string(&path).unwrap();
         assert!(first.starts_with("[[ant]]\nname = \"dev-a\""), "{first}");
 
-        let old = "# the team\nprovider = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[ant]]\nname = \"dev-a\"\n\
+        let old = "# the team\nharness = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[ant]]\nname = \"dev-a\"\n\
                    workdir = \".\"\ncreds = \"keys/dev-a.creds\"";
         std::fs::write(&path, old).unwrap();
         add("dev-b").unwrap();

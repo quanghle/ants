@@ -320,12 +320,12 @@ enum AuthCommand {
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
-    /// gives here. They expire after --ttl-secs.
+    /// gives here. They expire after --ttl.
     Enroll {
         ant: UserId,
-        /// Seconds the enrollment credentials stay valid.
-        #[arg(long, value_name = "SECS", default_value_t = 3600)]
-        ttl_secs: u64,
+        /// How long the enrollment credentials stay valid (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "1h")]
+        ttl: std::time::Duration,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -601,13 +601,12 @@ async fn main() -> Result<()> {
             println!("{}", out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Enroll { ant, ttl_secs, dir, out }) => {
+        Command::Auth(AuthCommand::Enroll { ant, ttl, dir, out }) => {
             if ant.is_human() {
                 bail!("{ant} is the default human, not an ant");
             }
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(&ant))));
-            let ttl = std::time::Duration::from_secs(ttl_secs);
             let expires = auth::issue_enrollment(&dir, &ant, ttl, &out)?;
             let expires = chrono::DateTime::from_timestamp(i64::try_from(expires)?, 0).context("expiry")?;
             println!(

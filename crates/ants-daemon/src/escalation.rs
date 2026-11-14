@@ -37,7 +37,7 @@ use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
 
-/// Default of `escalate_after_secs`: as long as a prompt may run by default.
+/// Default of `escalate_after`: as long as a prompt may run by default.
 pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_secs(1800);
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
