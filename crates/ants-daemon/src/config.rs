@@ -51,6 +51,10 @@
 //! `~` expands to the home directory; other relative paths, harness commands with a `/` included, are relative to the
 //! file's directory.
 //!
+//! The `*.toml` files of the `harnesses.d` directory beside the file ([`dropin_dir`]), read in name order, hidden
+//! ones skipped, define harnesses too: each holds `[harnesses.<name>]` tables alone, as in this file, a relative
+//! command being relative to `harnesses.d`. A name is defined once across this file and those.
+//!
 //! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
 //! ant named `messenger`; an empty file is a complete one.
 
@@ -496,8 +500,7 @@ pub fn load(path: &Path) -> Result<Loaded> {
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
-    let harnesses = define(std::mem::take(&mut file.harnesses), base, home)
-        .with_context(|| format!("config {}", path.display()))?;
+    let harnesses = define(std::mem::take(&mut file.harnesses), path, home)?;
     if let Some(harness) = &file.harness {
         harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
     }
@@ -695,14 +698,76 @@ fn check_added(ants: &mut [Ant], templates: &[AntTemplate]) -> Result<()> {
     Ok(())
 }
 
-/// The built-in harnesses with the file's `definitions`, their commands given as paths resolved like other paths.
-fn define(mut definitions: BTreeMap<String, Harness>, base: &Path, home: &Path) -> Result<Harnesses> {
-    for harness in definitions.values_mut() {
-        if harness.command_is_path() {
-            harness.command = resolve(&harness.command, base, home);
+/// The built-in harnesses with the definitions of the config file at `path`, `definitions`, and those of its drop-in
+/// files ([`dropin_files`]), their commands given as paths resolved like other paths of their file. A name defined
+/// twice, in two drop-in files or in one and the config file, fails naming both files.
+fn define(definitions: BTreeMap<String, Harness>, path: &Path, home: &Path) -> Result<Harnesses> {
+    let mut files = vec![(path.to_owned(), definitions)];
+    let dir = dropin_dir(path);
+    for file in dropin_files(&dir).with_context(|| format!("reading harness directory {}", dir.display()))? {
+        files.push((file.clone(), read_dropin(&file)?));
+    }
+    let mut harnesses = Harnesses::builtin();
+    let mut defined: BTreeMap<String, &Path> = BTreeMap::new();
+    for (file, definitions) in &files {
+        for name in definitions.keys() {
+            if let Some(first) = defined.insert(name.clone(), file) {
+                bail!("harness {name} is defined in both {} and {}", first.display(), file.display());
+            }
         }
     }
-    Harnesses::builtin().define(definitions)
+    for (i, (file, mut definitions)) in files.into_iter().enumerate() {
+        let base = file.parent().unwrap_or(Path::new("."));
+        for harness in definitions.values_mut() {
+            if harness.command_is_path() {
+                harness.command = resolve(&harness.command, base, home);
+            }
+            if i > 0 {
+                harness.file = Some(file.clone());
+            }
+        }
+        let what = if i == 0 { "config" } else { "harness file" };
+        harnesses = harnesses.define(definitions).with_context(|| format!("{what} {}", file.display()))?;
+    }
+    Ok(harnesses)
+}
+
+/// The directory of drop-in harness files beside the config file at `path`: `harnesses.d`.
+pub fn dropin_dir(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(Path::new(".")).join("harnesses.d")
+}
+
+/// The drop-in harness files in `dir`, sorted by name: its `*.toml` entries other than hidden ones and directories.
+/// None when there is no directory.
+pub fn dropin_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if !name.starts_with('.') && path.extension().is_some_and(|ext| ext == "toml") && !path.is_dir() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The `[harnesses.<name>]` tables of the drop-in file at `path`, its only keys.
+fn read_dropin(path: &Path) -> Result<BTreeMap<String, Harness>> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DropIn {
+        #[serde(default)]
+        harnesses: BTreeMap<String, Harness>,
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading harness file {}", path.display()))?;
+    let file: DropIn = toml::from_str(&text).with_context(|| format!("parsing harness file {}", path.display()))?;
+    Ok(file.harnesses)
 }
 
 fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
@@ -726,11 +791,14 @@ pub struct Summary {
 }
 
 impl Summary {
-    /// Read the summary of the file at `path`; an empty one, with the built-in harnesses, when there is no file.
+    /// Read the summary of the file at `path`; an empty one, with the built-in harnesses and those of its drop-in
+    /// files, when there is no file.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text, &std::path::absolute(path)?, &home_dir()?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Self::parse("", &std::path::absolute(path)?, &home_dir()?)
+            }
             Err(e) => Err(e).with_context(|| format!("reading config {}", path.display())),
         }
     }
@@ -738,7 +806,7 @@ impl Summary {
     fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
         let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
-        let harnesses = define(file.harnesses, base, home).with_context(|| format!("config {}", path.display()))?;
+        let harnesses = define(file.harnesses, path, home)?;
         let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
         Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps })
@@ -1468,6 +1536,66 @@ Review changes for correctness."""
         assert_eq!(summary.harness(Some("claude")).unwrap().name(), "claude");
         assert!(summary.harness(Some("vim")).is_err());
         assert_eq!(Summary::default().harness(None).unwrap().name(), DEFAULT_HARNESS);
+    }
+
+    #[test]
+    fn dropin_files_define_harnesses_the_ants_may_name() {
+        let dir = ants_test_support::scratch_dir("config-dropins").canonicalize().unwrap();
+        let config = dir.join("config.toml");
+        let dropins = dir.join("harnesses.d");
+        std::fs::create_dir(&dropins).unwrap();
+        let text = "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"\n\
+                    [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"mine\"\n\
+                    [harnesses.mine]\ncommand = \"mine-acp\"\n";
+        std::fs::write(&config, text).unwrap();
+        std::fs::write(
+            dropins.join("codex.toml"),
+            "[harnesses.codex]\ncommand = \"./codex-acp\"\nmode = \"read-only\"",
+        )
+        .unwrap();
+        std::fs::write(dropins.join("claude.toml"), "[harnesses.claude]\ncommand = \"claude-acp\"").unwrap();
+        std::fs::write(dropins.join(".hidden.toml"), "not toml").unwrap();
+        std::fs::write(dropins.join("notes.txt"), "not toml").unwrap();
+        let loaded = load(&config).unwrap();
+        let codex = loaded.harnesses.get("codex").unwrap();
+        assert_eq!(codex.command, dropins.join("./codex-acp"), "relative to harnesses.d");
+        assert_eq!(codex.file(), Some(dropins.join("codex.toml").as_path()));
+        assert_eq!(loaded.harnesses.get("claude").unwrap().mode, None, "replaces the built-in one whole");
+        assert_eq!(loaded.harnesses.get("mine").unwrap().file(), None);
+        let configs: Vec<_> =
+            loaded.ants.into_iter().map(|ant| ant.into_config("nats://unused", &loaded.harnesses).unwrap()).collect();
+        assert_eq!((configs[0].harness.name(), configs[1].harness.name()), ("codex", "mine"));
+        assert_eq!(Summary::load(&config).unwrap().harness(Some("codex")).unwrap(), codex);
+        std::fs::remove_file(&config).unwrap();
+        assert_eq!(Summary::load(&config).unwrap().harness(Some("codex")).unwrap(), codex, "no config file");
+
+        let err = |file: &str, text: &str| {
+            std::fs::write(dropins.join(file), text).unwrap();
+            let err = format!("{:#}", Summary::load(&config).unwrap_err());
+            std::fs::remove_file(dropins.join(file)).unwrap();
+            err
+        };
+        let twice = err("other.toml", "[harnesses.codex]\ncommand = \"x\"");
+        let (first, second) = (dropins.join("codex.toml"), dropins.join("other.toml"));
+        assert!(twice.contains(&format!("in both {} and {}", first.display(), second.display())), "{twice}");
+        std::fs::write(&config, "[harnesses.codex]\ncommand = \"x\"").unwrap();
+        let with_config = format!("{:#}", load(&config).unwrap_err());
+        assert!(
+            with_config.contains(&format!("in both {} and {}", config.display(), first.display())),
+            "{with_config}"
+        );
+        std::fs::write(&config, "").unwrap();
+        let path = dropins.join("bad.toml");
+        let unknown = err("bad.toml", "harness = \"codex\"");
+        assert!(
+            unknown.contains(&path.display().to_string()) && unknown.contains("unknown field `harness`"),
+            "{unknown}"
+        );
+        let field = err("bad.toml", "[harnesses.bad]\ncommand = \"x\"\nshell = \"sh\"");
+        assert!(field.contains(&path.display().to_string()) && field.contains("unknown field `shell`"), "{field}");
+        let empty = err("bad.toml", "[harnesses.bad]\ncommand = \"\"");
+        assert!(empty.contains(&path.display().to_string()) && empty.contains("must not be empty"), "{empty}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

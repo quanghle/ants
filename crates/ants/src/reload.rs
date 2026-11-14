@@ -1,6 +1,8 @@
-//! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, and once an edit of the file
-//! settled. The file is polled, its modification time, length and inode compared every [`CHECK_EVERY`] on the
-//! process's own runtime, with no watcher thread; a change counts once two checks in a row find the file the same.
+//! When `ants daemon` and `ants webhook serve` reload their config file: on SIGHUP, and once an edit of the file, or
+//! of the daemon's drop-in harness files, settled. The file is polled, its modification time, length and inode
+//! compared every [`CHECK_EVERY`] on the process's own runtime, with no watcher thread, and so are the drop-in files
+//! ([`ants_daemon::config::dropin_files`]) listed by name; a change counts once two checks in a row find them the
+//! same.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -35,26 +37,45 @@ impl FileId {
     }
 }
 
-/// A config file checked for changes.
+/// The config file, or none at its path, and the drop-in files, by path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Found {
+    file: Option<FileId>,
+    dropins: Vec<(PathBuf, FileId)>,
+}
+
+/// A config file, and a directory of drop-in files, checked for changes.
 #[derive(Debug)]
 struct Watched {
     path: PathBuf,
-    /// The file as last loaded, or none at the path.
-    loaded: Option<FileId>,
-    /// The file as the last check found it.
-    seen: Option<FileId>,
+    dropins: Option<PathBuf>,
+    /// The files as last loaded.
+    loaded: Found,
+    /// The files as the last check found them.
+    seen: Found,
 }
 
 impl Watched {
-    fn new(path: PathBuf) -> Self {
-        let now = FileId::of(&path).ok();
-        Self { path, loaded: now.clone(), seen: now }
+    fn new(path: PathBuf, dropins: Option<PathBuf>) -> Self {
+        let mut watched = Self { path, dropins, loaded: Found::default(), seen: Found::default() };
+        watched.loading();
+        watched
     }
 
-    /// Whether the file is another than the one loaded and unchanged since the last check: an edit still being
-    /// written waits for a later check. The file found counts as loaded then.
+    fn found(&self) -> Found {
+        let dropins = self.dropins.as_deref().and_then(|dir| ants_daemon::config::dropin_files(dir).ok());
+        let dropins = dropins
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| FileId::of(&path).ok().map(|id| (path, id)))
+            .collect();
+        Found { file: FileId::of(&self.path).ok(), dropins }
+    }
+
+    /// Whether the files are other than the ones loaded and unchanged since the last check: an edit still being
+    /// written waits for a later check. The files found count as loaded then.
     fn settled(&mut self) -> bool {
-        let now = FileId::of(&self.path).ok();
+        let now = self.found();
         let settled = now != self.loaded && now == self.seen;
         self.seen = now;
         if settled {
@@ -63,9 +84,9 @@ impl Watched {
         settled
     }
 
-    /// Count the file at the path now as loaded, as a reload by SIGHUP reads it.
+    /// Count the files found now as loaded, as a reload by SIGHUP reads them.
     fn loading(&mut self) {
-        self.loaded = FileId::of(&self.path).ok();
+        self.loaded = self.found();
         self.seen.clone_from(&self.loaded);
     }
 }
@@ -74,7 +95,7 @@ impl Watched {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Trigger {
     Hangup,
-    /// The config file changed and settled.
+    /// The config file, or a drop-in file, changed and settled.
     Changed,
 }
 
@@ -82,12 +103,12 @@ impl Trigger {
     pub fn describe(&self) -> &'static str {
         match self {
             Trigger::Hangup => "SIGHUP",
-            Trigger::Changed => "the config file changed",
+            Trigger::Changed => "the config changed",
         }
     }
 }
 
-/// SIGHUP, and changes of the config file.
+/// SIGHUP, and changes of the config file and its drop-in files.
 pub struct Triggers {
     hangup: Hangup,
     file: Watched,
@@ -95,11 +116,12 @@ pub struct Triggers {
 }
 
 impl Triggers {
-    /// Listen for SIGHUP and check the file at `path` every `every`.
-    pub fn new(path: PathBuf, every: Duration) -> Result<Self> {
+    /// Listen for SIGHUP and check the file at `path`, and the drop-in files of the directory `dropins`, every
+    /// `every`.
+    pub fn new(path: PathBuf, dropins: Option<PathBuf>, every: Duration) -> Result<Self> {
         let mut checks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        Ok(Self { hangup: Hangup::new()?, file: Watched::new(path), checks })
+        Ok(Self { hangup: Hangup::new()?, file: Watched::new(path, dropins), checks })
     }
 
     /// Wait for the next reason to reload. Cancel-safe, for `tokio::select!`.
@@ -111,7 +133,7 @@ impl Triggers {
                     return Trigger::Hangup;
                 }
                 _ = self.checks.tick() => if self.file.settled() {
-                    tracing::info!(file = %self.file.path.display(), "the config file changed");
+                    tracing::info!(file = %self.file.path.display(), "the config changed");
                     return Trigger::Changed;
                 },
             }
@@ -152,7 +174,7 @@ mod tests {
         let dir = ants_test_support::scratch_dir("reload-watch");
         let path = dir.join("config.toml");
         std::fs::write(&path, "a = 1\n").unwrap();
-        let mut file = Watched::new(path.clone());
+        let mut file = Watched::new(path.clone(), None);
         assert!(!file.settled(), "nothing changed");
 
         std::fs::write(&path, "a = 1\nb = 2\n").unwrap();
@@ -173,12 +195,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_new_or_edited_dropin_file_counts_as_a_change() {
+        let dir = ants_test_support::scratch_dir("reload-dropins");
+        let path = dir.join("config.toml");
+        let dropins = dir.join("harnesses.d");
+        std::fs::write(&path, "").unwrap();
+        let mut file = Watched::new(path, Some(dropins.clone()));
+        std::fs::create_dir(&dropins).unwrap();
+        std::fs::write(dropins.join("notes.txt"), "").unwrap();
+        assert!(!file.settled() && !file.settled(), "an empty directory and other files change nothing");
+        std::fs::write(dropins.join("codex.toml"), "[harnesses.codex]\ncommand = \"codex-acp\"\n").unwrap();
+        assert!(!file.settled(), "first seen");
+        assert!(file.settled(), "a new file");
+        std::fs::write(dropins.join("codex.toml"), "[harnesses.codex]\ncommand = \"codex-acp2\"\n").unwrap();
+        assert!(!file.settled() && file.settled(), "an edited file");
+        std::fs::remove_file(dropins.join("codex.toml")).unwrap();
+        assert!(!file.settled() && file.settled(), "a removed file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_settled_edit_triggers_a_reload() {
         let dir = ants_test_support::scratch_dir("reload-trigger");
         let path = dir.join("webhooks.toml");
         std::fs::write(&path, "a = 1\n").unwrap();
-        let mut triggers = Triggers::new(path.clone(), Duration::from_millis(20)).unwrap();
+        let mut triggers = Triggers::new(path.clone(), None, Duration::from_millis(20)).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), triggers.next()).await.is_err(), "no change");
         std::fs::write(&path, "a = 2\nb = 3\n").unwrap();
         let trigger = tokio::time::timeout(Duration::from_secs(5), triggers.next()).await.expect("a reload");

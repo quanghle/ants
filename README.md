@@ -332,11 +332,11 @@ model = "claude-sonnet-4-5"
 Flag and file precedence on `ants daemon`:
 
 - `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled) and runs its schedules.
-- `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present.
+- `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present and from `~/.ants/harnesses.d/` (see [Drop-in harness files](#drop-in-harness-files)).
 - `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`; an ant added from a template refuses ant flags. With `--ant`, no schedule runs.
 - Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`SIGHUP` reloads the config file without a restart, and so does a change to the file itself: the daemon checks its modification time, length and inode every 3 s and reloads once a change stayed the same across two checks (so within about 6 s of the last write; a `SIGHUP` reload counts as having read it). On a reload, ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use, a top-level default or the `[[ant_template]]` they were added from) stop the same way and start again with the new settings; unchanged ants keep running untouched (a template's pool taking in or losing an ant changes no member's settings). An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
+`SIGHUP` reloads the config file without a restart, and so does a change to the file itself or to its drop-in harness files: the daemon checks the file's modification time, length and inode, and those of the `*.toml` files in `harnesses.d` beside it (a file added, removed, replaced or edited), every 3 s and reloads once a change stayed the same across two checks (so within about 6 s of the last write; a `SIGHUP` reload counts as having read it). On a reload, ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use, a top-level default or the `[[ant_template]]` they were added from) stop the same way and start again with the new settings; unchanged ants keep running untouched (a template's pool taking in or losing an ant changes no member's settings). An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
 
 ### Ant templates
 
@@ -378,7 +378,7 @@ A harness definition specifies an ACP stdio executable, arguments, environment a
 | `claude` | `claude-agent-acp` (`npm install -g @agentclientprotocol/claude-agent-acp`) | `default` | `claude login` or `ANTHROPIC_API_KEY` |
 | `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` (or `agy acp --login`) or Gemini API key |
 
-Add new harnesses or replace a built-in whole under `[harnesses.NAME]`:
+Add new harnesses or replace a built-in whole under `[harnesses.NAME]`, in the config file or in a [drop-in file](#drop-in-harness-files):
 
 ```toml
 [harnesses.custom-acp]
@@ -412,6 +412,18 @@ sign_in = "codex-acp login"
 - **Claude Code:** forced to `default` mode (`auto` approves tools internally). Built-in read-only tools/commands (`Read`, `Grep`, `ls`, `echo`) and `~/.claude/settings.json` / `.claude/settings*.json` rules still run unasked; loads `CLAUDE.md` and hooks.
 - **Codex:** `read-only` asks before edits, network access and commands that need to leave Codex's read-only sandbox; commands that only read run in that sandbox unasked (`workspace-write` also edits the workdir unasked, `agent-full-access` never asks). Reports MCP tool calls as `execute` titled `mcp.<server>.<tool>` (matched by `other:` rules). Loads `~/.codex/config.toml` and `AGENTS.md`.
 - **Antigravity CLI:** forced to `default` mode (`agentMode` `auto` runs edits/commands unasked). Workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` rules still apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain sign-in requires services to run as the signed-in OS user (logs: `~/.gemini/antigravity-cli/log/`).
+
+### Drop-in harness files
+
+A harness may also ship as one TOML file in the `harnesses.d` directory beside the config file: `~/.ants/harnesses.d/` for `~/.ants/config.toml`, `DIR/harnesses.d/` for `--config DIR/FILE` or `ANTS_CONFIG=DIR/FILE`. The daemon, `ants doctor`, `ants harness check` and `ants harness prompt` load its `*.toml` files in file-name order, skipping hidden files (`.NAME`), directories and other files; a missing directory defines nothing. Each file holds `[harnesses.NAME]` tables, exactly as in the config file, so a definition moves between them unchanged; any other top-level key fails. A drop-in definition replaces a built-in of the same name whole, as one in the config file does, and a relative `command` with a `/` resolves against `harnesses.d` (`~` expands to the home directory). A name defined in two drop-in files, or in one and the config file, an unknown key or an invalid definition fails the config load, naming the files. Harnesses remain ACP executables: a drop-in file only describes how to start one.
+
+```toml
+# ~/.ants/harnesses.d/codex.toml
+[harnesses.codex]
+command = "codex-acp"
+mode = "read-only"
+sign_in = "codex-acp login"
+```
 
 ### Sign-in
 
