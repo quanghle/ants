@@ -172,7 +172,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let notes = std::sync::Arc::new(crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()));
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
-    let sessions_kv = bus::ensure_sessions(&js).await?;
+    let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps));
     let escalator = Escalator::new(
         config.ant.clone(),
@@ -214,7 +214,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
     let webhooks = Webhooks::new(js.clone());
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
-    let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.ant.clone());
+    let attempts =
+        Attempts::new(bus::ensure_attempts(&js, config.js_domain.as_ref(), &config.ant).await?, config.ant.clone());
     let answered = Answered::new(&config.home);
     answered.prune(bus::RETENTION).await;
     let buried = Buried::new(&config.home);
@@ -1417,7 +1418,7 @@ mod tests {
         attempts: Attempts,
         answered: Answered,
         buried: Buried,
-        markers: jetstream::kv::Store,
+        markers: crate::direct_kv::DirectKv,
         dev: UserId,
         limits: PromptLimits,
         ledger: Arc<Ledger>,
@@ -1444,7 +1445,7 @@ mod tests {
             let dev: UserId = "dev-a".parse().unwrap();
             let (client, js) = bus::connect(url, None, js_domain, &dev, "test").await.unwrap();
             let stream = bus::ensure_stream(&js).await.unwrap();
-            let markers = bus::ensure_attempts(&js).await.unwrap();
+            let markers = bus::ensure_attempts(&js, js_domain, &dev).await.unwrap();
             let attempts = Attempts::new(markers.clone(), dev.clone());
             let answered = Answered::new(&server.dir().join("dev-a"));
             let buried = Buried::new(&server.dir().join("dev-a"));
@@ -1456,7 +1457,8 @@ mod tests {
             let channels = bus::ensure_channels(&js).await.unwrap();
             // Before any post: a new channel consumer starts at the posts stored from then on.
             bus::chan_consumer(&stream, &dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap();
-            let threads = Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js).await.unwrap());
+            let threads =
+                Threads::new(js.clone(), dev.clone(), bus::ensure_sessions(&js, js_domain, &dev).await.unwrap());
             let roster = crate::mcp::jetstream_roster(js.clone());
             let bus = Self {
                 _server: server,
@@ -2052,7 +2054,7 @@ mod tests {
         bus.client.flush().await.unwrap();
         let t1 = ThreadId::generate();
         bus::ensure_owners(&bus.js).await.unwrap();
-        crate::owners::record(&bus.js, &t1, &alice).await.unwrap();
+        crate::owners::record(&bus.js, None, &t1, &alice).await.unwrap();
         let mut go_on = Envelope::on_thread(t1.clone(), alice.clone(), bus.dev.clone(), "go on");
         go_on.turn_budget = 0;
         for envelope in [
@@ -2858,7 +2860,7 @@ mod tests {
             };
             let humans = Registry::default();
             let webhooks = Webhooks::new(uplinked.hub_js.clone());
-            let sessions = bus::ensure_sessions(&uplinked.hub_js).await.unwrap();
+            let sessions = bus::ensure_sessions(&uplinked.hub_js, None, &UserId::human()).await.unwrap();
             let threads = Threads::new(uplinked.hub_js.clone(), UserId::human(), sessions);
             let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
             let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &claims);
@@ -3135,7 +3137,7 @@ mod tests {
         let [asked, stuck, unrecorded] = [(); 3].map(|()| ThreadId::generate());
         bus::ensure_owners(&bus.js).await.unwrap();
         for thread in [&asked, &stuck] {
-            crate::owners::record(&bus.js, thread, &alice).await.unwrap();
+            crate::owners::record(&bus.js, None, thread, &alice).await.unwrap();
         }
         // dev-b names the default human as the owner of each, and links spin-offs to `asked` and `unrecorded`.
         let forge = |thread: &ThreadId, origin: Option<&ThreadId>, text: &str| {
@@ -3543,7 +3545,7 @@ mod tests {
             let mut consumer: PullConsumer =
                 bus.stream.get_consumer(&ants_proto::chan_consumer(&bus.dev)).await.unwrap();
             assert!(consumer.info().await.unwrap().ack_floor.stream_sequence < seq, "not acked before the notice");
-            bus::ensure_sessions(&bus.js).await.unwrap();
+            bus::ensure_sessions(&bus.js, None, &bus.dev).await.unwrap();
             bus.until_posts_acked(seq).await;
             ctrl_c.add_permits(1);
         };

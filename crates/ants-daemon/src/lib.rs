@@ -10,6 +10,7 @@ pub mod channel;
 pub mod config;
 pub mod daemon;
 pub mod dead;
+pub mod direct_kv;
 pub mod escalation;
 pub mod harness;
 pub mod humans;

@@ -423,6 +423,7 @@ pub(crate) mod tests {
     use ants_daemon::channel::{Channels, Reading, Threads};
     use ants_daemon::daemon::Claims;
     use ants_daemon::dead::{self, Attempt};
+    use ants_daemon::direct_kv::DirectKv;
     use ants_daemon::humans::Registry;
     use ants_daemon::roster::Registration;
     use ants_daemon::webhooks::Webhooks;
@@ -597,27 +598,35 @@ pub(crate) mod tests {
 
         // dev-a keeps its sessions under its own keys, and cannot touch dev-b's.
         let thread: ThreadId = "t1".parse().unwrap();
-        assert!(bus::ensure_sessions(&a_js).await.is_err(), "only the human creates the bucket");
-        bus::ensure_sessions(&h_js).await.unwrap();
-        let sessions = bus::ensure_sessions(&a_js).await.unwrap();
-        sessions.put(session_key(&dev_a, &thread), "s1".into()).await.unwrap();
+        assert!(bus::ensure_sessions(&a_js, None, &dev_a).await.is_err(), "only the human creates the bucket");
+        assert!(bus::ensure_attempts(&a_js, None, &dev_a).await.is_err(), "only the human creates the bucket");
+        bus::init_own_buckets(&h_js).await.unwrap();
+        let sessions = bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap();
+        sessions.put(session_key(&dev_a, &thread), "s1").await.unwrap();
         assert_eq!(sessions.get(session_key(&dev_a, &thread)).await.unwrap().as_deref(), Some(&b"s1"[..]));
-        assert!(sessions.put(session_key(&dev_b, &thread), "s1".into()).await.is_err());
+        assert!(sessions.put(session_key(&dev_b, &thread), "s1").await.is_err());
         assert!(sessions.get(session_key(&dev_b, &thread)).await.is_err());
 
         // So it does with the markers of its attempts.
-        assert!(bus::ensure_attempts(&a_js).await.is_err(), "only the human creates the bucket");
-        bus::ensure_attempts(&h_js).await.unwrap();
-        let attempts = bus::ensure_attempts(&a_js).await.unwrap();
-        attempts.put(attempt_key(&dev_a, 1), "started".into()).await.unwrap();
+        let attempts = bus::ensure_attempts(&a_js, None, &dev_a).await.unwrap();
+        attempts.put(attempt_key(&dev_a, 1), "started").await.unwrap();
         assert_eq!(attempts.get(attempt_key(&dev_a, 1)).await.unwrap().as_deref(), Some(&b"started"[..]));
         attempts.delete(attempt_key(&dev_a, 1)).await.unwrap();
         assert_eq!(attempts.get(attempt_key(&dev_a, 1)).await.unwrap(), None);
-        assert!(attempts.put(attempt_key(&dev_b, 1), "started".into()).await.is_err());
+        assert!(attempts.put(attempt_key(&dev_b, 1), "started").await.is_err());
         assert!(attempts.get(attempt_key(&dev_b, 1)).await.is_err());
 
-        // Nor speak for dev-b, or listen to others.
+        // Nor list their keys, which a stream info request with a subjects filter would, as of the owners bucket.
         let (a_raw, mut errors) = server.watched(&dev_a).await;
+        let filter = br#"{"subjects_filter":">"}"#;
+        for bucket in [ants_proto::SESSIONS_BUCKET, ants_proto::ATTEMPTS_BUCKET, ants_proto::OWNERS_BUCKET] {
+            let info = format!("$JS.API.STREAM.INFO.KV_{bucket}");
+            a_raw.publish(info.clone(), filter[..].into()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{info}\"")), "{v}");
+        }
+
+        // Nor speak for dev-b, or listen to others.
         a_raw.publish(subject::status(&dev_a, &thread), "ok".into()).await.unwrap();
         a_raw.publish(subject::status(&dev_b, &thread), "spoof".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
@@ -695,8 +704,8 @@ pub(crate) mod tests {
         bus::ensure_stream(&a_js).await.unwrap();
         let b_stream = bus::init_stream(&b_js).await.unwrap();
         bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
-        bus::ensure_sessions(&a_js).await.unwrap();
-        bus::ensure_attempts(&b_js).await.unwrap();
+        bus::init_own_buckets(&a_js).await.unwrap();
+        bus::init_own_buckets(&b_js).await.unwrap();
         bus::ensure_channels(&a_js).await.unwrap();
         let a_humans = crate::humans::ensure(&a_js).await.unwrap();
         let b_humans = crate::humans::ensure(&b_js).await.unwrap();
@@ -1001,20 +1010,26 @@ pub(crate) mod tests {
         let alerts_creds = issue(&alerts, Destination::Channel("ops".parse().unwrap()));
 
         let (asked, delivered, forged) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
-        owners::record(&h_js, &asked, &human).await.unwrap();
-        owners::record(&h_js, &asked, &alice).await.unwrap();
+        owners::record(&h_js, None, &asked, &human).await.unwrap();
+        owners::record(&h_js, None, &asked, &alice).await.unwrap();
         let hook_js = connect_to(&server.url, &hook_creds, None, &hook).await;
-        owners::record(&hook_js, &delivered, &alice).await.unwrap();
-        owners::record(&hook_js, &asked, &alice).await.unwrap();
-        assert!(owners::record(&a_js, &forged, &alice).await.is_err(), "an ant records no owner");
+        owners::record(&hook_js, None, &delivered, &alice).await.unwrap();
+        owners::record(&hook_js, None, &asked, &alice).await.unwrap();
+        assert!(owners::record(&a_js, None, &forged, &alice).await.is_err(), "an ant records no owner");
         let alerts_js = connect_to(&server.url, &alerts_creds, None, &alerts).await;
-        assert!(owners::record(&alerts_js, &forged, &alice).await.is_err(), "nor a webhook to channels");
+        assert!(owners::record(&alerts_js, None, &forged, &alice).await.is_err(), "nor a webhook to channels");
 
         let (a_raw, mut errors) = server.watched(&dev_a).await;
         let denied = format!("$KV.{}.{}", ants_proto::OWNERS_BUCKET, ants_proto::owner_key(&forged));
         a_raw.publish(denied.clone(), "alice".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        // A webhook that records owners lists no threads of others, which stream info of the bucket would.
+        let (hook_raw, mut hook_errors) = server.watched_with(&hook, &hook_creds).await;
+        let info = format!("$JS.API.STREAM.INFO.KV_{}", ants_proto::OWNERS_BUCKET);
+        hook_raw.publish(info.clone(), br#"{"subjects_filter":">"}"#[..].into()).await.unwrap();
+        let v = next_violation(&hook_raw, &mut hook_errors).await;
+        assert!(v.contains(&format!("Publish to \"{info}\"")), "{v}");
         let read = owners::Owners::new(a_js);
         assert_eq!(read.owner_of(&asked).await.unwrap(), Some(human), "the first record stays");
         assert_eq!(read.owner_of(&delivered).await.unwrap(), Some(alice));
@@ -1146,12 +1161,13 @@ pub(crate) mod tests {
         h_kv.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
         let channels = Channels::watch(a_kv).await.unwrap();
         assert_eq!(channels.get(&ops), Some(&entry));
-        bus::ensure_sessions(&h_js).await.unwrap();
+        bus::init_own_buckets(&h_js).await.unwrap();
         let note = post.reply(human.clone(), "noted", &[], &ants_proto::Humans::default()).unwrap();
         bus::publish_json(&h_js, note.subject(), &note, None).await.unwrap();
         let ask = post.reply(human.clone(), "@dev-a go", &[], &ants_proto::Humans::default()).unwrap();
         let seq = bus::publish_json(&h_js, ask.subject(), &ask, None).await.unwrap();
-        let threads = Threads::new(a_js.clone(), dev_a.clone(), bus::ensure_sessions(&a_js).await.unwrap());
+        let threads =
+            Threads::new(a_js.clone(), dev_a.clone(), bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap());
         assert_eq!(
             threads.context(&ask, seq, true, &ants_proto::Humans::default()).await.unwrap().posts,
             [note],
@@ -1451,8 +1467,12 @@ pub(crate) mod tests {
                 deliveries: 2,
             };
             let (humans, webhooks) = (Registry::default(), Webhooks::new(h_js.clone()));
-            let threads = Threads::new(h_js.clone(), human.clone(), bus::ensure_sessions(&h_js).await.unwrap())
-                .reading(Reading::Gets);
+            let threads = Threads::new(
+                h_js.clone(),
+                human.clone(),
+                DirectKv::new(&h_js, None, ants_proto::SESSIONS_BUCKET).await.unwrap(),
+            )
+            .reading(Reading::Gets);
             let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
             assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1495,8 +1515,12 @@ pub(crate) mod tests {
         let post_seq = bus::publish_json(&b_js, post.subject(), &post, None).await.unwrap();
 
         let (humans, webhooks) = (Registry::new(alice.clone()), Webhooks::new(h_js.clone()));
-        let threads = Threads::new(h_js.clone(), alice.clone(), bus::ensure_sessions(&h_js).await.unwrap())
-            .reading(Reading::Gets);
+        let threads = Threads::new(
+            h_js.clone(),
+            alice.clone(),
+            DirectKv::new(&h_js, None, ants_proto::SESSIONS_BUCKET).await.unwrap(),
+        )
+        .reading(Reading::Gets);
         let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
         for (consumer, seq) in [(ants_proto::inbox_consumer(&dev_a), message_seq), (chan_consumer(&dev_a), post_seq)] {
             let advisory = dead::MaxDeliveries { stream: STREAM.to_owned(), consumer, stream_seq: seq, deliveries: 5 };
@@ -1548,8 +1572,7 @@ pub(crate) mod tests {
                 .unwrap();
         h_js.set_timeout(Duration::from_secs(1));
         bus::init_stream(&h_js).await.unwrap();
-        bus::ensure_sessions(&h_js).await.unwrap();
-        bus::ensure_attempts(&h_js).await.unwrap();
+        bus::init_own_buckets(&h_js).await.unwrap();
         crate::webhook::ensure_bucket(&h_js).await.unwrap();
 
         let (github, alerts) = (p("github"), p("alerts"));
@@ -1629,13 +1652,13 @@ pub(crate) mod tests {
         let mut inbox = bus::inbox_consumer(&stream, &dev_a, WAIT, 5, 2).await.unwrap();
         let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), ask);
-        let sessions = bus::ensure_sessions(&a_js).await.unwrap();
+        let sessions = bus::ensure_sessions(&a_js, Some(&domain), &dev_a).await.unwrap();
         let key = session_key(&dev_a, &ask.thread_id);
-        sessions.put(&key, "s1".into()).await.unwrap();
+        sessions.put(&key, "s1").await.unwrap();
         assert_eq!(sessions.get(&key).await.unwrap().as_deref(), Some(&b"s1"[..]));
-        let attempts = bus::ensure_attempts(&a_js).await.unwrap();
+        let attempts = bus::ensure_attempts(&a_js, Some(&domain), &dev_a).await.unwrap();
         let marker = attempt_key(&dev_a, msg.info().unwrap().stream_sequence);
-        attempts.put(&marker, "started".into()).await.unwrap();
+        attempts.put(&marker, "started").await.unwrap();
         assert!(attempts.get(&marker).await.unwrap().is_some());
         attempts.delete(&marker).await.unwrap();
         let reply = ask.reply(dev_a.clone(), "hello", Role::Human).unwrap();

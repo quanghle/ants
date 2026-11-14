@@ -17,8 +17,9 @@ use std::time::{Duration, SystemTime};
 
 use ants_proto::{ChannelPost, Envelope, NotesPost, ThreadId, UserId, Uuid, attempt_key};
 use anyhow::{Context as _, Result};
-use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
+
+use crate::direct_kv::DirectKv;
 
 /// What an earlier attempt at a message left.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,12 +68,12 @@ struct Record {
 
 /// The attempt markers of one ant, under its own keys.
 pub struct Attempts {
-    kv: kv::Store,
+    kv: DirectKv,
     ant: UserId,
 }
 
 impl Attempts {
-    pub fn new(kv: kv::Store, ant: UserId) -> Self {
+    pub fn new(kv: DirectKv, ant: UserId) -> Self {
         Self { kv, ant }
     }
 
@@ -114,7 +115,7 @@ impl Attempts {
     }
 
     async fn put(&self, seq: u64, record: &Record) -> Result<()> {
-        self.kv.put(attempt_key(&self.ant, seq), serde_json::to_vec(record)?.into()).await?;
+        self.kv.put(attempt_key(&self.ant, seq), serde_json::to_vec(record)?).await?;
         Ok(())
     }
 }

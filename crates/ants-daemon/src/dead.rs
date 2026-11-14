@@ -33,8 +33,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, ThreadOrigin, UserId, Uuid, chan_consumer,
-    dead_reader, inbox_consumer, subject,
+    ChannelPost, DeadLetter, Envelope, EscalationReason, SESSIONS_BUCKET, STREAM, ThreadOrigin, UserId, Uuid,
+    chan_consumer, dead_reader, inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
@@ -47,6 +47,7 @@ use crate::attempts::Notes;
 use crate::bus;
 use crate::channel::{Reading, Threads};
 use crate::daemon::Claims;
+use crate::direct_kv::DirectKv;
 use crate::escalation::{Escalator, Stuck};
 use crate::humans::Registry;
 use crate::webhooks::Webhooks;
@@ -437,7 +438,9 @@ pub async fn watch(
     let humans = Registry::default();
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let webhooks = Webhooks::new(js.clone());
-    let threads = Threads::new(js.clone(), reader.clone(), bus::ensure_sessions(js).await?).reading(Reading::Gets);
+    // The human's side neither reads nor writes sessions, which its credentials do not allow.
+    let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await?;
+    let threads = Threads::new(js.clone(), reader.clone(), sessions).reading(Reading::Gets);
     let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {

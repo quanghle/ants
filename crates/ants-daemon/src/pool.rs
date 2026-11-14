@@ -11,22 +11,22 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::v1::schema::SessionId;
 use ants_proto::{ThreadId, UserId, session_key};
 use anyhow::{Context as _, Result};
-use async_nats::jetstream::kv;
 use tokio::sync::Notify;
 
+use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
 pub enum SessionStore {
     /// The KV bucket [`ants_proto::SESSIONS_BUCKET`], under the ant's own keys.
-    Kv { kv: Box<kv::Store>, ant: UserId },
+    Kv { kv: Box<DirectKv>, ant: UserId },
     /// In this process only, shared by clones.
     Memory(Arc<Mutex<HashMap<ThreadId, SessionId>>>),
 }
 
 impl SessionStore {
-    pub fn kv(kv: kv::Store, ant: UserId) -> Self {
+    pub fn kv(kv: DirectKv, ant: UserId) -> Self {
         Self::Kv { kv: Box::new(kv), ant }
     }
 
@@ -39,7 +39,7 @@ impl SessionStore {
         match self {
             Self::Kv { kv, ant } => {
                 let value = kv.get(session_key(ant, thread)).await.context("reading the session of the thread")?;
-                Ok(value.and_then(|v| String::from_utf8(v.to_vec()).ok()).map(SessionId::new))
+                Ok(value.and_then(|v| String::from_utf8(v).ok()).map(SessionId::new))
             }
             Self::Memory(map) => Ok(map.lock().expect("session store").get(thread).cloned()),
         }
@@ -48,7 +48,7 @@ impl SessionStore {
     pub async fn put(&self, thread: &ThreadId, session: &SessionId) -> Result<()> {
         match self {
             Self::Kv { kv, ant } => {
-                kv.put(session_key(ant, thread), session.to_string().into())
+                kv.put(session_key(ant, thread), session.to_string())
                     .await
                     .context("storing the session of the thread")?;
             }

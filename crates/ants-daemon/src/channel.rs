@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 
+use crate::direct_kv::DirectKv;
 use crate::links;
 use crate::owners::Owners;
 pub use crate::reading::Reading;
@@ -510,7 +511,7 @@ pub struct Threads {
     js: jetstream::Context,
     ant: UserId,
     /// The sessions bucket, under the ant's own keys.
-    seen: kv::Store,
+    seen: DirectKv,
     /// How the reader reads channels back.
     reading: Reading,
     /// One read at a time through the reader's own consumer.
@@ -529,7 +530,7 @@ pub struct Threads {
 }
 
 impl Threads {
-    pub fn new(js: jetstream::Context, ant: UserId, sessions: kv::Store) -> Self {
+    pub fn new(js: jetstream::Context, ant: UserId, sessions: DirectKv) -> Self {
         Self {
             js: js.clone(),
             ant,
@@ -736,7 +737,7 @@ impl Threads {
             return Ok(());
         }
         let key = channel_seen_key(&self.ant, thread);
-        self.seen.put(key, seq.to_string().into()).await.context("storing the last post seen")?;
+        self.seen.put(key, seq.to_string()).await.context("storing the last post seen")?;
         Ok(())
     }
 }
@@ -770,7 +771,7 @@ impl Threads {
             crate::bus::store(&self.js, notice.subject(), &notice, &post.mention_msg_id(&human))
                 .await
                 .with_context(|| format!("notifying {human} of the mention"))?;
-            self.seen.put(key, post.id.to_string().into()).await.context("storing a mention marker")?;
+            self.seen.put(key, post.id.to_string()).await.context("storing a mention marker")?;
             notified.push(human);
         }
         Ok(notified)
