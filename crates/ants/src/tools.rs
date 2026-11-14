@@ -7,8 +7,8 @@
 //! is skipped with a warning.
 //!
 //! Any human decides, and the first decision wins: a decision is stored only while the request's subject holds none
-//! ([`answer`]), so of two humans answering at once, the second is told the request was already answered. The ant
-//! acts on the stored decision, not on the first it hears, since a refused publish still reaches subscribers.
+//! ([`answer_request`]), so of two humans answering at once, the second is told the request was already answered.
+//! The ant acts on the stored decision, not on the first it hears, since a refused publish still reaches subscribers.
 //!
 //! An agent of the ant's escalate_to may decide too: its decision travels as an envelope to the ant's inbox,
 //! `ants.inbox.<ant>.<agent>`, where humans read it back. A request such a decision came to first, as the stream
@@ -16,14 +16,20 @@
 //! is refused. The chain is the ant's roster entry's, else the one kept in `ants_chains`, as the ant takes a
 //! decision only from its own chain.
 //!
+//! A human approving the same call of an ant again and again is shown the allow rule that would spare it
+//! ([`suggestion`]): once [`SUGGEST_AFTER`] requests of the ant for the same rule ([`permission::rule_for`]) are
+//! approved, counting the one at hand, as the stream holds them. `ants tools approve --rule` approves and adds the rule
+//! to the ant's allow list in the config file, then reloads the daemon.
+//!
 //! Request ids are unique only per ant: any ant can publish a request reusing another's id. So a request is
 //! written `<ant>/<id>`, and a bare id (or start of one) matching requests of several ants is refused with
 //! the qualified ids to choose from.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::Path;
 
-use ants_daemon::{bus, chains};
+use ants_daemon::{bus, chains, config, permission};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, Following, ROSTER_BUCKET, RosterEntry, STREAM, UserId,
     Uuid, Verdict, subject,
@@ -332,6 +338,7 @@ pub async fn find(stream: &Stream, id: &str) -> Result<(u64, ApprovalRequest)> {
 
 /// Answer the pending request `id` picks (see [`find`]), and wait until JetStream has stored the decision. The
 /// decision is stored only while the request has none, so another human's that came first wins over it.
+#[cfg(test)]
 pub async fn answer(
     js: &jetstream::Context,
     stream: &Stream,
@@ -410,6 +417,43 @@ async fn decide(
         },
         Err(e) => Err(bus::explain(js, &decision.subject(), e).await).context("publishing the decision"),
     }
+}
+
+/// How many approvals of requests of an ant for the same allow rule, the one at hand included, make the rule suggested.
+pub const SUGGEST_AFTER: usize = 3;
+
+/// An allow rule that would have spared the humans a request ([`suggestion`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suggestion {
+    pub rule: String,
+    /// How many earlier requests of the ant for the rule a human approved.
+    pub approved_before: usize,
+}
+
+/// The allow rule fitting `request`, stored at stream sequence `seq`, if approving it makes at least
+/// [`SUGGEST_AFTER`] approvals of requests of its ant for that rule. Earlier requests count when the stream still holds
+/// them and a human's decision allowed them.
+pub async fn suggestion(stream: &Stream, seq: u64, request: &ApprovalRequest) -> Result<Option<Suggestion>> {
+    let Some(rule) = permission::rule_for(&request.tool) else { return Ok(None) };
+    let requests = subject::approvals(&request.ant);
+    let (mut approved_before, mut from) = (0, 1);
+    while from < seq {
+        let msg = match stream.get_first_raw_message_by_subject(&requests, from).await {
+            Ok(msg) if msg.sequence < seq => msg,
+            Ok(_) => break,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => break,
+            Err(e) => return Err(e).with_context(|| format!("reading the tool requests of {}", request.ant)),
+        };
+        from = msg.sequence + 1;
+        let Ok(earlier) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
+        let same = earlier.check_subject(&msg.subject).is_ok()
+            && earlier.id != request.id
+            && permission::rule_for(&earlier.tool).as_deref() == Some(rule.as_str());
+        if same && decision(stream, &earlier).await?.is_some_and(|d| d.verdict != Verdict::Reject) {
+            approved_before += 1;
+        }
+    }
+    Ok((approved_before + 1 >= SUGGEST_AFTER).then_some(Suggestion { rule, approved_before }))
 }
 
 /// Time left before `expires_at`, such as `4m05s`.
@@ -532,13 +576,74 @@ pub async fn show(nats: &crate::Nats<'_>, id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `ants tools approve ID [--always]` and `ants tools reject ID`: answer one request with `verdict`.
-pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict) -> Result<()> {
+/// `ants tools approve ID [--always] [--rule]` and `ants tools reject ID`: answer one request with `verdict`. With
+/// `rule`, the config file there, also add the allow rule fitting the request to its ant's allow list, then reload
+/// the daemon serving the file.
+pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, rule: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
-    let decision = answer(&js, &stream, id, verdict, Utc::now()).await?;
+    let (seq, request) = find(&stream, id).await?;
+    // Checked before answering, so a rule that cannot be added leaves the request pending.
+    let edit = match rule {
+        Some(path) => {
+            let rule = permission::rule_for(&request.tool).with_context(|| {
+                format!(
+                    "no allow rule fits request {} exactly; answer without --rule, and widen the allow list of {} by \
+                     hand if needed",
+                    qualified(&request),
+                    request.ant
+                )
+            })?;
+            let text = config::with_allow_rule(path, &request.ant, &rule)?;
+            Some((path, rule, text))
+        }
+        None => None,
+    };
+    let decision = answer_request(&js, &stream, seq, &request, verdict, Utc::now()).await?;
     println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
+    let ant = &request.ant;
+    match edit {
+        Some((path, rule, None)) => println!("{rule:?} is in the allow list of {ant} already in {}", path.display()),
+        Some((path, rule, Some(text))) => {
+            config::write(path, &text)?;
+            println!("{rule:?} added to the allow list of {ant} in {}", path.display());
+            reload_daemon(path, ant);
+        }
+        None if verdict == Verdict::Reject => {}
+        None => match suggestion(&stream, seq, &request).await {
+            Ok(Some(s)) => println!("{}", suggestion_text(&request, &s)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = format!("{e:#}"), "counting earlier approvals"),
+        },
+    }
     Ok(())
+}
+
+/// What `ants tools approve` prints after approving `request`, for which `suggestion` came.
+fn suggestion_text(request: &ApprovalRequest, suggestion: &Suggestion) -> String {
+    let ant = &request.ant;
+    format!(
+        "{ant} was allowed this {} times: the allow rule {:?} in its allow list would spare asking; `ants tools \
+         approve ID --rule` on the next such request adds it",
+        suggestion.approved_before + 1,
+        suggestion.rule
+    )
+}
+
+/// Reload the daemon serving the config file at `path`, for `ant` to take its new allow list, or say how.
+fn reload_daemon(path: &Path, ant: &UserId) {
+    use crate::service::{Action, Outcome, Service, Services, failure, manual};
+    match Services::local().apply(Service::Daemon, Action::Reload, path) {
+        Outcome::Done(command) => {
+            println!("daemon reloaded ({command}): {ant} restarts with the rule once its prompts in flight finish")
+        }
+        Outcome::NotRunning => println!("the daemon service is not running; {ant} has the rule once started"),
+        outcome => println!(
+            "{}reload `ants daemon` with SIGHUP, or its service ({}), for {ant} to take the rule",
+            failure(outcome),
+            manual(Service::Daemon, Action::Reload)
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -727,6 +832,43 @@ mod tests {
         let State::Decided(first) = state_of(&cat).await else { panic!("the human's came first") };
         assert_eq!(first.verdict, Verdict::Reject);
         assert_eq!(state_of(&rm).await, State::Pending, "dev-c is not in dev-a's chain");
+    }
+
+    /// Earlier approvals of dev-a for the same command make the rule suggested; rejected ones, other commands and
+    /// later requests do not count.
+    #[tokio::test]
+    async fn repeated_approvals_suggest_an_allow_rule() {
+        let Some(server) = Server::start() else { return };
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
+        let stream = bus::ensure_stream(&human).await.unwrap();
+        let (_, agent) = server.connect(&dev_a).await;
+        let mut stored = Vec::new();
+        for (command, verdict) in [
+            ("cargo test", Some(Verdict::AllowOnce)),
+            ("cargo test", Some(Verdict::Reject)),
+            ("git push", Some(Verdict::AllowOnce)),
+            ("cargo test", Some(Verdict::AllowAlways)),
+            ("cargo test", None),
+            ("cargo test", None),
+        ] {
+            let mut r =
+                request(&dev_a, command, vec![Verdict::AllowOnce, Verdict::AllowAlways], Duration::from_secs(60));
+            r.tool.input = Some(serde_json::json!({ "command": command }).to_string());
+            bus::publish_json(&agent, r.subject(), &r, None).await.unwrap();
+            let (seq, _) = find(&stream, &qualified(&r)).await.unwrap();
+            if let Some(verdict) = verdict {
+                answer_request(&human, &stream, seq, &r, verdict, Utc::now()).await.unwrap();
+            }
+            stored.push((seq, r));
+        }
+        let suggested = async |i: usize| suggestion(&stream, stored[i].0, &stored[i].1).await.unwrap();
+        assert_eq!(suggested(3).await, None, "the second approval");
+        let third = Suggestion { rule: "execute:cargo test".to_owned(), approved_before: 2 };
+        assert_eq!(suggested(4).await.as_ref(), Some(&third));
+        assert_eq!(suggested(5).await, Some(third), "a request still pending is no approval");
+        assert_eq!(suggested(2).await, None, "git push was allowed once");
+        assert!(suggestion_text(&stored[4].1, &suggested(4).await.unwrap()).contains("allowed this 3 times"));
     }
 
     #[test]

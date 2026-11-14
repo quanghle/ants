@@ -499,12 +499,13 @@ fn label(verdict: Verdict) -> &'static str {
 }
 
 /// The notice of `request`, stored at stream sequence `seq`, for `human`, with a button per verdict it offers when
-/// there are `links`.
+/// there are `links`, and the allow rule `suggested` for it ([`tools::suggestion`]).
 fn approval_notice(
     request: &ApprovalRequest,
     seq: u64,
     human: &UserId,
     links: Option<&Links>,
+    suggested: Option<&tools::Suggestion>,
     now: DateTime<Utc>,
 ) -> Notice {
     let tool = &request.tool;
@@ -522,6 +523,13 @@ fn approval_notice(
         request.thread_id,
         tools::left(request.expires_at, now),
     );
+    if let Some(suggested) = suggested {
+        let _ = write!(
+            text,
+            "\nallowed {} times before: `ants tools approve {id} --rule` also adds the allow rule {:?} to {}",
+            suggested.approved_before, suggested.rule, request.ant
+        );
+    }
     let buttons = links
         .map(|links| {
             request
@@ -782,11 +790,17 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
             return;
         }
         match tools::state(&bus.js, &bus.stream, seq, &request, now).await {
-            Ok(tools::State::Pending) => Some(approval_notice(&request, seq, &config.name, links, now)),
+            Ok(tools::State::Pending) => {
+                let suggested = tools::suggestion(&bus.stream, seq, &request).await.unwrap_or_else(|e| {
+                    tracing::warn!(human = %config.name, error = format!("{e:#}"), "counting earlier approvals");
+                    None
+                });
+                Some(approval_notice(&request, seq, &config.name, links, suggested.as_ref(), now))
+            }
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!(human = %config.name, error = format!("{e:#}"), "reading a tool request's state");
-                Some(approval_notice(&request, seq, &config.name, links, now))
+                Some(approval_notice(&request, seq, &config.name, links, None, now))
             }
         }
     };
@@ -1126,7 +1140,7 @@ mod tests {
     #[test]
     fn a_notice_carries_a_button_per_verdict_offered_in_each_sink_s_form() {
         let (request, links) = (request(), links());
-        let notice = approval_notice(&request, 9, &p("alice"), Some(&links), Utc::now());
+        let notice = approval_notice(&request, 9, &p("alice"), Some(&links), None, Utc::now());
         assert_eq!(notice.title, "dev-a asks to run a tool");
         assert!(
             notice.text.contains("rm -rf <build> (execute)\nfiles: src/a.rs\ninput: {\"command\""),
@@ -1144,7 +1158,19 @@ mod tests {
             let action = links.verify(query, Utc::now()).unwrap();
             assert_eq!((action.seq, action.verdict, &action.by), (9, button.verdict, &p("alice")));
         }
-        assert!(approval_notice(&request, 9, &p("alice"), None, Utc::now()).buttons.is_empty(), "no links");
+        assert!(approval_notice(&request, 9, &p("alice"), None, None, Utc::now()).buttons.is_empty(), "no links");
+        assert!(!notice.text.contains("--rule"), "{}", notice.text);
+        let suggested = tools::Suggestion { rule: "execute:rm -rf build".to_owned(), approved_before: 2 };
+        let suggesting = approval_notice(&request, 9, &p("alice"), None, Some(&suggested), Utc::now());
+        assert!(
+            suggesting.text.ends_with(&format!(
+                "\nallowed 2 times before: `ants tools approve dev-a/{} --rule` also adds the allow rule \
+                 \"execute:rm -rf build\" to dev-a",
+                request.id
+            )),
+            "{}",
+            suggesting.text
+        );
 
         let ntfy = Sink::Ntfy { url: NTFY.to_owned(), topic: "t".to_owned(), token: Some("tk".to_owned()) };
         let (url, bearer, body) = ntfy.request(&notice);

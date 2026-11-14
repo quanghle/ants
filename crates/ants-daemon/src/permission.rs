@@ -129,6 +129,29 @@ impl Allowlist {
     }
 }
 
+/// The narrowest allowlist rule allowing `tool`, a call an ant escalated ([`Approver::decide`]): its exact command,
+/// file, URL or title. None when no rule fits: a command with shell control characters, which no pattern matches, a
+/// call touching several files or none, or a text holding `*`, which a pattern cannot write literally, or with
+/// leading or trailing blanks, which a rule loses.
+pub fn rule_for(tool: &ToolCall) -> Option<String> {
+    let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
+    let pattern = match tool.kind.as_str() {
+        "execute" => input.as_ref().and_then(command_in).filter(|c| !has_shell_control(c))?,
+        "read" | "edit" | "delete" | "move" => match tool.locations.as_slice() {
+            [path] if Path::new(path).is_absolute() && normalize(Path::new(path)) == Path::new(path) => path.clone(),
+            _ => return None,
+        },
+        "fetch" => input
+            .as_ref()
+            .and_then(|i| i.get("url"))
+            .and_then(Value::as_str)
+            .map_or_else(|| tool.title.clone(), str::to_owned),
+        _ => tool.title.clone(),
+    };
+    let fits = !pattern.is_empty() && pattern.trim() == pattern && !pattern.contains('*');
+    (fits && KINDS.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
+}
+
 /// The humans and the ant's chain, or whoever stands in: decide tool requests outside the allowlist.
 pub trait Approver: Send + Sync {
     /// The decision on `tool`, requested on `thread`, among the `options` the harness offers. Never fails: anything
@@ -262,7 +285,11 @@ fn summary(tool: &Tool<'_>) -> ToolCall {
 }
 
 fn command(fields: &ToolCallUpdateFields) -> Option<String> {
-    match fields.raw_input.as_ref()?.get("command")? {
+    command_in(fields.raw_input.as_ref()?)
+}
+
+fn command_in(input: &Value) -> Option<String> {
+    match input.get("command")? {
         Value::String(s) => Some(s.clone()),
         Value::Array(parts) => {
             parts.iter().map(|p| p.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>().map(|p| p.join(" "))
@@ -463,6 +490,30 @@ mod tests {
     fn glob_stars_span_any_characters() {
         assert!(glob("a*c", "abbbc") && glob("*", "") && glob("a**", "a") && glob("*b*", "abc"));
         assert!(!glob("a*c", "abd") && !glob("abc", "ab") && !glob("", "a"));
+    }
+
+    #[test]
+    fn the_suggested_rule_allows_the_escalated_call_exactly() {
+        let rule = |request: &RequestPermissionRequest| {
+            let fields = &request.tool_call.fields;
+            rule_for(&summary(&Tool { kind: kind_name(fields), fields }))
+        };
+        let fetch = request(ToolKind::Fetch, "Fetch", json!({ "url": "https://docs.rs/x" }), &[]);
+        let mcp = request(ToolKind::Other, "mcp__bd__show", json!({}), &[]);
+        for (request, expected) in [
+            (shell("cargo test -p ants"), "execute:cargo test -p ants"),
+            (edit("/work/repo/src/main.rs"), "edit:/work/repo/src/main.rs"),
+            (fetch, "fetch:https://docs.rs/x"),
+            (mcp, "other:mcp__bd__show"),
+        ] {
+            assert_eq!(rule(&request).as_deref(), Some(expected));
+            assert!(allows(&[expected], &request), "{expected}");
+        }
+        assert!(!allows(&["execute:cargo test -p ants"], &shell("cargo test -p ants-daemon")));
+        let two = request(ToolKind::Edit, "Edit", json!({}), &["/work/repo/a", "/work/repo/b"]);
+        for none in [shell("git status; rm -rf ~"), shell("rm *.o"), shell(" ls"), edit("src/x"), two] {
+            assert_eq!(rule(&none), None, "{:?}", none.tool_call.fields.raw_input);
+        }
     }
 
     /// Answers every request with a fixed verdict, recording what it was asked.

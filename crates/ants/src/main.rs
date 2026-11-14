@@ -724,6 +724,13 @@ enum ToolsCommand {
         /// Allow this tool for the rest of the session (allow-always), when the request offers it.
         #[arg(long)]
         always: bool,
+        /// Also add the allow rule fitting the request exactly to the ant's allow list in the config file, then
+        /// reload the daemon serving it.
+        #[arg(long)]
+        rule: bool,
+        /// Config file listing the ant, for --rule (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
     },
     /// Reject the tool call of a pending request.
     Reject {
@@ -959,11 +966,18 @@ async fn main() -> Result<()> {
         }
         Command::Tools(ToolsCommand::List { follow, json }) => tools::list(&nats()?, follow, json).await,
         Command::Tools(ToolsCommand::Show { id, json }) => tools::show(&nats()?, &id, json).await,
-        Command::Tools(ToolsCommand::Approve { id, always }) => {
+        Command::Tools(ToolsCommand::Approve { id, always, rule, config }) => {
             let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };
-            tools::decide_request(&nats()?, &id, verdict).await
+            let config = match (rule, config) {
+                (false, _) => None,
+                (true, Some(path)) => Some(path),
+                (true, None) => Some(ants_daemon::config::default_path()?),
+            };
+            tools::decide_request(&nats()?, &id, verdict, config.as_deref()).await
         }
-        Command::Tools(ToolsCommand::Reject { id }) => tools::decide_request(&nats()?, &id, Verdict::Reject).await,
+        Command::Tools(ToolsCommand::Reject { id }) => {
+            tools::decide_request(&nats()?, &id, Verdict::Reject, None).await
+        }
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
             let default_path = ants_daemon::config::default_path()?;
@@ -2263,11 +2277,11 @@ mod tests {
         let parse = |line: &str| Cli::try_parse_from(line.split(' ')).map(|cli| cli.command);
         assert_matches!(
             parse("ants tools approve dev-a/019a --always"),
-            Ok(Command::Tools(ToolsCommand::Approve { id, always: true })) if id == "dev-a/019a"
+            Ok(Command::Tools(ToolsCommand::Approve { id, always: true, rule: false, .. })) if id == "dev-a/019a"
         );
         assert_matches!(
-            parse("ants tools approve 019a"),
-            Ok(Command::Tools(ToolsCommand::Approve { id, always: false })) if id == "019a"
+            parse("ants tools approve 019a --rule"),
+            Ok(Command::Tools(ToolsCommand::Approve { id, always: false, rule: true, .. })) if id == "019a"
         );
         assert_matches!(parse("ants tools reject 019a"), Ok(Command::Tools(ToolsCommand::Reject { id })) if id == "019a");
         assert_matches!(
@@ -2278,9 +2292,13 @@ mod tests {
             parse("ants tools list -f"),
             Ok(Command::Tools(ToolsCommand::List { follow: true, json: false }))
         );
-        for line in
-            ["ants approve", "ants approve 019a allow-once", "ants tools approve", "ants tools reject 019a --always"]
-        {
+        for line in [
+            "ants approve",
+            "ants approve 019a allow-once",
+            "ants tools approve",
+            "ants tools reject 019a --always",
+            "ants tools reject 019a --rule",
+        ] {
             assert!(parse(line).is_err(), "{line}");
         }
     }
