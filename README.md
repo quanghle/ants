@@ -584,7 +584,7 @@ ants dead drop 42       # delete dead letter without replaying (human creds)
 ants dead watch         # convert MAX_DELIVERIES advisories into dead letters until Ctrl-C
 ```
 
-If NATS errors prevent storing the dead letter on delivery 6, JetStream emits unpersisted advisory `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch` (and `ants inbox --follow`) captures that advisory, writes the dead letter and notifies the thread owner (or default human) directly. Offline leaf daemons note burials in `<home>/buried` and check `deadread-<ant>` on reconnect to avoid duplicates.
+If NATS errors prevent storing the dead letter on delivery 6, JetStream emits unpersisted advisory `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch` (and `ants inbox --follow`) captures that advisory, writes the dead letter and notifies the thread owner (or default human) directly, past the escalation chain; the notice carries a level-0 `dead_letter` escalation, so `ants webhook serve` pushes it and `ants thread list --escalated` lists it, but no reminder follows, as human credentials cannot keep the escalation in `ants_sessions`. A daemon finishing a burial from its outbox on the last delivery sends the same notice under the same message id. Offline leaf daemons note burials in `<home>/buried` and check `deadread-<ant>` on reconnect to avoid duplicates.
 
 ## Webhooks
 
