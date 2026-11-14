@@ -222,6 +222,7 @@ nats = "wss://hub.example/nats"            # default NATS URL for ants without `
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off); see Monitoring
+timezone = "America/New_York"              # default time zone of schedules' cron (default UTC); see Schedules
 
 [cli]                                      # the CLI's connection where no flag or environment variable sets it
 creds = "~/.config/ants/auth/alice.creds"  # the human's credentials (an ant's never apply)
@@ -635,7 +636,8 @@ Human credentials issued before notifications lack the `notify-<human>` consumer
 [[schedule]]
 name = "nightly"                              # ants auth user nightly --webhook --to dev-a
 creds = "~/.config/ants/auth/nightly.creds"
-cron = "0 3 * * 1-5"                          # minute hour day-of-month month day-of-week, in UTC
+cron = "0 3 * * 1-5"                          # minute hour day-of-month month day-of-week
+timezone = "Europe/London"                    # optional: the zone cron reads in; default the top-level timezone, then UTC
 ant = "dev-a"
 owner = "alice"                               # optional human owner for replies and escalations
 text = "Triage the failing nightly tests and summarise them."
@@ -651,7 +653,8 @@ text = "Post what changed since the last standup."
 nats = "nats://127.0.0.1:4222"                # optional, as js_domain: default the top-level values, then the flags
 ```
 
-- **Timetable:** exactly one of `cron` and `every`. `cron` takes 5 fields with `*`, lists, ranges, steps (`*/15`, `1-5/2`, `10/20`), month and weekday names (`jan`, `mon`; day of week `0` and `7` are Sunday) or `@yearly`, `@monthly`, `@weekly`, `@daily` and `@hourly`; when both day fields are restricted, a day matching either fires (as cron does). `every` is a duration of at least `1m` (`15m`, `1h30m`, `1d`), so `every = "1d"` fires at 00:00 UTC. All times are UTC.
+- **Timetable:** exactly one of `cron` and `every`. `cron` takes 5 fields with `*`, lists, ranges, steps (`*/15`, `1-5/2`, `10/20`), month and weekday names (`jan`, `mon`; day of week `0` and `7` are Sunday) or `@yearly`, `@monthly`, `@weekly`, `@daily` and `@hourly`; when both day fields are restricted, a day matching either fires (as cron does). `every` is a duration of at least `1m` (`15m`, `1h30m`, `1d`), anchored at the Unix epoch whatever the time zone, so `every = "1d"` fires at 00:00 UTC.
+- **Time zone:** `cron` reads in the IANA time zone `timezone` names (`Europe/London`, `Asia/Tokyo`), else the file's top-level `timezone`, else UTC; `timezone` goes with `cron` only, and an unknown name fails loading the file. Daylight saving time applies: a local time skipped when the clocks go forward fires once, at the instant they jump (`30 2 * * *` fires at 03:00 on a night going from 02:00 to 03:00, and `*/15 2 * * *` once then), and a local time repeated when they go back fires once, at its first occurrence, so `0 * * * *` skips the repeated hour; `every` keeps a steady interval. Zones come from the system's time zone database (`/usr/share/zoneinfo`, or the directory `TZDIR` names), and on Windows from one built into `ants`.
 - **Destination:** exactly one of `ant` and `channel`; `mention` and `broadcast` (all members at the firing) only with `channel`. `owner` works as for webhooks.
 - **Identity:** a schedule is a webhook-role user (`ants auth user NAME --webhook --to ANT` or `--channel CH`, and `--webhook NAME` in `ants auth leaf`), checked at load: its credentials must name it, be no human's and allow its destination. Its messages carry `webhook: true` and it puts `<schedule>.webhook` in `ants_webhooks` hourly, as a webhook does, so replies and triage work as for a [webhook](#webhooks).
 - **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 24 h `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.

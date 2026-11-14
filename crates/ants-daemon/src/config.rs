@@ -28,6 +28,8 @@
 //! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
 //! mode = "default"                  # ACP session mode every session must run in
 //!
+//! timezone = "America/New_York"    # default zone of the schedules' cron, else UTC
+//!
 //! [[schedule]]                      # a prompt on a timetable; see crate::schedule
 //! name = "nightly"
 //! cron = "0 3 * * *"
@@ -93,6 +95,8 @@ struct File {
     human: Option<UserId>,
     /// Where to serve health and metrics ([`crate::metrics`]).
     metrics: Option<SocketAddr>,
+    /// Default time zone of the schedules' cron timetables.
+    timezone: Option<String>,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant")]
@@ -411,8 +415,8 @@ pub fn load(path: &Path) -> Result<Loaded> {
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
 /// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false` or an ant is
-/// named `messenger`, and check the schedules, each named once and after no ant, with the top-level `nats` and
-/// `js_domain` where they set none.
+/// named `messenger`, and check the schedules, each named once and after no ant, with the top-level `nats`,
+/// `js_domain` and `timezone` where they set none.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
@@ -466,10 +470,16 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         ants.push(ant);
     }
+    let timezone = file
+        .timezone
+        .as_deref()
+        .map(schedule::time_zone)
+        .transpose()
+        .with_context(|| format!("config {}", path.display()))?;
     let mut schedules: Vec<Schedule> = Vec::with_capacity(file.schedules.len());
     for entry in file.schedules {
         let name = entry.name.clone();
-        let mut schedule = Schedule::from_entry(entry, |p| resolve(p, base, home))
+        let mut schedule = Schedule::from_entry(entry, timezone.as_ref(), |p| resolve(p, base, home))
             .with_context(|| format!("config {}: schedule {name}", path.display()))?;
         let name = &schedule.name;
         if schedules.iter().any(|s| s.name == *name) {
@@ -1264,6 +1274,16 @@ Review changes for correctness."""
         assert!(err(&ant).contains("schedule messenger has the name of an ant"));
         let bad = err(&one.replace("@daily", "0 25 * * *"));
         assert!(bad.contains("config.toml: schedule nightly: cron \"0 25 * * *\": hour"), "{bad}");
+        let bad = err(&format!("timezone = \"Mars/Olympus_Mons\"\n{one}"));
+        assert!(bad.contains("config.toml: timezone \"Mars/Olympus_Mons\": unknown time zone"), "{bad}");
+        let bad = err(&format!("{one}timezone = \"Europe/Londn\"\n"));
+        assert!(bad.contains("schedule nightly: timezone \"Europe/Londn\": unknown time zone"), "{bad}");
+
+        let zoned = |text: &str| parse_all(text).unwrap().schedules[0].when.to_string();
+        assert_eq!(zoned(one), "cron \"@daily\"", "UTC by default");
+        let tokyo = format!("timezone = \"Asia/Tokyo\"\n{one}");
+        assert_eq!(zoned(&tokyo), "cron \"@daily\" in Asia/Tokyo", "the top-level default");
+        assert_eq!(zoned(&format!("{tokyo}timezone = \"UTC\"\n")), "cron \"@daily\"", "the schedule's own");
     }
 
     #[test]
