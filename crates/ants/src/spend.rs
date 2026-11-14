@@ -24,7 +24,7 @@ const STALE_CREDS: &str = "human credentials issued before `ants spend` existed 
 /// What to report: one ant or all, one thread or the days up to today.
 pub struct Select {
     pub ant: Option<UserId>,
-    pub thread: Option<ThreadId>,
+    pub thread: Option<crate::thread::Pick>,
     pub days: u32,
 }
 
@@ -309,7 +309,7 @@ pub async fn show(nats: &crate::Nats<'_>, select: &Select, caps: &BTreeMap<UserI
     let (_, js) = nats.connect("ants-spend").await?;
     let kv = DirectKv::new(&js, None, SESSIONS_BUCKET).await?;
     let ant = select.ant.as_ref();
-    if let Some(id) = &select.thread {
+    if let Some(id) = &crate::thread::resolve(select.thread.clone(), &js, &nats.me).await? {
         let reports = thread(&js, &kv, ant, id, caps).await?;
         if json {
             for report in &reports {
