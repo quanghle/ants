@@ -1,11 +1,13 @@
 # The built-in harness definitions. A config file's [harnesses.<name>] table of the same name replaces one whole.
-# `sign_in` is the command a human runs when the harness reports it is not signed in.
+# `sign_in` is the command a human runs when the harness reports it is not signed in. `context_overflow` lists phrases
+# of its prompt errors that mean the session outgrew the model's context window, besides those every harness shares.
 
 # GitHub Copilot CLI.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp"]
 sign_in = "copilot login"
+context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
 
 [harnesses.copilot.context]
 default = { args = ["--context", "default"] }
@@ -17,6 +19,7 @@ long_context = { args = ["--context", "long_context"] }
 command = "claude-agent-acp"
 mode = "default"
 sign_in = "claude login"
+context_overflow = ["exceed context limit"]
 
 [harnesses.claude.context]
 default = {}
@@ -30,3 +33,4 @@ command = "agy"
 args = ["acp", "--disable-telemetry"]
 mode = "default"
 sign_in = "agy"
+context_overflow = ["exceeds the maximum number of tokens allowed"]

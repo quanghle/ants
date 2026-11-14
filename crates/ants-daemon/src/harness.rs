@@ -21,6 +21,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
+use crate::history::{History, Rebuild};
+use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
 
 /// The harness of an ant that names none, in a file that names none.
@@ -51,6 +53,10 @@ pub struct Harness {
     pub(crate) context: BTreeMap<String, ContextValue>,
     /// The command a human runs to sign the harness in, named when it reports it is signed out.
     pub(crate) sign_in: Option<String>,
+    /// Phrases of its prompt errors that mean the session outgrew the model's context window, besides the ones every
+    /// harness shares ([`crate::overflow`]).
+    #[serde(default)]
+    pub(crate) context_overflow: Vec<String>,
 }
 
 /// What one `context` value selects.
@@ -104,6 +110,9 @@ impl Harness {
         }
         if self.sign_in.as_ref().is_some_and(|command| command.trim().is_empty()) {
             bail!("harness {name}: sign_in must not be blank; omit it when the harness names no sign-in command");
+        }
+        if self.context_overflow.iter().any(|phrase| phrase.trim().is_empty()) {
+            bail!("harness {name}: context_overflow phrases must not be blank");
         }
         for (value, selects) in &self.context {
             if value.trim().is_empty() {
@@ -527,6 +536,7 @@ impl Launch {
             mode: None,
             context: BTreeMap::new(),
             sign_in: None,
+            context_overflow: Vec::new(),
         };
         Self {
             harness: Arc::new(harness),
@@ -602,12 +612,21 @@ pub struct Prompt {
     /// Receives the reply text, thoughts, tool calls and plan as the harness streams them. An update that finds the
     /// channel full is dropped rather than hold up the harness.
     pub progress: Option<mpsc::Sender<StatusUpdate>>,
+    /// The thread's history, read only when the prompt runs in a session that lost the thread's context.
+    pub history: Option<History>,
 }
 
 impl Prompt {
     /// `text` under the default limits.
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), limits: PromptLimits::default(), spend: None, stop: None, progress: None }
+        Self {
+            text: text.into(),
+            limits: PromptLimits::default(),
+            spend: None,
+            stop: None,
+            progress: None,
+            history: None,
+        }
     }
 }
 
@@ -626,7 +645,8 @@ struct Turn {
 
 /// A live harness holding one ACP session. Dropping it stops the harness once a running prompt is done.
 pub struct Session {
-    id: SessionId,
+    /// A prompt that outgrows the model's context window moves the harness to a new session.
+    id: Arc<Mutex<SessionId>>,
     turns: mpsc::Sender<Turn>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -636,13 +656,15 @@ impl Session {
     pub async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
         let (opened_tx, opened) = oneshot::channel();
         let (turns, turns_rx) = mpsc::channel(1);
-        let task = tokio::spawn(serve(launch.clone(), resume, opened_tx, turns_rx));
-        let id = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
+        let id = Arc::new(Mutex::new(SessionId::new("")));
+        let task = tokio::spawn(serve(launch.clone(), resume, id.clone(), opened_tx, turns_rx));
+        opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
         Ok(Self { id, turns, task })
     }
 
-    pub fn id(&self) -> &SessionId {
-        &self.id
+    /// The session the harness holds now.
+    pub fn id(&self) -> SessionId {
+        self.id.lock().expect("session id").clone()
     }
 
     /// False once the harness has exited or a prompt failed; the session can then only be resumed in a new one.
@@ -809,7 +831,8 @@ fn name(value: &impl serde::Serialize) -> Option<String> {
 async fn serve(
     launch: Launch,
     resume: Option<SessionId>,
-    opened: oneshot::Sender<Result<SessionId>>,
+    current: Arc<Mutex<SessionId>>,
+    opened: oneshot::Sender<Result<()>>,
     mut turns: mpsc::Receiver<Turn>,
 ) {
     let observed: Arc<Mutex<Observed>> = Arc::default();
@@ -852,35 +875,75 @@ async fn serve(
             methods.lock().expect("auth methods").clone_from(&init.auth_methods);
             let caps = &init.agent_capabilities;
             let mcp = launch.mcp_servers(caps.mcp_capabilities.http);
-            let id = open(&cx, &launch, resume, caps.load_session, mcp).await?;
+            let mut id = open(&cx, &launch, resume.clone(), caps.load_session, mcp.clone()).await?;
+            *current.lock().expect("session id") = id.clone();
             if let Some(tx) = opened.take() {
-                let _ = tx.send(Ok(id.clone()));
+                let _ = tx.send(Ok(()));
             }
+            let mut lost = resume.filter(|old| *old != id).map(|old| {
+                tracing::warn!(lost = %old, session = %id, "the session was not resumed; rebuilding its context");
+                Rebuild::Lost
+            });
             while let Some(Turn { prompt, reply }) = turns.recv().await {
-                let Prompt { text, limits, spend, stop, progress } = prompt;
-                let too_many = Arc::new(Notify::new());
-                {
-                    let mut observed = observed.lock().expect("observed");
-                    // A cost reported after the last prompt ended counts now.
-                    if let (Some(tx), Some(total)) = (&spend, observed.cost) {
-                        let _ = tx.send(Spend::Cost { session: id.clone(), total });
+                let Prompt { text, limits, spend, mut stop, progress, mut history } = prompt;
+                let mut rebuild = lost.take();
+                // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
+                let mut retry = rebuild.is_none();
+                let (done, cut, text) = loop {
+                    let too_many = Arc::new(Notify::new());
+                    {
+                        let mut observed = observed.lock().expect("observed");
+                        // A cost reported after the last prompt ended counts now.
+                        if let (Some(tx), Some(total)) = (&spend, observed.cost) {
+                            let _ = tx.send(Spend::Cost { session: id.clone(), total });
+                        }
+                        observed.current = Some(Current {
+                            text: String::new(),
+                            tool_calls: HashMap::new(),
+                            max_tool_calls: limits.max_tool_calls,
+                            too_many: too_many.clone(),
+                            spend: spend.clone(),
+                            progress: progress.clone(),
+                        });
                     }
-                    observed.current = Some(Current {
-                        text: String::new(),
-                        tool_calls: HashMap::new(),
-                        max_tool_calls: limits.max_tool_calls,
-                        too_many: too_many.clone(),
-                        spend: spend.clone(),
-                        progress,
-                    });
-                }
-                let text =
-                    if launch.instructions.is_empty() { text } else { format!("{}\n\n{text}", launch.instructions) };
-                let request = cx
-                    .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
-                    .block_task();
-                let (done, cut) = bounded(&cx, &id, request, limits, &too_many, stop, &cancelled).await;
-                let text = observed.lock().expect("observed").current.take().map(|c| c.text).unwrap_or_default();
+                    let seed = match rebuild {
+                        Some(why) => crate::history::seed(why, history.take()).await,
+                        None => String::new(),
+                    };
+                    let text = [launch.instructions.as_str(), &seed, &text]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    let request = cx
+                        .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
+                        .block_task();
+                    let (done, cut) = bounded(&cx, &id, request, limits, &too_many, &mut stop, &cancelled).await;
+                    let text = observed.lock().expect("observed").current.take().map(|c| c.text).unwrap_or_default();
+                    let overflowed = |e: &agent_client_protocol::Error| overflows(&launch.harness, &e.to_string());
+                    match &done {
+                        Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
+                            tracing::warn!(session = %id, error = %e, "the prompt outgrew the context window");
+                            id = match new_session(&cx, &launch, mcp.clone()).await {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    let methods = methods.lock().expect("auth methods");
+                                    let _ = reply.send(Err(harness_error(&launch, "session", &e, &methods)));
+                                    return Err(e);
+                                }
+                            };
+                            *current.lock().expect("session id") = id.clone();
+                            observed.lock().expect("observed").cost = None;
+                            (rebuild, retry) = (Some(Rebuild::Overflow), false);
+                        }
+                        Some(Err(e)) if cut.is_none() && overflowed(e) => {
+                            let harness = launch.harness.name.clone();
+                            let _ = reply.send(Err(ContextOverflow { harness, detail: e.to_string() }.into()));
+                            return Err(e.clone());
+                        }
+                        _ => break (done, cut, text),
+                    }
+                };
                 match done {
                     Some(Ok(done)) => {
                         tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
@@ -923,7 +986,7 @@ async fn bounded(
     request: impl Future<Output = Result<PromptResponse, agent_client_protocol::Error>>,
     limits: PromptLimits,
     too_many: &Notify,
-    stop: Option<oneshot::Receiver<String>>,
+    stop: &mut Option<oneshot::Receiver<String>>,
     cancelled: &watch::Sender<u64>,
 ) -> (Option<Result<PromptResponse, agent_client_protocol::Error>>, Option<String>) {
     tokio::pin!(request);
@@ -934,10 +997,13 @@ async fn bounded(
         }
     };
     let stop = async {
-        match stop {
+        let reason = match stop.as_mut() {
             Some(rx) => rx.await.ok(),
             None => None,
-        }
+        };
+        // Spent: a prompt retried in a new session must not wait on it again.
+        *stop = None;
+        reason
     };
     let cut = tokio::select! {
         biased;
@@ -978,6 +1044,14 @@ async fn open(
             }
         }
     }
+    new_session(cx, launch, mcp).await
+}
+
+async fn new_session(
+    cx: &ConnectionTo<Agent>,
+    launch: &Launch,
+    mcp: Vec<McpServer>,
+) -> Result<SessionId, agent_client_protocol::Error> {
     let new = cx.send_request(NewSessionRequest::new(launch.cwd.clone()).mcp_servers(mcp)).block_task().await?;
     configure(cx, launch, &new.session_id, new.modes, new.config_options.unwrap_or_default()).await?;
     Ok(new.session_id)

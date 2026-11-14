@@ -179,7 +179,16 @@ impl Pool {
     /// [`Pool::prompt`] with the prompt's own limits, spend reports and stop.
     pub async fn run(&self, thread: &ThreadId, prompt: Prompt) -> Result<Reply> {
         let lease = self.checkout(thread).await?;
-        lease.session.run(prompt).await
+        let before = lease.session.id();
+        let reply = lease.session.run(prompt).await;
+        let after = lease.session.id();
+        if after != before {
+            tracing::info!(%thread, session = %after, "the harness moved to a new session");
+            if let Err(e) = self.store.put(thread, &after).await {
+                tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
+            }
+        }
+        reply
     }
 
     /// Stop harnesses idle since before `now - idle_after`. Returns how many stopped.
@@ -264,12 +273,12 @@ impl Pool {
         }
         let session = Session::start(&launch, resume.clone()).await?;
         match &resume {
-            Some(old) if old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
+            Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
         }
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.
-        if let Err(e) = self.store.put(thread, session.id()).await {
+        if let Err(e) = self.store.put(thread, &session.id()).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
@@ -359,6 +368,8 @@ pub(crate) mod fake {
         pub cwds: Vec<PathBuf>,
         /// Prompts received, before any is held or answered.
         pub prompted: usize,
+        /// Their texts, in order.
+        pub prompts: Vec<String>,
         /// Prompts in the order they were answered.
         pub answered: Vec<String>,
         /// Prompts ended by session/cancel.
@@ -370,6 +381,8 @@ pub(crate) mod fake {
         /// While set, opening a session or prompting fails with ACP's `auth_required`, as a harness that is not
         /// signed in does.
         pub signed_out: bool,
+        /// While set, session/load fails, as with a harness whose session store was cleared.
+        pub lose_sessions: bool,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
@@ -377,7 +390,9 @@ pub(crate) mod fake {
     /// the word `doomed` waits for a permit too, then fails, every time. Words in
     /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
-    /// While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed in.
+    /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
+    /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that
+    /// is not signed in.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -426,6 +441,9 @@ pub(crate) mod fake {
                             if log.signed_out {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
+                            if log.lose_sessions {
+                                return responder.respond_with_internal_error("Session not found");
+                            }
                             log.loaded.push(load.session_id.to_string());
                             log.cwds.push(load.cwd.clone());
                             drop(log);
@@ -442,8 +460,9 @@ pub(crate) mod fake {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
                             log.prompted += 1;
-                            drop(log);
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
+                            log.prompts.push(t.text.clone());
+                            drop(log);
                             let (text, gate, sender, log, cancels) =
                                 (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
                             // Answer from a task, so a held prompt does not stall the connection.
@@ -466,6 +485,10 @@ pub(crate) mod fake {
                                 }
                                 let session = &prompt.session_id;
                                 let words: Vec<&str> = text.split_whitespace().collect();
+                                let rebuilt = text.contains("[ants] The session of this thread outgrew");
+                                if words.contains(&"overflows") || words.contains(&"overflow") && !rebuilt {
+                                    return responder.respond_with_internal_error("Prompt is too long");
+                                }
                                 // A word followed by a number, so prose such as the redelivery warning is no command.
                                 let arg = |word: &str| {
                                     let i = words.iter().position(|w| *w == word)?;
@@ -518,6 +541,7 @@ mod tests {
 
     use super::*;
     use crate::harness::{PromptLimits, Spend};
+    use crate::overflow::ContextOverflow;
 
     const IDLE: Duration = Duration::from_secs(60);
 
@@ -646,7 +670,9 @@ mod tests {
         let (pool, log, _) = fake_pool(1, false);
         pool.prompt(&thread(1), "a").await.unwrap();
         pool.prompt(&thread(2), "b").await.unwrap();
-        assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), "s3: c");
+        let told = "[ants] The earlier session of this thread could not be resumed, so this one starts over, without \
+                    the context of the thread.\n\nc";
+        assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), format!("s3: {told}"));
         assert!(log.lock().unwrap().loaded.is_empty());
     }
 
@@ -698,6 +724,52 @@ mod tests {
         assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
         let log = log.lock().unwrap();
         assert_eq!((log.new_sessions, log.loaded.as_slice()), (1, &["s1".to_owned()][..]));
+    }
+
+    fn with_history(text: &str) -> Prompt {
+        Prompt { history: Some(Box::pin(async { "HISTORY".to_owned() })), ..Prompt::new(text) }
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() {
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
+        pool.run(&thread(1), with_history("a")).await.unwrap();
+        pool.shutdown().await;
+        log.lock().unwrap().lose_sessions = true;
+
+        let pool = Pool::new(launch, store.clone(), 4, IDLE);
+        let seeded = "[ants] The earlier session of this thread could not be resumed, so this one starts over, its \
+                      context rebuilt from the thread's history.\n\nHISTORY\n\nb";
+        assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, format!("s2: {seeded}"));
+        assert_eq!(pool.run(&thread(1), with_history("c")).await.unwrap().text, "s2: c", "only the first prompt");
+        assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")));
+        assert_eq!(log.lock().unwrap().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_once() {
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
+        pool.run(&thread(1), with_history("a")).await.unwrap();
+        let reply = pool.run(&thread(1), with_history("overflow")).await.unwrap();
+        let seeded = "[ants] The session of this thread outgrew the model's context window, so this one starts over, \
+                      its context rebuilt from the thread's history.\n\nHISTORY\n\noverflow";
+        assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None });
+        assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")), "resumed from now on");
+        assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s2: b");
+        assert_eq!(log.lock().unwrap().starts, 1, "the same harness");
+
+        // A prompt that outgrows even a new session fails for good, without a third try.
+        let err = pool.run(&thread(1), with_history("overflows")).await.unwrap_err();
+        let overflow = err.downcast_ref::<ContextOverflow>().expect("a context overflow");
+        assert_eq!(overflow.harness, "test");
+        assert!(overflow.detail.contains("Prompt is too long"), "{}", overflow.detail);
+        let log = log.lock().unwrap();
+        assert_eq!((log.prompted, log.new_sessions), (6, 3));
+        assert!(log.prompts[5].contains("outgrew the model's context window"), "{}", log.prompts[5]);
     }
 
     #[tokio::test]

@@ -650,6 +650,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
         EscalationReason::DeadLetter => "a message became a dead letter",
         EscalationReason::Approval => "a tool request awaits a decision",
         EscalationReason::Asked => "asked for help",
+        EscalationReason::ContextWindow => "context window exceeded",
         EscalationReason::Unknown => "reason unknown",
     }
 }

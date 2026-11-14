@@ -1569,6 +1569,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages() {
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+        let (_h, h_js) = server.connect(&human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        let (_a, a_js) = server.connect(&dev_a).await;
+        let (_b, b_js) = server.connect(&dev_b).await;
+        let (thread, ops): (ThreadId, ChannelId) = (ThreadId::generate(), "ops".parse().unwrap());
+        bus::publish(&b_js, &Envelope::on_thread(thread.clone(), dev_b.clone(), dev_a.clone(), "status?"))
+            .await
+            .unwrap();
+        bus::publish(&a_js, &Envelope::on_thread(thread.clone(), dev_a.clone(), dev_b.clone(), "green")).await.unwrap();
+        bus::publish(&a_js, &Envelope::new(dev_a.clone(), dev_b.clone(), "elsewhere")).await.unwrap();
+        notes::publish(&b_js, &NotesPost::new(thread.clone(), dev_b.clone(), "noted"), None).await.unwrap();
+        let post = ChannelPost::on_thread(ops.clone(), thread.clone(), dev_b.clone(), "shipped");
+        bus::publish_json(&b_js, subject::chan(&ops, &dev_b), &post, None).await.unwrap();
+
+        let read = ants_daemon::history::Thread {
+            js: a_js.clone(),
+            ant: dev_a.clone(),
+            thread: thread.clone(),
+            channel: Some(ops),
+            before: u64::MAX,
+        };
+        assert_eq!(
+            read.history().await,
+            "[ants] The thread's history, read back from ants, oldest first:\n\ndev-b to dev-a:\nstatus?\n\n\
+             dev-a to dev-b:\ngreen\n\ndev-b in the thread notes:\nnoted\n\ndev-b in channel ops:\nshipped\n\n\
+             [ants] End of the thread's history."
+        );
+
+        // The sent reader filters dev-a's own sent messages only, and is not dev-b's to use.
+        let reader = |name: String, filter: String| jetstream::consumer::pull::Config {
+            name: Some(name),
+            filter_subject: filter,
+            ..Default::default()
+        };
+        let sent = ants_proto::sent_reader(&dev_a);
+        assert!(a_js.create_consumer_on_stream(reader(sent.clone(), subject::inbox_of(&dev_b)), STREAM).await.is_err());
+        assert!(b_js.create_consumer_on_stream(reader(sent, subject::inbox_from(&dev_a)), STREAM).await.is_err());
+    }
+
+    #[tokio::test]
     async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a) = (UserId::human(), p("dev-a"));
