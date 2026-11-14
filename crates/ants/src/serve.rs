@@ -545,6 +545,9 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
+        } else if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
+            // Members are left out of the comparison: the running ant takes the new ones as it is.
+            serving.members.replace(&listed.members);
         }
     }
     start
@@ -704,6 +707,27 @@ mod tests {
         assert!(names(reconcile(&mut running, vec![a, b, config("dev-c", None)])).is_empty());
         assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((true, Some(None)), (true, Some(None))));
         assert_eq!(state(&running, "dev-c"), (false, None));
+    }
+
+    #[test]
+    fn a_reload_hands_a_running_ant_its_pool_s_new_members_without_a_restart() {
+        use ants_daemon::caps::{Members, Pool};
+        let member = |name: &str| name.parse::<UserId>().unwrap();
+        let config = |members: &[&str]| {
+            let pool = Pool {
+                template: "worker".to_owned(),
+                daily_tokens: Some(100),
+                daily_cost: None,
+                members: Members::new(members.iter().map(|m| member(m)).collect()),
+            };
+            let p = Ant { pool: Some(pool), ..ant("lead-a") };
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+        };
+        let mut running = HashMap::new();
+        let (served, _) = reconcile(&mut running, vec![config(&["lead-a"])]).remove(0);
+        assert!(reconcile(&mut running, vec![config(&["lead-a", "lead-b"])]).is_empty());
+        assert!(!running[&member("lead-a")].stopping, "only its pool's members changed");
+        assert_eq!(served.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
     }
 
     #[test]

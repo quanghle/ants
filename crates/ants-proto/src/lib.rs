@@ -900,7 +900,9 @@ impl Permissions {
     /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
     /// the channels, humans and owners buckets but never writes them, reads which users are webhooks (their
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
-    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. Of
+    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets,
+    /// except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of a template to
+    /// their pool caps. Of
     /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
     /// ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every subject stored,
     /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
@@ -1066,6 +1068,8 @@ impl Permissions {
                 // Get and put of its own sessions.
                 format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
                 own_keys,
+                // Get of every ant's daily spend, which pool caps add up.
+                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
                 // Get, put and delete of the markers of its own attempts.
                 format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
                 own_attempts,
@@ -1642,7 +1646,7 @@ impl FromStr for DeviceId {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(3);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(4);
 
 /// The first permissions version whose credentials ask for their own renewal over NATS ([`subject::renew`],
 /// [`RenewRequest`]); older ones are renewed on the machine holding the team keys.

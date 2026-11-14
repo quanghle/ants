@@ -63,7 +63,7 @@ use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::caps::Caps;
+use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
@@ -208,6 +208,9 @@ pub struct Ant {
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
+    /// The daily caps it shares with the other ants added from its template, if the template has any.
+    #[serde(skip)]
+    pub pool: Option<Pool>,
 }
 
 fn default_max_harnesses() -> usize {
@@ -291,6 +294,7 @@ impl Ant {
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             builtin: false,
+            pool: None,
         }
     }
 
@@ -344,6 +348,7 @@ impl Ant {
             },
             caps,
             spend_warn_percent: self.spend_warn_percent,
+            pool: self.pool,
             escalation: Chain {
                 escalate_to: self.escalate_to,
                 max_hops: self.max_escalation_hops,
@@ -539,7 +544,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         ants.push(ant);
     }
-    check_added(&ants, &templates).with_context(|| format!("config {}", path.display()))?;
+    check_added(&mut ants, &templates).with_context(|| format!("config {}", path.display()))?;
     let mut schedules: Vec<Schedule> = Vec::with_capacity(file.schedules.len());
     for entry in file.schedules {
         let name = entry.name.clone();
@@ -634,8 +639,8 @@ fn from_template(ant: Ant, table: &toml::Table, templates: &[AntTemplate], base:
 }
 
 /// Check the ants added from templates against what the templates allow together: no more of a template's than its
-/// `max_ants`, and none a manager, as added ants never add ants.
-fn check_added(ants: &[Ant], templates: &[AntTemplate]) -> Result<()> {
+/// `max_ants`, and none a manager, as added ants never add ants. Hold those of a template with pool caps to them.
+fn check_added(ants: &mut [Ant], templates: &[AntTemplate]) -> Result<()> {
     let added: BTreeSet<UserId> = ants.iter().filter(|a| a.template.is_some()).map(|a| a.name.clone()).collect();
     for ant in ants.iter() {
         if let Some(manager) = ant.added_by.as_ref().filter(|m| added.contains(*m)) {
@@ -658,6 +663,17 @@ fn check_added(ants: &[Ant], templates: &[AntTemplate]) -> Result<()> {
                 members.len(),
                 t.max_ants
             );
+        }
+        if t.pooled() {
+            let pool = Pool {
+                template: t.name.clone(),
+                daily_tokens: t.pool_daily_tokens,
+                daily_cost: t.pool_daily_cost,
+                members: Members::new(members),
+            };
+            for ant in ants.iter_mut().filter(|a| a.template.as_ref() == Some(&t.name)) {
+                ant.pool = Some(pool.clone());
+            }
         }
     }
     Ok(())
@@ -1684,7 +1700,7 @@ Review changes for correctness."""
     }
 
     #[test]
-    fn an_ant_added_from_a_template_takes_its_settings() {
+    fn an_ant_added_from_a_template_takes_its_settings_and_shares_its_pool() {
         let text = with_ants(
             r#"
             [[ant]]
@@ -1723,11 +1739,16 @@ Review changes for correctness."""
             (a.escalate_to.clone(), a.nats.as_deref()),
             (vec!["lead".parse().unwrap()], Some("nats://hub:4222"))
         );
+        let pool = a.pool.clone().unwrap();
+        assert_eq!((pool.template.as_str(), pool.daily_cost, pool.daily_tokens), ("worker", Some(15.0), None));
+        assert_eq!(pool.members.get(), ["lead-a".parse::<UserId>().unwrap(), "lead-b".parse().unwrap()]);
         let b = loaded.ants.iter().find(|a| a.name.as_str() == "lead-b").unwrap();
         assert_eq!(
             (b.workdir.clone(), b.max_daily_cost),
             (manifest_dir().join("src").canonicalize().unwrap(), Some(10.0))
         );
+        assert!(loaded.ants.iter().find(|a| a.name.as_str() == "lead").unwrap().pool.is_none());
+        assert_eq!(config(a.clone()).unwrap().pool, Some(pool));
 
         let summary = Summary::parse(&text, &manifest_dir().join("config.toml"), Path::new("/home")).unwrap();
         assert_eq!(summary.caps[&"lead-b".parse::<UserId>().unwrap()].daily_cost, Some(10.0), "the template's ceiling");
@@ -1824,7 +1845,12 @@ Review changes for correctness."""
         let ant = reloaded.ants.into_iter().find(|a| a.name == name).unwrap();
         assert_eq!(
             ant,
-            Ant { creds: Some(manifest_dir().join("docs.creds")), nats: Some("nats://hub:4222".to_owned()), ..checked }
+            Ant {
+                creds: Some(manifest_dir().join("docs.creds")),
+                nats: Some("nats://hub:4222".to_owned()),
+                pool: ant.pool.clone(),
+                ..checked
+            }
         );
 
         for (manager, name, template, error) in [

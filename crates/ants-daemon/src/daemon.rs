@@ -109,6 +109,8 @@ pub struct Config {
     pub caps: Caps,
     /// The share of a cap, in percent, past which a human is warned once; 0 for never.
     pub spend_warn_percent: u8,
+    /// The daily caps the ant shares with the other ants added from its template, if any.
+    pub pool: Option<crate::caps::Pool>,
     /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
     /// daemon lists it, and hand over to a daemon that puts it later ([`roster::hold`]).
     pub defer_to_others: bool,
@@ -203,7 +205,9 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
     let notes = std::sync::Arc::new(crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()));
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
-    let ledger = Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps).warn_at(config.spend_warn_percent);
+    let ledger = Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps)
+        .warn_at(config.spend_warn_percent)
+        .with_pool(config.pool.clone());
     let ledger = std::sync::Arc::new(ledger);
     let escalator = Escalator::new(
         config.ant.clone(),

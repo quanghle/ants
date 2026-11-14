@@ -13,6 +13,11 @@
 //! Spend first passing a share of a cap short of it gives a [`Warning`], once per thread allowance or UTC day: that it
 //! was given is kept with the spend, so restarts and later prompts do not give it again.
 //!
+//! The ants added from one ant template ([`crate::template`]) may share a pool: daily caps on what they spend together
+//! ([`Pool`]), on top of each one's own caps. The pool's spend is the sum of its members' daily spend, read from the
+//! same keys, so it holds across the daemons serving them; its warning, given by one member, is noted in that
+//! member's daily spend, and no member gives it again that day.
+//!
 //! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, as is the
 //! reminder of one that reached a human ([`Reminder`]), and the threads whose escalation has a deadline or a reminder
 //! due, with the earlier of the two, under `<ant>.escalations.deadlines`.
@@ -81,6 +86,49 @@ struct DaySpend {
     cost: f64,
     #[serde(default, skip_serializing_if = "Warned::none")]
     warned: Warned,
+    /// The pool caps whose warning was given, by this ant or another member.
+    #[serde(default, skip_serializing_if = "Warned::none")]
+    pool_warned: Warned,
+}
+
+/// Daily caps on what the ants added from one template spend together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pool {
+    /// The template's name.
+    pub template: String,
+    /// Tokens its ants may spend together in a UTC day.
+    pub daily_tokens: Option<u64>,
+    /// Cost its ants may spend together in a UTC day.
+    pub daily_cost: Option<f64>,
+    /// Its ants.
+    pub members: Members,
+}
+
+/// The ants of a [`Pool`]; a clone shares the list, so a running ant sees it change ([`Members::replace`]). Equal to
+/// any other, so that a change of members alone does not restart the ants it concerns.
+#[derive(Debug, Clone, Default)]
+pub struct Members(Arc<std::sync::RwLock<Vec<UserId>>>);
+
+impl Members {
+    pub fn new(members: Vec<UserId>) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(members)))
+    }
+
+    pub fn get(&self) -> Vec<UserId> {
+        self.0.read().expect("pool members").clone()
+    }
+
+    /// Take the list of `other`, for every clone of this one.
+    pub fn replace(&self, other: &Self) {
+        let new = other.get();
+        *self.0.write().expect("pool members") = new;
+    }
+}
+
+impl PartialEq for Members {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// The caps whose warning was given.
@@ -103,6 +151,8 @@ impl Warned {
 pub struct Warning {
     /// The cap's config key, such as `max_daily_cost`.
     pub key: &'static str,
+    /// The template whose pool the cap is, for `pool_daily_tokens` and `pool_daily_cost`.
+    pub pool: Option<String>,
     /// What was spent against the cap, as `ants spend` shows it: `850/1000 tokens` or `4.10/5.00`.
     pub figure: String,
     /// The share of the cap spent, in percent, rounded down.
@@ -112,12 +162,20 @@ pub struct Warning {
 impl Warning {
     /// Whether it is about the ant's daily allowance rather than the thread's.
     pub fn daily(&self) -> bool {
-        self.key.starts_with("max_daily_")
+        self.key.starts_with("max_daily_") || self.key.starts_with("pool_daily_")
     }
 
     /// The notice telling a human of it, for `ant` spending on `thread`.
     pub fn text(&self, ant: &UserId, thread: &ThreadId) -> String {
-        let Self { key, figure, percent } = self;
+        let Self { key, pool, figure, percent } = self;
+        if let Some(template) = pool {
+            return format!(
+                "[ants] The ants added from template {template} spent {figure} ({percent}%) of its {key} today (UTC), \
+                 {ant} last, on thread {thread}. At the cap, the prompts of all of them are cancelled and escalated \
+                 until 00:00 UTC. To raise the cap, set {key} of [[ant_template]] {template} in the config files of \
+                 the daemons serving them and reload them (SIGHUP)."
+            );
+        }
         let raise = format!(
             "To raise the cap, set {key} of {ant} in the config file of the daemon serving it and reload the daemon \
              (SIGHUP)."
@@ -281,6 +339,8 @@ pub struct Ledger {
     store: Store,
     /// The share of a cap, in percent, past which spend gives a [`Warning`]; 0 for none.
     warn_percent: u8,
+    /// The pool the ant spends from, if any.
+    pool: Option<Pool>,
     /// The ant's spend of the day it is for; held while it is read or stored, so updates do not cross.
     day: tokio::sync::Mutex<Option<(String, DaySpend)>>,
     /// The escalation deadlines by thread, once read; held while a thread's spend is read and stored.
@@ -300,12 +360,17 @@ impl Ledger {
 
     fn with_store(store: Store, ant: UserId, caps: Caps) -> Self {
         let (day, threads) = (tokio::sync::Mutex::default(), tokio::sync::Mutex::default());
-        Self { caps, ant, store, warn_percent: 0, day, threads }
+        Self { caps, ant, store, warn_percent: 0, pool: None, day, threads }
     }
 
     /// Give a [`Warning`] once spend passes `percent` of a cap; 0 for never.
     pub fn warn_at(self, percent: u8) -> Self {
         Self { warn_percent: percent, ..self }
+    }
+
+    /// Hold the ant to the daily caps of `pool` too.
+    pub fn with_pool(self, pool: Option<Pool>) -> Self {
+        Self { pool: pool.filter(|p| p.daily_tokens.is_some() || p.daily_cost.is_some()), ..self }
     }
 
     /// The thread starts over from nothing spent.
@@ -469,13 +534,16 @@ impl Ledger {
     }
 
     async fn reached_on(&self, thread: &ThreadId, today: &str) -> Result<Option<String>> {
-        if !self.caps.any() {
+        if !self.caps.any() && self.pool.is_none() {
             return Ok(None);
         }
         let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
         let mut day = self.day.lock().await;
         let daily = self.load_day(&mut day, today).await?;
-        Ok(self.check(&spent, daily))
+        if let Some(reached) = self.check(&spent, daily) {
+            return Ok(Some(reached));
+        }
+        Ok(self.pool_spent(daily, today).await.and_then(|(pool, spent, _)| check_pool(pool, spent)))
     }
 
     /// Counted whether or not the ant has caps, so `ants spend` reports it.
@@ -501,15 +569,51 @@ impl Ledger {
 
         let mut day = self.day.lock().await;
         let daily = self.load_day(&mut day, today).await?;
-        if tokens > 0 || cost > 0.0 {
+        let pool = if tokens > 0 || cost > 0.0 {
             daily.tokens += tokens;
             daily.cost += cost;
             let total = Spent { tokens: daily.tokens, cost: daily.cost };
             let (tokens_cap, cost_cap) = (("max_daily_tokens", caps.daily_tokens), ("max_daily_cost", caps.daily_cost));
             warnings.extend(self.warnings(total, tokens_cap, cost_cap, &mut daily.warned));
+            let pool = self.pool_spent(daily, today).await;
+            if let Some((pool, total, mut warned)) = pool {
+                let (tokens_cap, cost_cap) =
+                    (("pool_daily_tokens", pool.daily_tokens), ("pool_daily_cost", pool.daily_cost));
+                let pool_warnings = self.warnings(total, tokens_cap, cost_cap, &mut warned);
+                daily.pool_warned = warned;
+                warnings.extend(pool_warnings.into_iter().map(|w| Warning { pool: Some(pool.template.clone()), ..w }));
+            }
             self.store.put(daily_spend_key(&self.ant, today), daily).await?;
+            pool
+        } else {
+            self.pool_spent(daily, today).await
+        };
+        let reached = self.check(&spent, daily).or_else(|| pool.and_then(|(pool, spent, _)| check_pool(pool, spent)));
+        Ok(Recorded { reached, warnings })
+    }
+
+    /// What the ant's pool spent on `today`, `own` being the ant's share, and the pool's warnings given by any member.
+    /// None without a pool, or when a member's spend cannot be read: the pool then holds no ant back.
+    async fn pool_spent(&self, own: &DaySpend, today: &str) -> Option<(&Pool, Spent, Warned)> {
+        let pool = self.pool.as_ref()?;
+        let mut total = Spent { tokens: own.tokens, cost: own.cost };
+        let mut warned = own.pool_warned;
+        for member in pool.members.get().iter().filter(|m| **m != self.ant) {
+            let spent: DaySpend = match self.store.get(daily_spend_key(member, today)).await {
+                Ok(spent) => spent,
+                Err(e) => {
+                    tracing::warn!(
+                        ant = %self.ant, %member, template = pool.template,
+                        "reading the daily spend of a member of the pool: {e:#}; not holding the ant to the pool caps"
+                    );
+                    return None;
+                }
+            };
+            total += Spent { tokens: spent.tokens, cost: spent.cost };
+            warned.tokens |= spent.pool_warned.tokens;
+            warned.cost |= spent.pool_warned.cost;
         }
-        Ok(Recorded { reached: self.check(&spent, daily), warnings })
+        Some((pool, total, warned))
     }
 
     /// The warnings `spent` is due against a token and a cost cap, each named by its config key: one for each cap it
@@ -535,7 +639,7 @@ impl Ledger {
             if spent.tokens < cap {
                 let figure = format!("{}/{cap} tokens", spent.tokens);
                 let percent = (u128::from(spent.tokens) * 100 / u128::from(cap)) as u64;
-                warnings.push(Warning { key: tokens_key, figure, percent });
+                warnings.push(Warning { key: tokens_key, pool: None, figure, percent });
             }
         }
         if let Some(cap) = cost_cap
@@ -545,7 +649,8 @@ impl Ledger {
             warned.cost = true;
             if spent.cost < cap {
                 let figure = format!("{:.2}/{cap:.2}", spent.cost);
-                warnings.push(Warning { key: cost_key, figure, percent: (spent.cost / cap * 100.0) as u64 });
+                let percent = (spent.cost / cap * 100.0) as u64;
+                warnings.push(Warning { key: cost_key, pool: None, figure, percent });
             }
         }
         warnings
@@ -579,6 +684,25 @@ impl Ledger {
         }
         None
     }
+}
+
+/// The pool cap `spent` reached, if any.
+fn check_pool(pool: &Pool, spent: Spent) -> Option<String> {
+    let template = &pool.template;
+    let by = "spent by its ants today; resets at 00:00 UTC";
+    if let Some(cap) = pool.daily_tokens.filter(|cap| spent.tokens >= *cap) {
+        return Some(format!(
+            "Pool daily token cap of template {template} reached ({} of {cap} tokens {by})",
+            spent.tokens
+        ));
+    }
+    if let Some(cap) = pool.daily_cost.filter(|cap| spent.cost >= *cap) {
+        return Some(format!(
+            "Pool daily cost cap of template {template} reached ({:.2} of {cap:.2} {by})",
+            spent.cost
+        ));
+    }
+    None
 }
 
 /// Forget what the thread spent, and the warnings given of it. Returns whether it had spent anything.
@@ -688,7 +812,7 @@ mod tests {
         let recorded = ledger.record_on(&t1, &Spend::Tokens(79), DAY).await.unwrap();
         assert_eq!(recorded, Recorded::default(), "short of the warning share");
         let recorded = ledger.record_on(&t1, &Spend::Tokens(6), DAY).await.unwrap();
-        let warning = Warning { key: "max_thread_tokens", figure: "85/100 tokens".to_owned(), percent: 85 };
+        let warning = Warning { key: "max_thread_tokens", pool: None, figure: "85/100 tokens".to_owned(), percent: 85 };
         assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()] });
         assert!(!warning.daily());
         let text = warning.text(&ant(), &t1);
@@ -703,7 +827,7 @@ mod tests {
         assert_eq!(recorded.warnings.len(), 1, "a fresh allowance warns again");
 
         let recorded = ledger.record_on(&t1, &cost("s1", 1.7), DAY).await.unwrap();
-        let warning = Warning { key: "max_daily_cost", figure: "1.70/2.00".to_owned(), percent: 85 };
+        let warning = Warning { key: "max_daily_cost", pool: None, figure: "1.70/2.00".to_owned(), percent: 85 };
         assert_eq!(recorded.warnings, std::slice::from_ref(&warning));
         assert!(warning.daily() && warning.text(&ant(), &t1).contains("today (UTC), last on thread t1"));
         assert!(ledger.record_on(&t2, &cost("s2", 0.1), DAY).await.unwrap().warnings.is_empty(), "once a day");
@@ -718,6 +842,51 @@ mod tests {
 
         let silent = Ledger::with_store(Store::Memory(Arc::default()), ant(), caps).warn_at(0);
         assert!(silent.record_on(&t1, &Spend::Tokens(90), DAY).await.unwrap().warnings.is_empty(), "0: never");
+    }
+
+    #[tokio::test]
+    async fn a_pool_caps_its_members_together_across_ledgers_and_warns_once() {
+        let (a, b): (UserId, UserId) = ("lead-a".parse().unwrap(), "lead-b".parse().unwrap());
+        let pool = Pool {
+            template: "worker".to_owned(),
+            daily_tokens: Some(100),
+            daily_cost: None,
+            members: Members::new(vec![a.clone(), b.clone()]),
+        };
+        let store = Store::Memory(Arc::default());
+        let ledger = |ant: &UserId| {
+            Ledger::with_store(store.clone(), ant.clone(), Caps::default()).warn_at(80).with_pool(Some(pool.clone()))
+        };
+        let (la, lb) = (ledger(&a), ledger(&b));
+        assert_eq!(la.record_on(&thread(1), &Spend::Tokens(50), DAY).await.unwrap(), Recorded::default());
+        let recorded = lb.record_on(&thread(2), &Spend::Tokens(35), DAY).await.unwrap();
+        let warning = Warning {
+            key: "pool_daily_tokens",
+            pool: Some("worker".to_owned()),
+            figure: "85/100 tokens".to_owned(),
+            percent: 85,
+        };
+        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()] });
+        assert!(warning.daily());
+        let text = warning.text(&b, &thread(2));
+        assert!(text.starts_with("[ants] The ants added from template worker spent 85/100 tokens (85%)"), "{text}");
+        assert!(text.contains("set pool_daily_tokens of [[ant_template]] worker"), "{text}");
+        assert!(la.record_on(&thread(1), &Spend::Tokens(5), DAY).await.unwrap().warnings.is_empty(), "warned by b");
+
+        let reached = lb.record_on(&thread(2), &Spend::Tokens(10), DAY).await.unwrap().reached.unwrap();
+        assert_eq!(
+            reached,
+            "Pool daily token cap of template worker reached (100 of 100 tokens spent by its ants today; resets at 00:00 UTC)"
+        );
+        assert!(la.reached_on(&thread(3), DAY).await.unwrap().is_some(), "every member is held back");
+        assert_eq!(la.reached_on(&thread(3), "2026-11-14").await.unwrap(), None, "until the next day");
+        let restarted = ledger(&a);
+        assert!(restarted.reached_on(&thread(3), DAY).await.unwrap().is_some(), "also after a restart");
+
+        pool.members.replace(&Members::new(vec![a.clone()]));
+        assert_eq!(la.reached_on(&thread(3), DAY).await.unwrap(), None, "a member that left no longer counts");
+        let alone = Ledger::with_store(store.clone(), a.clone(), Caps::default());
+        assert_eq!(alone.reached_on(&thread(3), DAY).await.unwrap(), None, "no pool, no pool cap");
     }
 
     fn escalated(to: &[&str], deadline: Option<i64>) -> Pending {
