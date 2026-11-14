@@ -61,16 +61,20 @@ pub const HUMANS_BUCKET: &str = "ants_humans";
 /// start. Unlike the roster's, entries never expire, so a chain can be followed past an ant that is offline. Each
 /// ant writes only its own; every ant and human reads them.
 pub const CHAINS_BUCKET: &str = "ants_chains";
-/// KV bucket of the links to channel threads ants passed on ([`link_key`]): an ant whose message carries a link to a
-/// channel thread ([`Envelope::origin_thread`]) records, under its own keys, that it passed the link on to the
-/// recipient, so a daemon can check the link of a message from an ant that takes no part in that thread. Each ant
-/// writes only its own keys; every ant and human reads them all. Entries expire with the stream's messages.
+/// KV bucket of the links to threads ants passed on ([`link_key`]): an ant whose message carries a link to a thread
+/// ([`Envelope::origin_thread`]), or is on a thread with an owner or creator, records, under its own keys, that it
+/// passed the link to that thread on to the recipient ([`Envelope::passes_on`]), so a daemon can check the link of a
+/// message from an ant that takes no part in that thread itself. Each ant writes only its own keys; every ant and human
+/// reads them all. Entries expire with the stream's messages.
 pub const LINKS_BUCKET: &str = "ants_links";
-/// KV bucket of the owners of the threads humans and webhooks message ants on, keyed by thread id ([`owner_key`]):
-/// the human that the first human's or webhook's message on the thread names ([`Envelope::owner`]), put before that
-/// message is sent. Only humans and webhooks write it, every credential reads it by key, and the first record of a
-/// thread stays: its stream keeps one message per key, discards new ones per subject, and denies deletes and purges.
-/// Daemons take the owner of an ant's message on a thread no channel post started from it. Entries expire after the
+/// KV bucket of the owners of the threads humans and webhooks message ants on, keyed by thread id and recipient
+/// ([`owner_key`]): the human that each human's or webhook's message to an ant on the thread names
+/// ([`Envelope::owner`]), put before that message is sent, or kept in the machine's outbox until the bucket sources it
+/// ([`owner_outbox`]). Only humans and webhooks write it, a webhook for its own ant destinations only, every credential
+/// reads it by key, and the first record of a thread to an ant stays: its stream refuses a second record of a key,
+/// drops one carrying the first's [`owner_record_id`] within its retention, so none sourced from an outbox is refused,
+/// and denies deletes and purges. Daemons take the owner of an ant's message on a thread no channel post started from
+/// the record to that ant, or to an ant that passed the link to the thread on to it. Records expire after the
 /// stream's retention.
 pub const OWNERS_BUCKET: &str = "ants_owners";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
@@ -283,6 +287,14 @@ impl Machine {
     pub fn admitted_links(&self, user: &UserId) -> (String, String) {
         let filter = format!("ants.in.{self}.ants.out.links.{user}.*.*");
         (filter, format!("$KV.{LINKS_BUCKET}.{user}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
+    }
+
+    /// What the hub's [`OWNERS_BUCKET`] admits from the machine's outbox when a human runs on it, as an
+    /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: the owner records its humans kept there
+    /// ([`owner_outbox`]), under their keys.
+    pub fn admitted_owners(&self) -> (String, String) {
+        let filter = format!("ants.in.{self}.ants.out.owners.*.*");
+        (filter, format!("$KV.{OWNERS_BUCKET}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
     }
 }
 
@@ -596,9 +608,23 @@ pub fn link_outbox(from: &UserId, thread: &ThreadId, to: &UserId) -> String {
     format!("ants.out.links.{}", link_key(from, thread, to))
 }
 
-/// Key in [`OWNERS_BUCKET`] of the owner of `thread`.
-pub fn owner_key(thread: &ThreadId) -> String {
-    thread.to_string()
+/// Key in [`OWNERS_BUCKET`] of the owner of `thread` that a message to `to` on it names.
+pub fn owner_key(thread: &ThreadId, to: &UserId) -> String {
+    format!("{thread}.{to}")
+}
+
+/// The message id (`Nats-Msg-Id`) of every record of `key` in [`OWNERS_BUCKET`], whoever writes it, so the bucket
+/// drops a second one, as from an outbox, rather than refuse it.
+pub fn owner_record_id(key: &str) -> String {
+    format!("owner.{key}")
+}
+
+/// Where a human's client on a leaf node records the owner of `thread` that its message to `to` names
+/// ([`owner_key`]) while the hub is out of reach: the leaf's outbox ([`OUTBOX_STREAM`]) keeps it, and the hub's
+/// [`OWNERS_BUCKET`] sources it from the hub's intake under the key, from machines a human runs on only
+/// ([`Machine::admitted_owners`]).
+pub fn owner_outbox(thread: &ThreadId, to: &UserId) -> String {
+    format!("ants.out.owners.{}", owner_key(thread, to))
 }
 
 /// Every key in [`LINKS_BUCKET`] of a link to `thread` passed on, whoever passed it on to whom.
@@ -721,7 +747,7 @@ impl Permissions {
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
-    /// (the owners only where no record is, [`OWNERS_BUCKET`]), and reads and removes dead
+    /// (the owners also in its outbox form, [`owner_outbox`]), and reads and removes dead
     /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -729,9 +755,9 @@ impl Permissions {
     ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter subject, it may also publish
     /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
-    /// ([`link_outbox`]). Only a human sets up leaf outboxes and the hub's
-    /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no ant
-    /// may create or change one.
+    /// ([`link_outbox`]). Only a human sets up leaf outboxes, the hub's intake and the buckets' sources from it: a
+    /// stream's configuration can copy, transform and republish any subject of the account, so no ant may create or
+    /// change one.
     pub fn for_user(user: &UserId, role: Role) -> Self {
         let consumer = inbox_consumer(user);
         let notes = notes_consumer(user);
@@ -817,8 +843,9 @@ impl Permissions {
                 // Put and delete of every channel's and every human's entry.
                 format!("$KV.{CHANNELS_BUCKET}.>"),
                 format!("$KV.{HUMANS_BUCKET}.>"),
-                // Recording the owner of each thread it messages an ant on.
-                format!("$KV.{OWNERS_BUCKET}.*"),
+                // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
+                format!("$KV.{OWNERS_BUCKET}.*.*"),
+                "ants.out.owners.*.*".to_owned(),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
@@ -829,8 +856,9 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
-                // And the links bucket's sources from the intake.
+                // And the links and owners buckets' sources from the intake.
                 format!("$JS.API.STREAM.UPDATE.{links}"),
+                format!("$JS.API.STREAM.UPDATE.{owners}"),
             ]);
             for op in ["CREATE", "UPDATE", "INFO"] {
                 publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
@@ -998,10 +1026,10 @@ impl Permissions {
 
     /// What the credentials of `webhook` allow: delivering its events to `destinations` only, as itself, on
     /// [`Destination::subject`], remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
-    /// only, and recording the owner its config names for each thread it starts in an inbox ([`OWNERS_BUCKET`]). It
-    /// reads the entry of each channel among `destinations`, for the members a broadcast mentions, and hears its own
-    /// reply inboxes, for the stream's acks. Nothing else: it neither writes `ants_channels` nor `ants_humans`,
-    /// so it can neither change a channel nor become a human, nor reads any message.
+    /// only, and recording the owner its config names for each thread it starts in an ant's inbox ([`OWNERS_BUCKET`],
+    /// under that ant's keys only). It reads the entry of each channel among `destinations`, for the members a
+    /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. Nothing else: it neither writes
+    /// `ants_channels` nor `ants_humans`, so it can neither change a channel nor become a human, nor reads any message.
     pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
         let seen = kv_stream(WEBHOOKS_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
@@ -1024,10 +1052,12 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{seen}.{own}"),
             own,
         ]);
-        if destinations.iter().any(|d| matches!(d, Destination::Ant(_))) {
-            // Recording the owner of the threads it starts in an inbox, where no record is.
-            publish.push(format!("$KV.{OWNERS_BUCKET}.*"));
-        }
+        let ants = destinations.iter().filter_map(|d| match d {
+            Destination::Ant(ant) => Some(ant),
+            Destination::Channel(_) => None,
+        });
+        // Recording the owner of the threads it starts in an ant's inbox, under that ant's keys, where no record is.
+        publish.extend(ants.map(|ant| format!("$KV.{OWNERS_BUCKET}.*.{ant}")));
         publish.dedup();
         Self { publish, subscribe: vec![format!("{}.>", inbox_prefix(webhook))] }
     }
@@ -1271,7 +1301,8 @@ pub struct Envelope {
     /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it. A
     /// daemon takes it as a human or a webhook ([`Envelope::webhook`]) says; from an ant, only as stored state says:
     /// on a channel thread, the thread's posts ([`ThreadOrigin`]); on any other, the thread's record in
-    /// [`OWNERS_BUCKET`], else that of the thread it was spun off ([`Envelope::origin_thread`]); else there is none.
+    /// [`OWNERS_BUCKET`] for the sender, or for an ant that passed the link to the thread on to it, else that of the
+    /// thread it was spun off ([`Envelope::origin_thread`]); else there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
     /// The ant whose top-level channel post started the thread ([`ChannelPost::thread_creator`]), kept like `owner`.
@@ -1287,7 +1318,8 @@ pub struct Envelope {
     /// from the thread keep it. A daemon takes a linked channel thread's creator and owner only when a top-level
     /// channel post kept in the stream started it and the sender, a member or the messenger of its channel, posted on
     /// it or was woken by a post on it, or such an ant passed the link on to it ([`LINKS_BUCKET`]); a linked message
-    /// thread's owner as [`OWNERS_BUCKET`] records it; else drops the link.
+    /// thread's owner as [`OWNERS_BUCKET`] records it only when a human or webhook messaged the sender on that thread
+    /// ([`owner_key`]), or such an ant passed the link on to it; else drops the link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_thread: Option<ThreadId>,
     /// The escalation the message carries up a chain, or answers. Never copied by [`Envelope::reply`] or
@@ -1421,6 +1453,12 @@ impl Envelope {
         let origin = self.origin_thread.clone().unwrap_or_else(|| self.thread_id.clone());
         let origin_thread = (self.links_origin() && origin != thread).then_some(origin);
         Self { thread_id: thread, origin_thread, ..self }
+    }
+
+    /// The thread whose link the envelope passes on to its recipient ([`LINKS_BUCKET`]): the one it was spun off
+    /// ([`Envelope::origin_thread`]), else its own while it has a creator or an owner.
+    pub fn passes_on(&self) -> Option<&ThreadId> {
+        self.origin_thread.as_ref().or_else(|| self.links_origin().then_some(&self.thread_id))
     }
 
     /// Whether the envelope has a creator or an owner for a link to its origin thread to vouch for.
@@ -2770,6 +2808,10 @@ mod tests {
             ["ants.in.m1.ants.out.notes.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
             "no inbox subjects"
         );
+        assert_eq!(
+            m1.admitted_owners(),
+            ("ants.in.m1.ants.out.owners.*.*".to_owned(), "$KV.ants_owners.{{wildcard(1)}}.{{wildcard(2)}}".to_owned())
+        );
         assert_eq!(subject::intake(&m1), "ants.in.m1.>");
     }
 
@@ -3275,7 +3317,7 @@ mod tests {
                 "$JS.API.STREAM.INFO.KV_ants_webhooks",
                 "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
                 "$KV.ants_webhooks.github.>",
-                "$KV.ants_owners.*",
+                "$KV.ants_owners.*.dev-a",
             ]
         );
         assert_eq!(perms.subscribe, ["_INBOX.github.>"]);

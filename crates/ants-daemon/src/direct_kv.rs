@@ -78,6 +78,16 @@ impl DirectKv {
         Ok(())
     }
 
+    /// [`DirectKv::put`] as message `id` (`Nats-Msg-Id`): the stream drops a repeat of it within its duplicate window.
+    pub async fn put_as(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>, id: &str) -> Result<()> {
+        let key = key.as_ref();
+        let mut headers = HeaderMap::new();
+        headers.insert("Nats-Msg-Id", id);
+        let ack = self.js.publish_with_headers(self.put_subject(key), headers, value.into().into()).await;
+        ack.with_context(|| format!("storing {key}"))?.await.with_context(|| format!("storing {key}"))?;
+        Ok(())
+    }
+
     /// Delete `key`, leaving a delete marker, as `kv::Store::delete` does.
     pub async fn delete(&self, key: impl AsRef<str>) -> Result<()> {
         let key = key.as_ref();

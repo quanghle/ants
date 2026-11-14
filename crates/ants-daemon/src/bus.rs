@@ -360,32 +360,36 @@ pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
     ensure_kept(js, LINKS_BUCKET).await
 }
 
-/// The KV bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow
-/// it (the human's). Its stream keeps one message per key and refuses another, so the first record of a thread stays
-/// whoever writes after it; entries expire with the stream's messages.
-pub async fn ensure_owners(js: &jetstream::Context) -> Result<kv::Store> {
-    if let Ok(store) = js.get_key_value(OWNERS_BUCKET).await {
-        return Ok(store);
+/// The bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow it
+/// (the human's). Its stream keeps one record per key and refuses another, but drops one repeating the first's
+/// message id while the first is kept, as a refused one from a machine's outbox would stall its source
+/// ([`crate::owners::first_records_only`]); it denies deletes and purges, and records expire with the stream's
+/// messages. A stream from before, dropping repeats only for 2 min, is changed to drop them while it keeps records.
+pub async fn ensure_owners(js: &jetstream::Context) -> Result<()> {
+    let name = crate::owners::owners_stream();
+    if let Ok(stream) = js.get_stream(&name).await {
+        let mut config = stream.cached_info().config.clone();
+        if crate::owners::first_records_only(&mut config) {
+            js.update_stream(&config).await.context("having the owners bucket drop repeated records")?;
+        }
+        return Ok(());
     }
-    let created = js
-        .create_stream(stream::Config {
-            name: format!("KV_{OWNERS_BUCKET}"),
-            description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
-            subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
-            max_messages_per_subject: 1,
-            discard: stream::DiscardPolicy::New,
-            discard_new_per_subject: true,
-            max_age: RETENTION,
-            storage: stream::StorageType::File,
-            num_replicas: 1,
-            allow_direct: true,
-            deny_delete: true,
-            deny_purge: true,
-            ..Default::default()
-        })
-        .await;
+    let mut config = stream::Config {
+        name,
+        description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
+        subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
+        max_age: RETENTION,
+        storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        deny_delete: true,
+        deny_purge: true,
+        ..Default::default()
+    };
+    crate::owners::first_records_only(&mut config);
+    let created = js.create_stream(config).await;
     created.context("creating the owners bucket (with credentials, `ants init` as the human creates it)")?;
-    js.get_key_value(OWNERS_BUCKET).await.context("opening the owners bucket")
+    Ok(())
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.

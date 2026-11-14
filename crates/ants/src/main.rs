@@ -976,7 +976,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words
         false => bus::live_inbox(&client, &nats.me.id).await?,
     };
     if let Some(owner) = &envelope.owner {
-        owners::recording(&js, nats.domain, &envelope.thread_id, owner).await;
+        owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
     }
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
@@ -1018,7 +1018,8 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words
 
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
 /// an ant starts has no owner: only a human gets a thread's escalations, with a fresh turn budget. A human's owner is
-/// recorded for the thread before the message goes out ([`owners::record`]); the first record of a thread stays.
+/// recorded for the thread and the recipient before the message goes out ([`owners::record`]); the first record of a
+/// thread to an ant stays.
 fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, words: Vec<String>) -> Result<Envelope> {
     let (to, text) = recipient(words)?;
     let envelope = match thread {

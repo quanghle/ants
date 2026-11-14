@@ -10,7 +10,10 @@
 //!    the intake.
 //!
 //! The links to channel threads the machine's ants pass on ([`LINKS_BUCKET`]) take the same way, the links bucket
-//! sourcing from the intake, per ant, only the keys the ant may write itself ([`Machine::admitted_links`]).
+//! sourcing from the intake, per ant, only the keys the ant may write itself ([`Machine::admitted_links`]); so do the
+//! owners its humans record for the threads they message ants on ([`OWNERS_BUCKET`]), the owners bucket sourcing them
+//! from the intake only when a human runs on the machine ([`Machine::admitted_owners`]). The owners bucket keeps every
+//! record it sources, a thread's first staying its owner: a record it refused would stall its source.
 //!
 //! A machine's credentials thus never decide what the hub's stream stores: only a human, who sets up both hops here,
 //! does. Each message keeps its `Nats-Msg-Id`, so the hub's stream drops a buffered copy of a message it already took
@@ -19,7 +22,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::{INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, Role, STREAM, UserId, subject};
+use ants_daemon::owners;
+use ants_proto::{
+    INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET, Role, STREAM, UserId, subject,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -48,9 +54,9 @@ pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &
 
 /// Set up store and forward for `machine`, on which `members` run, ants and humans each in its role
 /// ([`crate::auth::members`]): create or update the machine's outbox on its leaf node (which must be connected),
-/// through `leaf` from [`connect`], and have the hub's stream take from it what those members may send, and the links
-/// bucket the links its ants pass on, once `ants init` created it. Admissions of members no longer listed are dropped;
-/// those already in place are kept as they are.
+/// through `leaf` from [`connect`], and have the hub's stream take from it what those members may send, the links
+/// bucket the links its ants pass on, and the owners bucket the owners its humans record, once `ants init` created
+/// them. Admissions of members no longer listed are dropped; those already in place are kept as they are.
 pub async fn admit(
     leaf: &async_nats::Client,
     hub: &Context,
@@ -74,9 +80,14 @@ pub async fn admit(
     let mut config = ants.info().await?.config.clone();
     admit_into(&mut config, machine, admissions(machine, members, start));
     hub.update_stream(&config).await.context("admitting the machine's outbox into the hub's stream")?;
-    if let Some(mut config) = links_config(hub).await? {
+    if let Some(mut config) = bucket_config(hub, LINKS_BUCKET).await? {
         admit_into(&mut config, machine, link_admissions(machine, members, start));
         hub.update_stream(&config).await.context("admitting the machine's outbox into the links bucket")?;
+    }
+    if let Some(mut config) = bucket_config(hub, OWNERS_BUCKET).await? {
+        owners::first_records_only(&mut config);
+        admit_into(&mut config, machine, owner_admissions(machine, members, start));
+        hub.update_stream(&config).await.context("admitting the machine's outbox into the owners bucket")?;
     }
 
     let mut intake = intake_config(hub).await?;
@@ -145,9 +156,13 @@ pub async fn remove(hub: &Context, machine: &Machine) -> Result<()> {
     let mut config = ants.info().await?.config.clone();
     admit_into(&mut config, machine, Vec::new());
     hub.update_stream(&config).await.context("dropping the machine from the hub's stream")?;
-    if let Some(mut config) = links_config(hub).await? {
-        admit_into(&mut config, machine, Vec::new());
-        hub.update_stream(&config).await.context("dropping the machine from the links bucket")?;
+    for bucket in [LINKS_BUCKET, OWNERS_BUCKET] {
+        if let Some(mut config) = bucket_config(hub, bucket).await? {
+            admit_into(&mut config, machine, Vec::new());
+            hub.update_stream(&config)
+                .await
+                .with_context(|| format!("dropping the machine from the {bucket} bucket"))?;
+        }
     }
     let mut intake = intake_config(hub).await?;
     if let Some(sources) = intake.sources.as_mut() {
@@ -169,12 +184,12 @@ fn admit_into(config: &mut stream::Config, machine: &Machine, wanted: Vec<Source
     config.sources = (!sources.is_empty()).then_some(sources);
 }
 
-/// The configuration of the links bucket's stream, or `None` while `ants init` has not created it.
-async fn links_config(hub: &Context) -> Result<Option<stream::Config>> {
-    match hub.get_stream(format!("KV_{LINKS_BUCKET}")).await {
-        Ok(mut links) => Ok(Some(links.info().await?.config.clone())),
+/// The configuration of the stream of `bucket`, or `None` while `ants init` has not created it.
+async fn bucket_config(hub: &Context, bucket: &str) -> Result<Option<stream::Config>> {
+    match hub.get_stream(format!("KV_{bucket}")).await {
+        Ok(mut stream) => Ok(Some(stream.info().await?.config.clone())),
         Err(e) if not_found(&e) => Ok(None),
-        Err(e) => Err(e).context("looking up the links bucket"),
+        Err(e) => Err(e).with_context(|| format!("looking up the {bucket} bucket")),
     }
 }
 
@@ -264,6 +279,20 @@ fn link_admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) ->
         .collect()
 }
 
+/// The owners bucket's source for `machine`, when a human runs on it: the owners its humans record.
+fn owner_admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<Source> {
+    if !members.iter().any(|(_, role)| role.is_human()) {
+        return Vec::new();
+    }
+    let (source, destination) = machine.admitted_owners();
+    vec![Source {
+        name: INTAKE_STREAM.to_owned(),
+        start_sequence: Some(start),
+        subject_transforms: vec![SubjectTransform { source, destination }],
+        ..Default::default()
+    }]
+}
+
 fn from_machine(source: &Source, machine: &Machine) -> bool {
     let prefix = format!("ants.in.{machine}.");
     let transforms = &source.subject_transforms;
@@ -277,7 +306,7 @@ mod tests {
     use ants_daemon::{bus, links, notes};
     use ants_proto::{ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
     use ants_test_support::NatsServer;
-    use async_nats::jetstream::message::PublishMessage;
+    use async_nats::jetstream::message::{PublishMessage, StreamMessage};
     use futures::StreamExt as _;
 
     use super::*;
@@ -337,6 +366,7 @@ mod tests {
         let (h, h_js) = connect(&hub.url, &human).await;
         bus::init_stream(&h_js).await.unwrap();
         bus::ensure_links(&h_js).await.unwrap();
+        bus::ensure_owners(&h_js).await.unwrap();
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         // The CLI runs on m1 too.
@@ -440,11 +470,21 @@ mod tests {
         };
         links::pass_on(&a_js, &spun(&dev_a, &dev_b)).await.unwrap();
         links::pass_on(&b_js, &spun(&dev_b, &dev_a)).await.unwrap();
+        // So do the owners a human records, ahead of the message: a second record of a thread is dropped,
+        // and does not hold up those after it.
+        let (taken, asked, after) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        owners::record(&h_js, Some(&domain), &taken, &dev_a, &alice).await.unwrap();
+        owners::record(&h_leaf_js, Some(&domain), &taken, &dev_a, &human).await.unwrap();
+        owners::record(&h_leaf_js, Some(&domain), &asked, &dev_b, &human).await.unwrap();
+        let ask =
+            Envelope::on_thread(asked.clone(), human.clone(), dev_b.clone(), "asked").with_owner(Some(human.clone()));
+        assert_eq!(bus::publish(&h_leaf_js, &ask).await.unwrap(), bus::Stored::Outbox);
+        owners::record(&h_leaf_js, Some(&domain), &after, &dev_a, &human).await.unwrap();
         assert!(messages(&h_js, STREAM).await == 1);
 
         reload(leaf_port);
-        eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 9).await;
-        eventually("the hub's stream takes what dev-a sent", async || messages(&h_js, STREAM).await == 5).await;
+        eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 13).await;
+        eventually("the hub's stream takes what dev-a sent", async || messages(&h_js, STREAM).await == 6).await;
         let ants = h_js.get_stream(STREAM).await.unwrap();
         let last = ants.get_last_raw_message_by_subject(&kept.subject()).await.unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&last.payload).unwrap(), kept);
@@ -461,8 +501,21 @@ mod tests {
         let passed_on = async || links::passed_on(&h_js, &channel_thread).await.unwrap();
         eventually("the links bucket takes dev-a's link", async || !passed_on().await.is_empty()).await;
         assert_eq!(passed_on().await, [(dev_a.clone(), dev_b.clone())]);
+        let read = owners::Owners::new(h_js.clone());
+        eventually("the owners bucket takes the owners", async || {
+            read.recorded(&after, &dev_a).await.unwrap() == Some(human.clone())
+        })
+        .await;
+        assert_eq!(read.recorded(&asked, &dev_b).await.unwrap(), Some(human.clone()));
+        assert_eq!(read.recorded(&taken, &dev_a).await.unwrap(), Some(alice.clone()), "the first record stays");
+        // How a daemon tells a message from an outbox.
+        let source = |msg: StreamMessage| msg.headers.get("Nats-Stream-Source").is_some();
+        assert!(source(ants.get_last_raw_message_by_subject(&ask.subject()).await.unwrap()));
+        let first = ants.get_raw_message(1).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&first.payload).unwrap(), direct);
+        assert!(!source(first));
         tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(messages(&h_js, STREAM).await, 5, "stored once");
+        assert_eq!(messages(&h_js, STREAM).await, 6, "stored once");
         for replies in &mut waiters {
             assert!(futures::FutureExt::now_or_never(replies.next()).is_none(), "each once, live or stored");
         }
@@ -489,7 +542,7 @@ mod tests {
         assert!(on_leaf.is_err() && on_hub.is_err() && ant.is_err(), "each once, live or read back");
 
         remove(&h_js, &m1).await.unwrap();
-        for name in [STREAM.to_owned(), format!("KV_{LINKS_BUCKET}")] {
+        for name in [STREAM.to_owned(), format!("KV_{LINKS_BUCKET}"), format!("KV_{OWNERS_BUCKET}")] {
             let info = h_js.get_stream(name).await.unwrap().info().await.unwrap().config.clone();
             assert!(info.sources.unwrap_or_default().is_empty());
         }

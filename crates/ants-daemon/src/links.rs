@@ -1,9 +1,10 @@
-//! Links to channel threads, passed on from ant to ant. A message spun off a channel thread links to it
-//! ([`Envelope::origin_thread`]), and a daemon takes that thread's creator for an ant's message only when the
-//! sender's link is verifiable: the sender takes part in the channel thread, or an ant with a verifiable link passed
-//! the link on to it. Each daemon records the links its ant passes on in [`LINKS_BUCKET`], under keys only the ant's
-//! credentials write ([`link_key`]), and reads back who passed on the link to a thread ([`passed_on`]). While the hub
-//! is out of reach, the machine's outbox keeps the record until the bucket sources it ([`link_outbox`]).
+//! Links to threads, passed on from ant to ant. A message spun off a thread links to it ([`Envelope::origin_thread`]),
+//! and a daemon takes that thread's creator or owner for an ant's message only when the sender's link is verifiable:
+//! the sender takes part in the thread, or an ant with a verifiable link passed the link on to it, spinning a thread
+//! off it or messaging the ant on it. Each daemon records the links its ant passes on in [`LINKS_BUCKET`], under keys
+//! only the ant's credentials write ([`link_key`]), and reads back who passed on the link to a thread ([`passed_on`]).
+//! While the hub is out of reach, the machine's outbox keeps the record until the bucket sources it
+//! ([`link_outbox`]).
 
 use std::time::Duration;
 
@@ -14,14 +15,15 @@ use futures::StreamExt as _;
 
 /// How long a read of the links waits for each record the bucket said it has.
 const WAIT: Duration = Duration::from_secs(5);
-/// Most records read for one channel thread.
+/// Most records read for one thread.
 const MAX_LINKS: u64 = 1024;
 
-/// Record that the sender of `envelope` passed the link it carries to a channel thread, if any, on to its recipient:
-/// in the links bucket or, while the hub is out of reach, in the machine's outbox, which the bucket sources once the
-/// uplink is back ([`link_outbox`]). Resolves once either holds it, so a message sent after it never outruns its link.
+/// Record that the sender of `envelope` passed the link it carries to a thread, if any ([`Envelope::passes_on`]), on
+/// to its recipient: in the links bucket or, while the hub is out of reach, in the machine's outbox, which the bucket
+/// sources once the uplink is back ([`link_outbox`]). Resolves once either holds it, so a message sent after it never
+/// outruns its link.
 pub async fn pass_on(js: &jetstream::Context, envelope: &Envelope) -> Result<()> {
-    let Some(thread) = envelope.origin_thread.as_ref() else { return Ok(()) };
+    let Some(thread) = envelope.passes_on() else { return Ok(()) };
     let value = envelope.thread_id.to_string();
     let in_hub = async {
         let kv = js
@@ -54,21 +56,20 @@ pub async fn pass_on(js: &jetstream::Context, envelope: &Envelope) -> Result<()>
     Ok(())
 }
 
-/// [`pass_on`], logging a failure: the message goes out anyway, its recipient's own replies and messages losing the
-/// thread's creator, as they would before the links bucket or credentials allowing it existed.
+/// [`pass_on`], logging a failure: the message goes out anyway, its recipient's own messages linking to the thread
+/// losing its creator and owner, as they would before the links bucket or credentials allowing it existed.
 pub async fn passing_on(js: &jetstream::Context, envelope: &Envelope) {
     if let Err(e) = pass_on(js, envelope).await {
         tracing::warn!(
-            thread = ?envelope.origin_thread,
+            thread = ?envelope.passes_on(),
             to = %envelope.to,
             error = format!("{e:#}"),
-            "recording the link passed on; replies and messages from the recipient lose the thread's creator"
+            "recording the link passed on; messages the recipient links to the thread lose its creator and owner"
         );
     }
 }
 
-/// Who passed the link to channel thread `thread` on to whom, as the links bucket keeps it: none while there is no
-/// bucket.
+/// Who passed the link to `thread` on to whom, as the links bucket keeps it: none while there is no bucket.
 pub async fn passed_on(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<(UserId, UserId)>> {
     let kv = match js.get_key_value(LINKS_BUCKET).await {
         Ok(kv) => kv,

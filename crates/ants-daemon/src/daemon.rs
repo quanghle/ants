@@ -44,6 +44,10 @@ const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
 const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How long a human's message from a machine's outbox waits for its thread's owner to be recorded.
+const OWNER_LANDS_WITHIN: Duration = Duration::from_secs(10);
+/// The header JetStream marks a message it sourced from another stream with.
+const STREAM_SOURCE: &str = "Nats-Stream-Source";
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
@@ -674,6 +678,27 @@ impl Inbox<'_> {
     }
 }
 
+impl Inbox<'_> {
+    /// Wait, up to [`OWNER_LANDS_WITHIN`], for the owner a human's message in `incoming` names to be recorded for its
+    /// thread and the ant when the message came from a machine's outbox: the owners bucket sources the record from the
+    /// same outbox, but apart from the hub's stream, and the ant's own messages on or from the thread take their owner
+    /// from it.
+    async fn owner_landed(&self, incoming: &Incoming, msg: &jetstream::Message) {
+        let envelope = &incoming.envelope;
+        let sourced = msg.headers.as_ref().is_some_and(|h| h.get(STREAM_SOURCE).is_some());
+        if !sourced || incoming.post.is_some() || envelope.owner.is_none() || !self.humans.is_human(&envelope.from) {
+            return;
+        }
+        match self.threads.awaited_owner(&envelope.thread_id, self.ant, OWNER_LANDS_WITHIN).await {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::debug!(thread = %envelope.thread_id, "no owner recorded for the thread"),
+            Err(e) => {
+                tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's owner")
+            }
+        }
+    }
+}
+
 /// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
 /// that buries what the daemon could not ([`dead::bury_undelivered`]).
 pub struct Claims<'a> {
@@ -689,10 +714,10 @@ impl Claims<'_> {
     /// Check what inbox message `envelope`, at stream sequence `seq`, says of its sender and thread: its sender wrote
     /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
     /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
-    /// creator its posts say ([`Threads::origin_of`]); any other has the owner recorded for it by the human or webhook
-    /// that first messaged an ant on it ([`Threads::recorded_owner`]), else that of the thread it was spun off
-    /// ([`Envelope::origin_thread`]): a channel thread's under the same check as its creator, another's as recorded;
-    /// else none, whatever owner the ant names.
+    /// creator its posts say ([`Threads::origin_of`]); any other has the owner a human's or a webhook's message on it to
+    /// the sender, or to an ant that passed the link to it on to the sender, named ([`Threads::owner_for`]), else that
+    /// of the thread it was spun off ([`Envelope::origin_thread`]): a channel thread's under the same check as its
+    /// creator, another's under the same as its own; else none, whatever owner the ant names.
     pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
         if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
         {
@@ -726,7 +751,7 @@ impl Claims<'_> {
             Err(e) => {
                 tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's origin");
                 if envelope.owner.is_some() {
-                    envelope.owner = self.recorded_owner(&envelope.thread_id).await;
+                    envelope.owner = self.recorded_owner(&envelope.thread_id, &envelope.from).await;
                 }
                 envelope.creator = None;
                 envelope.origin_thread = None;
@@ -735,13 +760,13 @@ impl Claims<'_> {
     }
 
     /// Check the owner and creator `envelope`, an ant's message at stream sequence `seq` on a thread no channel post
-    /// started, names: its owner is the one recorded for its thread, else the one of the thread it links to
+    /// started, names: its owner is the one recorded for its thread and sender, else the one of the thread it links to
     /// ([`Claims::linked`]); its creator that of the channel thread it links to. It keeps the link only when it gives
     /// either.
     async fn spun_off(&self, envelope: &mut Envelope, seq: u64, humans: &Humans) {
         let (named_owner, named_creator) = (envelope.owner.take(), envelope.creator.take());
         let recorded = match named_owner {
-            Some(_) => self.recorded_owner(&envelope.thread_id).await,
+            Some(_) => self.recorded_owner(&envelope.thread_id, &envelope.from).await,
             None => None,
         };
         let (linked_owner, linked_creator) = match envelope.origin_thread.take() {
@@ -762,15 +787,15 @@ impl Claims<'_> {
             tracing::debug!(
                 thread = %envelope.thread_id,
                 sender = %envelope.from,
-                "dropping the message's owner or creator: no human or webhook recorded the thread's owner, and it \
-                 links to no thread that gives one"
+                "dropping the message's owner or creator: no human or webhook recorded the thread's owner for the \
+                 sender, and it links to no thread that gives one"
             );
         }
     }
 
-    /// The owner and creator of `origin`, the thread an ant's message from `sender` at stream sequence `seq` links to:
-    /// a channel thread's when `sender` has a link to it ([`Threads::origin_for`]); else the owner recorded for it
-    /// ([`Threads::recorded_owner`]) and no creator.
+    /// The owner and creator of `origin`, the thread an ant's message from `sender` at stream sequence `seq` links to,
+    /// when `sender` has a link to it: a channel thread's ([`Threads::origin_for`]); else the owner recorded for it
+    /// ([`Threads::owner_for`]) and no creator.
     async fn linked(
         &self,
         origin: &ThreadId,
@@ -783,7 +808,7 @@ impl Claims<'_> {
                 let origin = self.threads.origin_for(origin, sender, seq, humans).await?;
                 return anyhow::Ok(origin.map_or((None, None), |o| (o.owner, o.creator)));
             }
-            Ok((self.threads.recorded_owner(origin).await?.filter(|o| self.humans.is_human(o)), None))
+            Ok((self.threads.owner_for(origin, sender).await?.filter(|o| self.humans.is_human(o)), None))
         };
         read.await.unwrap_or_else(|e| {
             tracing::warn!(thread = %origin, error = format!("{e:#}"), "reading the origin thread");
@@ -791,9 +816,9 @@ impl Claims<'_> {
         })
     }
 
-    /// The owner recorded for `thread`, when a human ([`Threads::recorded_owner`]).
-    async fn recorded_owner(&self, thread: &ThreadId) -> Option<UserId> {
-        match self.threads.recorded_owner(thread).await {
+    /// The owner recorded for `thread` and `sender`, when a human ([`Threads::owner_for`]).
+    async fn recorded_owner(&self, thread: &ThreadId, sender: &UserId) -> Option<UserId> {
+        match self.threads.owner_for(thread, sender).await {
             Ok(owner) => owner.filter(|o| self.humans.is_human(o)),
             Err(e) => {
                 tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner");
@@ -851,6 +876,7 @@ impl Inbox<'_> {
         };
         self.thread_origin(&mut incoming, seq).await;
         self.sender_claims(&mut incoming, seq).await;
+        self.owner_landed(&incoming, &msg).await;
         let envelope = &incoming.envelope;
         if self.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
@@ -2054,7 +2080,10 @@ mod tests {
         bus.client.flush().await.unwrap();
         let t1 = ThreadId::generate();
         bus::ensure_owners(&bus.js).await.unwrap();
-        crate::owners::record(&bus.js, None, &t1, &alice).await.unwrap();
+        // alice asked both on the thread.
+        for to in [&bus.dev, &dev_b] {
+            crate::owners::record(&bus.js, None, &t1, to, &alice).await.unwrap();
+        }
         let mut go_on = Envelope::on_thread(t1.clone(), alice.clone(), bus.dev.clone(), "go on");
         go_on.turn_budget = 0;
         for envelope in [
@@ -3133,49 +3162,96 @@ mod tests {
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let dev_b: UserId = "dev-b".parse().unwrap();
         let [mut to_dev_b, mut to_alice] = inboxes(&bus, &[dev_b.clone(), alice.clone()]).await;
-        // alice asked on `asked` and `stuck`, recording herself as their owner; nobody recorded one for `unrecorded`.
+        // alice asked dev-a and dev-b on `asked`, and dev-a on `stuck`, recording herself as their owner; nobody
+        // recorded one for `unrecorded`.
         let [asked, stuck, unrecorded] = [(); 3].map(|()| ThreadId::generate());
         bus::ensure_owners(&bus.js).await.unwrap();
-        for thread in [&asked, &stuck] {
-            crate::owners::record(&bus.js, None, thread, &alice).await.unwrap();
+        for (thread, to) in [(&asked, &bus.dev), (&asked, &dev_b), (&stuck, &bus.dev)] {
+            crate::owners::record(&bus.js, None, thread, to, &alice).await.unwrap();
         }
-        // dev-b names the default human as the owner of each, and links spin-offs to `asked` and `unrecorded`.
+        // dev-b names the default human as the owner of each, and links spin-offs to `asked`, `unrecorded` and
+        // `stuck`, where nobody messaged it.
         let forge = |thread: &ThreadId, origin: Option<&ThreadId>, text: &str| {
             Envelope::on_thread(thread.clone(), dev_b.clone(), bus.dev.clone(), text)
                 .with_owner(Some(UserId::human()))
                 .with_origin_thread(origin.cloned())
         };
         let on_asked = forge(&asked, None, "on alice's thread");
+        let on_stuck = forge(&stuck, None, "on a thread alice asked another on");
         let on_unrecorded = forge(&unrecorded, None, "on a thread nobody recorded");
         let spun_off_asked = forge(&ThreadId::generate(), Some(&asked), "spun off alice's thread");
         let spun_off_unrecorded = forge(&ThreadId::generate(), Some(&unrecorded), "spun off the other");
+        let spun_off_stuck = forge(&ThreadId::generate(), Some(&stuck), "spun off a thread it took no part in");
         // Out of turns: escalated to the thread's owner.
-        let mut spent = forge(&stuck, None, "stuck");
+        let mut spent = forge(&asked, None, "stuck");
         spent.turn_budget = 0;
         let mut seq = 0;
-        for envelope in [&on_asked, &on_unrecorded, &spun_off_asked, &spun_off_unrecorded, &spent] {
+        let sent =
+            [&on_asked, &on_stuck, &on_unrecorded, &spun_off_asked, &spun_off_unrecorded, &spun_off_stuck, &spent];
+        for envelope in sent {
             seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
         }
 
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
             let mut named = HashMap::new();
-            for _ in 0..4 {
+            for _ in 0..6 {
                 let reply = next_envelope(&mut to_dev_b).await;
                 named.insert(reply.in_reply_to.unwrap(), (reply.owner, reply.origin_thread));
             }
             let alice = Some(alice.clone());
             assert_eq!(named[&on_asked.id], (alice.clone(), None), "as recorded");
+            assert_eq!(named[&on_stuck.id], (None, None), "nobody messaged dev-b on it");
             assert_eq!(named[&on_unrecorded.id], (None, None), "nobody recorded one");
             assert_eq!(named[&spun_off_asked.id], (alice.clone(), Some(asked.clone())), "as recorded for its origin");
             assert_eq!(named[&spun_off_unrecorded.id], (None, None), "a link giving nothing is dropped");
+            assert_eq!(named[&spun_off_stuck.id], (None, None), "nor one to a thread dev-b took no part in");
             let escalation = next_envelope(&mut to_alice).await;
-            assert_eq!((&escalation.thread_id, &escalation.owner), (&stuck, &alice));
+            assert_eq!((&escalation.thread_id, &escalation.owner), (&asked, &alice));
             bus.until_acked(seq).await;
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the named one");
+    }
+
+    #[tokio::test]
+    async fn a_human_s_message_from_an_outbox_waits_for_its_thread_s_owner_to_be_recorded() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        bus::ensure_owners(&bus.js).await.unwrap();
+        let human = UserId::human();
+        let ask = |text: &str| Envelope::new(human.clone(), bus.dev.clone(), text).with_owner(Some(human.clone()));
+        let (sourced, direct) = (ask("from the outbox"), ask("unrecorded, straight to the hub"));
+        // Sourced, as from a machine's outbox, ahead of the owner's record.
+        let outbox =
+            jetstream::stream::Config { name: "OUT".into(), subjects: vec!["out.>".into()], ..Default::default() };
+        bus.js.create_stream(outbox).await.unwrap();
+        let mut config = bus.js.get_stream(ants_proto::STREAM).await.unwrap().cached_info().config.clone();
+        config.sources = Some(vec![jetstream::stream::Source {
+            name: "OUT".into(),
+            subject_transforms: vec![jetstream::stream::SubjectTransform {
+                source: "out.>".into(),
+                destination: "ants.>".into(),
+            }],
+            ..Default::default()
+        }]);
+        bus.js.update_stream(&config).await.unwrap();
+        let out = sourced.subject().replacen("ants.", "out.", 1);
+        bus::publish_json(&bus.js, out, &sourced, None).await.unwrap();
+        let seq = bus::publish_json(&bus.js, direct.subject(), &direct, None).await.unwrap();
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(direct.id), "no record to wait for");
+            assert!(timeout(Duration::from_millis(700), to_human.next()).await.is_err(), "waiting for the record");
+            crate::owners::record(&bus.js, None, &sourced.thread_id, &bus.dev, &human).await.unwrap();
+            assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(sourced.id));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]
@@ -3258,6 +3334,66 @@ mod tests {
             let reply = next_envelope(&mut to_dev_y).await;
             assert_eq!(named(&reply), (Some(passed.id), Some(lead.clone()), Some(root.thread_id.clone())));
             assert_eq!(named(&next_envelope(&mut to_eve).await), (Some(forged.id), None, None));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
+    async fn a_link_to_a_message_thread_passed_on_from_an_ant_messaged_on_it_carries_the_owner_further() {
+        let Some((bus, _to_human)) = Bus::start().await else { return };
+        bus::ensure_links(&bus.js).await.unwrap();
+        bus::ensure_owners(&bus.js).await.unwrap();
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let human = UserId::human();
+        let [dev_b, dev_x, dev_y, dev_z, eve, mallory] = ants(["dev-b", "dev-x", "dev-y", "dev-z", "eve", "mallory"]);
+        let [mut to_dev_y, mut to_dev_z, mut to_eve] =
+            inboxes(&bus, &[dev_y.clone(), dev_z.clone(), eve.clone()]).await;
+        let asked = ThreadId::generate();
+        crate::owners::record(&bus.js, None, &asked, &dev_b, &human).await.unwrap();
+        let on_asked = |from: &UserId, to: &UserId, text: &str| {
+            Envelope::on_thread(asked.clone(), from.clone(), to.clone(), text).with_owner(Some(human.clone()))
+        };
+        let spin = |from: &UserId, to: &UserId, text: &str| on_asked(from, to, text).spun_off(ThreadId::generate());
+        // dev-b, messaged on the thread, passes the link on to dev-x, which passes it on to dev-y, and to dev-z with
+        // a message on the thread itself. eve passes it on to itself and gets it from mallory, neither with a link.
+        for passed in [
+            spin(&dev_b, &dev_x, ""),
+            spin(&dev_x, &dev_y, ""),
+            on_asked(&dev_b, &dev_z, ""),
+            spin(&eve, &eve, ""),
+            spin(&mallory, &eve, ""),
+        ] {
+            crate::links::pass_on(&bus.js, &passed).await.unwrap();
+        }
+        let passed = spin(&dev_y, &bus.dev, "two hops away");
+        let on_thread = spin(&dev_z, &bus.dev, "messaged on the thread by dev-b");
+        let forged = spin(&eve, &bus.dev, "no link");
+        // The same on the thread itself.
+        let on_it = on_asked(&dev_z, &bus.dev, "on the thread");
+        let forged_on_it = on_asked(&eve, &bus.dev, "on the thread, no link");
+        let mut seq = 0;
+        for envelope in [&passed, &on_thread, &forged, &on_it, &forged_on_it] {
+            seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut named = HashMap::new();
+            for (to, replies) in [(&mut to_dev_y, 1), (&mut to_dev_z, 2), (&mut to_eve, 2)] {
+                for _ in 0..replies {
+                    let reply = next_envelope(to).await;
+                    named.insert(reply.in_reply_to.unwrap(), (reply.owner, reply.origin_thread));
+                }
+            }
+            let linked = (Some(human.clone()), Some(asked.clone()));
+            assert_eq!(named[&passed.id], linked);
+            assert_eq!(named[&on_thread.id], linked);
+            assert_eq!(named[&forged.id], (None, None));
+            assert_eq!(named[&on_it.id], (Some(human.clone()), None));
+            assert_eq!(named[&forged_on_it.id], (None, None));
             bus.until_acked(seq).await;
             ctrl_c.add_permits(1);
         };

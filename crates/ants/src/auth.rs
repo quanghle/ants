@@ -1010,17 +1010,22 @@ pub(crate) mod tests {
         let alerts_creds = issue(&alerts, Destination::Channel("ops".parse().unwrap()));
 
         let (asked, delivered, forged) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
-        owners::record(&h_js, None, &asked, &human).await.unwrap();
-        owners::record(&h_js, None, &asked, &alice).await.unwrap();
+        let dev_b = p("dev-b");
+        owners::record(&h_js, None, &asked, &dev_a, &human).await.unwrap();
+        owners::record(&h_js, None, &asked, &dev_b, &alice).await.unwrap();
         let hook_js = connect_to(&server.url, &hook_creds, None, &hook).await;
-        owners::record(&hook_js, None, &delivered, &alice).await.unwrap();
-        owners::record(&hook_js, None, &asked, &alice).await.unwrap();
-        assert!(owners::record(&a_js, None, &forged, &alice).await.is_err(), "an ant records no owner");
+        owners::record(&hook_js, None, &delivered, &dev_a, &alice).await.unwrap();
+        owners::record(&hook_js, None, &asked, &dev_a, &alice).await.unwrap();
+        assert!(
+            owners::record(&hook_js, None, &forged, &dev_b, &alice).await.is_err(),
+            "a webhook records for its ants only"
+        );
+        assert!(owners::record(&a_js, None, &forged, &dev_a, &alice).await.is_err(), "an ant records no owner");
         let alerts_js = connect_to(&server.url, &alerts_creds, None, &alerts).await;
-        assert!(owners::record(&alerts_js, None, &forged, &alice).await.is_err(), "nor a webhook to channels");
+        assert!(owners::record(&alerts_js, None, &forged, &dev_a, &alice).await.is_err(), "nor a webhook to channels");
 
         let (a_raw, mut errors) = server.watched(&dev_a).await;
-        let denied = format!("$KV.{}.{}", ants_proto::OWNERS_BUCKET, ants_proto::owner_key(&forged));
+        let denied = format!("$KV.{}.{}", ants_proto::OWNERS_BUCKET, ants_proto::owner_key(&forged, &dev_a));
         a_raw.publish(denied.clone(), "alice".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
@@ -1031,9 +1036,13 @@ pub(crate) mod tests {
         let v = next_violation(&hook_raw, &mut hook_errors).await;
         assert!(v.contains(&format!("Publish to \"{info}\"")), "{v}");
         let read = owners::Owners::new(a_js);
-        assert_eq!(read.owner_of(&asked).await.unwrap(), Some(human), "the first record stays");
-        assert_eq!(read.owner_of(&delivered).await.unwrap(), Some(alice));
-        assert_eq!(read.owner_of(&forged).await.unwrap(), None);
+        assert_eq!(read.recorded(&asked, &dev_a).await.unwrap(), Some(human), "the first record stays");
+        assert_eq!(read.recorded(&asked, &dev_b).await.unwrap(), Some(alice.clone()));
+        assert_eq!(read.recorded(&delivered, &dev_a).await.unwrap(), Some(alice));
+        for to in [&dev_a, &dev_b] {
+            assert_eq!(read.recorded(&forged, to).await.unwrap(), None);
+        }
+        assert_eq!(read.recorded(&delivered, &dev_b).await.unwrap(), None);
     }
 
     #[tokio::test]
