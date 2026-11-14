@@ -14,6 +14,7 @@ mod revoke;
 mod roster;
 mod scheduler;
 mod serve;
+mod service;
 mod spend;
 mod thread;
 mod tools;
@@ -179,7 +180,8 @@ enum Command {
     Daemon(Box<serve::DaemonArgs>),
     /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
-    /// key to sign; run again with --jwt or --enroll to complete the credentials. Reload the daemon (SIGHUP) to serve the ant.
+    /// key to sign; run again with --jwt or --enroll to complete the credentials. Completed credentials reload the
+    /// daemon service of the config file to serve the ant, when it runs (scripts/install-units.sh).
     Add(Box<add::AddArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
     /// list them, approve or reject one.

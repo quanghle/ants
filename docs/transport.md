@@ -147,7 +147,6 @@ ants auth leaf macbook --ant dev-a --webhook github --js-domain hub
 ants auth enroll dev-c                                   # account-key machine
 ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds   # leaf machine, through its leaf node
 ants enroll approve dev-c --js-domain hub                # account-key machine
-launchctl kickstart -k gui/$(id -u)/ants.nats            # leaf machine (Linux: systemctl --user restart ants-nats)
 ```
 
 - `ants add --enroll` reads the machine's `leaf.conf` (`--leaf-config FILE`, default `~/.config/ants/leaf.conf` when present) for its `server_name` and uplink credentials, and names the leaf in the request, signed with the uplink key. Each repeat of the request reads the uplink credentials again.
@@ -155,7 +154,7 @@ launchctl kickstart -k gui/$(id -u)/ants.nats            # leaf machine (Linux: 
 - Approval of a request naming a leaf:
   - re-signs the leaf's uplink JWT for the same key, adding the ant's permissions (`Permissions::for_leaf` for the ant alone) to what it already allows, and sends it with the ant's JWT (`leaf_jwt`);
   - when `ANTS_IN` sources the machine's outbox, adds the ant's admission to `ANTS` (without its inbox subjects when a human's admission takes every inbox of the machine) and to `ants_links`, starting after the current `ANTS_IN` entries, before answering.
-- The asking machine checks the renewed JWT (team account, leaf key, `leaf-<machine>`) and writes it into the uplink credentials file, unless that file changed meanwhile to allow something the renewal lacks. `nats-server` reads the file at each connect but does not reconnect on `SIGHUP` for new contents, so restart the leaf node; local clients reconnect.
+- The asking machine checks the renewed JWT (team account, leaf key, `leaf-<machine>`) and writes it into the uplink credentials file, unless that file changed meanwhile to allow something the renewal lacks. `nats-server` reads the file at each connect but does not reconnect on `SIGHUP` for new contents, so the leaf node restarts: `ants add` restarts the leaf node service `scripts/install-units.sh` installed for that `leaf.conf` (`launchctl kickstart -k gui/<uid>/ants.nats`, `systemctl --user restart ants-nats`) when it runs, last, after reloading the daemon; otherwise it prints those commands to run by hand. Local clients, the daemon's ants among them, reconnect.
 - A rogue leaf may hear answers to its machine's requests: they hold only public JWTs, useless without the seeds that stay on the asking machine. Later `ants auth leaf` and `ants leaf outbox` runs replace the lists, so name the enrolled ant in them too.
 
 ## Store and forward

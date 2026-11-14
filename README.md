@@ -620,9 +620,9 @@ ants enroll list --js-domain hub                # auth machine: inspect pending 
 ants enroll approve dev-c --js-domain hub
 ```
 
-Requests prove the enrollment credentials by signature; `--hub URL` sends them to another server than `--nats`. Behind a leaf node, `ants add --enroll` names the machine's leaf (from `~/.config/ants/leaf.conf` or `--leaf-config FILE`) with a signature by its uplink key, and approval renews the leaf's uplink credentials for the ant and admits it to the outbox sourcing set by `ants leaf outbox`; restart the leaf node afterwards (`SIGHUP` does not reread credentials) and name the ant in later `ants auth leaf` and `ants leaf outbox` runs. `ants enroll` behind a leaf node needs uplink credentials issued with `ants auth leaf --enroll-approver`. Leaf uplink credentials issued before enrollment crossed leaves need `ants auth leaf` once more. See [docs/transport.md](docs/transport.md#enrollment-behind-a-leaf-node).
+Requests prove the enrollment credentials by signature; `--hub URL` sends them to another server than `--nats`. Behind a leaf node, `ants add --enroll` names the machine's leaf (from `~/.config/ants/leaf.conf` or `--leaf-config FILE`) with a signature by its uplink key, and approval renews the leaf's uplink credentials for the ant and admits it to the outbox sourcing set by `ants leaf outbox`; `ants add` then restarts the leaf node service of that `leaf.conf` when it runs (`SIGHUP` does not reread credentials; otherwise it prints the restart command, see [Services](#services)). Name the ant in later `ants auth leaf` and `ants leaf outbox` runs. `ants enroll` behind a leaf node needs uplink credentials issued with `ants auth leaf --enroll-approver`. Leaf uplink credentials issued before enrollment crossed leaves need `ants auth leaf` once more. See [docs/transport.md](docs/transport.md#enrollment-behind-a-leaf-node).
 
-Reload `ants daemon` (`SIGHUP`, see [Services](#services)) after adding an ant; after `--jwt`, also update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
+Once the credentials are complete, `ants add` reloads the daemon service serving the config file (see [Services](#services)) when it runs, and otherwise prints the command to send `ants daemon` `SIGHUP` by hand; after `--jwt`, also update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
 
 ## Leaf nodes
 
@@ -679,7 +679,8 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | HTTPS bridge server (`ants bridge serve`, hub) | `ants.bridge-serve` (`bridge-serve.log`) | `ants-bridge-serve.service` | `--bridge-serve` |
 
 - **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux).
-- **Reload daemon config (`ants add`):** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
+- **Reload daemon config:** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
+- **Managed by `ants add`:** completed credentials reload `ants.daemon` / `ants-daemon` when its unit (`~/Library/LaunchAgents/ants.daemon.plist`, `~/.config/systemd/user/ants-daemon.service`) runs the config file of `ants add` and the service is running; an enrollment that renewed the leaf's uplink credentials then restarts `ants.nats` / `ants-nats` (`launchctl kickstart -k`, `systemctl --user restart`) when its unit runs that `leaf.conf`. A unit of another file, a stopped service or another system gets the commands printed instead.
 - **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
