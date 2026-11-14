@@ -15,7 +15,7 @@ pub use uuid::Uuid;
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
 pub const STREAM_SUBJECTS: [&str; 5] =
-    ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
+    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
 pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
@@ -70,8 +70,8 @@ pub enum Error {
     /// A body naming another user than the key or subject it was stored under, which credentials pin.
     #[error("{kind} of {user} found at {at}")]
     ForeignUser { kind: &'static str, user: UserId, at: String },
-    #[error("plan post from {from} on thread {thread} arrived on {subject}")]
-    WrongPlanSubject { subject: String, from: UserId, thread: ThreadId },
+    #[error("notes post from {from} on thread {thread} arrived on {subject}")]
+    WrongNotesSubject { subject: String, from: UserId, thread: ThreadId },
     #[error("channel post from {from} in channel {channel} arrived on {subject}")]
     WrongChannelSubject { subject: String, from: UserId, channel: ChannelId },
     /// A body naming another channel than the key it was stored under.
@@ -213,14 +213,14 @@ impl Machine {
     }
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `user` in `role`, as pairs of an
-    /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, plan and channel subjects
-    /// the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters.
+    /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, notes and channel
+    /// subjects the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters.
     /// With `inbox` false, no inbox subjects: a human's admission takes every inbox subject of a machine it is on, and
     /// the filters of one stream's sources may not overlap. A human's dead letters, of any ant, are written from
     /// what only the hub holds, so none are buffered.
     pub fn admitted(&self, user: &UserId, role: Role, inbox: bool) -> Vec<(String, String)> {
-        let [own_inbox, own_plan, own_chan] = subject::sendable(user, role);
-        let mut patterns = if inbox { vec![own_inbox, own_plan, own_chan] } else { vec![own_plan, own_chan] };
+        let [own_inbox, own_notes, own_chan] = subject::sendable(user, role);
+        let mut patterns = if inbox { vec![own_inbox, own_notes, own_chan] } else { vec![own_notes, own_chan] };
         if !role.is_human() {
             patterns.push(subject::dead(user));
         }
@@ -315,29 +315,29 @@ pub mod subject {
     }
 
     /// A post by `from` to the notes of `thread`. Like an inbox subject it names the sender, so credentials can
-    /// pin it there ([`plan_from`]).
-    pub fn plan(thread: &ThreadId, from: &UserId) -> String {
-        format!("ants.plan.{thread}.{from}")
+    /// pin it there ([`notes_from`]).
+    pub fn notes(thread: &ThreadId, from: &UserId) -> String {
+        format!("ants.notes.{thread}.{from}")
     }
 
     /// Every post to the notes of `thread`, whoever wrote it.
-    pub fn plan_room(thread: &ThreadId) -> String {
-        format!("ants.plan.{thread}.*")
+    pub fn notes_of(thread: &ThreadId) -> String {
+        format!("ants.notes.{thread}.*")
     }
 
-    /// Every plan subject `user` may post on.
-    pub fn plan_from(user: &UserId) -> String {
-        format!("ants.plan.*.{user}")
+    /// Every notes subject `user` may post on.
+    pub fn notes_from(user: &UserId) -> String {
+        format!("ants.notes.*.{user}")
     }
 
-    /// The thread and the sender a plan subject names, or `None` when it is no plan subject.
-    pub fn parse_plan(subject: &str) -> Option<(ThreadId, UserId)> {
-        let (thread, from) = subject.strip_prefix("ants.plan.")?.split_once('.')?;
+    /// The thread and the sender a notes subject names, or `None` when it is no notes subject.
+    pub fn parse_notes(subject: &str) -> Option<(ThreadId, UserId)> {
+        let (thread, from) = subject.strip_prefix("ants.notes.")?.split_once('.')?;
         Some((thread.parse().ok()?, from.parse().ok()?))
     }
 
     /// The notes of every thread.
-    pub const ALL_PLANS: &str = "ants.plan.>";
+    pub const ALL_NOTES: &str = "ants.notes.>";
 
     /// A post by `from` to `channel`. Like an inbox subject it names the sender, so credentials can pin it there
     /// ([`chan_from`]).
@@ -383,19 +383,19 @@ pub mod subject {
         format!("$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.{}.*", super::STREAM)
     }
 
-    /// The inbox, plan and channel subjects `user` in `role` may publish on: every inbox for a human (to replay dead
-    /// letters as they were), else [`inbox_from`]; [`plan_from`]; and [`chan_from`].
+    /// The inbox, notes and channel subjects `user` in `role` may publish on: every inbox for a human (to replay dead
+    /// letters as they were), else [`inbox_from`]; [`notes_from`]; and [`chan_from`].
     pub fn sendable(user: &UserId, role: Role) -> [String; 3] {
         let inbox = if role.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(user) };
-        [inbox, plan_from(user), chan_from(user)]
+        [inbox, notes_from(user), chan_from(user)]
     }
 
-    /// Where a client on a leaf node puts an inbox, plan, channel or dead letter subject (or pattern) while the hub's
+    /// Where a client on a leaf node puts an inbox, notes, channel or dead letter subject (or pattern) while the hub's
     /// stream is out of reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]).
     /// `None` for other subjects, which are not buffered: approvals wait for a human's answer through the hub.
     pub fn outbox(subject: &str) -> Option<String> {
         let rest = subject.strip_prefix("ants.")?;
-        ["inbox.", "plan.", "chan.", "dead."]
+        ["inbox.", "notes.", "chan.", "dead."]
             .iter()
             .any(|kind| rest.starts_with(kind))
             .then(|| format!("ants.out.{rest}"))
@@ -514,10 +514,10 @@ pub fn attempt_key(ant: &UserId, seq: u64) -> String {
     format!("{ant}.{seq}")
 }
 
-/// JetStream consumer a user reads plan rooms through, one room at a time. Its name is fixed, so its credentials
+/// JetStream consumer a user reads thread notes through, one thread at a time. Its name is fixed, so its credentials
 /// need not let it pull from other consumers.
-pub fn plan_consumer(user: &UserId) -> String {
-    format!("plan-{user}")
+pub fn notes_consumer(user: &UserId) -> String {
+    format!("notes-{user}")
 }
 
 /// Durable JetStream consumer an ant takes channel posts from, to be woken by those meant for it. Its filter is
@@ -527,7 +527,7 @@ pub fn chan_consumer(ant: &UserId) -> String {
 }
 
 /// JetStream consumer a user reads a channel (or a thread of it) back through, one read at a time, like
-/// [`plan_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too.
+/// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too.
 pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
 }
@@ -547,13 +547,13 @@ pub struct Permissions {
 impl Permissions {
     /// What the credentials of `user` in `role` allow.
     ///
-    /// Any ant may write to every inbox, every plan room and every channel, but only as itself (the sender is the
-    /// last token of inbox, plan and channel subjects). It speaks only for itself on status, approvals and dead letters,
-    /// reads only its own inbox (consumer and live), every plan room (live, and from the stream through its own plan
-    /// consumer), every channel (live, and from the stream through its own channel consumer and reader), its own
-    /// replies and the decisions on its own approval requests (live, and as stored), reads the roster to find ants
-    /// by capability but writes only its own entry, reads every escalation chain by key but writes only its own, reads
-    /// the channels and humans buckets but never writes them, and
+    /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
+    /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
+    /// letters, reads only its own inbox (consumer and live), the notes of every thread (live, and from the stream
+    /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
+    /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
+    /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
+    /// its own, reads the channels and humans buckets but never writes them, and
     /// reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
@@ -564,13 +564,13 @@ impl Permissions {
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
     ///
-    /// Each inbox, plan and channel subject an ant may publish, and its own dead letter subject, it may also publish
+    /// Each inbox, notes and channel subject an ant may publish, and its own dead letter subject, it may also publish
     /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps. Only a human sets up leaf outboxes and the hub's
     /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no ant
     /// may create or change one.
     pub fn for_user(user: &UserId, role: Role) -> Self {
         let consumer = inbox_consumer(user);
-        let plan = plan_consumer(user);
+        let notes = notes_consumer(user);
         let (chan, chan_read) = (chan_consumer(user), chan_reader(user));
         let roster_stream = kv_stream(ROSTER_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
@@ -590,10 +590,10 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox_of(user)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
             format!("$JS.ACK.{STREAM}.{consumer}.>"),
-            // Reading plan rooms back through its own consumer, which only ever filters plan subjects.
-            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{plan}.{}", subject::ALL_PLANS),
-            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{plan}"),
-            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{plan}"),
+            // Reading thread notes back through its own consumer, which only ever filters notes subjects.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notes}.{}", subject::ALL_NOTES),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notes}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{notes}"),
             // Channel posts: its durable consumer, and reading channels back; both only ever filter channel subjects.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan}"),
@@ -675,7 +675,7 @@ impl Permissions {
                 subject::chain(user),
             ]);
             subscribe.extend([
-                subject::ALL_PLANS.to_owned(),
+                subject::ALL_NOTES.to_owned(),
                 subject::ALL_CHANNELS.to_owned(),
                 format!("{}.*", subject::approvals(user)),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
@@ -719,7 +719,7 @@ impl Permissions {
     /// `users` only, all of them the machine's own. nats-server carries a reply across a leaf connection only if the
     /// leaf may publish it: the interest behind it reaches the leaf only then.
     ///
-    /// For each pattern of a user's inbox, plan and channel subjects, which has a wildcard before the sender, the
+    /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, the
     /// uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
     /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
     pub fn for_leaf<'a>(machine: &Machine, users: impl IntoIterator<Item = (&'a UserId, Role)>) -> Self {
@@ -730,7 +730,7 @@ impl Permissions {
                 setup.push(user.clone());
             }
             let Self { publish, subscribe } = Self::for_user(user, role);
-            // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.plan.>`, ...) cross the uplink only if
+            // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
             let found = subject::sendable(user, role).map(|s| s.replace('*', user.as_str()));
@@ -1124,7 +1124,7 @@ pub enum EscalationReason {
     /// A prompt limit or a spending cap was reached.
     Cap,
     /// The thread's notes are out of turns.
-    PlanRoom,
+    Notes,
     /// A message on the thread became a dead letter.
     DeadLetter,
     /// A tool request needs a decision ([`Escalation::request_id`]).
@@ -1141,7 +1141,7 @@ impl EscalationReason {
         match self {
             Self::TurnBudget => "turn_budget",
             Self::Cap => "cap",
-            Self::PlanRoom => "plan_room",
+            Self::Notes => "notes",
             Self::DeadLetter => "dead_letter",
             Self::Approval => "approval",
             Self::Asked => "asked",
@@ -1249,14 +1249,14 @@ impl Escalation {
     }
 }
 
-/// A post to the notes of a thread, on [`subject::plan`]: one shared board per thread, where the ants on it plan
+/// A post to the notes of a thread, on [`subject::notes`]: one shared board per thread, where the ants on it coordinate
 /// together; a post wakes nobody, and each of them can read the whole board.
 ///
 /// Posts spend the thread's turn budget like messages between agents do, and each carries what is left. The post that
 /// spends the last turn hands the thread to the human, and the notes take no more agent posts until the human posts
 /// there with a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanPost {
+pub struct NotesPost {
     pub id: Uuid,
     pub thread_id: ThreadId,
     pub from: UserId,
@@ -1266,7 +1266,7 @@ pub struct PlanPost {
     pub sent_at: DateTime<Utc>,
 }
 
-impl PlanPost {
+impl NotesPost {
     /// A post with a fresh budget, as the human posts.
     pub fn new(thread_id: ThreadId, from: UserId, text: impl Into<String>) -> Self {
         Self {
@@ -1280,13 +1280,13 @@ impl PlanPost {
     }
 
     /// An agent's post, spending one turn of what is left: the lower of `budget`, the turns of the message the agent
-    /// is handling, and those the room's `last` post left. Fails when none are left.
+    /// is handling, and those the notes' `last` post left. Fails when none are left.
     pub fn spend(
         thread_id: ThreadId,
         from: UserId,
         text: impl Into<String>,
         budget: u32,
-        last: Option<&PlanPost>,
+        last: Option<&NotesPost>,
     ) -> Result<Self, Error> {
         let left = last.map_or(budget, |last| last.turn_budget.min(budget));
         let turn_budget = left.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(thread_id.clone()))?;
@@ -1294,16 +1294,16 @@ impl PlanPost {
     }
 
     pub fn subject(&self) -> String {
-        subject::plan(&self.thread_id, &self.from)
+        subject::notes(&self.thread_id, &self.from)
     }
 
-    /// Check that the post arrived on its own [`PlanPost::subject`]. Credentials pin the sender token of a plan
+    /// Check that the post arrived on its own [`NotesPost::subject`]. Credentials pin the sender token of a notes
     /// subject, so a `from` that disagrees with it is forged.
     pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
         if subject == self.subject() {
             return Ok(());
         }
-        Err(Error::WrongPlanSubject {
+        Err(Error::WrongNotesSubject {
             subject: subject.to_owned(),
             from: self.from.clone(),
             thread: self.thread_id.clone(),
@@ -1973,9 +1973,9 @@ mod tests {
             "$JS.hub.API.$KV.ants_chains.dev-a",
             "$JS.hub.API.DIRECT.GET.KV_ants_chains.>",
             "$JS.hub.API.$KV.ants_roster.dev-a",
-            "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.plan-dev-a",
+            "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.notes-dev-a",
             "$JS.ACK.ANTS.inbox-dev-a.>",
-            "ants.plan.*.dev-a",
+            "ants.notes.*.dev-a",
         ] {
             assert!(publish.iter().any(|have| have == s), "{s} missing from {publish:?}");
         }
@@ -2003,9 +2003,9 @@ mod tests {
         assert_eq!(
             extra,
             [
-                // Already allowed by `ants.inbox.*.dev-a`, `ants.plan.*.dev-a` and `ants.chan.*.dev-a`.
+                // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a` and `ants.chan.*.dev-a`.
                 "ants.inbox.dev-a.dev-a",
-                "ants.plan.dev-a.dev-a",
+                "ants.notes.dev-a.dev-a",
                 "ants.chan.dev-a.dev-a",
                 "$JS.S.m1.>",
                 "$JSC.R.m1.*.ANTS_OUT.>",
@@ -2026,18 +2026,18 @@ mod tests {
     }
 
     #[test]
-    fn outboxes_take_inbox_plan_channel_and_dead_letter_subjects_only() {
+    fn outboxes_take_inbox_notes_channel_and_dead_letter_subjects_only() {
         let t: ThreadId = "t1".parse().unwrap();
         let c: ChannelId = "ops".parse().unwrap();
         assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
-        assert_eq!(subject::outbox(&subject::plan(&t, &p("dev-a"))).unwrap(), "ants.out.plan.t1.dev-a");
+        assert_eq!(subject::outbox(&subject::notes(&t, &p("dev-a"))).unwrap(), "ants.out.notes.t1.dev-a");
         assert_eq!(subject::outbox(&subject::chan(&c, &p("dev-a"))).unwrap(), "ants.out.chan.ops.dev-a");
         assert_eq!(subject::outbox(&subject::dead(&p("dev-a"))).unwrap(), "ants.out.dead.dev-a");
         for other in [subject::approvals(&p("dev-a")), subject::roster(&p("dev-a")), "ants.outbox.x".to_owned()] {
             assert_eq!(subject::outbox(&other), None, "{other}");
         }
         let a = Permissions::for_user(&p("dev-a"), Role::Ant);
-        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"] {
+        for s in ["ants.out.inbox.*.dev-a", "ants.out.notes.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"] {
             assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
         }
         assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.approvals")));
@@ -2054,7 +2054,7 @@ mod tests {
             m1.admitted(&p("dev-a"), Role::Ant, true),
             [
                 ("ants.in.m1.ants.out.inbox.*.dev-a".to_owned(), "ants.inbox.{{wildcard(1)}}.dev-a".to_owned()),
-                ("ants.in.m1.ants.out.plan.*.dev-a".to_owned(), "ants.plan.{{wildcard(1)}}.dev-a".to_owned()),
+                ("ants.in.m1.ants.out.notes.*.dev-a".to_owned(), "ants.notes.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.chan.*.dev-a".to_owned(), "ants.chan.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.dead.dev-a".to_owned(), "ants.dead.dev-a".to_owned()),
             ]
@@ -2065,7 +2065,7 @@ mod tests {
         let rest: Vec<_> = m1.admitted(&p("dev-a"), Role::Ant, false).into_iter().map(|(filter, _)| filter).collect();
         assert_eq!(
             rest,
-            ["ants.in.m1.ants.out.plan.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
+            ["ants.in.m1.ants.out.notes.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
             "no inbox subjects"
         );
         assert_eq!(subject::intake(&m1), "ants.in.m1.>");
@@ -2077,10 +2077,10 @@ mod tests {
         assert_eq!(subject::inbox(&p("dev-a"), &UserId::human()), "ants.inbox.dev-a.human");
         assert_eq!(subject::inbox_of(&p("dev-a")), "ants.inbox.dev-a.*");
         assert_eq!(subject::inbox_from(&p("dev-a")), "ants.inbox.*.dev-a");
-        assert_eq!(subject::plan(&t, &p("dev-a")), "ants.plan.t1.dev-a");
-        assert_eq!(subject::plan_room(&t), "ants.plan.t1.*");
-        assert_eq!(subject::plan_from(&p("dev-a")), "ants.plan.*.dev-a");
-        assert!(STREAM_SUBJECTS.contains(&subject::ALL_PLANS), "plan rooms are durable");
+        assert_eq!(subject::notes(&t, &p("dev-a")), "ants.notes.t1.dev-a");
+        assert_eq!(subject::notes_of(&t), "ants.notes.t1.*");
+        assert_eq!(subject::notes_from(&p("dev-a")), "ants.notes.*.dev-a");
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_NOTES), "thread notes are durable");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
@@ -2163,21 +2163,21 @@ mod tests {
         let err = forged.check_subject("ants.inbox.dev-b.dev-a").unwrap_err();
         assert_eq!(err.to_string(), "envelope from human to dev-b arrived on ants.inbox.dev-b.dev-a");
         assert!(msg.check_subject("ants.inbox.dev-c.dev-a").is_err(), "addressed to another inbox");
-        for bad in ["ants.inbox.dev-b", "ants.inbox.dev-b.dev-a.x", "ants.plan.t1.dev-a", "ants.inbox.dev-b.*"] {
+        for bad in ["ants.inbox.dev-b", "ants.inbox.dev-b.dev-a.x", "ants.notes.t1.dev-a", "ants.inbox.dev-b.*"] {
             assert_eq!(subject::parse_inbox(bad), None, "{bad}");
         }
     }
 
     #[test]
-    fn the_plan_subject_names_the_sender() {
-        let post = PlanPost::new("t1".parse().unwrap(), p("dev-a"), "split the work");
-        assert_eq!(subject::parse_plan(&post.subject()), Some(("t1".parse().unwrap(), p("dev-a"))));
-        assert_eq!(post.check_subject("ants.plan.t1.dev-a"), Ok(()));
-        let err = post.check_subject("ants.plan.t1.dev-b").unwrap_err();
-        assert_eq!(err.to_string(), "plan post from dev-a on thread t1 arrived on ants.plan.t1.dev-b");
-        assert!(post.check_subject("ants.plan.t2.dev-a").is_err(), "posted to another room");
-        for bad in ["ants.plan.t1", "ants.plan.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.plan.t1.*"] {
-            assert_eq!(subject::parse_plan(bad), None, "{bad}");
+    fn the_notes_subject_names_the_sender() {
+        let post = NotesPost::new("t1".parse().unwrap(), p("dev-a"), "split the work");
+        assert_eq!(subject::parse_notes(&post.subject()), Some(("t1".parse().unwrap(), p("dev-a"))));
+        assert_eq!(post.check_subject("ants.notes.t1.dev-a"), Ok(()));
+        let err = post.check_subject("ants.notes.t1.dev-b").unwrap_err();
+        assert_eq!(err.to_string(), "notes post from dev-a on thread t1 arrived on ants.notes.t1.dev-b");
+        assert!(post.check_subject("ants.notes.t2.dev-a").is_err(), "posted to the notes of another thread");
+        for bad in ["ants.notes.t1", "ants.notes.t1.dev-a.x", "ants.inbox.t1.dev-a", "ants.notes.t1.*"] {
+            assert_eq!(subject::parse_notes(bad), None, "{bad}");
         }
     }
 
@@ -2189,7 +2189,7 @@ mod tests {
         assert_eq!(subject::chan_from(&p("dev-a")), "ants.chan.*.dev-a");
         assert_eq!(subject::parse_chan("ants.chan.ops.dev-a"), Some((c.clone(), p("dev-a"))));
         for bad in
-            ["ants.chan.ops", "ants.chan.ops.dev-a.x", "ants.plan.ops.dev-a", "ants.chan.ops.*", "ants.chan.Ops.a"]
+            ["ants.chan.ops", "ants.chan.ops.dev-a.x", "ants.notes.ops.dev-a", "ants.chan.ops.*", "ants.chan.Ops.a"]
         {
             assert_eq!(subject::parse_chan(bad), None, "{bad}");
         }
@@ -2412,19 +2412,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_posts_spend_the_lower_of_the_message_and_the_room_budget() {
+    fn notes_posts_spend_the_lower_of_the_message_and_the_notes_budget() {
         let t: ThreadId = "t1".parse().unwrap();
-        let first = PlanPost::spend(t.clone(), p("dev-a"), "draft", 3, None).unwrap();
-        assert_eq!(first.turn_budget, 2, "an empty room starts from the message's budget");
-        let second = PlanPost::spend(t.clone(), p("dev-b"), "agreed", 8, Some(&first)).unwrap();
-        assert_eq!(second.turn_budget, 1, "the room's budget is lower");
-        let last = PlanPost::spend(t.clone(), p("dev-a"), "done", 1, Some(&second)).unwrap();
+        let first = NotesPost::spend(t.clone(), p("dev-a"), "draft", 3, None).unwrap();
+        assert_eq!(first.turn_budget, 2, "empty notes start from the message's budget");
+        let second = NotesPost::spend(t.clone(), p("dev-b"), "agreed", 8, Some(&first)).unwrap();
+        assert_eq!(second.turn_budget, 1, "the notes' budget is lower");
+        let last = NotesPost::spend(t.clone(), p("dev-a"), "done", 1, Some(&second)).unwrap();
         assert_eq!(last.turn_budget, 0);
-        let refused = PlanPost::spend(t.clone(), p("dev-b"), "more", 8, Some(&last));
+        let refused = NotesPost::spend(t.clone(), p("dev-b"), "more", 8, Some(&last));
         assert_eq!(refused, Err(Error::BudgetExhausted(t.clone())));
-        let human = PlanPost::new(t.clone(), UserId::human(), "go on");
+        let human = NotesPost::new(t.clone(), UserId::human(), "go on");
         assert_eq!(
-            PlanPost::spend(t, p("dev-b"), "more", 8, Some(&human)).unwrap().turn_budget,
+            NotesPost::spend(t, p("dev-b"), "more", 8, Some(&human)).unwrap().turn_budget,
             DEFAULT_TURN_BUDGET - 1
         );
     }
@@ -2511,7 +2511,7 @@ mod tests {
             "$JS.API.STREAM.CREATE.KV_ants_humans",
             "$KV.ants_humans.>",
             "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.*",
-            "$JS.API.CONSUMER.CREATE.ANTS.plan-alice.ants.plan.>",
+            "$JS.API.CONSUMER.CREATE.ANTS.notes-alice.ants.notes.>",
         ] {
             assert!(alice.publish.iter().any(|have| have == s), "{s} missing from {:?}", alice.publish);
         }

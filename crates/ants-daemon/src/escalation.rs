@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ChannelId, DEFAULT_MAX_ESCALATION_HOPS, DEFAULT_TURN_BUDGET, Envelope, Escalation, EscalationReason, Hop,
-    OwnerBecause, PlanPost, ThreadId, UserId,
+    NotesPost, OwnerBecause, ThreadId, UserId,
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -55,11 +55,11 @@ pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     })
 }
 
-/// Stores a plan post under a message id, resolving once JetStream has it.
-pub type PlanSender = Arc<dyn Fn(PlanPost, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+/// Stores a post to thread notes under a message id, resolving once JetStream has it.
+pub type NotesSender = Arc<dyn Fn(NotesPost, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
-/// Stores plan posts through JetStream ([`bus::store`]).
-pub fn jetstream_plan_sender(js: async_nats::jetstream::Context) -> PlanSender {
+/// Stores posts to thread notes through JetStream ([`bus::store`]).
+pub fn jetstream_notes_sender(js: async_nats::jetstream::Context) -> NotesSender {
     Arc::new(move |post, id| {
         let js = js.clone();
         Box::pin(async move { bus::store(&js, post.subject(), &post, &id).await.map(drop) })
@@ -139,8 +139,8 @@ pub struct Escalator {
     humans: Registry,
     ledger: Arc<Ledger>,
     send: Sender,
-    /// Gives the thread's plan room a fresh budget as an escalation goes up a level; None leaves the room as it is.
-    plan: Option<PlanSender>,
+    /// Gives the thread's notes a fresh budget as an escalation goes up a level; None leaves the notes as they are.
+    notes: Option<NotesSender>,
     /// Held while an escalation is decided and stored, so two on one thread do not climb from the same level.
     busy: Mutex<()>,
     /// A deadline was set.
@@ -151,7 +151,7 @@ impl Escalator {
     /// Escalations of `ant` up `chain`, the chains of others read from `roster`, kept in `ledger`.
     pub fn new(ant: UserId, chain: Chain, roster: Roster, humans: Registry, ledger: Arc<Ledger>, send: Sender) -> Self {
         let (busy, deadline_set) = (Mutex::default(), Notify::new());
-        Self { ant, chain, roster, chains: None, humans, ledger, send, plan: None, busy, deadline_set }
+        Self { ant, chain, roster, chains: None, humans, ledger, send, notes: None, busy, deadline_set }
     }
 
     /// Follow the chain of a leader missing from the roster through `chains`.
@@ -160,9 +160,9 @@ impl Escalator {
         self
     }
 
-    /// Post to the thread's plan room through `plan` as each escalation goes up a level, with a fresh budget.
-    pub fn with_plan_room(self, plan: PlanSender) -> Self {
-        Self { plan: Some(plan), ..self }
+    /// Post to the thread's notes through `notes` as each escalation goes up a level, with a fresh budget.
+    pub fn with_notes(self, notes: NotesSender) -> Self {
+        Self { notes: Some(notes), ..self }
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -344,9 +344,9 @@ impl Escalator {
                 let ours = escalation.stuck == self.ant;
                 let deadline = self.chain.after.filter(|_| ours).map(|after| now_ms() + millis(after));
                 // Before the escalation is stored: a retry stores the post again under the same id.
-                if let Some(plan) = &self.plan {
-                    let post = PlanPost::new(thread.clone(), self.ant.clone(), room_text(&escalation, &to));
-                    plan(post, format!("{}/plan", stuck.id)).await?;
+                if let Some(notes) = &self.notes {
+                    let post = NotesPost::new(thread.clone(), self.ant.clone(), notes_text(&escalation, &to));
+                    notes(post, format!("{}/notes", stuck.id)).await?;
                 }
                 let pending = Pending {
                     escalation: escalation.clone(),
@@ -495,7 +495,7 @@ fn chain_text(escalation: &Escalation, to: &[UserId], summary: &str) -> String {
     let (thread, leader, stuck) = (&escalation.thread_id, &escalation.leader, &escalation.stuck);
     format!(
         "[ants] Escalation on thread {thread}, level {}: {stuck} is stuck ({}). Sent to {}; {leader} leads. The members \
-         coordinate in the notes of thread {thread} (read_plan, post_plan). Only {leader} resolves it, by \
+         coordinate in the notes of thread {thread} (read_notes, post_notes). Only {leader} resolves it, by \
          answering {stuck} on thread {thread}, or escalates it further (escalate).\n\n{summary}",
         escalation.level,
         reason_text(escalation.reason),
@@ -504,7 +504,7 @@ fn chain_text(escalation: &Escalation, to: &[UserId], summary: &str) -> String {
 }
 
 /// What an escalation going up to `to` posts to the thread's notes, with a fresh budget.
-fn room_text(escalation: &Escalation, to: &[UserId]) -> String {
+fn notes_text(escalation: &Escalation, to: &[UserId]) -> String {
     format!(
         "[ants] Escalation of {}'s thread, level {}: sent to {}; {} leads. The notes have a fresh budget of {} turns.",
         escalation.stuck,
@@ -526,8 +526,8 @@ pub fn members_at(escalation: &Escalation) -> &[UserId] {
 pub enum Route {
     /// To the stuck ant: the leader resolves the escalation.
     Stuck(UserId),
-    /// To the thread's plan room, for the leader: a member other than the leader does not answer the stuck ant.
-    Room,
+    /// To the thread's notes, for the leader: a member other than the leader does not answer the stuck ant.
+    Notes,
     /// To the sender, a fellow member of the group, as for any message.
     Sender,
 }
@@ -549,7 +549,7 @@ pub fn route<'a>(ant: &UserId, envelope: &'a Envelope) -> Option<(&'a Escalation
     } else if e.is_leader(ant) {
         Route::Stuck(e.stuck.clone())
     } else {
-        Route::Room
+        Route::Notes
     };
     Some((e, route))
 }
@@ -571,12 +571,12 @@ pub fn group_note(ant: &UserId, envelope: &Envelope) -> Option<String> {
     };
     let reply = match route {
         Route::Stuck(_) => format!("The reply to this message goes to {stuck}."),
-        Route::Room => format!("The reply to this message goes to the thread notes for {leader}, not to {stuck}."),
+        Route::Notes => format!("The reply to this message goes to the thread notes for {leader}, not to {stuck}."),
         Route::Sender => format!("The reply to this message goes to {}.", envelope.from),
     };
     Some(format!(
         "[ants] {ant} is part of an escalation group for {stuck}'s thread {thread}, level {}; members: {}. The group \
-         shares the thread's notes (read_plan, post_plan). {role} {reply}",
+         shares the thread's notes (read_notes, post_notes). {role} {reply}",
         e.level,
         join(members_at(e))
     ))
@@ -612,7 +612,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
     match reason {
         EscalationReason::TurnBudget => "turn budget spent",
         EscalationReason::Cap => "limit or cap reached",
-        EscalationReason::PlanRoom => "thread notes out of turns",
+        EscalationReason::Notes => "thread notes out of turns",
         EscalationReason::DeadLetter => "a message became a dead letter",
         EscalationReason::Approval => "a tool request awaits a decision",
         EscalationReason::Asked => "asked for help",
@@ -730,7 +730,7 @@ mod tests {
             route(&p(to), &envelope).map(|(_, route)| route)
         };
         assert_eq!(to("dev-a", "lead"), Some(Route::Stuck(p("dev-a"))));
-        assert_eq!(to("dev-a", "dev-b"), Some(Route::Room));
+        assert_eq!(to("dev-a", "dev-b"), Some(Route::Notes));
         assert_eq!(to("dev-b", "dev-c"), Some(Route::Sender), "between members, as any message");
         assert_eq!(to("dev-b", "lead"), Some(Route::Sender));
         assert_eq!(to("lead", "dev-a"), None, "the stuck ant's own escalation");

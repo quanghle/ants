@@ -256,26 +256,26 @@ server restarts):
    (`external.api: $JS.<machine>.API`, `deliver: $JS.S.<machine>`) and stores each message under
    `ants.in.<machine>.`, so nothing a machine sends can pass for another machine or land in `ANTS` directly.
 2. `ANTS` sources from `ANTS_IN`, for each machine and each user listed for it, ant or human, only what that user may
-   publish itself (`ants.in.<machine>.ants.out.inbox.*.<user>`, `...plan.*.<user>`, `...chan.*.<user>` and, for an
+   publish itself (`ants.in.<machine>.ants.out.inbox.*.<user>`, `...notes.*.<user>`, `...chan.*.<user>` and, for an
    ant, `...dead.<ant>`; a human's `inbox.>`), and transforms
    it back to the usual subject. The rest stays in the intake, where only the human can read it.
 
 Source filters of one stream must not overlap, so when a human is on a machine its `inbox.>` covers the other
-users' inbox subjects there, and they get only their plan and channel subjects. Every message keeps its `Nats-Msg-Id` (the
+users' inbox subjects there, and they get only their notes and channel subjects. Every message keeps its `Nats-Msg-Id` (the
 envelope or post id): a sourced copy of a message `ANTS` already took within its duplicate window (2 minutes) is
 dropped.
 
-Clients (`bus::store`): an inbox message, reply, plan post, channel post or a daemon's dead letter goes to the hub's
+Clients (`bus::store`): an inbox message, reply, notes post, channel post or a daemon's dead letter goes to the hub's
 stream as before; when that fails with "no stream" (no responders across a down uplink) or times out, the same message,
 with the same id, goes to `ants.out.<rest of the subject>` on the leaf. The CLI says so (`ants ask`: "kept in this
 machine's outbox"); a daemon logs a warning. Everything else needs the hub at once and is not buffered (ants-xyb):
 
 - Consumers and their acks, and stream reads (`ants watch --replay`, `ants dead list`/`replay`): they read the hub's
   stream.
-- Plan posts that expect a sequence (an ant's `post_plan`): the expected last subject sequence is optimistic
+- Notes posts that expect a sequence (an ant's `post_notes`): the expected last subject sequence is optimistic
   concurrency, and only the hub's stream, at the time of the post, can tell the poster whether it won the turn. A
-  buffered copy would land minutes later against a newer room, where the hub could only drop a post the poster was
-  told was kept. Plan posts without an expected sequence are buffered.
+  buffered copy would land minutes later against newer notes, where the hub could only drop a post the poster was
+  told was kept. Notes posts without an expected sequence are buffered.
 - Approvals: a request waits for a human's decision, read from the hub, until it expires. A buffered request would
   reach the human after the asker had given up on it.
 - KV (sessions, roster, attempt markers, escalation chains): a bucket keeps the last value per key, so a buffered put
@@ -340,22 +340,22 @@ Found while building it (nats-server 2.15.3, source reading and verified):
   - The source's deliveries and flow control use `$JS.S.<machine>.>` (leaf to hub) and `$JS.FC.ANTS_OUT.>` (hub to
     leaf); the uplink credentials allow those and the outbox's stream and consumer API under `$JS.<machine>.API`.
 - **Stream interest crosses only allowances `ReverseMatch` finds.** The hub's stream listens on `ants.inbox.>`,
-  `ants.plan.>` and `ants.chan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
+  `ants.notes.>` and `ants.chan.>`. nats-server tells a leaf about such a wildcard subscription only if `ReverseMatch` finds a publish
   allowance of the uplink under it (`canSubscribeInternal`), and `ReverseMatch` (`sublist.go`, `getAllNodes`) skips an
   allowance with `*` before its last token, such as dev-a's `ants.inbox.*.dev-a`. Only the human's `ants.inbox.>`
-  would match, and no ant's plan or channel subjects. So the uplink credentials also carry one literal subject of each
-  ant's inbox, plan and channel pattern (`ants.inbox.dev-a.dev-a`, `ants.plan.dev-a.dev-a`,
+  would match, and no ant's notes or channel subjects. So the uplink credentials also carry one literal subject of each
+  ant's inbox, notes and channel pattern (`ants.inbox.dev-a.dev-a`, `ants.notes.dev-a.dev-a`,
   `ants.chan.dev-a.dev-a`), which the pattern allows
   anyway (uplink credentials issued without them need `ants auth leaf` again). With that, an ant's messages,
-  replies, plan and channel posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; an
+  replies, notes and channel posts reach the hub's stream directly while the uplink is up, whoever else is on the machine; an
   ant not on the uplink still gets "no stream" at once, since the leaf forwards only what the uplink may publish
   (`a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload` in `crates/ants/src/leaf.rs`).
 - **The leaf's domain must differ from the hub's**, or the leaf would answer the hub's API itself.
 
 Verified (`the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down` in `crates/ants/src/outbox.rs`): a hub and a
 generated leaf with dev-a and the human on it. A message stored directly plus a copy of it in the outbox is in `ANTS`
-once. With the uplink switched to a dead port, dev-a's message, plan post, channel post and dead letter and dev-b's
-plan post and dead letter go to the outbox; after switching back, the intake has all of them, `ANTS` has dev-a's four
+once. With the uplink switched to a dead port, dev-a's message, notes post, channel post and dead letter and dev-b's
+notes post and dead letter go to the outbox; after switching back, the intake has all of them, `ANTS` has dev-a's four
 and none of dev-b's, which the machine was not admitted for. The human, waiting as `ants ask --wait` does on the hub
 and on the leaf, gets the message stored directly and dev-a's kept message once each. A daemon's dead letter of a message failing while the
 uplink is down lands once, with its notice, after the uplink is back

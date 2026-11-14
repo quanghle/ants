@@ -490,7 +490,7 @@ mod tests {
         let chan = MaxDeliveries { consumer: "chan-dev-a".into(), ..advisory.clone() };
         assert_eq!(chan.ant(), Some(("dev-a".parse().unwrap(), Consumer::Channels)));
         for (stream, consumer) in
-            [("ANTS", "inbox-human"), ("ANTS", "plan-dev-a"), ("ANTS", "chanread-dev-a"), ("OTHER", "inbox-dev-a")]
+            [("ANTS", "inbox-human"), ("ANTS", "notes-dev-a"), ("ANTS", "chanread-dev-a"), ("OTHER", "inbox-dev-a")]
         {
             let other = MaxDeliveries { stream: stream.into(), consumer: consumer.into(), ..advisory.clone() };
             assert_eq!(other.ant(), None, "{stream} {consumer}");

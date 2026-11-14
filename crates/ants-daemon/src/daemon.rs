@@ -26,8 +26,8 @@ use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
+use crate::notes::{self, NotesStore};
 use crate::permission::{Allowlist, PermissionPolicy};
-use crate::plan::{self, Rooms};
 use crate::pool::{Pool, SessionStore};
 use crate::status::{self, Status};
 use crate::{bus, roster};
@@ -159,7 +159,7 @@ async fn serve(config: &Config) -> Result<Served> {
         .with_chain(config.escalation.clone());
     let policy = PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone())));
     let (outbox, roster) = (crate::mcp::jetstream_outbox(js.clone()), crate::mcp::jetstream_roster(js.clone()));
-    let rooms = std::sync::Arc::new(crate::plan::JetStreamRooms::new(js.clone(), config.ant.clone()));
+    let notes = std::sync::Arc::new(crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()));
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js).await?;
@@ -173,7 +173,7 @@ async fn serve(config: &Config) -> Result<Served> {
         escalation::jetstream_sender(js.clone()),
     )
     .with_chains(crate::chains::jetstream_chains(js.clone()))
-    .with_plan_room(escalation::jetstream_plan_sender(js.clone()));
+    .with_notes(escalation::jetstream_notes_sender(js.clone()));
     let escalator = std::sync::Arc::new(escalator);
     if let Err(e) = crate::chains::publish(&js, &config.ant, &config.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
@@ -183,7 +183,7 @@ async fn serve(config: &Config) -> Result<Served> {
         &config.home,
         outbox,
         roster.clone(),
-        rooms.clone(),
+        notes.clone(),
         humans.clone(),
         Some(escalator.clone()),
     )
@@ -253,7 +253,7 @@ async fn serve(config: &Config) -> Result<Served> {
         limits: config.limits,
         ledger: &ledger,
         escalator: &escalator,
-        rooms: rooms.as_ref(),
+        notes: notes.as_ref(),
         threads: &threads,
         roster: &roster,
         humans: &humans,
@@ -375,8 +375,8 @@ struct Inbox<'a> {
     ledger: &'a Ledger,
     /// Sends what the ant cannot settle up its chain, and notes the answers.
     escalator: &'a Escalator,
-    /// The plan rooms, where the members of an escalation group other than its leader answer.
-    rooms: &'a dyn Rooms,
+    /// The thread notes, where the members of an escalation group other than its leader answer.
+    notes: &'a dyn NotesStore,
     threads: &'a Threads,
     /// The roster, for the members a triage prompt shows.
     roster: &'a Roster,
@@ -885,13 +885,13 @@ impl Inbox<'_> {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
                 let mut reply = envelope.reply(self.ant.clone(), text, self.humans.role(&envelope.from))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
-                    Some(Route::Room) => {
-                        let (room, budget) = (self.rooms, envelope.turn_budget);
-                        match plan::spend(room, thread, self.ant, &reply.text, budget).await? {
-                            Some(post) => Reply::Plan(post),
+                    Some(Route::Notes) => {
+                        let (store, budget) = (self.notes, envelope.turn_budget);
+                        match notes::spend(store, thread, self.ant, &reply.text, budget).await? {
+                            Some(post) => Reply::Notes(post),
                             None => {
                                 let why = "Thread notes out of turns before the answer was posted";
-                                let reason = EscalationReason::PlanRoom;
+                                let reason = EscalationReason::Notes;
                                 self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
                                 return self.done(msg, seq).await;
                             }
@@ -941,9 +941,9 @@ impl Inbox<'_> {
     /// post it also notes that the posts on its thread up to it were shown.
     async fn deliver(&self, incoming: &Incoming, reply: &Reply, msg: &jetstream::Message, seq: u64) -> Result<()> {
         let request = &incoming.envelope;
-        // Store the reply before acking: a crash in between redelivers rather than loses the message. A plan post is
-        // in its room already.
-        if !matches!(reply, Reply::Plan(_)) {
+        // Store the reply before acking: a crash in between redelivers rather than loses the message. A post to thread
+        // notes is in the notes already.
+        if !matches!(reply, Reply::Notes(_)) {
             bus::store(self.js, reply.subject(), reply, &reply_id(self.ant, request)).await?;
         }
         if incoming.post.is_some()
@@ -1244,7 +1244,7 @@ mod tests {
             let messages = futures::stream::select(messages, posts);
             let channels = Channels::watch(self.channels.clone()).await.unwrap();
             let escalator = self.escalator();
-            let rooms = crate::plan::JetStreamRooms::new(self.js.clone(), self.dev.clone());
+            let notes = crate::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
             let inbox = Inbox {
                 client: &self.client,
                 js: &self.js,
@@ -1259,7 +1259,7 @@ mod tests {
                 limits: self.limits,
                 ledger: &self.ledger,
                 escalator: &escalator,
-                rooms: &rooms,
+                notes: &notes,
                 threads: &self.threads,
                 roster: &self.roster,
                 humans: &self.humans,
@@ -1280,7 +1280,7 @@ mod tests {
             let send = escalation::jetstream_sender(self.js.clone());
             let (dev, chain, roster, humans) = (&self.dev, &self.chain, &self.roster, &self.humans);
             Escalator::new(dev.clone(), chain.clone(), roster.clone(), humans.clone(), self.ledger.clone(), send)
-                .with_plan_room(escalation::jetstream_plan_sender(self.js.clone()))
+                .with_notes(escalation::jetstream_notes_sender(self.js.clone()))
         }
 
         async fn until_acked(&self, seq: u64) {
@@ -1946,12 +1946,12 @@ mod tests {
         escalation
     }
 
-    async fn room(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::PlanPost> {
-        crate::plan::read(&bus.js, &"reader".parse().unwrap(), thread).await.unwrap().posts
+    async fn read_notes(bus: &Bus, thread: &ThreadId) -> Vec<ants_proto::NotesPost> {
+        crate::notes::read(&bus.js, &"reader".parse().unwrap(), thread).await.unwrap().posts
     }
 
     #[tokio::test]
-    async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_plan_room() {
+    async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_thread_notes() {
         let Some((bus, _to_human)) = Bus::start().await else { return };
         let [lead, carol, boss] = ants(["lead", "carol", "boss"]);
         bus.put_roster(&lead, std::slice::from_ref(&boss)).await;
@@ -1964,8 +1964,8 @@ mod tests {
         let member = escalated(&carol, &t1, &[&[lead.clone(), bus.dev.clone()]]);
         let leader = escalated(&carol, &t2, &[std::slice::from_ref(&lead), std::slice::from_ref(&bus.dev)]);
         let spent = escalated(&carol, &t3, &[&[lead.clone(), bus.dev.clone()]]);
-        let full = ants_proto::PlanPost::spend(t3.clone(), lead.clone(), "last turn", 1, None).unwrap();
-        crate::plan::publish(&bus.js, &full, None).await.unwrap();
+        let full = ants_proto::NotesPost::spend(t3.clone(), lead.clone(), "last turn", 1, None).unwrap();
+        crate::notes::publish(&bus.js, &full, None).await.unwrap();
         for (from, thread, text, escalation) in
             [(&carol, &t1, "help", member), (&lead, &t2, "help more", leader.clone()), (&carol, &t3, "x", spent)]
         {
@@ -1981,18 +1981,19 @@ mod tests {
             let (answer, notice) = if first.thread_id == t2 { (first, second) } else { (second, first) };
             assert_eq!((&answer.thread_id, answer.escalation.as_deref()), (&t2, Some(&leader)), "the leader's answer");
             assert!(answer.text.ends_with("The reply to this message goes to carol.\n\nhelp more"), "{}", answer.text);
-            // Out of plan room turns, the member's answer goes one level up with the escalation, and carol hears.
+            // Out of turns in the thread notes, the member's answer goes one level up with the escalation, and carol
+            // hears.
             let up = next_envelope(&mut to_boss).await;
             assert_eq!(up.escalation.as_deref().map(|e| (e.level, &e.stuck)), Some((2, &carol)));
             assert!(up.text.contains("Unposted answer from dev-a:"), "{}", up.text);
             assert_eq!(notice.thread_id, t3);
             timeout(WAIT, async {
-                while room(&bus, &t1).await.is_empty() {
+                while read_notes(&bus, &t1).await.is_empty() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await
-            .expect("the member's answer in the plan room");
+            .expect("the member's answer in the thread notes");
             assert!(notice.text.starts_with("[ants] dev-a escalated thread"), "{}", notice.text);
             ctrl_c.add_permits(1);
         };
@@ -2000,7 +2001,7 @@ mod tests {
         assert_eq!(bus.unacked().await, 0);
         assert!(timeout(Duration::from_millis(200), to_carol.next()).await.is_err(), "a member does not answer carol");
         assert!(timeout(Duration::from_millis(50), to_lead.next()).await.is_err());
-        let posts = room(&bus, &t1).await;
+        let posts = read_notes(&bus, &t1).await;
         assert_eq!(posts.len(), 1, "the member's answer");
         assert_eq!((&posts[0].from, posts[0].turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET - 1));
         assert!(posts[0].text.ends_with("not to carol.\n\nhelp"), "{}", posts[0].text);
@@ -2012,7 +2013,7 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("Only lead resolves it"), "{prompt}");
-        let grant = room(&bus, &t3).await.pop().unwrap();
+        let grant = read_notes(&bus, &t3).await.pop().unwrap();
         assert_eq!((&grant.from, grant.turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET), "a fresh budget at level 2");
     }
 
@@ -2032,7 +2033,7 @@ mod tests {
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
             let one = next_envelope(&mut to_lead).await.escalation.expect("the escalation");
-            let grant = room(&bus, &t1).await.pop().expect("the plan room has a fresh budget");
+            let grant = read_notes(&bus, &t1).await.pop().expect("the thread notes have a fresh budget");
             assert_eq!((&grant.from, grant.turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET));
             assert!(grant.text.contains("level 1: sent to lead; lead leads"), "{}", grant.text);
 
@@ -2363,8 +2364,8 @@ mod tests {
         std::fs::write(home.join("mcp.json"), stored.to_string()).unwrap();
         let (outbox, roster) =
             (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
-        let rooms = Arc::new(crate::plan::JetStreamRooms::new(bus.js.clone(), bus.dev.clone()));
-        let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, rooms, bus.humans.clone(), None).await;
+        let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+        let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
         bus.mcp = Some(mcp.unwrap());
         for ask in &asks {
             let reply = ask.reply(dev_b.clone(), "late", Role::Ant).unwrap();

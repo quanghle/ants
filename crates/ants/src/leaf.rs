@@ -296,8 +296,8 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
-    use ants_daemon::{bus, plan};
-    use ants_proto::{ChannelPost, Envelope, PlanPost, Role, UserId};
+    use ants_daemon::{bus, notes};
+    use ants_proto::{ChannelPost, Envelope, NotesPost, Role, UserId};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
 
@@ -466,12 +466,12 @@ mod tests {
             bus::connect(&leaf_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
         a_js.set_timeout(Duration::from_secs(1));
         assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over nats-leaf://");
-        // Only dev-a is on the leaf, so the uplink allows no inbox, plan or channel subject without a wildcard before the
-        // sender. The hub's stream interest crosses all the same: the leaf has no outbox to fall back on.
+        // Only dev-a is on the leaf, so the uplink allows no inbox, notes or channel subject without a wildcard before
+        // the sender. The hub's stream interest crosses all the same: the leaf has no outbox to fall back on.
         let to_human = Envelope::new(dev_a.clone(), human.clone(), "hi");
         assert_eq!(bus::publish(&a_js, &to_human).await.unwrap(), bus::Stored::Hub);
-        let post = PlanPost::new("t1".parse().unwrap(), dev_a.clone(), "plan");
-        assert!(plan::publish(&a_js, &post, Some(0)).await.unwrap(), "plan post not stored directly");
+        let post = NotesPost::new("t1".parse().unwrap(), dev_a.clone(), "notes");
+        assert!(notes::publish(&a_js, &post, Some(0)).await.unwrap(), "notes post not stored directly");
         let chan = ChannelPost::new("ops".parse().unwrap(), dev_a.clone(), "@human hi");
         let stored = bus::store(&a_js, chan.subject(), &chan, &chan.id.to_string()).await.unwrap();
         assert_eq!(stored, bus::Stored::Hub, "channel post not stored directly");
@@ -482,8 +482,8 @@ mod tests {
         b_js.set_timeout(Duration::from_secs(1));
         let stray = Envelope::new(dev_b.clone(), human.clone(), "stray");
         assert!(bus::publish(&b_js, &stray).await.is_err());
-        let stray = PlanPost::new("t1".parse().unwrap(), dev_b.clone(), "stray");
-        assert!(plan::publish(&b_js, &stray, Some(2)).await.is_err());
+        let stray = NotesPost::new("t1".parse().unwrap(), dev_b.clone(), "stray");
+        assert!(notes::publish(&b_js, &stray, Some(2)).await.is_err());
         let stray = ChannelPost::new("ops".parse().unwrap(), dev_b.clone(), "stray");
         assert!(bus::store(&b_js, stray.subject(), &stray, &stray.id.to_string()).await.is_err());
         let stored = h_js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().state.messages;

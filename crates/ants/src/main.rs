@@ -15,10 +15,10 @@ mod serve;
 
 use std::path::{Path, PathBuf};
 
-use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
+use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, notes};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation, JsDomain, Machine,
-    PlanPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
+    NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -111,15 +111,17 @@ enum Command {
     /// Channels: named groups of ants that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
-    /// Show the notes of a thread, or post to them as the CLI's human, which gives them a fresh turn budget. Thread
-    /// notes are one shared board per thread: a post wakes nobody, and agents read the board with read_plan.
-    Plan {
+    /// Show the notes of a thread, or post TEXT to them as the CLI's human, which gives them a fresh turn budget.
+    /// Thread notes are a passive board, one per thread: a post wakes nobody, and agents read the notes with
+    /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.
+    Notes {
         thread: ThreadId,
         /// The post. Without it, show the notes.
-        words: Vec<String>,
+        #[arg(value_name = "TEXT")]
+        text: Vec<String>,
     },
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
-    /// progress of an ant: state, reply text, tool calls and plan.
+    /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
         /// Subject filter, or an ant to follow its progress on every thread.
         #[arg(default_value = subject::ALL)]
@@ -494,7 +496,7 @@ async fn main() -> Result<()> {
             post(&nats()?, channel, thread, wait, words).await
         }
         Command::Channel(command) => channels(&nats()?, command).await,
-        Command::Plan { thread, words } => plan_room(&nats()?, thread, words).await,
+        Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
             watch(&nats()?, filter).await
@@ -1037,19 +1039,19 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-async fn plan_room(nats: &Nats<'_>, thread: ThreadId, words: Vec<String>) -> Result<()> {
+async fn thread_notes(nats: &Nats<'_>, thread: ThreadId, text: Vec<String>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
-    if !words.is_empty() {
-        let post = PlanPost::new(thread, nats.me.id.clone(), words.join(" "));
-        plan::publish(&js, &post, None).await?;
+    if !text.is_empty() {
+        let post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
+        notes::publish(&js, &post, None).await?;
         println!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget);
         return Ok(());
     }
-    let room = plan::read(&js, &nats.me.id, &thread).await?;
-    if room.posts.is_empty() {
+    let read = notes::read(&js, &nats.me.id, &thread).await?;
+    if read.posts.is_empty() {
         println!("thread {thread} has no notes");
     }
-    for post in &room.posts {
+    for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
         println!("{time} {} ({} turns left): {}", post.from, post.turn_budget, post.text);
     }
@@ -1079,9 +1081,9 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         } else if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
             printer.line(&envelope_line(&e, &forged(e.check_subject(&msg.subject).is_ok())))
         } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
-            // Before plan posts: a channel post has every field of one.
+            // Before notes posts: a channel post has every field of one.
             printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
-        } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
+        } else if let Ok(post) = serde_json::from_slice::<NotesPost>(&msg.payload) {
             let forged = forged(post.check_subject(&msg.subject).is_ok());
             let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
             printer.line(&format!("[{thread}] {from} -> thread notes ({left} turns left){forged}: {}", post.text))
@@ -1256,7 +1258,7 @@ mod tests {
         let t1: ThreadId = "t1".parse().unwrap();
         assert_eq!(watch_filter("dev-a", None).unwrap(), "ants.status.dev-a.*");
         assert_eq!(watch_filter("dev-a", Some(&t1)).unwrap(), "ants.status.dev-a.t1");
-        assert_eq!(watch_filter("ants.plan.>", None).unwrap(), "ants.plan.>");
+        assert_eq!(watch_filter("ants.notes.>", None).unwrap(), "ants.notes.>");
         assert_eq!(watch_filter(">", None).unwrap(), ">");
         assert!(watch_filter("ants.>", Some(&t1)).is_err());
     }
@@ -1335,6 +1337,16 @@ mod tests {
             envelope_line(&decided, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
+    }
+
+    #[test]
+    fn notes_shows_without_text_and_posts_with_it() {
+        let cli = Cli::try_parse_from(["ants", "notes", "t1", "split", "the", "work"]).unwrap();
+        let Command::Notes { thread, text } = cli.command else { panic!("not notes") };
+        assert_eq!((thread.as_str(), text), ("t1", vec!["split".to_owned(), "the".to_owned(), "work".to_owned()]));
+        let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
+        assert!(matches!(cli.command, Command::Notes { text, .. } if text.is_empty()));
+        assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
     }
 
     #[test]

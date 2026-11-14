@@ -334,11 +334,11 @@ pub(crate) mod tests {
     use ants_daemon::bus;
     use ants_daemon::channel::{Channels, Threads};
     use ants_daemon::dead::{self, Attempt};
-    use ants_daemon::plan;
+    use ants_daemon::notes;
     use ants_daemon::roster::Registration;
     use ants_proto::{
-        ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, PlanPost, RosterEntry, STREAM, STREAM_SUBJECTS,
-        ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, plan_consumer, session_key, subject,
+        ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, NotesPost, RosterEntry, STREAM, STREAM_SUBJECTS,
+        ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, notes_consumer, session_key, subject,
     };
     use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
@@ -519,10 +519,10 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
         }
-        // It posts to plan rooms only under its own name too.
-        let room: ThreadId = "t2".parse().unwrap();
-        a_raw.publish(subject::plan(&room, &dev_a), "ok".into()).await.unwrap();
-        for spoof in [subject::plan(&room, &dev_b), subject::plan(&room, &human)] {
+        // It posts to thread notes only under its own name too.
+        let thread: ThreadId = "t2".parse().unwrap();
+        a_raw.publish(subject::notes(&thread, &dev_a), "ok".into()).await.unwrap();
+        for spoof in [subject::notes(&thread, &dev_b), subject::notes(&thread, &human)] {
             a_raw.publish(spoof.clone(), "spoof".into()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
@@ -633,7 +633,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn plan_rooms_are_read_back_through_each_reader_own_consumer() {
+    async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
         let (_h, h_js) = server.connect(&human).await;
@@ -642,33 +642,33 @@ pub(crate) mod tests {
         let (_b, b_js) = server.connect(&dev_b).await;
         let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
 
-        let first = PlanPost::spend(thread.clone(), dev_a.clone(), "draft", 8, None).unwrap();
-        assert!(plan::publish(&a_js, &first, Some(0)).await.unwrap());
-        // dev-b spends the same turn without having seen dev-a's post: refused, the room moved on.
-        let stale = PlanPost::spend(thread.clone(), dev_b.clone(), "me first", 8, None).unwrap();
-        assert!(!plan::publish(&b_js, &stale, Some(0)).await.unwrap());
+        let first = NotesPost::spend(thread.clone(), dev_a.clone(), "draft", 8, None).unwrap();
+        assert!(notes::publish(&a_js, &first, Some(0)).await.unwrap());
+        // dev-b spends the same turn without having seen dev-a's post: refused, the notes moved on.
+        let stale = NotesPost::spend(thread.clone(), dev_b.clone(), "me first", 8, None).unwrap();
+        assert!(!notes::publish(&b_js, &stale, Some(0)).await.unwrap());
         // dev-a may only post on its own subject, so a post naming dev-b as its author is dropped by readers.
-        let forged = PlanPost::new(thread.clone(), dev_b.clone(), "dev-b agrees");
-        bus::publish_json(&a_js, subject::plan(&thread, &dev_a), &forged, None).await.unwrap();
-        plan::publish(&a_js, &PlanPost::new(other, dev_a.clone(), "elsewhere"), None).await.unwrap();
+        let forged = NotesPost::new(thread.clone(), dev_b.clone(), "dev-b agrees");
+        bus::publish_json(&a_js, subject::notes(&thread, &dev_a), &forged, None).await.unwrap();
+        notes::publish(&a_js, &NotesPost::new(other, dev_a.clone(), "elsewhere"), None).await.unwrap();
 
-        let room = plan::read(&b_js, &dev_b, &thread).await.unwrap();
-        assert_eq!(room.posts, std::slice::from_ref(&first));
-        let answer = PlanPost::spend(thread.clone(), dev_b.clone(), "agreed", 8, room.last()).unwrap();
-        assert!(plan::publish(&b_js, &answer, Some(room.last_seq)).await.unwrap());
-        assert_eq!(plan::read(&h_js, &human, &thread).await.unwrap().posts, [first, answer]);
+        let seen = notes::read(&b_js, &dev_b, &thread).await.unwrap();
+        assert_eq!(seen.posts, std::slice::from_ref(&first));
+        let answer = NotesPost::spend(thread.clone(), dev_b.clone(), "agreed", 8, seen.last()).unwrap();
+        assert!(notes::publish(&b_js, &answer, Some(seen.last_seq)).await.unwrap());
+        assert_eq!(notes::read(&h_js, &human, &thread).await.unwrap().posts, [first, answer]);
 
-        // dev-a's plan consumer filters plan rooms only, and dev-b's is not dev-a's to use.
+        // dev-a's notes consumer filters thread notes only, and dev-b's is not dev-a's to use.
         let consumer = |name: String, filter: String| jetstream::consumer::pull::Config {
             name: Some(name),
             filter_subject: filter,
             ..Default::default()
         };
-        let into_inbox = consumer(plan_consumer(&dev_a), subject::inbox_of(&dev_b));
+        let into_inbox = consumer(notes_consumer(&dev_a), subject::inbox_of(&dev_b));
         assert!(a_js.create_consumer_on_stream(into_inbox, STREAM).await.is_err());
-        let not_its_own = consumer(plan_consumer(&dev_b), subject::plan_room(&thread));
+        let not_its_own = consumer(notes_consumer(&dev_b), subject::notes_of(&thread));
         assert!(a_js.create_consumer_on_stream(not_its_own, STREAM).await.is_err());
-        assert!(plan::read(&a_js, &dev_a, &thread).await.is_ok(), "its own works");
+        assert!(notes::read(&a_js, &dev_a, &thread).await.is_ok(), "its own works");
     }
 
     #[tokio::test]
@@ -840,14 +840,20 @@ pub(crate) mod tests {
         let (h_client, h_js) = server.connect(&human).await;
         let (_, a_js) = server.connect(&dev_a).await;
 
-        // A stream from before dead letters and direct gets gains them on `ants init`.
-        let old: Vec<String> =
-            STREAM_SUBJECTS.iter().filter(|s| **s != subject::DEAD_ALL).map(|s| (*s).to_owned()).collect();
+        // A stream from before dead letters, thread notes and direct gets gains them on `ants init`, and keeps the
+        // subject of its older thread notes, whose posts stay stored.
+        let mut old: Vec<String> = STREAM_SUBJECTS
+            .iter()
+            .filter(|s| ![subject::DEAD_ALL, subject::ALL_NOTES].contains(*s))
+            .map(|s| (*s).to_owned())
+            .collect();
+        old.push("ants.plan.>".to_owned());
         h_js.create_stream(jetstream::stream::Config { name: STREAM.to_owned(), subjects: old, ..Default::default() })
             .await
             .unwrap();
         let stream = bus::init_stream(&h_js).await.unwrap();
         assert!(bus::missing_subjects(&stream.cached_info().config.subjects).is_empty());
+        assert!(stream.cached_info().config.subjects.iter().any(|s| s == "ants.plan.>"), "older subjects stay");
         assert!(stream.cached_info().config.allow_direct, "and direct gets");
         assert!(stream.cached_info().config.republish.is_some(), "and republishes inbox messages");
 
