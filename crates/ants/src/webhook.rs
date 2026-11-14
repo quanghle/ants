@@ -169,6 +169,7 @@ enum Auth {
     Bearer(String),
 }
 
+#[derive(Debug)]
 enum IdSource {
     Header(HeaderName),
     Json(String),
@@ -190,7 +191,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
-        let home = std::env::var_os("HOME").map(PathBuf::from).context("no home directory")?;
+        let home = std::env::home_dir().context("no home directory")?;
         let config = Self::parse(&text, &std::path::absolute(path)?, &home, |name| std::env::var(name).ok())?;
         for hook in &config.webhooks {
             hook.check_creds().with_context(|| format!("webhook config {}", path.display()))?;
@@ -997,6 +998,7 @@ fn reply(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::assert_matches;
     use std::fmt::Write as _;
     use std::net::SocketAddr;
 
@@ -1039,9 +1041,9 @@ pub(crate) mod tests {
         assert_eq!(github.destination, Destination::Ant(p("dev-a")));
         assert_eq!(github.creds.as_deref(), Some(Path::new("/home/q/github.creds")));
         assert_eq!(ci.creds.as_deref(), Some(Path::new("/etc/ants/ci.creds")));
-        assert!(matches!(github.id, IdSource::Header(ref h) if h == "x-github-delivery"));
-        assert!(matches!(ci.id, IdSource::BodySha256));
-        assert!(matches!(alerts.id, IdSource::Json(ref p) if p == "/alert/id"));
+        assert_matches!(github.id, IdSource::Header(ref h) if h == "x-github-delivery");
+        assert_matches!(ci.id, IdSource::BodySha256);
+        assert_matches!(alerts.id, IdSource::Json(ref p) if p == "/alert/id");
         assert_eq!((&github.mentions, &ci.mentions), (&Mentions::Nobody, &Mentions::Members));
         assert_eq!(alerts.mentions, Mentions::Listed(vec![p("dev-b")]));
 

@@ -33,12 +33,12 @@ const ATTEMPTS: usize = 10;
 
 /// A channel id as given on the command line: `#ops` or `ops`.
 pub fn parse_channel(s: &str) -> Result<ChannelId, ants_proto::Error> {
-    s.strip_prefix('#').unwrap_or(s).parse()
+    s.trim_prefix('#').parse()
 }
 
 /// A user id as given on the command line, an ant's or a human's: `@dev-a` or `dev-a`; never the channel manager.
 pub fn parse_ant(s: &str) -> Result<UserId, String> {
-    let ant: UserId = s.strip_prefix('@').unwrap_or(s).parse().map_err(|e: ants_proto::Error| e.to_string())?;
+    let ant: UserId = s.trim_prefix('@').parse().map_err(|e: ants_proto::Error| e.to_string())?;
     if ant == UserId::channel_manager() {
         return Err(format!("{ant} is the channel manager, not an ant"));
     }

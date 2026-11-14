@@ -175,16 +175,13 @@ impl Pool {
     /// Stop harnesses idle since before `now - idle_after`. Returns how many stopped.
     pub fn evict_idle(&self, now: Instant) -> usize {
         let mut slots = self.slots();
-        let before = slots.len();
-        slots.retain(|thread, slot| {
-            let Slot::Ready(live) = slot else { return true };
-            let keep = live.busy > 0 || now.saturating_duration_since(live.last_used) < self.idle_after;
-            if !keep {
-                tracing::info!(%thread, "stopping idle harness");
-            }
-            keep
-        });
-        let stopped = before - slots.len();
+        let stopped = slots
+            .extract_if(|_, slot| match slot {
+                Slot::Ready(live) => live.busy == 0 && now.saturating_duration_since(live.last_used) >= self.idle_after,
+                Slot::Starting => false,
+            })
+            .inspect(|(thread, _)| tracing::info!(%thread, "stopping idle harness"))
+            .count();
         drop(slots);
         if stopped > 0 {
             self.changed.notify_waiters();

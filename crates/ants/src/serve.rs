@@ -425,14 +425,10 @@ impl Schedules {
     /// or which stopped, starts again; the others carry on untouched.
     fn reconcile(&mut self, wanted: Vec<Schedule>, spawn: impl Fn(Schedule) -> JoinHandle<()>) {
         let listed: HashSet<UserId> = wanted.iter().map(|s| s.name.clone()).collect();
-        self.0.retain(|name, (_, task)| {
-            let keep = listed.contains(name);
-            if !keep {
-                tracing::info!(schedule = %name, "stopping the schedule no longer listed");
-                task.abort();
-            }
-            keep
-        });
+        for (name, (_, task)) in self.0.extract_if(|name, _| !listed.contains(name)) {
+            tracing::info!(schedule = %name, "stopping the schedule no longer listed");
+            task.abort();
+        }
         for schedule in wanted {
             let name = schedule.name.clone();
             match self.0.get(&name) {

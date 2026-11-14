@@ -468,6 +468,8 @@ pub async fn show(nats: &crate::Nats<'_>, thread: &ThreadId, since: Option<Durat
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use ants_proto::{ApprovalRequest, Escalation, EscalationReason, ToolCall, Verdict};
 
     use super::*;
@@ -615,13 +617,13 @@ mod tests {
 
     #[test]
     fn show_starts_at_a_time_ordered_thread_s_start_or_reads_everything() {
-        assert!(matches!(show_start(&t("t1"), None), consumer::DeliverPolicy::All));
-        assert!(matches!(show_start(&ThreadId::generate(), None), consumer::DeliverPolicy::ByStartTime { .. }));
-        assert!(matches!(
+        assert_matches!(show_start(&t("t1"), None), consumer::DeliverPolicy::All);
+        assert_matches!(show_start(&ThreadId::generate(), None), consumer::DeliverPolicy::ByStartTime { .. });
+        assert_matches!(
             show_start(&t("t1"), Some(Duration::from_secs(60))),
             consumer::DeliverPolicy::ByStartTime { .. }
-        ));
-        assert!(matches!(window(Duration::ZERO), consumer::DeliverPolicy::All));
+        );
+        assert_matches!(window(Duration::ZERO), consumer::DeliverPolicy::All);
     }
 
     #[tokio::test]

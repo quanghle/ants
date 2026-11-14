@@ -100,7 +100,7 @@ impl Services {
             "linux" => Some(Manager::Systemd),
             _ => None,
         };
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = std::env::home_dir();
         Services { manager: manager.filter(|_| home.is_some()), home: home.unwrap_or_default(), run: Box::new(run) }
     }
 
