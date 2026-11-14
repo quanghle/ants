@@ -1121,7 +1121,9 @@ credentials pin the filter of both under `ants.chan.>`, so neither reaches an in
 before channels need `ants auth user` and `ants init` again.
 
 An ant's credentials publish dead letters only on its own `ants.dead.<ant>` (and `ants.out.dead.<ant>` in a
-leaf's outbox); credentials issued before the outbox took dead letters need `ants auth user` again.
+leaf's outbox); credentials issued before the outbox took dead letters need `ants auth user` again. An ant reads back
+only its own dead letters, through its consumer `deadread-<ant>`, whose filter credentials pin to `ants.dead.<ant>`;
+credentials issued before then need `ants auth user`, and leaf uplinks `ants auth leaf`, again.
 
 Approval decisions go on `ants.approvals.<ant>.<request id>`, which only humans publish to. An ant hears the
 decisions on its own requests and reads back the one the stream stored with a direct get
@@ -1301,6 +1303,9 @@ terminated, on the message's next delivery after the uplink is back; the daemon 
 Kept on the consumer's extra delivery, with no delivery left, the letter is stored in the hub, its notice sent to the
 thread's owner, else the default human, and its message terminated by the running daemon within 30 seconds of the
 uplink coming back; the notice shares its message id with the one `ants dead watch` sends, so the human gets one.
+Either way the daemon first reads its own dead letters back from the hub (`deadread-<ant>`): a letter of the message
+that landed there already, from the outbox or from `ants dead watch`, however long before, is not stored again, and
+one from `ants dead watch`, which told the human, gets no second notice.
 Machines set up before dead letters were buffered need `ants leaf outbox` again, and ant credentials issued before
 need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
 whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on

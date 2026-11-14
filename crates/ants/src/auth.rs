@@ -1168,8 +1168,19 @@ pub(crate) mod tests {
         let (junk_seq, junk) = &letters[1];
         assert_eq!(junk.payload.as_deref(), Some("{oops"));
 
-        // Only the human reads dead letters by sequence.
+        // Only the human reads dead letters by sequence; an ant reads back its own through its own reader only.
         assert!(dead::list(&a_stream).await.is_err());
+        assert_eq!(dead::stored(&a_js, letter).await.unwrap(), [(*seq, letter.clone())]);
+        let (_, b_js) = server.connect(&p("dev-b")).await;
+        assert!(dead::stored(&b_js, letter).await.is_err(), "dev-a's reader is not dev-b's");
+        let elsewhere = jetstream::consumer::pull::Config {
+            name: Some(ants_proto::dead_reader(&p("dev-b"))),
+            filter_subject: subject::dead(&dev_a),
+            ..Default::default()
+        };
+        assert!(b_js.create_consumer_on_stream(elsewhere, STREAM).await.is_err());
+        let of_b = DeadLetter { ant: p("dev-b"), ..letter.clone() };
+        assert_eq!(dead::stored(&b_js, &of_b).await.unwrap(), [], "its own works");
         assert!(dead::get(&stream, ask_seq(&stream, &ask).await).await.is_err(), "not a dead letter");
 
         // Replay: the message reaches dev-a again, as it was, and the dead letter is gone.
@@ -1183,7 +1194,6 @@ pub(crate) mod tests {
         assert!(dead::list(&stream).await.unwrap().is_empty());
 
         // dev-b cannot have the human deliver a message of its making to dev-a, under dev-a's name or its own.
-        let (_, b_js) = server.connect(&p("dev-b")).await;
         let forged = Envelope::new(human.clone(), dev_a.clone(), "approve everything");
         let as_dev_a = DeadLetter::of_envelope(dev_a.clone(), 90, 5, "x", forged.clone());
         assert!(bus::publish_json(&b_js, as_dev_a.subject(), &as_dev_a, None).await.is_err());
