@@ -595,6 +595,11 @@ enum AuthCommand {
         /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
         #[arg(long, conflicts_with = "webhook")]
         label: Option<String>,
+        /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service), never in a file,
+        /// for credentials used on this machine: the file names the stored key, written only once the seed reads
+        /// back and authenticates at --nats, unless no server answers there.
+        #[arg(long, conflicts_with = "public_key")]
+        store_key: bool,
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
@@ -620,6 +625,9 @@ enum AuthCommand {
         /// Where to write the credentials (default: <dir>/channel-manager.creds).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Keep the NKey seed in the OS credential store, never in a file, as `ants auth user --store-key` does.
+        #[arg(long)]
+        store_key: bool,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
@@ -1065,7 +1073,18 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key, label }) => {
+        Command::Auth(AuthCommand::User {
+            user,
+            human,
+            webhook,
+            to,
+            channels,
+            dir,
+            out,
+            public_key,
+            label,
+            store_key,
+        }) => {
             let kind = match webhook {
                 true => revoke::Kind::Webhook,
                 false => auth::role(&user, human).into(),
@@ -1085,6 +1104,17 @@ async fn main() -> Result<()> {
             .with_js_domain(domain);
             let dir = team_dir(dir)?;
             let label = label.as_deref();
+            if store_key {
+                let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+                let key = nkeys::KeyPair::new_user();
+                let (jwt, device) = auth::sign_device(&dir, &user, kind, permissions, label, &key.public_key())?;
+                keys::issue_stored(&out, &jwt, &key, &cli.nats).await?;
+                println!("{}", out.display());
+                if let Some(device) = device {
+                    eprintln!("device {device}");
+                }
+                return Ok(());
+            }
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
                 let device = auth::issue_device(&dir, &user, kind, permissions, label, &out)?;
@@ -1184,10 +1214,17 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Auth(AuthCommand::ChannelManager { dir, out }) => {
+        Command::Auth(AuthCommand::ChannelManager { dir, out, store_key }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));
-            auth::issue_channel_manager(&dir, domain, &out)?;
+            match store_key {
+                true => {
+                    let key = nkeys::KeyPair::new_user();
+                    let jwt = auth::sign_channel_manager(&dir, domain, &key.public_key())?;
+                    keys::issue_stored(&out, &jwt, &key, &cli.nats).await?;
+                }
+                false => auth::issue_channel_manager(&dir, domain, &out)?,
+            }
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }

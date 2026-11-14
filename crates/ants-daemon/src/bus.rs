@@ -81,7 +81,9 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// credentials allow: none but a human's get the stream's info, which lists every subject stored. What another attempt
 /// cannot cure fails at once: an unreadable credentials file, a malformed URL or one carrying a user and password
 /// ([`check_url`]), credentials the server rejects, a TLS error, a JetStream request the credentials do not permit.
-/// None when `stop` completes first.
+/// Before all that, credentials whose seed is in the OS credential store wait the same way for a store that is locked
+/// or not available yet ([`keystore::Unavailable`]), as before its user logs in; a store holding no seed for their key,
+/// or another key's, fails at once. None when `stop` completes first.
 pub async fn connect_retrying(
     url: &str,
     creds: Option<&Path>,
@@ -90,10 +92,23 @@ pub async fn connect_retrying(
     name: &str,
     stop: impl Future<Output = ()>,
 ) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
+    connect_retrying_with(url, creds, keystore::os(), js_domain, user, name, stop).await
+}
+
+/// [`connect_retrying`], reading a seed the credentials file keeps in `store` rather than in itself.
+pub async fn connect_retrying_with(
+    url: &str,
+    creds: Option<&Path>,
+    store: &dyn Store,
+    js_domain: Option<&JsDomain>,
+    user: &UserId,
+    name: &str,
+    stop: impl Future<Output = ()>,
+) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
     check_url(url)?;
     // A denied request just times out; the server's error naming it arrives through the event callback.
     let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
-    let options = options(creds, keystore::os(), user, name)?.event_callback(move |event| {
+    let options = options(None, store, user, name)?.event_callback(move |event| {
         let denied_tx = denied_tx.clone();
         async move {
             if let Event::ServerError(async_nats::ServerError::Other(e)) = &event
@@ -106,6 +121,29 @@ pub async fn connect_retrying(
     });
     let shown = redacted(url);
     let attempts = async {
+        let options = match creds {
+            Some(path) => {
+                crate::creds::warn(path);
+                let mut delay = RETRY_FIRST;
+                loop {
+                    match authenticate(options.clone(), path, store) {
+                        Ok(options) => break options,
+                        Err(e) if keystore::is_unavailable(&e) => {
+                            tracing::warn!(
+                                creds = %path.display(),
+                                error = format!("{e:#}"),
+                                retry_in = ?delay,
+                                "waiting for the OS credential store to be unlocked"
+                            );
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(RETRY_MAX);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            None => options,
+        };
         let mut delay = RETRY_FIRST;
         let client = loop {
             match options.clone().connect(url).await {
@@ -211,7 +249,7 @@ fn log_event(event: Event) {
 }
 
 /// Whether the server may answer a later attempt: it is not listening yet, or not reachable.
-fn worth_retrying(e: &async_nats::ConnectError) -> bool {
+pub fn worth_retrying(e: &async_nats::ConnectError) -> bool {
     matches!(e.kind(), ConnectErrorKind::Io | ConnectErrorKind::TimedOut | ConnectErrorKind::Dns)
 }
 
@@ -931,6 +969,41 @@ mod tests {
             let err = format!("{:#}", failed.err().unwrap());
             assert!(err.contains(why) && !err.contains("wrong"), "{err}");
         }
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
+        let Some(server) = NatsServer::start() else {
+            return;
+        };
+        let key = nkeys::KeyPair::new_user();
+        let claims = serde_json::json!({ "name": "dev-a", "sub": key.public_key(), "nats": {} });
+        let jwt = format!("e30.{}.sig", data_encoding::BASE64URL_NOPAD.encode(claims.to_string().as_bytes()));
+        let creds = server.dir().join("dev-a.creds");
+        std::fs::write(&creds, crate::creds::stored_text(&jwt, &key.public_key())).unwrap();
+        let (store, dev) = (keystore::Memory::default(), dev());
+        let connect =
+            || connect_retrying_with(&server.url, Some(&creds), &store, None, &dev, "test", std::future::pending());
+        let fails_at_once = async |why: &str| {
+            let failed = tokio::time::timeout(RETRY_FIRST * 3, connect()).await.expect("retried");
+            let err = format!("{:#}", failed.err().unwrap());
+            assert!(err.contains(why), "{err}");
+        };
+
+        fails_at_once("holds no seed").await;
+        store.set(&key.public_key(), &nkeys::KeyPair::new_user().seed().unwrap()).unwrap();
+        fails_at_once("the seed of another key").await;
+
+        store.set(&key.public_key(), &key.seed().unwrap()).unwrap();
+        store.lock(true);
+        let unlock = async {
+            tokio::time::sleep(RETRY_FIRST * 2).await;
+            store.lock(false);
+        };
+        let (connected, ()) = tokio::time::timeout(RETRY_MAX, async { tokio::join!(connect(), unlock) })
+            .await
+            .expect("still waiting for the store");
+        connected.unwrap().expect("connected once unlocked");
     }
 
     /// The `ANTS` stream of a version before channels: it captures no `ants.chan.>`.
