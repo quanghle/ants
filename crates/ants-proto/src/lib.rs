@@ -1405,20 +1405,17 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", feed.filter()),
                 format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
-                format!("$JS.ACK.{STREAM}.{consumer}.>"),
-                // nats-server 2.16's form: `$JS.ACK.<domain>.<account hash>.<stream>.<consumer>...`.
-                format!("$JS.ACK.*.*.{STREAM}.{consumer}.>"),
-                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"),
             ]);
+            publish.extend(ack_subjects(STREAM, &consumer));
+            publish.push(format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"));
         }
         let roster = kv_stream(ROSTER_BUCKET);
         publish.extend([
             format!("$JS.API.STREAM.INFO.{roster}"),
             format!("$JS.API.DIRECT.GET.{roster}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster}"),
-            format!("$JS.FC.{roster}.>"),
-            format!("$JS.FC.*.*.{roster}.>"),
         ]);
+        publish.extend(flow_control_subjects("*", &roster));
         publish.push(subject::renew(observer.as_str()));
         let subscribe = vec![
             format!("{}.>", inbox_prefix(observer)),
