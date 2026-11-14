@@ -1,8 +1,8 @@
 //! Escalations up the persona's chain.
 //!
-//! What a persona cannot settle on a thread (its turn budget spent, a limit or cap reached, its plan room out of
+//! What a persona cannot settle on a thread (its turn budget spent, a limit or cap reached, its thread notes out of
 //! turns, a dead letter) goes to its `escalate_to` chain before any human: every member gets it, the first one leads.
-//! The members coordinate in the thread's plan room; only the leader resolves it, by answering the persona on the
+//! The members coordinate in the thread's notes; only the leader resolves it, by answering the persona on the
 //! thread, or escalates it further. The leader's answer gives the thread a fresh turn budget and allowance once per
 //! level ([`Escalator::arrived`]); on a channel thread, the persona's answer to it goes back to the channel with that
 //! budget ([`Pending::channel`]). The next escalation goes one level higher, to the leader's own chain, which the
@@ -10,9 +10,9 @@
 //! that loops back or past `max_escalation_hops`, it goes to the thread's owner, else the default human, as it did
 //! before chains. Only a human's message ends an escalation.
 //!
-//! Each level that goes up a chain posts to the thread's plan room with a fresh turn budget, so the members have turns
-//! to coordinate there even when the room ran out. A member's prompt says who leads ([`group_note`]); the leader's
-//! reply goes to the stuck persona, a non-leader's to the plan room. A member that sends the escalation one level
+//! Each level that goes up a chain posts to the thread's notes with a fresh turn budget, so the members have turns
+//! to coordinate there even when the notes ran out. A member's prompt says who leads ([`group_note`]); the leader's
+//! reply goes to the stuck persona, a non-leader's to the thread notes. A member that sends the escalation one level
 //! higher also tells the stuck persona, whose daemon takes that level as the thread's ([`Escalator::took_climb`]).
 //!
 //! Without an answer from the leader within `escalate_after`, the stuck persona sends it one level higher
@@ -502,7 +502,7 @@ fn chain_text(escalation: &Escalation, to: &[PersonaId], summary: &str) -> Strin
     let (thread, leader, stuck) = (&escalation.thread_id, &escalation.leader, &escalation.stuck);
     format!(
         "[ants] Escalation on thread {thread}, level {}: {stuck} is stuck ({}). Sent to {}; {leader} leads. The members \
-         coordinate in the plan room of thread {thread} (read_plan, post_plan). Only {leader} resolves it, by \
+         coordinate in the notes of thread {thread} (read_plan, post_plan). Only {leader} resolves it, by \
          answering {stuck} on thread {thread}, or escalates it further (escalate).\n\n{summary}",
         escalation.level,
         reason_text(escalation.reason),
@@ -510,10 +510,10 @@ fn chain_text(escalation: &Escalation, to: &[PersonaId], summary: &str) -> Strin
     )
 }
 
-/// What an escalation going up to `to` posts to the thread's plan room, with a fresh budget.
+/// What an escalation going up to `to` posts to the thread's notes, with a fresh budget.
 fn room_text(escalation: &Escalation, to: &[PersonaId]) -> String {
     format!(
-        "[ants] Escalation of {}'s thread, level {}: sent to {}; {} leads. The room has a fresh budget of {} turns.",
+        "[ants] Escalation of {}'s thread, level {}: sent to {}; {} leads. The notes have a fresh budget of {} turns.",
         escalation.stuck,
         escalation.level,
         join(to),
@@ -569,7 +569,7 @@ pub fn group_note(persona: &PersonaId, envelope: &Envelope) -> Option<String> {
     let role = if e.is_leader(persona) {
         format!(
             "{persona} leads: it alone resolves the escalation, by answering {stuck} on thread {thread}, or sends it \
-             one level higher (escalate tool) when the group cannot. The other members post to the plan room."
+             one level higher (escalate tool) when the group cannot. The other members post to the thread notes."
         )
     } else {
         format!(
@@ -578,12 +578,12 @@ pub fn group_note(persona: &PersonaId, envelope: &Envelope) -> Option<String> {
     };
     let reply = match route {
         Route::Stuck(_) => format!("The reply to this message goes to {stuck}."),
-        Route::Room => format!("The reply to this message goes to the plan room for {leader}, not to {stuck}."),
+        Route::Room => format!("The reply to this message goes to the thread notes for {leader}, not to {stuck}."),
         Route::Sender => format!("The reply to this message goes to {}.", envelope.from),
     };
     Some(format!(
         "[ants] {persona} is part of an escalation group for {stuck}'s thread {thread}, level {}; members: {}. The group \
-         shares the thread's plan room (read_plan, post_plan). {role} {reply}",
+         shares the thread's notes (read_plan, post_plan). {role} {reply}",
         e.level,
         join(members_at(e))
     ))
@@ -619,7 +619,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
     match reason {
         EscalationReason::TurnBudget => "turn budget spent",
         EscalationReason::Cap => "limit or cap reached",
-        EscalationReason::PlanRoom => "plan room out of turns",
+        EscalationReason::PlanRoom => "thread notes out of turns",
         EscalationReason::DeadLetter => "a message became a dead letter",
         EscalationReason::Approval => "a tool request awaits a decision",
         EscalationReason::Asked => "asked for help",

@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster, escalations or a thread's plan room.
+description: Send messages to ants personas (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ants persona or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster, escalations or a thread's notes.
 ---
 
 # Messaging ants personas
@@ -66,7 +66,7 @@ human as read, including replies that human has not seen yet.
 
 ```sh
 ants watch dev-a <thread>   # live state, reply text and tool calls of dev-a on that thread
-ants plan <thread>          # the thread's plan room
+ants plan <thread>          # the thread's notes: a shared board; posts there wake nobody
 ```
 
 `ants watch` never exits on its own: run it in the background and stop it when done.
@@ -94,9 +94,9 @@ Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creat
 
 A persona may name other personas to escalate to: the `escalate_to` key of its config, a chain whose first persona
 leads. `ants roster` shows it in the `ESCALATE_TO` column (`escalate_to` in `--json`), leader first. What a persona
-cannot settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, its plan room out of turns, or
+cannot settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, thread notes out of turns, or
 an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human. The
-members coordinate in the thread's plan room (`ants plan <thread>`), which gets a fresh turn budget at each level; only
+members coordinate in the thread's notes (`ants plan <thread>`), which get a fresh turn budget at each level; only
 the leader resolves it, by answering the stuck persona on its thread, or sends it one level higher, to its own chain.
 A chain that is empty, loops back or climbs past `max_escalation_hops` (default 3) hands the thread to its owner, the
 human who started it, else the daemon's default human. Inside ants, an agent calls `escalate(issue)` when stuck, and a

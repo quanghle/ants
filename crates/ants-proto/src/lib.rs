@@ -297,13 +297,13 @@ pub mod subject {
         Some((to.parse().ok()?, from.parse().ok()?))
     }
 
-    /// A post by `from` to the planning room of `thread`. Like an inbox subject it names the sender, so credentials can
+    /// A post by `from` to the notes of `thread`. Like an inbox subject it names the sender, so credentials can
     /// pin it there ([`plan_from`]).
     pub fn plan(thread: &ThreadId, from: &PersonaId) -> String {
         format!("ants.plan.{thread}.{from}")
     }
 
-    /// Every post to the planning room of `thread`, whoever wrote it.
+    /// Every post to the notes of `thread`, whoever wrote it.
     pub fn plan_room(thread: &ThreadId) -> String {
         format!("ants.plan.{thread}.*")
     }
@@ -319,7 +319,7 @@ pub mod subject {
         Some((thread.parse().ok()?, from.parse().ok()?))
     }
 
-    /// Every planning room.
+    /// The notes of every thread.
     pub const ALL_PLANS: &str = "ants.plan.>";
 
     /// A post by `from` to `channel`. Like an inbox subject it names the sender, so credentials can pin it there
@@ -1056,7 +1056,7 @@ pub enum EscalationReason {
     TurnBudget,
     /// A prompt limit or a spending cap was reached.
     Cap,
-    /// The thread's plan room is out of turns.
+    /// The thread's notes are out of turns.
     PlanRoom,
     /// A message on the thread became a dead letter.
     DeadLetter,
@@ -1182,11 +1182,11 @@ impl Escalation {
     }
 }
 
-/// A post to the planning room of a thread, on [`subject::plan`]. Personas on a thread plan there together; every one
-/// of them reads the whole room.
+/// A post to the notes of a thread, on [`subject::plan`]: one shared board per thread, where the personas on it plan
+/// together; a post wakes nobody, and each of them can read the whole board.
 ///
 /// Posts spend the thread's turn budget like messages between agents do, and each carries what is left. The post that
-/// spends the last turn hands the thread to the human, and the room takes no more agent posts until the human posts
+/// spends the last turn hands the thread to the human, and the notes take no more agent posts until the human posts
 /// there with a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPost {
@@ -1194,7 +1194,7 @@ pub struct PlanPost {
     pub thread_id: ThreadId,
     pub from: PersonaId,
     pub text: String,
-    /// Turns left in the room after this post.
+    /// Turns left in the notes after this post.
     pub turn_budget: u32,
     pub sent_at: DateTime<Utc>,
 }
