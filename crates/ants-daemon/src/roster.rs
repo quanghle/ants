@@ -7,7 +7,7 @@ use std::time::Duration;
 use ants_proto::{Activity, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{StreamExt as _, TryStreamExt as _};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -430,10 +430,33 @@ pub fn has_capability(entry: &RosterEntry, capability: &str) -> bool {
     entry.capabilities.iter().any(|c| c.trim().eq_ignore_ascii_case(capability))
 }
 
-/// The ant a request needing `capability` goes to: of the entries other than `asking` that advertise it, the
-/// first by id, so the same roster always gives the same answer.
-pub fn pick<'a>(entries: &'a [RosterEntry], capability: &str, asking: &UserId) -> Option<&'a RosterEntry> {
-    entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by(|a, b| a.ant.cmp(&b.ant))
+/// An entry not refreshed for this long has missed a heartbeat: its daemon may be gone, and the entry expires once
+/// [`ROSTER_TTL`] has passed.
+pub const STALE_AFTER: Duration = ROSTER_HEARTBEAT.saturating_mul(2);
+
+/// Whether `entry` was refreshed within [`STALE_AFTER`] of `now`. A heartbeat ahead of `now` counts as fresh.
+pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
+    (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
+}
+
+/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: live
+/// entries before stale ones, then idle ants before those of unknown activity (older daemons) and those working,
+/// then the fewest messages in hand, then the first by id. The same roster at the same time always gives the same
+/// answer.
+pub fn pick<'a>(
+    entries: &'a [RosterEntry],
+    capability: &str,
+    asking: &UserId,
+    now: DateTime<Utc>,
+) -> Option<&'a RosterEntry> {
+    entries.iter().filter(|e| &e.ant != asking && has_capability(e, capability)).min_by_key(|e| {
+        let busyness = match e.activity {
+            Some(Activity::Idle) => 0,
+            None | Some(Activity::Unknown) => 1,
+            Some(Activity::Working) => 2,
+        };
+        (!is_live(e, now), busyness, e.handling.unwrap_or(u32::MAX), &e.ant)
+    })
 }
 
 async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {
@@ -513,12 +536,51 @@ mod tests {
             entry("dev-a", &["rust"]),
         ];
         let me: UserId = "dev-a".parse().unwrap();
-        let picked = |capability| pick(&entries, capability, &me).map(|e| e.ant.as_str());
+        let now = Utc::now();
+        let picked = |capability| pick(&entries, capability, &me, now).map(|e| e.ant.as_str());
         assert_eq!(picked("rust"), Some("dev-b"));
         assert_eq!(picked("RUST "), Some("dev-b"));
         assert_eq!(picked("rust-ops"), Some("ops"));
         assert_eq!(picked("ops"), None, "tags match whole, not in part");
-        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap()).map(|e| e.ant.as_str()), Some("dev-a"));
+        assert_eq!(pick(&entries, "rust", &"dev-b".parse().unwrap(), now).map(|e| e.ant.as_str()), Some("dev-a"));
+    }
+
+    #[test]
+    fn pick_prefers_live_then_idle_then_least_loaded_ants() {
+        let now = Utc::now();
+        let with = |ant, activity, handling, beat_secs_ago| RosterEntry {
+            activity,
+            handling,
+            heartbeat_at: now - chrono::Duration::seconds(beat_secs_ago),
+            ..entry(ant, &["rust"])
+        };
+        let me: UserId = "me".parse().unwrap();
+        let picked = |entries: &[RosterEntry]| pick(entries, "rust", &me, now).map(|e| e.ant.to_string());
+        let (idle, working, unknown) = (Some(Activity::Idle), Some(Activity::Working), Some(Activity::Unknown));
+
+        let mut entries = vec![
+            with("dev-a", working, Some(1), 0),
+            with("dev-b", None, None, 0),
+            with("dev-c", working, Some(3), 0),
+            with("dev-d", idle, Some(0), 0),
+            with("dev-e", idle, Some(0), 0),
+            with("dev-0", idle, Some(0), 25),
+            with("me", idle, Some(0), 0),
+        ];
+        assert_eq!(picked(&entries).as_deref(), Some("dev-d"), "idle and live, ties by name, never the caller");
+        entries.retain(|e| !["dev-d", "dev-e"].contains(&e.ant.as_str()));
+        assert_eq!(picked(&entries).as_deref(), Some("dev-b"), "unknown activity before working");
+        entries[1].activity = unknown;
+        assert_eq!(picked(&entries).as_deref(), Some("dev-b"), "a newer daemon's activity counts as unknown");
+        entries.remove(1);
+        assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "fewest messages in hand");
+        entries[0].handling = Some(5);
+        assert_eq!(picked(&entries).as_deref(), Some("dev-c"));
+        entries.retain(|e| e.ant.as_str() != "dev-c");
+        entries[0].heartbeat_at = now - chrono::Duration::seconds(21);
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a stale entry still takes requests when all are stale");
+        entries[0].heartbeat_at = now + chrono::Duration::seconds(5);
+        assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "a heartbeat ahead of this clock counts as live");
     }
 
     #[test]

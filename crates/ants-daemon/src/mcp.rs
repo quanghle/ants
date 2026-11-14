@@ -1165,8 +1165,9 @@ impl Tools {
         Ok(text(result))
     }
 
-    #[tool(description = "Route a request to the ant whose roster capabilities include `capability`: the first \
-        such ant by name, other than this one. By default it waits for the reply and returns it, like ask_agent; \
+    #[tool(description = "Route a request to an ant whose roster capabilities include `capability`, other than \
+        this one: a live ant before a stale one, then an idle ant before a busy one, then the one with the fewest \
+        messages in hand, then the first by name. By default it waits for the reply and returns it, like ask_agent; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
         and follows its turn budget, as those do.")]
     async fn route(
@@ -1178,7 +1179,7 @@ impl Tools {
         let result = async {
             let entries = self.hub.others().await?;
             let capability = args.capability.trim();
-            let to = roster::pick(&entries, capability, &self.hub.ant)
+            let to = roster::pick(&entries, capability, &self.hub.ant, chrono::Utc::now())
                 .ok_or_else(|| nobody_has(capability, &entries))?
                 .ant
                 .to_string();
@@ -1660,7 +1661,10 @@ mod tests {
         billing.whoami = Some("Maintain billing services.\nReview invoices.".to_owned());
         let mut docs = listed("docs", &[]);
         docs.activity = Some(ants_proto::Activity::Working);
-        let roster = vec![listed("dev-a", &["rust"]), billing, listed("dev-b", &["rust"]), docs];
+        let mut busy = listed("dev-b", &["rust"]);
+        busy.activity = Some(ants_proto::Activity::Working);
+        busy.handling = Some(1);
+        let roster = vec![listed("dev-a", &["rust"]), billing, busy, docs];
         let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
         let current = from_human();
         let _turn = mcp.begin(&current);
@@ -1677,12 +1681,12 @@ mod tests {
         assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1)") && !text.contains("dev-b"), "{text}");
         assert!(text.contains("Maintain billing services.\nReview invoices."), "{text}");
 
-        // dev-a has the capability too, but does not route to itself; dev-b comes before dev-c.
+        // dev-a has the capability too, but does not route to itself; dev-b comes before dev-c by name, but works.
         let (ok, text) =
             call(&client, "route", serde_json::json!({"capability": "RUST", "text": "fix it", "wait": false})).await;
-        assert!(ok && text.starts_with("Routed to dev-b for RUST."), "{text}");
+        assert!(ok && text.starts_with("Routed to dev-c for RUST."), "{text}");
         let out = sent.recv().await.unwrap();
-        assert_eq!((&out.to, out.text.as_str(), &out.thread_id), (&user("dev-b"), "fix it", &current.thread_id));
+        assert_eq!((&out.to, out.text.as_str(), &out.thread_id), (&user("dev-c"), "fix it", &current.thread_id));
 
         let asking = tokio::spawn(async move {
             call(&client, "route", serde_json::json!({"capability": "billing", "text": "invoice?"})).await

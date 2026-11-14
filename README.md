@@ -626,7 +626,7 @@ speak as the ant, on the thread the session serves:
 | `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
 | `list_ants(capability?)` | Lists the other ants in the roster with `whoami`, capabilities, harness, machine and activity (idle or working); only those advertising `capability` when given. |
-| `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first ant by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
+| `route(capability, text, wait?, timeout_secs?)` | Sends the request to an ant, other than the caller, whose capabilities include `capability` (whole tag, any case): live before stale, idle before working, fewest messages in hand, then first by name. Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
 | `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
 | `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
@@ -699,8 +699,10 @@ This agent is the messenger of an ants team. It routes each request instead of d
 
 In channels the messenger triages the posts of humans and webhooks that mention nobody (see Channel delivery).
 
-`route` picks deterministically: the first ant by name with the tag, so the same roster always routes the same
-way; `list_ants` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
+`route` picks deterministically from the roster entries of the ants with the tag: a `live` entry before a `stale` one
+(see Roster), then an idle ant before one of unknown activity (an older daemon) and one working, then the fewest
+messages being handled, then the first by name, so the same roster at the same moment always routes the same way;
+`list_ants` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
 and `send_message`. Every ant gets these tools, not only the messenger.
 
 ## Thread notes

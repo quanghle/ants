@@ -3,16 +3,12 @@
 use std::time::Duration;
 
 use ants_daemon::{bus, roster};
-use ants_proto::{ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
+use ants_proto::{ROSTER_TTL, RosterEntry, UserId};
 use anyhow::Result;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
-/// An entry not refreshed for this long has missed a heartbeat: its daemon may be gone, and the entry expires once
-/// [`ROSTER_TTL`] has passed.
-const STALE_AFTER: Duration = ROSTER_HEARTBEAT.saturating_mul(2);
-
-/// How fresh an entry is, judged by its last heartbeat.
+/// How fresh an entry is, judged by its last heartbeat ([`roster::is_live`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Live,
@@ -21,7 +17,7 @@ pub enum State {
 
 impl State {
     pub fn of(entry: &RosterEntry, now: DateTime<Utc>) -> Self {
-        if since(entry.heartbeat_at, now) <= STALE_AFTER { Self::Live } else { Self::Stale }
+        if roster::is_live(entry, now) { Self::Live } else { Self::Stale }
     }
 
     fn as_str(self) -> &'static str {
@@ -140,7 +136,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
-    use ants_proto::Activity;
+    use ants_proto::{Activity, ROSTER_HEARTBEAT};
 
     use super::*;
     use crate::auth::tests::Server;
