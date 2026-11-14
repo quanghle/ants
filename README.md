@@ -44,7 +44,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_chains` | File, none | Persistent `escalate_to` chains (`<ant>`), readable after roster expiry. |
 | KV `ants_links` | File, 30d | Verified `origin_thread` handoffs (`<from>.<thread>.<to>`), from spin-offs and from messages on a thread with a `creator` or `owner`. |
 | KV `ants_owners` | File, 30d | Thread `owner` (`<thread>.<recipient>`) recorded by a human (`ants ask`) or webhook for each ant it messages on the thread; the first record of a key stays: a second is refused, or dropped as a repeat of its `Nats-Msg-Id` (no delete or purge). |
-| KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`) and daily `<webhook>.webhook` markers. |
+| KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`), sent schedule firings (`<schedule>.<unix time>`) and daily `<webhook>.webhook` markers of webhooks and schedules. |
 | Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
 
 User, channel, thread and JetStream domain IDs use 1–64 characters of `a-z`, `0-9` and `-`, starting with a letter or digit (`channel-manager` is reserved). Machine and harness names also allow `_` (machine names allow uppercase ASCII and must differ from `js_domain`). Durations require whole-number units ordered largest first (`s`, `m`, `h`, `d`: `90s`, `10m`, `1h30m`) or `0`; bare non-zero numbers are rejected.
@@ -169,6 +169,13 @@ nats = "wss://hub.example/nats"            # default NATS URL for ants without `
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
 
+[[schedule]]                               # see Schedules
+name = "nightly"
+creds = "~/.config/ants/auth/nightly.creds"
+cron = "0 3 * * 1-5"
+ant = "dev-a"
+text = "Triage the failing nightly tests."
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -203,16 +210,16 @@ workdir = "~/src/repo-b"
 creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
-`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant names, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
+`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant or schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
 Flag and file precedence on `ants daemon`:
 
-- `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled).
+- `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled) and runs its schedules.
 - `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present.
-- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`.
-- Per-ant and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant).
+- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`. With `--ant`, no schedule runs.
+- Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. A file that fails to load is logged and the ants served stay as they were.
+`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
 
 ## Harnesses
 
@@ -445,6 +452,35 @@ mention = ["dev-a"]                           # optional; or broadcast = true fo
 - **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 2m `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
 - **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 
+## Schedules
+
+`[[schedule]]` entries of the config file send a prompt on a timetable: each firing sends `text`, literally, as a new thread to an ant's inbox or a channel. `ants daemon` runs them when serving the whole file (not with `--ant`), each over its own NATS connection with its own credentials:
+
+```toml
+[[schedule]]
+name = "nightly"                              # ants auth user nightly --webhook --to dev-a
+creds = "~/.config/ants/auth/nightly.creds"
+cron = "0 3 * * 1-5"                          # minute hour day-of-month month day-of-week, in UTC
+ant = "dev-a"
+owner = "alice"                               # optional human owner for replies and escalations
+text = "Triage the failing nightly tests and summarise them."
+
+[[schedule]]
+name = "standup"                              # ants auth user standup --webhook --channel ops
+creds = "standup.creds"
+every = "4h"                                  # at whole multiples since 1970-01-01 00:00 UTC
+channel = "ops"
+broadcast = true                              # optional; or mention = ["dev-a"]; else the channel messenger triages
+text = "Post what changed since the last standup."
+nats = "nats://127.0.0.1:4222"                # optional, as js_domain: default the top-level values, then the flags
+```
+
+- **Timetable:** exactly one of `cron` and `every`. `cron` takes 5 fields with `*`, lists, ranges, steps (`*/15`, `1-5/2`, `10/20`), month and weekday names (`jan`, `mon`; day of week `0` and `7` are Sunday) or `@yearly`, `@monthly`, `@weekly`, `@daily` and `@hourly`; when both day fields are restricted, a day matching either fires (as cron does). `every` is a duration of at least `1m` (`15m`, `1h30m`, `1d`), so `every = "1d"` fires at 00:00 UTC. All times are UTC.
+- **Destination:** exactly one of `ant` and `channel`; `mention` and `broadcast` (all members at the firing) only with `channel`. `owner` works as for webhooks.
+- **Identity:** a schedule is a webhook-role user (`ants auth user NAME --webhook --to ANT` or `--channel CH`, and `--webhook NAME` in `ants auth leaf`), checked at load: its credentials must name it, be no human's and allow its destination. Its messages carry `webhook: true` and it refreshes `<schedule>.webhook` in `ants_webhooks` daily, so replies and triage work as for a [webhook](#webhooks).
+- **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 2m `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.
+- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, never made up.
+
 ## Credentials
 
 `ants auth` manages decentralized NATS NKey/JWT credentials in `~/.config/ants/auth` (`--dir` / `ANTS_AUTH_DIR`; keep `*.nk` seeds private):
@@ -455,6 +491,7 @@ ants auth user human --js-domain hub                    # human.creds ("human" a
 ants auth user alice --human --js-domain hub            # alice.creds (human role)
 ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
 ants auth user github --webhook --to dev-a --js-domain hub
+ants auth user nightly --webhook --to dev-a --js-domain hub  # a schedule sends as a webhook
 ants auth channel-manager --js-domain hub               # channel-manager.creds
 ```
 
@@ -583,7 +620,7 @@ Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANT
 |---|---|
 | `crates/ants-proto` | Wire contract: IDs, subjects, envelopes, turn budgets, NATS permissions (no I/O) |
 | `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, delivery loop, approvals, escalations, MCP server |
-| `crates/ants` | `ants` binary: CLI, `daemon`, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `mcp` |
+| `crates/ants` | `ants` binary: CLI, `daemon` and its schedules, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `mcp` |
 | `crates/ants-test-support` | Dev-only test helpers: `PATH` checks and throwaway `nats-server` |
 | `contrib/` | `launchd` plists, `systemd` user units and CLI agent skill (`contrib/skills/ants/SKILL.md`) |
 | `scripts/` | `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |

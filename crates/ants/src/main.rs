@@ -10,6 +10,7 @@ mod inbox;
 mod leaf;
 mod outbox;
 mod roster;
+mod scheduler;
 mod serve;
 mod tools;
 mod webhook;
@@ -711,11 +712,14 @@ async fn main() -> Result<()> {
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
             let default_path = ants_daemon::config::default_path()?;
-            let configs = || {
-                let (ants, harnesses) = serve::ants(&args, &default_path)?;
-                serve::configs(ants, &harnesses, &cli.nats, cli.creds.clone(), domain.cloned())
+            let served = || {
+                let listed = serve::ants(&args, &default_path)?;
+                let configs =
+                    serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
+                let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
+                Ok(serve::Served { configs, schedules })
             };
-            serve::run(configs()?, configs).await
+            serve::run(served()?, served).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { pick }) => {

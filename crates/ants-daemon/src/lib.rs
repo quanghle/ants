@@ -22,6 +22,7 @@ pub mod permission;
 pub mod pool;
 pub mod reading;
 pub mod roster;
+pub mod schedule;
 pub mod status;
 pub mod webhooks;
 
