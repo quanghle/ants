@@ -11,6 +11,7 @@ mod leaf;
 mod outbox;
 mod roster;
 mod serve;
+mod thread;
 mod tools;
 mod webhook;
 
@@ -121,6 +122,11 @@ enum Command {
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
     },
+    /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
+    /// and decisions, and dead letters: list the recent ones, find those mentioning a text, or show one's whole
+    /// history. Nothing is consumed or marked read. Needs a human's credentials.
+    #[command(subcommand)]
+    Thread(ThreadCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
     /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
@@ -380,6 +386,45 @@ enum BridgeCommand {
         /// HTTP CONNECT forward proxy, http://[user:password@]host:port.
         #[arg(long, value_name = "URL")]
         proxy: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThreadCommand {
+    /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
+    /// last time, messages, and the first line of the first message; the most recently active last.
+    List {
+        /// Only threads this ant (or human) sent or received a message on.
+        #[arg(long, value_name = "ANT")]
+        ant: Option<UserId>,
+        /// Only threads this human owns.
+        #[arg(long, value_name = "HUMAN")]
+        owner: Option<UserId>,
+        /// Only threads with a message whose text contains TEXT, whatever the case; its first matching line is shown
+        /// under the thread.
+        #[arg(long, value_name = "TEXT")]
+        grep: Option<String>,
+        /// How far back to read, such as 90m, 24h or 7d; 0 for everything the stream keeps. Each message in it is
+        /// read, so a longer one takes longer.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
+        since: Duration,
+        /// At most this many threads, the most recently active.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// One JSON thread per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
+    Show {
+        thread: ThreadId,
+        /// How far back to read; by default from the thread's start when its id is time-ordered (as generated ids
+        /// are), else everything the stream keeps.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+        since: Option<Duration>,
+        /// One JSON entry per line.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -669,6 +714,13 @@ async fn main() -> Result<()> {
         Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
+        Command::Thread(ThreadCommand::List { ant, owner, grep, since, limit, json }) => {
+            let select = thread::Select { ant, owner, grep, limit: Some(limit) };
+            thread::list(&nats()?, since, &select, json).await
+        }
+        Command::Thread(ThreadCommand::Show { thread, since, json }) => {
+            thread::show(&nats()?, &thread, since, json).await
+        }
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
             watch(&nats()?, filter).await

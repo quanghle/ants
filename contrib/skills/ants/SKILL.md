@@ -72,6 +72,8 @@ as read, consuming replies and notices from other threads.
 ants watch dev-a <thread>   # live state, streamed thoughts and reply, tool calls and plan of dev-a on <thread>
 ants watch                  # all live traffic; escalations show level, reason, stuck ant/thread, leader and visited
 ants notes <thread>         # passive shared board for <thread>; posts there wake nobody
+ants thread show <thread>   # the thread's whole stored history; reads without consuming anything
+ants thread list --grep foo # threads of the last 24h with a message mentioning foo
 ```
 
 `ants watch` never exits on its own: start it in the background and stop it when done. `ants notes <thread> "<text>"`
