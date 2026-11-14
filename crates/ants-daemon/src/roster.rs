@@ -1,10 +1,10 @@
 //! The ant's entry in the roster, kept alive by heartbeats.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ants_proto::{Activity, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
+use ants_proto::{Activity, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, Utc};
@@ -25,13 +25,15 @@ pub struct Registration {
     held: Option<watch::Receiver<Option<u64>>>,
 }
 
-/// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled and the live
-/// harnesses.
+/// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
+/// harnesses and whether the harness is signed out.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
     harnesses: AtomicUsize,
-    /// Wakes the heartbeats when the ant turns idle or working, so the roster shows it before the next beat.
+    signed_out: Mutex<Option<SignInNeeded>>,
+    /// Wakes the heartbeats when the ant turns idle or working, or its harness signed out or in, so the roster shows
+    /// it before the next beat.
     changed: Notify,
 }
 
@@ -46,6 +48,19 @@ impl Workload {
 
     pub fn set_harnesses(&self, live: usize) {
         self.harnesses.store(live, Ordering::Relaxed);
+    }
+
+    /// Note the harness as signed out, or with `None` as signed in.
+    pub fn set_signed_out(&self, signed_out: Option<SignInNeeded>) {
+        let mut current = self.signed_out.lock().expect("signed out");
+        if *current != signed_out {
+            *current = signed_out;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn signed_out(&self) -> Option<SignInNeeded> {
+        self.signed_out.lock().expect("signed out").clone()
     }
 
     pub fn handling(&self) -> usize {
@@ -66,6 +81,7 @@ impl Workload {
         entry.activity = Some(self.activity());
         entry.handling = Some(count(self.handling()));
         entry.harnesses = Some(count(self.harnesses()));
+        entry.signed_out = self.signed_out();
     }
 }
 
@@ -97,6 +113,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         handling: None,
         harnesses: None,
         escalate_to: config.escalation.escalate_to.clone(),
+        signed_out: None,
     }
 }
 
@@ -229,7 +246,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
             () = changed => false,
         };
         if let Some(workload) = workload {
-            if !beat && entry.activity == Some(workload.activity()) {
+            if !beat && entry.activity == Some(workload.activity()) && entry.signed_out == workload.signed_out() {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
             }
@@ -439,10 +456,10 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
     (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
 }
 
-/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: live
-/// entries before stale ones, then idle ants before those of unknown activity (older daemons) and those working,
-/// then the fewest messages in hand, then the first by id. The same roster at the same time always gives the same
-/// answer.
+/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
+/// harness is signed in before those signed out, then live entries before stale ones, then idle ants before those
+/// of unknown activity (older daemons) and those working, then the fewest messages in hand, then the first by id. The
+/// same roster at the same time always gives the same answer.
 pub fn pick<'a>(
     entries: &'a [RosterEntry],
     capability: &str,
@@ -455,7 +472,7 @@ pub fn pick<'a>(
             None | Some(Activity::Unknown) => 1,
             Some(Activity::Working) => 2,
         };
-        (!is_live(e, now), busyness, e.handling.unwrap_or(u32::MAX), &e.ant)
+        (e.signed_out.is_some(), !is_live(e, now), busyness, e.handling.unwrap_or(u32::MAX), &e.ant)
     })
 }
 
@@ -503,6 +520,7 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            signed_out: None,
         }
     }
 
@@ -525,6 +543,18 @@ mod tests {
 
         // Turning working and turning idle each leave a wakeup, which a later waiter takes at once.
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some());
+
+        let out = SignInNeeded { since: Utc::now(), sign_in: Some("copilot login".to_owned()) };
+        workload.set_signed_out(Some(out.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "signing out shows at once");
+        workload.set_signed_out(Some(out.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_none(), "nothing new");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.signed_out, Some(out));
+        workload.set_signed_out(None);
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "signing in shows at once");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.signed_out, None);
     }
 
     #[test]
@@ -581,6 +611,8 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a stale entry still takes requests when all are stale");
         entries[0].heartbeat_at = now + chrono::Duration::seconds(5);
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "a heartbeat ahead of this clock counts as live");
+        entries[0].signed_out = Some(SignInNeeded { since: now, sign_in: None });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a signed-in ant, even stale, before a signed-out one");
     }
 
     #[test]

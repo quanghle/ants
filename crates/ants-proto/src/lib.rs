@@ -1252,6 +1252,20 @@ pub struct RosterEntry {
     /// leads. Published so any daemon can follow the chain while the ant is offline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<UserId>,
+    /// Set while the ant's harness is signed out: messages to the ant wait, unanswered, until a check finds the
+    /// harness signed in again. Missing while it is signed in, and from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_out: Option<SignInNeeded>,
+}
+
+/// An ant's harness that is signed out, as its roster entry reports it ([`RosterEntry::signed_out`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInNeeded {
+    /// When the harness first said it is signed out.
+    pub since: DateTime<Utc>,
+    /// The command that signs the harness in, run on the entry's machine as the user its daemon runs as, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<String>,
 }
 
 /// What an ant is doing, as its roster entry reports it.
@@ -4193,10 +4207,12 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            signed_out: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
+        assert!(!json.contains("signed_out"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
@@ -4209,6 +4225,18 @@ mod tests {
         let json = serde_json::to_string(&busy).unwrap();
         assert!(json.contains(r#""activity":"working","handling":2,"harnesses":1"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), busy);
+        let since = "2026-01-01T00:00:00Z".parse().unwrap();
+        let out = RosterEntry {
+            signed_out: Some(SignInNeeded { since, sign_in: Some("copilot login".to_owned()) }),
+            ..entry.clone()
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z","sign_in":"copilot login"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), out);
+        let unknown = RosterEntry { signed_out: Some(SignInNeeded { since, sign_in: None }), ..entry.clone() };
+        let json = serde_json::to_string(&unknown).unwrap();
+        assert!(json.contains(r#""signed_out":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), unknown);
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -4220,11 +4248,14 @@ mod tests {
         assert!(entry.capabilities.is_empty() && entry.escalate_to.is_empty());
         assert_eq!((entry.whoami, entry.instance), (None, None));
         assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
+        assert_eq!(entry.signed_out, None, "an older daemon's entry");
 
         let newer = r#"{"ant":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,
+            "signed_out":{"since":"2026-01-01T00:00:05Z","sign_in":"x login","reason":"expired"},
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(newer).unwrap();
         assert_eq!((entry.activity, entry.harnesses), (Some(Activity::Unknown), Some(3)));
+        assert_eq!(entry.signed_out.and_then(|s| s.sign_in).as_deref(), Some("x login"));
     }
 
     #[test]

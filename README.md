@@ -97,7 +97,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 |---|---|
 | `ants ask [--thread ID] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
 | `ants inbox [--peek] [--thread ID] [--limit N] [-f] [--json]` | Print unread replies and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread`, the device counts as reading its escalations, see [Notifications](#notifications)). |
-| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`), harnesses, capabilities, `escalate_to` chains and workdirs. |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`), harnesses, capabilities, `escalate_to` chains and workdirs; below the table, one line per signed-out harness with its sign-in command and machine. |
 | `ants spend [ANT] [--thread ID \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants post [--thread ID] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
@@ -305,7 +305,8 @@ A harness is signed out when it answers `session/new`, `session/load` or a promp
 - holds the message in hand, with progress acks, first on its thread: the attempt is not counted (its `ants_attempts` marker is cleared unless the prompt had already streamed work, so the retry carries no cut-off warning), its delivery count does not grow, and no message is dead-lettered for it;
 - starts no further prompts; messages already delivered wait their turn, and once `max_harnesses × 2` are in hand the consumer delivers no more;
 - tells the thread's owner, else the default human, once per signed-out period, on the thread, with the sign-in command (`sign_in`, else the terminal auth method the harness offers in its `initialize` response) and the machine to run it on; the notice goes to the human directly, not up the ant's chain;
-- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it) and answers the held messages once one succeeds. The next sign-out after a message got past sign-in tells the human again.
+- shows the harness as signed out in the ant's roster entry (`signed_out`: `since`, `sign_in`), so `ants roster` and peers' `list_ants` show why the ant is not answering, and `route` prefers ants whose harness is signed in;
+- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it); once one succeeds, clears `signed_out` from the roster entry and answers the held messages. The next sign-out after a message got past sign-in tells the human again.
 
 Stopping the daemon while signed out hands the held messages back, each counting one more delivery. `ants harness check` runs the same handshake on demand.
 
@@ -345,7 +346,7 @@ Today's and each day's figures show as `spent/cap` against `max_daily_tokens` an
 
 ## Roster, identity and memory
 
-Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count), refreshing every 10s and on activity transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
+Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count, and while the harness is signed out a `signed_out` object with `since` and the `sign_in` command), refreshing every 10s and on activity or sign-in transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
 
 ### Identity, memory and task tracking
 
@@ -400,8 +401,8 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
 | `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
-| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity). |
-| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (`live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
+| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command). |
+| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
 | `post_notes(text)` | Append to the current thread's notes (1 turn; wakes nobody). |
 | `read_notes(thread?)` | Read up to 50 notes posts (oldest first) and turns left on the current or named thread (0 turns). |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
