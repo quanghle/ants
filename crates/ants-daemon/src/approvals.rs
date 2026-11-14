@@ -48,7 +48,7 @@ use crate::escalation::Chain;
 use crate::permission::Approver;
 
 /// How long a tool request waits for a human by default.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How often the ant looks for the stored decision after hearing one that is not stored (yet).
 pub const RECHECK: Duration = Duration::from_millis(250);

@@ -83,7 +83,7 @@ pub const OWNERS_BUCKET: &str = "ants_owners";
 /// expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
-pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
 /// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
 pub const READ_BUCKET: &str = "ants_read";

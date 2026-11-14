@@ -1228,7 +1228,7 @@ Review changes for correctness."""
         full.max_harnesses = 1;
         full.worktrees = true;
         full.prompt_timeout = Duration::ZERO;
-        full.idle_timeout = Duration::from_secs(5_400);
+        full.idle_timeout = Duration::from_mins(90);
         full.max_thread_cost = Some(2.5);
         full.max_daily_tokens = Some(1000);
         let text = entry(&full).unwrap();

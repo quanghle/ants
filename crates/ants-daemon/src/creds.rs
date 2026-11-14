@@ -17,10 +17,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// Credentials expiring within this long get a warning.
-pub const EXPIRY_WARNING: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const EXPIRY_WARNING: Duration = Duration::from_hours(7 * 24);
 
 /// How often a daemon checks its credentials again ([`recheck`]).
-pub const RECHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+pub const RECHECK_EVERY: Duration = Duration::from_hours(24);
 
 /// What credentials are for, with what renewing them takes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

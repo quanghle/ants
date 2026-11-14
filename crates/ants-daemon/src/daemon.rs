@@ -54,7 +54,7 @@ const STREAM_SOURCE: &str = "Nats-Stream-Source";
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// How often the worktrees of threads whose session expired are looked for, besides at start.
-const PRUNE_WORKTREES_EVERY: Duration = Duration::from_secs(60 * 60);
+const PRUNE_WORKTREES_EVERY: Duration = Duration::from_hours(1);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
 

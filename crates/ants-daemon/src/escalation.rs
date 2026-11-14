@@ -41,7 +41,7 @@ use crate::mcp::Roster;
 use crate::{bus, links};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
-pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_secs(1800);
+pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.

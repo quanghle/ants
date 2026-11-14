@@ -60,7 +60,7 @@ pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
 /// Name the harness shows the tools under.
 const SERVER_NAME: &str = "ants";
 const DEFAULT_ASK_WAIT: Duration = Duration::from_secs(300);
-const MAX_ASK_WAIT: Duration = Duration::from_secs(1800);
+const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
 /// Asks remembered for their replies; the oldest are forgotten first.
 const MAX_ASKS: usize = 1024;
 /// Late replies kept for `check_inbox`; the oldest are dropped first.

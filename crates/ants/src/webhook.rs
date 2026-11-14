@@ -72,7 +72,7 @@ const ID_HASH_LEN: usize = 32;
 /// Least time between two warnings about rejected requests of one webhook.
 const WARN_EVERY: Duration = Duration::from_secs(60);
 /// How often a webhook that delivers puts its marker again, well within [`ants_proto::WEBHOOK_RETENTION`].
-const MARK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const MARK_EVERY: Duration = Duration::from_hours(24);
 
 /// `~/.ants/webhooks.toml`.
 pub fn default_path() -> Result<PathBuf> {

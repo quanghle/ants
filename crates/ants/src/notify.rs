@@ -57,7 +57,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_WAIT: Duration = Duration::from_secs(60);
 const MAX_DELIVER: i64 = 3;
 /// How long the consumer of a human no process lists any more stays.
-const INACTIVE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const INACTIVE: Duration = Duration::from_hours(7 * 24);
 /// Escalations older than this, as after a long outage, are not notified.
 const ESCALATION_MAX_AGE: TimeDelta = TimeDelta::days(1);
 /// Longest text taken from a request's input or an escalation.

@@ -560,7 +560,7 @@ impl fmt::Debug for Launch {
 }
 
 /// Wall-clock time a prompt may run by default.
-pub const DEFAULT_PROMPT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_PROMPT_TIMEOUT: Duration = Duration::from_mins(30);
 /// Tool calls a prompt may start by default.
 pub const DEFAULT_MAX_TOOL_CALLS: usize = 300;
 /// How long a harness has to end a cancelled prompt before it is stopped.

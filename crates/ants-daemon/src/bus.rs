@@ -24,12 +24,12 @@ use crate::reading::{self, Reading};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
-pub const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const RETENTION: Duration = Duration::from_hours(30 * 24);
 
 /// How long the `ANTS` stream drops a message repeating the `Nats-Msg-Id` of one it stored. A copy kept in a leaf's
 /// outbox lands up to about two and a half minutes after the uplink is back, so it may follow its twin stored
 /// directly by the length of an outage plus that: a day covers outages overnight.
-pub const DUPLICATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+pub const DUPLICATE_WINDOW: Duration = Duration::from_hours(24);
 
 /// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
 /// sleep, dropped tunnel) is noticed within about a minute instead of three, and proxies with a 60 s idle timeout see
