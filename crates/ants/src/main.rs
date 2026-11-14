@@ -17,6 +17,7 @@ mod webhook;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, Escalation, JsDomain,
@@ -1281,7 +1282,7 @@ async fn thread_notes(nats: &Nats<'_>, thread: ThreadId, text: Vec<String>) -> R
         println!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget);
         return Ok(());
     }
-    let read = notes::read(&js, &nats.me.id, &thread).await?;
+    let read = notes::read(&js, &nats.me.id, Reading::cli(nats.me.role), &thread).await?;
     if read.posts.is_empty() {
         println!("thread {thread} has no notes");
     }

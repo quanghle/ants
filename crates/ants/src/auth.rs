@@ -746,11 +746,34 @@ pub(crate) mod tests {
         bus::publish_json(&a_js, subject::notes(&thread, &dev_a), &forged, None).await.unwrap();
         notes::publish(&a_js, &NotesPost::new(other, dev_a.clone(), "elsewhere"), None).await.unwrap();
 
-        let seen = notes::read(&b_js, &dev_b, &thread).await.unwrap();
+        let seen = notes::read(&b_js, &dev_b, Reading::Consumer, &thread).await.unwrap();
         assert_eq!(seen.posts, std::slice::from_ref(&first));
         let answer = NotesPost::spend(thread.clone(), dev_b.clone(), "agreed", 8, seen.last()).unwrap();
         assert!(notes::publish(&b_js, &answer, Some(seen.last_seq)).await.unwrap());
-        assert_eq!(notes::read(&h_js, &human, &thread).await.unwrap().posts, [first, answer]);
+
+        // While dev-b's daemon reads through notes-dev-b, dev-b's CLI reads through its spares and the human's by message
+        // gets, more at once than there are spares: all read the whole notes, and the daemon's read carries on.
+        let daemon = jetstream::consumer::pull::Config {
+            name: Some(notes_consumer(&dev_b)),
+            filter_subject: subject::notes_of(&thread),
+            ack_policy: jetstream::consumer::AckPolicy::None,
+            ..Default::default()
+        };
+        let daemon: jetstream::consumer::PullConsumer = b_js.create_consumer_on_stream(daemon, STREAM).await.unwrap();
+        let next = || async {
+            let msg = daemon.fetch().max_messages(1).messages().await.unwrap().next().await.unwrap().unwrap();
+            serde_json::from_slice::<NotesPost>(&msg.payload).unwrap()
+        };
+        assert_eq!(next().await, first);
+        let reads = (0..6).map(|i| match i % 2 {
+            0 => notes::read(&h_js, &human, Reading::Gets, &thread),
+            _ => notes::read(&b_js, &dev_b, Reading::Spare, &thread),
+        });
+        for read in futures::future::join_all(reads).await {
+            let read = read.unwrap();
+            assert_eq!((&read.posts[..], read.last_seq), (&[first.clone(), answer.clone()][..], seen.last_seq + 2));
+        }
+        assert_eq!(next().await, forged, "the daemon's read carries on where it was");
 
         // dev-a's notes consumer filters thread notes only, and dev-b's is not dev-a's to use.
         let consumer = |name: String, filter: String| jetstream::consumer::pull::Config {
@@ -762,7 +785,13 @@ pub(crate) mod tests {
         assert!(a_js.create_consumer_on_stream(into_inbox, STREAM).await.is_err());
         let not_its_own = consumer(notes_consumer(&dev_b), subject::notes_of(&thread));
         assert!(a_js.create_consumer_on_stream(not_its_own, STREAM).await.is_err());
-        assert!(notes::read(&a_js, &dev_a, &thread).await.is_ok(), "its own works");
+        assert!(notes::read(&a_js, &dev_a, Reading::Consumer, &thread).await.is_ok(), "its own works");
+        let spare = |name: String| consumer(name, subject::notes_of(&thread));
+        let not_its_spare = spare(ants_proto::spare_readers(&notes_consumer(&dev_b)).next().unwrap());
+        assert!(a_js.create_consumer_on_stream(not_its_spare, STREAM).await.is_err());
+        let into_inbox =
+            consumer(ants_proto::spare_readers(&notes_consumer(&dev_a)).next().unwrap(), subject::inbox_of(&dev_b));
+        assert!(a_js.create_consumer_on_stream(into_inbox, STREAM).await.is_err());
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod notes;
 pub mod permission;
 pub mod pool;
+pub mod reading;
 pub mod roster;
 pub mod status;
 pub mod webhooks;

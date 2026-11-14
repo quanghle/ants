@@ -1,25 +1,22 @@
 //! Thread notes: the posts of a thread live in the ANTS stream on `ants.notes.<thread>.<from>`.
 //!
-//! A reader reads the notes of a thread back through its own consumer `notes-<user>`, created for the read and deleted
-//! after it, so its credentials need not let it touch any other consumer. Posts whose sender or thread disagrees with
-//! their subject are dropped. A post states the stream sequence of the last post it saw in the notes, so two agents
-//! spending the same turn cannot both succeed: the second one reads the notes again.
+//! An ant's daemon reads the notes of a thread back through the ant's own consumer `notes-<ant>`, created for the read
+//! and deleted after it, so its credentials need not let it touch any other consumer; the CLI with the ant's
+//! credentials reads through a spare of it, and a human by message gets ([`Reading`]). Posts whose sender or thread
+//! disagrees with their subject are dropped. A post states the stream sequence of the last post it saw in the notes, so
+//! two agents spending the same turn cannot both succeed: the second one reads the notes again.
 
-use std::time::Duration;
+use std::ops::ControlFlow;
 
-use ants_proto::{NotesPost, STREAM, ThreadId, UserId, notes_consumer, subject};
+use ants_proto::{NotesPost, ThreadId, UserId, notes_consumer, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, consumer};
-use futures::StreamExt as _;
 use futures::future::BoxFuture;
 
 use crate::bus;
+use crate::reading::{self, Reading};
 
-/// How long a consumer left behind by an interrupted read lives on.
-const INACTIVE: Duration = Duration::from_secs(30);
-/// Messages asked for at once.
-const BATCH: u64 = 256;
 /// Reads of busy notes before [`spend`] gives up.
 const SPEND_TRIES: usize = 5;
 /// Header naming the subjects `Nats-Expected-Last-Subject-Sequence` applies to (nats-server 2.11).
@@ -47,11 +44,11 @@ pub trait NotesStore: Send + Sync {
     fn post<'a>(&'a self, post: &'a NotesPost, last_seq: u64) -> BoxFuture<'a, Result<bool>>;
 }
 
-/// Thread notes in the ANTS stream, as `reader` sees them.
+/// Thread notes in the ANTS stream, as `reader`, an ant's daemon, sees them.
 pub struct JetStreamNotes {
     js: jetstream::Context,
     reader: UserId,
-    /// One read at a time: they share the reader's consumer.
+    /// One read at a time: they share the reader's own consumer.
     reading: tokio::sync::Mutex<()>,
 }
 
@@ -65,7 +62,7 @@ impl NotesStore for JetStreamNotes {
     fn read<'a>(&'a self, thread: &'a ThreadId) -> BoxFuture<'a, Result<Notes>> {
         Box::pin(async move {
             let _one = self.reading.lock().await;
-            read(&self.js, &self.reader, thread).await
+            read(&self.js, &self.reader, Reading::Consumer, thread).await
         })
     }
 
@@ -74,54 +71,25 @@ impl NotesStore for JetStreamNotes {
     }
 }
 
-/// The notes of `thread`, read through the consumer of `reader`. Only one read per reader may run at a time.
-pub async fn read(js: &jetstream::Context, reader: &UserId, thread: &ThreadId) -> Result<Notes> {
-    let name = notes_consumer(reader);
-    // A consumer left by an interrupted read would carry on where it stopped.
-    let _ = js.delete_consumer_from_stream(&name, STREAM).await;
-    let config = consumer::pull::Config {
-        name: Some(name.clone()),
-        filter_subject: subject::notes_of(thread),
-        ack_policy: consumer::AckPolicy::None,
-        inactive_threshold: INACTIVE,
-        ..Default::default()
-    };
-    let consumer: consumer::PullConsumer = js
-        .create_consumer_on_stream(config, STREAM)
-        .await
-        .with_context(|| format!("reading the notes of thread {thread}"))?;
-    let notes = collect(&consumer, thread).await;
-    if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
-        tracing::debug!(error = %e, consumer = name, "deleting the notes consumer");
-    }
-    notes
-}
-
-async fn collect(consumer: &consumer::PullConsumer, thread: &ThreadId) -> Result<Notes> {
+/// The notes of `thread`, read as `reading` says, through `reader`'s notes consumer ([`notes_consumer`]) or its spares
+/// for a consumer. Only one read through the reader's own consumer may run at a time.
+pub async fn read(js: &jetstream::Context, reader: &UserId, reading: Reading, thread: &ThreadId) -> Result<Notes> {
     let mut notes = Notes::default();
-    let mut left = consumer.cached_info().num_pending;
-    while left > 0 {
-        let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
-        let mut got = 0;
-        while let Some(msg) = batch.next().await {
-            let msg = msg.map_err(|e| anyhow::anyhow!(e))?;
-            got += 1;
-            if let Ok(info) = msg.info() {
-                notes.last_seq = info.stream_sequence;
-            }
-            let post = serde_json::from_slice::<NotesPost>(&msg.payload)
-                .map_err(|e| e.to_string())
-                .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
-            match post {
-                Ok(post) => notes.posts.push(post),
-                Err(error) => tracing::warn!(%thread, subject = %msg.subject, error, "dropping a notes post"),
-            }
+    let filter = subject::notes_of(thread);
+    let start = consumer::DeliverPolicy::All;
+    reading::read_back(js, &notes_consumer(reader), reading, &filter, start, |seq, _, subject, payload| {
+        notes.last_seq = seq;
+        let post = serde_json::from_slice::<NotesPost>(payload)
+            .map_err(|e| e.to_string())
+            .and_then(|post| post.check_subject(subject).map(|()| post).map_err(|e| e.to_string()));
+        match post {
+            Ok(post) => notes.posts.push(post),
+            Err(error) => tracing::warn!(%thread, subject, error, "dropping a notes post"),
         }
-        if got == 0 {
-            break;
-        }
-        left = left.saturating_sub(got);
-    }
+        ControlFlow::Continue(())
+    })
+    .await
+    .with_context(|| format!("reading the notes of thread {thread}"))?;
     Ok(notes)
 }
 

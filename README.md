@@ -792,9 +792,13 @@ ants notes <thread> "ship friday"       # post as the CLI's human, which gives t
 ants watch 'ants.notes.>'               # the notes of every thread, live
 ```
 
-Ants and humans read the notes back through their own consumer, `notes-<name>`, created for the read and
-deleted after it; their credentials allow it to filter notes subjects only. Ant and human credentials issued before
-thread notes need `ants auth user` again.
+An ant's daemon reads the notes back through the ant's own consumer, `notes-<ant>`, created for the read and
+deleted after it; `ants notes` with an ant's credentials takes a free spare of it instead (`notes-<ant>_1` to
+`notes-<ant>_3`, waiting for one when all are taken), so it never gets in the way of the daemon's read or of another
+`ants notes`. Credentials allow these consumers to filter notes subjects only. A human reads the notes by fetching the
+posts one by one (`STREAM.MSG.GET`, with no consumer), so any number of `ants notes` read at once. Ant and human
+credentials issued before thread notes, and ant credentials issued before the spares, need `ants auth user` again (and
+leaf uplinks issued before the spares `ants auth leaf`).
 
 ## Channels
 
@@ -878,7 +882,7 @@ wakes the members it @mentions, or the messenger, and replies come back to the c
 **Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
 them back by fetching the channel's posts one by one (`STREAM.MSG.GET`, with no consumer), so any number of `ants
 channel read`, `ants post --thread`, `ants dead watch` and `ants inbox --follow` read at once without getting in each
-other's way (with an ant's credentials, through the ant's `chanread-<ant>` as below), and drops a post whose sender or
+other's way (with an ant's credentials, through a spare of the ant's reader as below), and drops a post whose sender or
 channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and messenger are an
 entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials and the channel manager's
 write (see [Channel owners](#channel-owners)):
@@ -1171,10 +1175,15 @@ channel disagrees with its key. An ant asks the channel manager for changes only
 subject proves the requester, and the manager answers only on the requester's `_INBOX.<ant>.` (see [Channel
 owners](#channel-owners)). Credentials issued before channel owners lack `ants.chanadm.*.<ant>`: owner ants need
 `ants auth user` and their machines' leaf nodes `ants auth leaf` again. An ant takes
-channel posts through its own consumer `chan-<ant>` and reads channels back through `chanread-<ant>`, created for each
-read and deleted after it, one read at a time; credentials pin the filter of both under `ants.chan.>`, so neither
-reaches an inbox. A human's credentials read channels back with `STREAM.MSG.GET`, which they already allow, so no
-credentials need issuing again for it. Credentials and streams set up
+channel posts through its own consumer `chan-<ant>`, and its daemon reads channels back through `chanread-<ant>`,
+created for each read and deleted after it, one read at a time. The CLI with the ant's credentials (`ants channel
+read`, `ants post --thread`) reads through a free spare of it instead, `chanread-<ant>_1` to `chanread-<ant>_3`, taken
+with a strict create for the read (waiting for one when all are taken) and deleted after it, so it never deletes the
+consumer the daemon or another read is reading through; a spare an interrupted read leaves behind goes after 30 s
+unused. Credentials pin the filter of all of them under `ants.chan.>`, so none reaches an inbox; ant credentials
+issued before the spares need `ants auth user`, and leaf uplinks `ants auth leaf`, again. An ant gets no `STREAM.MSG.GET`, which would expose every
+inbox. A human's credentials read channels back with `STREAM.MSG.GET`, which they already allow, so no credentials
+need issuing again for it. Credentials and streams set up
 before channels need `ants auth user` and `ants init` again.
 
 An ant's credentials publish dead letters only on its own `ants.dead.<ant>` (and `ants.out.dead.<ant>` in a
