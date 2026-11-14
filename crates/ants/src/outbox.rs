@@ -274,13 +274,14 @@ mod tests {
     use std::process::Command;
 
     use ants_daemon::{bus, links, notes};
-    use ants_proto::{ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
+    use ants_proto::{ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
     use ants_test_support::NatsServer;
     use async_nats::jetstream::message::PublishMessage;
     use futures::StreamExt as _;
 
     use super::*;
-    use crate::{auth, leaf};
+    use crate::humans::Me;
+    use crate::{auth, channel, leaf};
 
     fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
@@ -481,6 +482,134 @@ mod tests {
             let info = h_js.get_stream(name).await.unwrap().info().await.unwrap().config.clone();
             assert!(info.sources.unwrap_or_default().is_empty());
         }
+    }
+
+    /// A real hub and leaf node: `ants post --wait` gets each reply once, also those the hub stores while the leaf's
+    /// uplink is down and those it takes from a leaf's outbox, which never come live, read back with a human's
+    /// credentials and an ant's; for a post kept in the outbox, only what the hub stores after it.
+    #[tokio::test]
+    async fn a_post_waiter_reads_back_what_never_comes_live() {
+        let (leaf_port, dead_port) = (free_port(), free_port());
+        let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {
+            return;
+        };
+        let team = hub.dir().join("auth");
+        let domain: JsDomain = "hub".parse().unwrap();
+        let m1: Machine = "m1".parse().unwrap();
+        let (human, dev_a, dev_b): (UserId, UserId, UserId) =
+            (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        let connect = async |url: &str, p: &UserId| {
+            let creds = hub.dir().join(format!("{p}.creds"));
+            auth::issue(&team, p, Role::by_default(p), Some(&domain), &creds).unwrap();
+            let (client, mut js) = bus::connect(url, Some(&creds), Some(&domain), p, "test").await.unwrap();
+            js.set_timeout(Duration::from_secs(2));
+            (client, js)
+        };
+        let (h, h_js) = connect(&hub.url, &human).await;
+        bus::init_stream(&h_js).await.unwrap();
+        let (_b, b_js) = connect(&hub.url, &dev_b).await;
+
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
+        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
+        let server_conf = team.join(auth::SERVER_CONF);
+        let listen = format!("127.0.0.1:{}", free_port());
+        let configure = |dir: &Path, port: u16| {
+            let uplinks = [format!("nats-leaf://127.0.0.1:{port}")];
+            let config = leaf::Leaf {
+                machine: &m1,
+                hub_domain: Some(&domain),
+                uplinks: &uplinks,
+                creds: &leaf_creds,
+                server_conf: &server_conf,
+                ca_file: None,
+                proxy: None,
+                listen: &listen,
+            };
+            leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        };
+        let leaf_node = NatsServer::spawn_with(|dir| {
+            configure(dir, leaf_port);
+            "include \"leaf.conf\"\n".to_owned()
+        })
+        .unwrap();
+        let reload = async |port: u16, up: bool| {
+            configure(leaf_node.dir(), port);
+            let status = Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap();
+            assert!(status.success());
+            let (_, js) = connect(&leaf_node.url, &dev_a).await;
+            eventually("the uplink goes up or down", async || bus::ensure_stream(&js).await.is_ok() == up).await;
+        };
+        let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
+        let (a_leaf, a_leaf_js) = connect(&leaf_node.url, &dev_a).await;
+        eventually("the leaf reaches the hub", async || bus::ensure_stream(&a_leaf_js).await.is_ok()).await;
+        let setup = super::connect(&hub.url, Some(&hub.dir().join("human.creds")), &human, &m1).await.unwrap();
+        admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+        sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
+
+        // Each poster waits as `ants post --wait` does: subscribed before it posts, reading back after its post.
+        let ops: ChannelId = "ops".parse().unwrap();
+        let wait = async |client: &async_nats::Client, js: &Context, post: &ChannelPost| {
+            let room = client.subscribe(subject::chan_room(&ops)).await.unwrap();
+            client.flush().await.unwrap();
+            let stored = bus::store_acked(js, post.subject(), post, &post.id.to_string()).await.unwrap();
+            let me = Me { id: post.from.clone(), role: Role::by_default(&post.from) };
+            let posts = channel::caught_up_posts(room, js, &me, post, stored.as_ref().map(|ack| ack.sequence));
+            (stored.is_some(), Box::pin(channel::thread_posts(posts, post, true)))
+        };
+        let next = async |waiter: &mut (dyn futures::Stream<Item = ChannelPost> + Unpin)| {
+            tokio::time::timeout(Duration::from_secs(60), waiter.next()).await.expect("no post").unwrap()
+        };
+        let top = ChannelPost::new(ops.clone(), human.clone(), "on the leaf");
+        let (stored, mut on_leaf) = wait(&h_leaf, &h_leaf_js, &top).await;
+        assert!(stored);
+        let ant_top = ChannelPost::new(ops.clone(), dev_a.clone(), "an ant on the leaf");
+        let (stored, mut ant_on_leaf) = wait(&a_leaf, &a_leaf_js, &ant_top).await;
+        assert!(stored);
+        let hub_top = ChannelPost::new(ops.clone(), human.clone(), "on the hub");
+        let (stored, mut on_hub) = wait(&h, &h_js, &hub_top).await;
+        assert!(stored);
+
+        reload(dead_port, false).await;
+        let reply = |to: &ChannelPost, from: &UserId, text: &str| {
+            channel::human_post(ops.clone(), Some(to.thread_id.clone()), from.clone(), None, text.to_owned())
+        };
+        let (away, ant_away) = (reply(&top, &dev_b, "away"), reply(&ant_top, &dev_b, "ant away"));
+        for post in [&away, &ant_away] {
+            assert_eq!(bus::store(&b_js, post.subject(), post, &post.id.to_string()).await.unwrap(), bus::Stored::Hub);
+        }
+        // Kept in the outbox, so never published on its subject.
+        let outboxed = reply(&hub_top, &dev_a, "from the outbox");
+        let stored = bus::store(&a_leaf_js, outboxed.subject(), &outboxed, &outboxed.id.to_string()).await.unwrap();
+        assert_eq!(stored, bus::Stored::Outbox);
+        let kept = ChannelPost::new(ops.clone(), human.clone(), "kept");
+        let (stored, mut on_kept) = wait(&h_leaf, &h_leaf_js, &kept).await;
+        assert!(!stored);
+        let early = reply(&kept, &dev_b, "before the post reaches the hub");
+        bus::store(&b_js, early.subject(), &early, &early.id.to_string()).await.unwrap();
+
+        reload(leaf_port, true).await;
+        assert_eq!(next(&mut on_leaf).await, away, "read back by message gets");
+        assert_eq!(next(&mut ant_on_leaf).await, ant_away, "read back through a spare reader");
+        assert_eq!(next(&mut on_hub).await, outboxed, "read back once the hub takes it from the outbox");
+        let ants = h_js.get_stream(STREAM).await.unwrap();
+        eventually("the hub takes the kept post", async || {
+            ants.get_last_raw_message_by_subject(&kept.subject()).await.is_ok()
+        })
+        .await;
+
+        reload(dead_port, false).await;
+        let late = reply(&kept, &dev_b, "after the post");
+        bus::store(&b_js, late.subject(), &late, &late.id.to_string()).await.unwrap();
+        reload(leaf_port, true).await;
+        assert_eq!(next(&mut on_kept).await, late, "only what the hub stored after the post kept in the outbox");
+
+        let again = channel::CATCH_UP * 2;
+        let quiet = async |waiter: &mut (dyn futures::Stream<Item = ChannelPost> + Unpin)| {
+            tokio::time::timeout(again, waiter.next()).await.is_err()
+        };
+        let quiet = tokio::join!(quiet(&mut on_leaf), quiet(&mut ant_on_leaf), quiet(&mut on_hub), quiet(&mut on_kept));
+        assert_eq!(quiet, (true, true, true, true), "each once, live or read back");
     }
 
     fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {

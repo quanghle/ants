@@ -38,8 +38,9 @@ inbox. An ant not in the roster is offline and gets the post when its daemon sta
 
 /// Most earlier posts a prompt shows; older unseen ones are counted instead.
 pub const MAX_CONTEXT: usize = 50;
-/// Slack for the clocks of the thread's first poster and the server, when a read starts at the thread's start.
-const CLOCK_SLACK: Duration = Duration::from_secs(300);
+/// Slack for the clocks of a poster and the server, when a read starts at the time a post was sent, such as a thread's
+/// start.
+pub const CLOCK_SLACK: Duration = Duration::from_secs(300);
 /// Most thread origins kept in memory; past it they are read again.
 const MAX_ORIGINS: usize = 4096;
 /// Most ants, the sender of a message among them, whose link to a channel thread is checked for it.
