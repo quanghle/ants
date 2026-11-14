@@ -655,7 +655,7 @@ mod tests {
         assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((false, None), (false, None)));
 
         let changed = config("dev-a", Some("smart"));
-        assert_eq!(names(reconcile(&mut running, vec![changed.clone(), config("dev-c", None)])), ["dev-c"]);
+        assert_eq!(names(reconcile(&mut running, vec![changed, config("dev-c", None)])), ["dev-c"]);
         assert_eq!(state(&running, "dev-a"), (true, Some(Some("smart".to_owned()))));
         assert_eq!(state(&running, "dev-b"), (true, None));
         assert_eq!(state(&running, "dev-c"), (false, None));

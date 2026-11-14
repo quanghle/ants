@@ -18,6 +18,7 @@
 //! the inbox consumer from prompting with it. A reply that comes after the call gave up is kept for `check_inbox`.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -1049,16 +1050,17 @@ fn describe(entries: &[&RosterEntry]) -> String {
             let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
                 let how = out.sign_in.as_ref().map(|c| format!(" (`{c}` on {})", e.machine)).unwrap_or_default();
-                text.push_str(&format!(
+                let _ = write!(
+                    text,
                     "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",
                     out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     e.ant
-                ));
+                );
             }
             if let Some(whoami) = &e.whoami
                 && !whoami.trim().is_empty()
             {
-                text.push_str(&format!("\n  whoami (advertised):\n{whoami}"));
+                let _ = write!(text, "\n  whoami (advertised):\n{whoami}");
             }
             text
         })
@@ -1099,11 +1101,11 @@ fn describe_notes(thread: &ThreadId, posts: &[NotesPost]) -> String {
     let shown = &posts[posts.len().saturating_sub(SHOWN_POSTS)..];
     let mut text = format!("Notes of thread {thread}: {} posts", posts.len());
     if shown.len() < posts.len() {
-        text.push_str(&format!(", the last {} shown", shown.len()));
+        let _ = write!(text, ", the last {} shown", shown.len());
     }
-    text.push_str(&format!("; {} turns left.", last.turn_budget));
+    let _ = write!(text, "; {} turns left.", last.turn_budget);
     for post in shown {
-        text.push_str(&format!("\n\n{} at {}:\n{}", post.from, post.sent_at.to_rfc3339(), post.text));
+        let _ = write!(text, "\n\n{} at {}:\n{}", post.from, post.sent_at.to_rfc3339(), post.text);
     }
     text
 }

@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::pin;
@@ -577,7 +578,7 @@ fn parse_proxy(proxy: &str) -> Result<(String, Option<String>)> {
 async fn tunnel(tcp: &mut TcpStream, authority: &str, auth: Option<&str>) -> Result<()> {
     let mut head = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
     if let Some(auth) = auth {
-        head += &format!("Proxy-Authorization: {auth}\r\n");
+        let _ = write!(head, "Proxy-Authorization: {auth}\r\n");
     }
     head += "\r\n";
     tcp.write_all(head.as_bytes()).await?;

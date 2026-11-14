@@ -432,7 +432,7 @@ mod tests {
 
         let enrollment = Permissions::for_enrollment(&dev_a);
         let enroll = |exp| Finding::from_claims(&claims("enroll-dev-a", &enrollment, &tags, Some(exp))).unwrap();
-        assert_eq!(enroll(now + 60).kind, Kind::Enrollment { ant: dev_a.clone() });
+        assert_eq!(enroll(now + 60).kind, Kind::Enrollment { ant: dev_a });
         assert!(enroll(now + 60).warnings(now).is_empty(), "enrollment credentials are short-lived by design");
         assert_eq!(enroll(now).renew(), ["ants auth enroll dev-a"]);
         assert_eq!(enroll(now).warnings(now).len(), 1);

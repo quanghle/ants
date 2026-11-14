@@ -982,6 +982,7 @@ fn reply(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::fmt::Write as _;
     use std::net::SocketAddr;
 
     use ants_proto::{ChannelEntry, Permissions, STREAM};
@@ -1154,9 +1155,9 @@ pub(crate) mod tests {
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: hooks\r\nConnection: close\r\n");
         for (name, value) in headers {
-            head.push_str(&format!("{name}: {value}\r\n"));
+            let _ = write!(head, "{name}: {value}\r\n");
         }
-        head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        let _ = write!(head, "Content-Length: {}\r\n\r\n", body.len());
         stream.write_all(head.as_bytes()).await.unwrap();
         stream.write_all(body).await.unwrap();
         let mut answer = String::new();
@@ -1326,10 +1327,11 @@ pub(crate) mod tests {
             [("news", ""), ("alerts", "mention = [\"dev-b\", \"carol\"]"), ("ci", "broadcast = true")]
         {
             let creds = creds(&server, &p(name), Destination::Channel(ops.clone()));
-            config.push_str(&format!(
+            let _ = write!(
+                config,
                 "[[webhook]]\nname = \"{name}\"\ncreds = {creds:?}\nauth = \"bearer\"\nsecret_file = {secret:?}\n\
                  channel = \"ops\"\ntext = \"{{body}}\"\n{mentions}\n"
-            ));
+            );
         }
         let path = server.dir().join("webhooks.toml");
         std::fs::write(&path, config).unwrap();

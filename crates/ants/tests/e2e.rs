@@ -4,6 +4,7 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
+use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -612,11 +613,12 @@ fn stub_harness() {
                         reply.push_str(adapter);
                     }
                     if let Ok(db) = std::env::var("ANTS_TEST_TOOL_DB") {
-                        reply.push_str(&format!(
+                        let _ = write!(
+                            reply,
                             "\n{db}; BD_DB={}; BD_REMOTE={}",
                             std::env::var("BD_DB").unwrap(),
                             std::env::var("BD_REMOTE").unwrap()
-                        ));
+                        );
                         let options = options.lock().unwrap();
                         let selected: Vec<_> = options
                             .iter()
@@ -625,7 +627,7 @@ fn stub_harness() {
                                 select.current_value.0.as_ref()
                             })
                             .collect();
-                        reply.push_str(&format!("\nmodel={}; effort={}; context={context}", selected[0], selected[1]));
+                        let _ = write!(reply, "\nmodel={}; effort={}; context={context}", selected[0], selected[1]);
                     }
                     let reply = ContentBlock::Text(TextContent::new(reply));
                     cx.send_notification(SessionNotification::new(

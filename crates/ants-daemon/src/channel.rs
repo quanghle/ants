@@ -11,6 +11,7 @@
 //! [`crate::humans::Registry`]'s to say.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -421,12 +422,13 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) ->
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    text.push_str(&format!("[ants] Post from {} mentioning {ant}:\n{}\n\n", post.from, post.text));
-    text.push_str(&format!(
+    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}\n\n", post.from, post.text);
+    let _ = write!(
+        text,
         "[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
          ({left} left after it). An @mention in it wakes that member of the channel, or notifies it if a human; \
          mentioning nobody wakes nobody."
-    ));
+    );
     text
 }
 
@@ -455,19 +457,20 @@ pub fn triage_prompt(
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
     let kind = if post.webhook { " (a webhook)" } else { "" };
-    text.push_str(&format!("[ants] Post from {}{kind} mentioning nobody:\n{}\n\n", post.from, post.text));
+    let _ = write!(text, "[ants] Post from {}{kind} mentioning nobody:\n{}\n\n", post.from, post.text);
     text.push_str(TRIAGE_RULES);
-    text.push_str(&format!("\n\n[ants] Members of #{channel}:\n"));
+    let _ = write!(text, "\n\n[ants] Members of #{channel}:\n");
     if entry.members.is_empty() {
         text.push_str("(none)\n");
     }
     for member in &entry.members {
-        text.push_str(&format!("- {}\n", member_line(member, roster, humans)));
+        let _ = writeln!(text, "- {}", member_line(member, roster, humans));
     }
-    text.push_str(&format!(
+    let _ = write!(
+        text,
         "\n[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
          ({left} left after it)."
-    ));
+    );
     text
 }
 
@@ -482,10 +485,10 @@ fn member_line(member: &UserId, roster: &[RosterEntry], humans: &Humans) -> Stri
     };
     let mut line = format!("@{member}");
     if !entry.capabilities.is_empty() {
-        line.push_str(&format!(" [{}]", entry.capabilities.join(", ")));
+        let _ = write!(line, " [{}]", entry.capabilities.join(", "));
     }
     if let Some(whoami) = entry.whoami.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-        line.push_str(&format!(": {}", whoami.replace('\n', " ")));
+        let _ = write!(line, ": {}", whoami.replace('\n', " "));
     }
     line
 }
@@ -496,11 +499,11 @@ fn context_text(context: &Context) -> String {
     }
     let mut text = "[ants] Earlier posts on the thread not shown before".to_owned();
     if context.skipped > 0 {
-        text.push_str(&format!(" ({} older ones left out)", context.skipped));
+        let _ = write!(text, " ({} older ones left out)", context.skipped);
     }
     text.push_str(", oldest first:\n");
     for post in &context.posts {
-        text.push_str(&format!("{}: {}\n", post.from, post.text));
+        let _ = writeln!(text, "{}: {}", post.from, post.text);
     }
     text.push('\n');
     text
