@@ -122,33 +122,43 @@ impl Store for Os {
 
 /// The Secret Service through `secret-tool`, which reports a locked keyring by failing without a message, as it does
 /// when nothing matches: a silent lookup or clear is told apart by searching for the entry, which lists locked
-/// entries too.
+/// entries too, and, as KeePassXC lists none of a locked database's entries, by a locked collection listing none.
 #[cfg(any(target_os = "linux", test))]
 mod secret_service {
     use std::io::{Read as _, Write as _};
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
     use std::time::{Duration, Instant};
 
     use anyhow::{Result, anyhow, bail};
 
     use super::{SERVICE, Store, Unavailable};
 
+    /// The Secret Service's bus name, and its object.
+    const BUS_NAME: &str = "org.freedesktop.secrets";
+    const ROOT: &str = "/org/freedesktop/secrets";
+
     /// How long `secret-tool` may run, as it waits for an unlock prompt for as long as the prompt stays open.
     const TIMEOUT: Duration = Duration::from_secs(60);
 
     const UNSTORE: &str = "to keep the seed in the file instead, run `ants keys unstore` where the keyring is unlocked";
 
-    /// The `secret-tool` program run, and how long it may run.
+    /// The `secret-tool` program run, how long it may run, and the D-Bus tools tried in turn to read the Secret
+    /// Service's collections (`busctl`, `gdbus`, `dbus-send`, told apart by file name).
     pub struct SecretTool {
         pub program: PathBuf,
         pub timeout: Duration,
+        pub bus: Vec<PathBuf>,
     }
 
     impl SecretTool {
         #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         pub fn os() -> Self {
-            Self { program: "secret-tool".into(), timeout: TIMEOUT }
+            Self {
+                program: "secret-tool".into(),
+                timeout: TIMEOUT,
+                bus: ["busctl", "gdbus", "dbus-send"].map(PathBuf::from).into(),
+            }
         }
 
         /// Whether an entry for `key` exists, locked or not: the search lists each entry matching, a locked one
@@ -158,72 +168,162 @@ mod secret_service {
             Ok(found.is_some_and(|out| !out.trim().is_empty()))
         }
 
+        /// A locked collection listing no entries, as KeePassXC lists none of a locked database's, and searches leave
+        /// it out: an entry `secret-tool` does not find may be in it. None when every locked collection lists its
+        /// entries, as GNOME Keyring's and KDE Wallet's do, or when no D-Bus tool runs.
+        fn hiding_collection(&self) -> Option<String> {
+            let program = self.bus.iter().find_map(|program| {
+                let collections = self.property(program, ROOT, "Service", "Collections")?;
+                Some((program, object_paths(&collections)))
+            });
+            let (program, collections) = program?;
+            collections.into_iter().find(|collection| {
+                self.property(program, collection, "Collection", "Locked").is_some_and(|locked| locked.contains("true"))
+                    && self
+                        .property(program, collection, "Collection", "Items")
+                        .is_none_or(|items| object_paths(&items).is_empty())
+            })
+        }
+
+        /// The property `name` of the Secret Service's `interface` (`Service`, `Collection`) at `path`, as `program`
+        /// prints it; none when it fails.
+        fn property(&self, program: &Path, path: &str, interface: &str, name: &str) -> Option<String> {
+            let interface = format!("org.freedesktop.Secret.{interface}");
+            let args: Vec<String> = match program.file_name()?.to_str()? {
+                "busctl" => {
+                    vec!["--user".into(), "get-property".into(), BUS_NAME.into(), path.into(), interface, name.into()]
+                }
+                "gdbus" => [
+                    "call",
+                    "--session",
+                    "--dest",
+                    BUS_NAME,
+                    "--object-path",
+                    path,
+                    "--method",
+                    "org.freedesktop.DBus.Properties.Get",
+                    &interface,
+                    name,
+                ]
+                .map(String::from)
+                .into(),
+                "dbus-send" => vec![
+                    "--session".into(),
+                    "--print-reply".into(),
+                    format!("--dest={BUS_NAME}"),
+                    path.into(),
+                    "org.freedesktop.DBus.Properties.Get".into(),
+                    format!("string:{interface}"),
+                    format!("string:{name}"),
+                ],
+                _ => return None,
+            };
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let output = spawn(program, &args, None, self.timeout).ok()??;
+            output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+
         /// Run `secret-tool` with `args`, writing `input` (a seed) to its standard input, never to its arguments. Its
         /// output on success; none when it fails silently, as a lookup finding nothing does.
         fn run(&self, args: &[&str], input: Option<&str>) -> Result<Option<String>> {
-            let mut child = Command::new(&self.program)
-                .args(args)
-                .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => anyhow!(
-                        "the Secret Service needs `secret-tool`: install libsecret-tools (Debian, Ubuntu) or \
-                         libsecret (Fedora, Arch)"
-                    ),
-                    _ => anyhow!("running secret-tool: {e}"),
-                })?;
-            if let (Some(input), Some(mut stdin)) = (input, child.stdin.take())
-                && let Err(e) = stdin.write_all(input.as_bytes())
-                && e.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.into());
-            }
-            // Its output is a few lines, well within the pipes' buffers, so it is read once it exits.
-            let deadline = Instant::now() + self.timeout;
-            let status = loop {
-                if let Some(status) = child.try_wait()? {
-                    break status;
-                }
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Unavailable(format!(
-                        "Secret Service (secret-tool {}): no answer within {} s: answer the keyring's unlock prompt \
-                         on the desktop, or unlock the keyring before running ants",
-                        args[0],
-                        self.timeout.as_secs()
-                    ))
-                    .into());
-                }
-                std::thread::sleep(Duration::from_millis(20));
+            let output = spawn(&self.program, args, input, self.timeout).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => anyhow!(
+                    "the Secret Service needs `secret-tool`: install libsecret-tools (Debian, Ubuntu) or libsecret \
+                     (Fedora, Arch)"
+                ),
+                _ => anyhow!("running secret-tool: {e}"),
+            })?;
+            let Some(output) = output else {
+                return Err(Unavailable(format!(
+                    "Secret Service (secret-tool {}): no answer within {} s: answer the keyring's unlock prompt on the \
+                     desktop, or unlock the keyring before running ants",
+                    args[0],
+                    self.timeout.as_secs()
+                ))
+                .into());
             };
-            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_end(&mut stdout)?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_end(&mut stderr)?;
-            }
-            let stderr = String::from_utf8_lossy(&stderr);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             let error = stderr.trim().trim_start_matches("secret-tool:").trim();
-            match (status.success(), error) {
-                (true, _) => String::from_utf8(stdout).map(Some).map_err(|_| anyhow!("a stored seed is not text")),
+            match (output.status.success(), error) {
+                (true, _) => {
+                    String::from_utf8(output.stdout).map(Some).map_err(|_| anyhow!("a stored seed is not text"))
+                }
                 (false, "") => Ok(None),
                 (false, error) => Err(failure(args[0], error)),
             }
         }
+
+        /// Why `secret-tool command` found no entry for `key` although one may exist, if it may.
+        fn not_found(&self, command: &str, key: &str) -> Result<Option<anyhow::Error>> {
+            // Before searching, which in KeePassXC asks again to unlock the database.
+            if let Some(collection) = self.hiding_collection() {
+                return Ok(Some(failure(
+                    command,
+                    &format!("the collection {collection} is locked and lists no entries until it is unlocked"),
+                )));
+            }
+            Ok(self.stored(key)?.then(|| locked(command)))
+        }
+    }
+
+    /// Run `program` with `args`, writing `input` to its standard input; none when it runs past `timeout`.
+    fn spawn(program: &Path, args: &[&str], input: Option<&str>, timeout: Duration) -> std::io::Result<Option<Output>> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take())
+            && let Err(e) = stdin.write_all(input.as_bytes())
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+        // The output is a few lines, well within the pipes' buffers, so it is read once the program exits.
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        if let Some(mut out) = child.stdout.take() {
+            out.read_to_end(&mut stdout)?;
+        }
+        if let Some(mut err) = child.stderr.take() {
+            err.read_to_end(&mut stderr)?;
+        }
+        Ok(Some(Output { status, stdout, stderr }))
+    }
+
+    /// The object paths `busctl`, `gdbus` or `dbus-send` print, each quoted.
+    fn object_paths(printed: &str) -> Vec<String> {
+        printed
+            .split(['"', '\''])
+            .skip(1)
+            .step_by(2)
+            .filter(|quoted| quoted.starts_with('/'))
+            .map(String::from)
+            .collect()
     }
 
     impl Store for SecretTool {
         fn get(&self, key: &str) -> Result<Option<String>> {
             match self.run(&["lookup", "service", SERVICE, "account", key], None)? {
                 Some(seed) => Ok(Some(seed.trim().to_owned()).filter(|s| !s.is_empty())),
-                None if self.stored(key)? => Err(locked("lookup")),
-                None => Ok(None),
+                None => match self.not_found("lookup", key)? {
+                    Some(error) => Err(error),
+                    None => Ok(None),
+                },
             }
         }
 
@@ -239,8 +339,10 @@ mod secret_service {
         }
 
         fn delete(&self, key: &str) -> Result<()> {
-            if self.run(&["clear", "service", SERVICE, "account", key], None)?.is_none() && self.stored(key)? {
-                return Err(locked("clear"));
+            if self.run(&["clear", "service", SERVICE, "account", key], None)?.is_none()
+                && let Some(error) = self.not_found("clear", key)?
+            {
+                return Err(error);
             }
             Ok(())
         }
@@ -260,8 +362,9 @@ mod secret_service {
             "no Secret Service is installed or running in this session: install and start one (gnome-keyring, \
              KeePassXC's Secret Service integration, KDE Wallet)"
         } else if error.contains("locked") {
-            "unlock the keyring: a desktop login unlocks the login keyring, and an unlock prompt needs a desktop; \
-             without one, `gnome-keyring-daemon --unlock` reads the password on standard input"
+            "unlock the keyring (in KeePassXC, the database, and allow access to the entry when asked): a desktop login \
+             unlocks GNOME Keyring's login keyring, and an unlock prompt needs a desktop; without one, \
+             `gnome-keyring-daemon --unlock` reads the password on standard input"
         } else if error.contains("does not exist at path") {
             "no default keyring exists, and creating one asks for its password in a prompt that needs a desktop: \
              create it in a desktop session, or with `gnome-keyring-daemon --unlock` reading the new password on \
@@ -287,7 +390,32 @@ mod secret_service {
             let program = dir.join("secret-tool");
             std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            (SecretTool { program, timeout: Duration::from_secs(10) }, dir)
+            (SecretTool { program, timeout: Duration::from_secs(10), bus: Vec::new() }, dir)
+        }
+
+        /// `tool` reading the collections through a `busctl` running the shell `script`.
+        fn with_bus(mut tool: SecretTool, dir: &Path, script: &str) -> SecretTool {
+            use std::os::unix::fs::PermissionsExt as _;
+            let program = dir.join("busctl");
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            tool.bus = vec![dir.join("gdbus-missing"), program];
+            tool
+        }
+
+        /// A `busctl` printing as the real one does a collection `/c/login` listing an entry, and `/c/kp` locked or
+        /// not, listing none.
+        fn bus(kp_locked: bool) -> String {
+            format!(
+                r#"case "$4 $6" in
+  "/org/freedesktop/secrets Collections") echo 'ao 2 "/c/login" "/c/kp"' ;;
+  "/c/login Locked") echo 'b false' ;;
+  "/c/kp Locked") echo 'b {kp_locked}' ;;
+  "/c/login Items") echo 'ao 1 "/c/login/1"' ;;
+  "/c/kp Items") echo 'ao 0' ;;
+  *) exit 1 ;;
+esac"#
+            )
         }
 
         #[test]
@@ -317,6 +445,44 @@ esac"#,
             let error = tool.set(KEY, "SUSEED").unwrap_err().to_string();
             assert!(error.contains("secret-tool store") && !error.contains("SUSEED"), "{error}");
             std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn a_locked_collection_listing_no_entries_fails_rather_than_reading_as_missing() {
+            // As KeePassXC does with a locked database: nothing is found, not even by a search, which must not run
+            // as it asks again to unlock the database.
+            let (tool, dir) = fake(r#"[ "$1" = search ] && touch "$(dirname "$0")/searched"; exit 1"#);
+            let tool = with_bus(tool, &dir, &bus(true));
+            for error in [tool.get(KEY).unwrap_err(), tool.delete(KEY).unwrap_err()] {
+                assert!(super::super::is_unavailable(&error), "{error}");
+                let error = error.to_string();
+                assert!(error.contains("/c/kp is locked") && error.contains("in KeePassXC, the database"), "{error}");
+            }
+            assert!(!dir.join("searched").exists());
+            let tool = with_bus(tool, &dir, &bus(false));
+            assert_eq!(tool.get(KEY).unwrap(), None);
+            tool.delete(KEY).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn object_paths_read_as_each_bus_tool_prints_them() {
+            let paths = ["/org/freedesktop/secrets/collection/kp", "/org/freedesktop/secrets/collection/login"];
+            for printed in [
+                r#"ao 2 "/org/freedesktop/secrets/collection/kp" "/org/freedesktop/secrets/collection/login""#,
+                "(<[objectpath '/org/freedesktop/secrets/collection/kp', \
+                 '/org/freedesktop/secrets/collection/login']>,)",
+                "method return time=1.2 sender=:1.73 -> destination=:1.91 serial=201 reply_serial=2\n   variant       \
+                 array [\n         object path \"/org/freedesktop/secrets/collection/kp\"\n         object path \
+                 \"/org/freedesktop/secrets/collection/login\"\n      ]",
+            ] {
+                assert_eq!(object_paths(printed), paths, "{printed}");
+            }
+            for empty in
+                ["ao 0", "(<@ao []>,)", "method return time=1.2 sender=:1.73\n   variant       array [\n      ]"]
+            {
+                assert!(object_paths(empty).is_empty(), "{empty}");
+            }
         }
 
         #[test]
