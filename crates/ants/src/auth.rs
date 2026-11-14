@@ -207,16 +207,19 @@ pub fn check_user_key(public_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Issue the enrollment credentials of `ant`, valid for `ttl`, and write their `.creds` file to `out`: they may
-/// only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
-/// expire, in seconds since the epoch.
-pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<u64> {
+/// Issue the enrollment credentials of `ant`, valid for `ttl` (zero: with no expiry), and write their `.creds` file
+/// to `out`: they may only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]).
+/// Returns when they expire, in seconds since the epoch.
+pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<Option<u64>> {
     check_not_reserved(ant)?;
+    if !ttl.is_zero() && ttl < Duration::from_secs(1) {
+        bail!("a ttl of {ttl:?} is under a second: give at least 1s, or 0 for no expiry");
+    }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let exp = now()? + ttl.as_secs().max(1);
+    let exp = if ttl.is_zero() { None } else { Some(now()? + ttl.as_secs()) };
     let name = ants_proto::enrollment_user(ant);
-    let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), Some(exp))?;
+    let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     Ok(exp)
 }
@@ -530,7 +533,31 @@ pub(crate) mod tests {
         s.parse().unwrap()
     }
 
+    #[test]
+    fn enrollment_credentials_issued_with_a_zero_ttl_never_expire() {
+        let dir = ants_test_support::scratch_dir("enroll-ttl");
+        let (team, out, dev_a) = (dir.join("auth"), dir.join("enroll-dev-a.creds"), p("dev-a"));
+        init(&team).unwrap();
+        let issued = |ttl| {
+            let exp = issue_enrollment(&team, &dev_a, ttl, &out)?;
+            let text = std::fs::read_to_string(&out).unwrap();
+            anyhow::Ok((exp, verified(creds_jwt(&text).unwrap()).unwrap().exp))
+        };
+        assert_eq!(issued(Duration::ZERO).unwrap(), (None, None));
+        let (exp, claimed) = issued(Duration::from_secs(60)).unwrap();
+        assert!(exp.is_some_and(|exp| exp >= now().unwrap() + 59) && claimed == exp, "{exp:?} {claimed:?}");
+        let err = issued(Duration::from_millis(500)).unwrap_err().to_string();
+        assert!(err.contains("under a second"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The server handles operations in order, so the next violation names the first denied one.
+    /// Returns once the server has registered the subscriptions of `js`'s client: async-nats' flush only writes them
+    /// out, so another client's publish could otherwise get there first, and be missed.
+    async fn subscribed(js: &jetstream::Context) {
+        js.get_stream(STREAM).await.unwrap();
+    }
+
     async fn next_violation(client: &Client, errors: &mut mpsc::UnboundedReceiver<String>) -> String {
         client.flush().await.unwrap();
         timeout(WAIT, errors.recv()).await.expect("no violation").unwrap()
@@ -692,8 +719,8 @@ pub(crate) mod tests {
         // Both watch all traffic and read dead letters.
         let mut a_all = a_client.subscribe(subject::ALL).await.unwrap();
         let mut b_all = b_client.subscribe(subject::ALL).await.unwrap();
-        for c in [&a_client, &b_client] {
-            c.flush().await.unwrap();
+        for js in [&a_js, &b_js] {
+            subscribed(js).await;
         }
         assert!(dead::list(&b_stream).await.unwrap().is_empty());
 
@@ -717,13 +744,17 @@ pub(crate) mod tests {
         // Either human decides dev-a's approval requests.
         let request = ants_proto::Uuid::now_v7();
         let mut decisions = d_client.subscribe(subject::approval_decision(&dev_a, &request)).await.unwrap();
-        d_client.flush().await.unwrap();
+        subscribed(&d_js).await;
         a_client.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
         a_client.flush().await.unwrap();
         b_client.publish(subject::approval_decision(&dev_a, &request), "reject".into()).await.unwrap();
-        for verdict in [&b"allow"[..], b"reject"] {
-            assert_eq!(&timeout(WAIT, decisions.next()).await.unwrap().unwrap().payload[..], verdict);
+        // Published on different connections, so heard in either order.
+        let mut heard = Vec::new();
+        for _ in 0..2 {
+            heard.push(timeout(WAIT, decisions.next()).await.unwrap().unwrap().payload);
         }
+        heard.sort();
+        assert_eq!(heard, [&b"allow"[..], b"reject"]);
     }
 
     #[tokio::test]
