@@ -255,8 +255,8 @@ server restarts):
    (`external.api: $JS.<machine>.API`, `deliver: $JS.S.<machine>`) and stores each message under
    `ants.in.<machine>.`, so nothing a machine sends can pass for another machine or land in `ANTS` directly.
 2. `ANTS` sources from `ANTS_IN`, for each machine and persona, only what the persona may publish itself
-   (`ants.in.<machine>.ants.out.inbox.*.<persona>`, `...plan.*.<persona>` and `...chan.*.<persona>`, the human's
-   `inbox.>`), and transforms
+   (`ants.in.<machine>.ants.out.inbox.*.<persona>`, `...plan.*.<persona>`, `...chan.*.<persona>` and, for a persona
+   that is no human, `...dead.<persona>`; the human's `inbox.>`), and transforms
    it back to the usual subject. The rest stays in the intake, where only the human can read it.
 
 Source filters of one stream must not overlap, so when the human is on a machine its `inbox.>` covers the other
@@ -264,12 +264,32 @@ personas' inbox subjects there, and they get only their plan and channel subject
 envelope or post id): a sourced copy of a message `ANTS` already took within its duplicate window (2 minutes) is
 dropped.
 
-Clients (`bus::store`): an inbox message, reply, plan post or channel post goes to the hub's stream as before; when that fails with
-"no stream" (no responders across a down uplink) or times out, the same message, with the same id, goes to
-`ants.out.<rest of the subject>` on the leaf. The CLI says so (`ants ask`: "kept in this machine's outbox"); a daemon
-logs a warning. Everything else needs the hub at once and is not buffered: consumers and their acks, KV (sessions,
-roster), stream reads (`ants watch --replay`, dead-letter replay), plan posts that expect a sequence (a persona's
-`post_plan`), dead letters and approvals.
+Clients (`bus::store`): an inbox message, reply, plan post, channel post or a daemon's dead letter goes to the hub's
+stream as before; when that fails with "no stream" (no responders across a down uplink) or times out, the same message,
+with the same id, goes to `ants.out.<rest of the subject>` on the leaf. The CLI says so (`ants ask`: "kept in this
+machine's outbox"); a daemon logs a warning. Everything else needs the hub at once and is not buffered (ants-xyb):
+
+- Consumers and their acks, and stream reads (`ants watch --replay`, `ants dead list`/`replay`): they read the hub's
+  stream.
+- Plan posts that expect a sequence (a persona's `post_plan`): the expected last subject sequence is optimistic
+  concurrency, and only the hub's stream, at the time of the post, can tell the poster whether it won the turn. A
+  buffered copy would land minutes later against a newer room, where the hub could only drop a post the poster was
+  told was kept. Plan posts without an expected sequence are buffered.
+- Approvals: a request waits for a human's decision, read from the hub, until it expires. A buffered request would
+  reach the human after the asker had given up on it.
+- KV (sessions, roster, attempt markers, escalation chains): a bucket keeps the last value per key, so a buffered put
+  landing late could overwrite a newer one. A daemon puts its roster heartbeat every 10 seconds, so the roster is
+  current again soon after the uplink is back, and a daemon gets no messages to work on meanwhile.
+- Dead letters a human writes (`ants dead watch`, `ants inbox --follow`): they come from the hub's max-deliveries
+  advisories and stream, so the hub is up whenever they are written.
+
+A dead letter in the outbox leaves its message unfinished: the notice on the thread needs the escalation state in
+`ants_sessions` and the termination needs the hub. The daemon notes the dead letter in `<home>/buried` of the persona
+(`<envelope id>.json`, by envelope id like `answered`); the message's next delivery after the uplink is back, even to a
+restarted daemon, buries the noted letter again without another prompt. The hub's stream drops the copy by its
+`Nats-Msg-Id` (`dead-<stream sequence>`) and the daemon sends the notice and terminates the message, once. A daemon
+buries a message on its last attempt, and the consumer allows one more delivery after that one, which then carries the
+noted letter to the hub (see Limits for a letter kept on that extra delivery).
 
 Set up, as a human, with the leaf up and connected:
 
@@ -311,9 +331,11 @@ Found while building it (nats-server 2.15.3, source reading and verified):
 
 Verified (`the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down` in `crates/ants/src/outbox.rs`): a hub and a
 generated leaf with dev-a and the human on it. A message stored directly plus a copy of it in the outbox is in `ANTS`
-once. With the uplink switched to a dead port, dev-a's message and plan post and dev-b's plan post go to the outbox;
-after switching back, the intake has all of them, `ANTS` has dev-a's two and not dev-b's, which the machine was not
-admitted for.
+once. With the uplink switched to a dead port, dev-a's message, plan post, channel post and dead letter and dev-b's
+plan post and dead letter go to the outbox; after switching back, the intake has all of them, `ANTS` has dev-a's four
+and none of dev-b's, which the machine was not admitted for. A daemon's dead letter of a message failing while the
+uplink is down lands once, with its notice, after the uplink is back
+(`a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back` in `crates/ants-daemon/src/daemon.rs`).
 
 Limits:
 
@@ -329,7 +351,16 @@ Limits:
   again (ants-fv1). async-nats's `double_ack` takes the "no responders" status the client gets then for a
   confirmation, so the daemon acks with a request of its own (`bus::double_ack`). Verified by
   `a_reply_kept_in_the_outbox_answers_its_message_once` in `crates/ants-daemon/src/daemon.rs`.
-- Messages a persona put in the outbox before `ants leaf outbox` admitted it stay in the intake.
+- Messages a persona put in the outbox before `ants leaf outbox` admitted it stay in the intake. A machine set up
+  before dead letters were buffered needs `ants leaf outbox` again for `ANTS` to take its dead letters, and persona
+  credentials issued before need `ants auth user` again to publish on `ants.out.dead.<persona>`.
+- A dead letter stored in the outbox on the message's extra delivery (the last attempt never finished) has no
+  delivery left to send its notice and terminate the message. JetStream gives up on the message and publishes a
+  max-deliveries advisory: a running `ants dead watch` dead-letters it from the hub, with the same `Nats-Msg-Id`, and
+  tells the human, unless the outbox copy has landed first; then no notice goes out. An outbox copy landing more than
+  two minutes after the watcher's letter is stored twice.
+- The outbox copy of a daemon's dead letter and the one the redelivery stores usually land within two minutes of each
+  other (the source's retry backoff, the consumer's 60 second ack wait); further apart, the hub's stream keeps both.
 
 ## HTTPS fallback bridge
 

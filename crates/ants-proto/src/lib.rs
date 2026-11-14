@@ -208,12 +208,16 @@ impl Machine {
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `persona` in `role`, as pairs of an
     /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, plan and channel subjects
-    /// the persona may publish itself ([`subject::sendable`]). With `inbox` false, only its plan and channel posts: a
-    /// human's admission takes every inbox subject of a machine it is on, and the filters of one stream's sources may
-    /// not overlap.
+    /// the persona may publish itself ([`subject::sendable`]), and for a persona that is no human its own dead letters.
+    /// With `inbox` false, no inbox subjects: a human's admission takes every inbox subject of a machine it is on, and
+    /// the filters of one stream's sources may not overlap. A human's dead letters, of any persona, are written from
+    /// what only the hub holds, so none are buffered.
     pub fn admitted(&self, persona: &PersonaId, role: Role, inbox: bool) -> Vec<(String, String)> {
         let [own_inbox, own_plan, own_chan] = subject::sendable(persona, role);
-        let patterns = if inbox { vec![own_inbox, own_plan, own_chan] } else { vec![own_plan, own_chan] };
+        let mut patterns = if inbox { vec![own_inbox, own_plan, own_chan] } else { vec![own_plan, own_chan] };
+        if !role.is_human() {
+            patterns.push(subject::dead(persona));
+        }
         patterns
             .into_iter()
             .map(|pattern| {
@@ -373,12 +377,15 @@ pub mod subject {
         [inbox, plan_from(persona), chan_from(persona)]
     }
 
-    /// Where a client on a leaf node puts an inbox, plan or channel subject (or pattern) while the hub's stream is out
-    /// of reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]). `None` for
-    /// other subjects, which are not buffered.
+    /// Where a client on a leaf node puts an inbox, plan, channel or dead letter subject (or pattern) while the hub's
+    /// stream is out of reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]).
+    /// `None` for other subjects, which are not buffered: approvals wait for a human's answer through the hub.
     pub fn outbox(subject: &str) -> Option<String> {
         let rest = subject.strip_prefix("ants.")?;
-        ["inbox.", "plan.", "chan."].iter().any(|kind| rest.starts_with(kind)).then(|| format!("ants.out.{rest}"))
+        ["inbox.", "plan.", "chan.", "dead."]
+            .iter()
+            .any(|kind| rest.starts_with(kind))
+            .then(|| format!("ants.out.{rest}"))
     }
 
     /// Everything the hub's intake ([`super::INTAKE_STREAM`]) took from the outbox of `machine`: the leaf's subjects,
@@ -527,8 +534,8 @@ impl Permissions {
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any persona's dead letter subject.
     ///
-    /// Each inbox, plan and channel subject a persona may publish it may also publish in its outbox form
-    /// ([`subject::outbox`]), which only a leaf node's outbox keeps. Only a human sets up leaf outboxes and the hub's
+    /// Each inbox, plan and channel subject a persona may publish, and its own dead letter subject, it may also publish
+    /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps. Only a human sets up leaf outboxes and the hub's
     /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no persona
     /// may create or change one.
     pub fn for_persona(persona: &PersonaId, role: Role) -> Self {
@@ -631,6 +638,7 @@ impl Permissions {
                 // subject returns only the last message on that subject, so nothing else is readable this way.
                 format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(persona)),
                 subject::dead(persona),
+                subject::outbox(&subject::dead(persona)).expect("an outbox subject"),
                 subject::status_of(persona),
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(persona),
@@ -1879,22 +1887,25 @@ mod tests {
     }
 
     #[test]
-    fn outboxes_take_inbox_plan_and_channel_subjects_only() {
+    fn outboxes_take_inbox_plan_channel_and_dead_letter_subjects_only() {
         let t: ThreadId = "t1".parse().unwrap();
         let c: ChannelId = "ops".parse().unwrap();
         assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
         assert_eq!(subject::outbox(&subject::plan(&t, &p("dev-a"))).unwrap(), "ants.out.plan.t1.dev-a");
         assert_eq!(subject::outbox(&subject::chan(&c, &p("dev-a"))).unwrap(), "ants.out.chan.ops.dev-a");
-        for other in [subject::dead(&p("dev-a")), subject::approvals(&p("dev-a")), "ants.outbox.x".to_owned()] {
+        assert_eq!(subject::outbox(&subject::dead(&p("dev-a"))).unwrap(), "ants.out.dead.dev-a");
+        for other in [subject::approvals(&p("dev-a")), subject::roster(&p("dev-a")), "ants.outbox.x".to_owned()] {
             assert_eq!(subject::outbox(&other), None, "{other}");
         }
         let a = Permissions::for_persona(&p("dev-a"), Role::Persona);
-        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a", "ants.out.chan.*.dev-a"] {
+        for s in ["ants.out.inbox.*.dev-a", "ants.out.plan.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"] {
             assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
         }
+        assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.approvals")));
         let human = Permissions::for_persona(&PersonaId::human(), Role::Human);
         assert!(human.publish.iter().any(|s| s == "ants.out.inbox.>"));
         assert!(human.publish.iter().any(|s| s == "ants.out.chan.*.human"));
+        assert!(!human.publish.iter().any(|s| s.starts_with("ants.out.dead")), "a human's dead letters need the hub");
     }
 
     #[test]
@@ -1906,15 +1917,19 @@ mod tests {
                 ("ants.in.m1.ants.out.inbox.*.dev-a".to_owned(), "ants.inbox.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.plan.*.dev-a".to_owned(), "ants.plan.{{wildcard(1)}}.dev-a".to_owned()),
                 ("ants.in.m1.ants.out.chan.*.dev-a".to_owned(), "ants.chan.{{wildcard(1)}}.dev-a".to_owned()),
+                ("ants.in.m1.ants.out.dead.dev-a".to_owned(), "ants.dead.dev-a".to_owned()),
             ]
         );
-        assert_eq!(
-            m1.admitted(&PersonaId::human(), Role::Human, true)[0],
-            ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned())
-        );
-        let posts: Vec<_> =
+        let human = m1.admitted(&PersonaId::human(), Role::Human, true);
+        assert_eq!(human[0], ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned()));
+        assert!(human.iter().all(|(filter, _)| !filter.contains(".dead.")), "no dead letters of a human");
+        let rest: Vec<_> =
             m1.admitted(&p("dev-a"), Role::Persona, false).into_iter().map(|(filter, _)| filter).collect();
-        assert_eq!(posts, ["ants.in.m1.ants.out.plan.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a"], "posts only");
+        assert_eq!(
+            rest,
+            ["ants.in.m1.ants.out.plan.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
+            "no inbox subjects"
+        );
         assert_eq!(subject::intake(&m1), "ants.in.m1.>");
     }
 

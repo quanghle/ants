@@ -281,11 +281,15 @@ pub(crate) mod fake {
         pub answered: Vec<String>,
         /// Prompts ended by session/cancel.
         pub cancelled: usize,
+        /// Prompts with the word `doomed` that started, then failed.
+        pub doomed: usize,
+        pub doomed_failed: usize,
         flaky_failed: Vec<String>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
-    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time. Words in
+    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time; one with
+    /// the word `doomed` waits for a permit too, then fails, every time. Words in
     /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
@@ -344,6 +348,12 @@ pub(crate) mod fake {
                             cx.spawn(async move {
                                 if text.starts_with("hold") {
                                     gate.acquire().await.unwrap().forget();
+                                }
+                                if text.split_whitespace().any(|w| w == "doomed") {
+                                    log.lock().unwrap().doomed += 1;
+                                    gate.acquire().await.unwrap().forget();
+                                    log.lock().unwrap().doomed_failed += 1;
+                                    return responder.respond_with_internal_error("doomed");
                                 }
                                 if text.starts_with("flaky") {
                                     let mut log = log.lock().unwrap();
