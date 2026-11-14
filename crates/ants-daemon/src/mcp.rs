@@ -59,8 +59,8 @@ use crate::{bus, links, roster};
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
 /// Name the harness shows the tools under.
 const SERVER_NAME: &str = "ants";
-const DEFAULT_ASK_SECS: u64 = 300;
-const MAX_ASK_SECS: u64 = 1800;
+const DEFAULT_ASK_WAIT: Duration = Duration::from_secs(300);
+const MAX_ASK_WAIT: Duration = Duration::from_secs(1800);
 /// Asks remembered for their replies; the oldest are forgotten first.
 const MAX_ASKS: usize = 1024;
 /// Late replies kept for `check_inbox`; the oldest are dropped first.
@@ -883,9 +883,9 @@ struct AskAgent {
     to: String,
     /// The question.
     text: String,
-    /// Seconds to wait for the reply (default 300, at most 1800).
+    /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
-    timeout_secs: Option<u64>,
+    timeout: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -944,9 +944,9 @@ struct Route {
     /// Wait for the reply and return it (the default); false sends the request and returns at once.
     #[serde(default = "default_wait")]
     wait: bool,
-    /// Seconds to wait for the reply (default 300, at most 1800).
+    /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
-    timeout_secs: Option<u64>,
+    timeout: Option<String>,
 }
 
 fn default_wait() -> bool {
@@ -1008,10 +1008,9 @@ impl Tools {
         thread: &ThreadId,
         to: &str,
         text: String,
-        timeout_secs: Option<u64>,
+        wait: Duration,
         cx: &RequestContext<RoleServer>,
     ) -> Result<Envelope, String> {
-        let wait = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_ASK_SECS).clamp(1, MAX_ASK_SECS));
         let envelope = self.hub.outgoing(thread, to, text, None)?;
         if self.hub.humans.is_human(&envelope.to) {
             return Err(format!("ask_agent is for agents; send_message reaches {}", envelope.to));
@@ -1021,6 +1020,19 @@ impl Tools {
         }
         self.hub.ask(envelope, wait, cx.ct.cancelled()).await
     }
+}
+
+/// The wait an `ask_agent` or `route` call asked for, from its `timeout` argument.
+fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
+    let Some(timeout) = timeout else { return Ok(DEFAULT_ASK_WAIT) };
+    let wait = ants_proto::duration::parse(timeout.trim()).map_err(|e| format!("timeout: {e}"))?;
+    if wait.is_zero() || wait > MAX_ASK_WAIT {
+        return Err(format!(
+            "timeout {timeout:?} is out of range: more than 0 and at most {}",
+            ants_proto::duration::format(MAX_ASK_WAIT)
+        ));
+    }
+    Ok(wait)
 }
 
 /// Ant, capabilities, harness, machine and advertised role instructions.
@@ -1116,7 +1128,10 @@ impl Tools {
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        let result = self.ask(&thread, &args.to, args.text, args.timeout_secs, &cx).await;
+        let result = match ask_wait(args.timeout.as_deref()) {
+            Ok(wait) => self.ask(&thread, &args.to, args.text, wait, &cx).await,
+            Err(e) => Err(e),
+        };
         Ok(text(result.map(|reply| format!("{} replied:\n{}", reply.from, reply.text))))
     }
 
@@ -1186,6 +1201,7 @@ impl Tools {
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
         let result = async {
+            let wait = ask_wait(args.timeout.as_deref())?;
             let entries = self.hub.others().await?;
             let capability = args.capability.trim();
             let to = roster::pick(&entries, capability, &self.hub.ant, chrono::Utc::now())
@@ -1196,7 +1212,7 @@ impl Tools {
                 let sent = self.send_to(&thread, &to, args.text, None).await?;
                 return Ok(format!("Routed to {to} for {capability}. {sent}"));
             }
-            let reply = self.ask(&thread, &to, args.text, args.timeout_secs, &cx).await?;
+            let reply = self.ask(&thread, &to, args.text, wait, &cx).await?;
             Ok(format!("Routed to {to} for {capability}. {} replied:\n{}", reply.from, reply.text))
         }
         .await;
@@ -1985,6 +2001,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bad_timeout_is_refused_before_anything_is_sent() {
+        let (mcp, mut sent) = start(&home("timeout")).await;
+        let current = from_human();
+        let _turn = mcp.begin(&current);
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+        for (timeout, why) in [("300", "without a unit"), ("0", "out of range"), ("31m", "at most 30m")] {
+            for (tool, args) in [
+                ("ask_agent", serde_json::json!({"to": "dev-b", "text": "?", "timeout": timeout})),
+                ("route", serde_json::json!({"capability": "rust", "text": "?", "timeout": timeout})),
+            ] {
+                let (ok, text) = call(&client, tool, args).await;
+                assert!(!ok && text.contains("timeout") && text.contains(why), "{tool} {timeout}: {text}");
+            }
+        }
+        assert!(sent.try_recv().is_err(), "nothing sent");
+    }
+
+    #[tokio::test]
     async fn ask_agent_gets_the_reply_while_the_inbox_consumer_holds_it() {
         let (mcp, mut sent) = start(&home("ask")).await;
         let current = from_human();
@@ -2037,7 +2072,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let (ok, text) =
-            call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "?", "timeout_secs": 1})).await;
+            call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "?", "timeout": "1s"})).await;
         assert!(!ok && text.contains("check_inbox"), "{text}");
         let ask = sent.recv().await.unwrap();
         drop((turn, client, mcp));
