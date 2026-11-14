@@ -156,6 +156,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
 | Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), enrollment (`ants.enroll.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
 | KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
+| Owner records (`ants_owners`, from `ants ask` and webhooks delivering to ants) | Fail with a warning; the message still goes out, and ants' messages on its thread carry no owner. |
 
 ### Republishing and live waiters
 
@@ -242,5 +243,5 @@ Stopping `devtunnel connect` leaves the hub-side socket from `devtunnel host` to
 | Daemon startup retry | `1s` doubling to `30s` | `ants daemon` and `ants channel serve` retry unreachable NATS TCP/DNS and `ANTS` stream info until the leaf uplink joins; bad URLs, TLS errors, bad `.creds`, and permission violations fail immediately (as do other CLI commands). |
 | Progress ack and `ack_wait` | `20s` progress / `60s` `ack_wait` | Daemons renew in-hand messages every 20 s; silent links or crashes hold at most one message per pull slot for up to 60 s before redelivery (in-hand duplicates are ignored). Human `inbox-<name>` also uses `60s` `ack_wait`. |
 | Roster heartbeat / TTL | `10s` refresh / `30s` TTL (`20s` stale) | Disconnected daemons expire within 30 s and reappear within 10 s of reconnect. |
-| Retention and deduplication | `30d` streams/KV; `2m` dup window | `ANTS`, `ANTS_OUT`, `ANTS_IN`, `ants_sessions`, `ants_attempts`, and `ants_links` retain 30 d (`ants_webhooks` 7 d). Outbox messages land after live traffic (up to ~2 min source backoff); timed-out publishes that reached the hub and replay after 2 min store twice. |
+| Retention and deduplication | `30d` streams/KV; `2m` dup window | `ANTS`, `ANTS_OUT`, `ANTS_IN`, `ants_sessions`, `ants_attempts`, `ants_links` and `ants_owners` retain 30 d (`ants_webhooks` 7 d). Outbox messages land after live traffic (up to ~2 min source backoff); timed-out publishes that reached the hub and replay after 2 min store twice. |
 | `max_control_line` | `16384` (16 KiB) | Set in `server.conf` on hub and leaves so user and leaf JWT permissions fit in `CONNECT`. |

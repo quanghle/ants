@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ants_daemon::bus;
+use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
     WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
@@ -669,6 +669,9 @@ impl Hook {
                 let message = Envelope::new(hook.name.clone(), ant.clone(), event.text)
                     .with_owner(hook.owner.clone())
                     .from_webhook();
+                if let Some(owner) = &hook.owner {
+                    owners::recording(&bus.js, &message.thread_id, owner).await;
+                }
                 (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
             }
             Destination::Channel(channel) => {
@@ -954,6 +957,7 @@ mod tests {
         let (_, js) = server.connect(&UserId::human()).await;
         bus::init_stream(&js).await.unwrap();
         ensure_bucket(&js).await.unwrap();
+        bus::ensure_owners(&js).await.unwrap();
         let channels = bus::ensure_channels(&js).await.unwrap();
         let mut ops = ChannelEntry::new("ops".parse().unwrap());
         ops.add_member(p("dev-a"));
@@ -1056,6 +1060,8 @@ mod tests {
         let [message] = &messages[..] else { panic!("one message: {messages:?}") };
         assert_eq!((&message.from, &message.to, message.thread_id.as_str()), (&github, &p("dev-a"), thread.as_str()));
         assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
+        let recorded = owners::Owners::new(js.clone()).owner_of(&message.thread_id).await.unwrap();
+        assert_eq!(recorded, Some(p("alice")), "ants' messages on the thread name its owner as recorded");
         assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
         let marker = seen.get(webhook_marker_key(&github)).await.unwrap();
         assert_eq!(marker.as_deref(), Some(&b"github"[..]), "daemons take its messages as a webhook's");

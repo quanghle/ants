@@ -421,9 +421,9 @@ pub(crate) mod tests {
     use ants_daemon::daemon::Claims;
     use ants_daemon::dead::{self, Attempt};
     use ants_daemon::humans::Registry;
-    use ants_daemon::notes;
     use ants_daemon::roster::Registration;
     use ants_daemon::webhooks::Webhooks;
+    use ants_daemon::{notes, owners};
     use ants_proto::{
         ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM,
         STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, link_key, notes_consumer,
@@ -951,6 +951,43 @@ pub(crate) mod tests {
             assert_eq!(ants_daemon::links::passed_on(js, &origin).await.unwrap(), [(dev_a.clone(), dev_b.clone())]);
         }
         assert!(ants_daemon::links::passed_on(&b_js, &ThreadId::generate()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_record_stays() {
+        let Some(server) = Server::start() else { return };
+        let (human, alice, dev_a, hook, alerts) = (UserId::human(), p("alice"), p("dev-a"), p("github"), p("alerts"));
+        let (_a, a_js) = server.connect(&dev_a).await;
+        assert!(bus::ensure_owners(&a_js).await.is_err(), "only the human creates the bucket");
+        let (_h, h_js) = server.connect(&human).await;
+        bus::ensure_owners(&h_js).await.unwrap();
+        let issue = |webhook: &UserId, to: Destination| {
+            let creds = server.dir().join(format!("{webhook}.creds"));
+            issue_with(&server.dir().join("auth"), webhook, Permissions::for_webhook(webhook, &[to]), &creds).unwrap();
+            creds
+        };
+        let hook_creds = issue(&hook, Destination::Ant(dev_a.clone()));
+        let alerts_creds = issue(&alerts, Destination::Channel("ops".parse().unwrap()));
+
+        let (asked, delivered, forged) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        owners::record(&h_js, &asked, &human).await.unwrap();
+        owners::record(&h_js, &asked, &alice).await.unwrap();
+        let hook_js = connect_to(&server.url, &hook_creds, None, &hook).await;
+        owners::record(&hook_js, &delivered, &alice).await.unwrap();
+        owners::record(&hook_js, &asked, &alice).await.unwrap();
+        assert!(owners::record(&a_js, &forged, &alice).await.is_err(), "an ant records no owner");
+        let alerts_js = connect_to(&server.url, &alerts_creds, None, &alerts).await;
+        assert!(owners::record(&alerts_js, &forged, &alice).await.is_err(), "nor a webhook to channels");
+
+        let (a_raw, mut errors) = server.watched(&dev_a).await;
+        let denied = format!("$KV.{}.{}", ants_proto::OWNERS_BUCKET, ants_proto::owner_key(&forged));
+        a_raw.publish(denied.clone(), "alice".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        let read = owners::Owners::new(a_js);
+        assert_eq!(read.owner_of(&asked).await.unwrap(), Some(human), "the first record stays");
+        assert_eq!(read.owner_of(&delivered).await.unwrap(), Some(alice));
+        assert_eq!(read.owner_of(&forged).await.unwrap(), None);
     }
 
     #[tokio::test]

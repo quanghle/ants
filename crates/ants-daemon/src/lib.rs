@@ -16,6 +16,7 @@ pub mod humans;
 pub mod links;
 pub mod mcp;
 pub mod notes;
+pub mod owners;
 pub mod permission;
 pub mod pool;
 pub mod reading;

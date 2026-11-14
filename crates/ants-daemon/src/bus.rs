@@ -8,9 +8,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, Role,
-    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix,
-    subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, OWNERS_BUCKET, ROSTER_BUCKET,
+    Role, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId,
+    inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -314,6 +314,34 @@ pub async fn ensure_chains(js: &jetstream::Context) -> Result<kv::Store> {
 /// credentials allow it (the human's). Entries expire with the stream's messages.
 pub async fn ensure_links(js: &jetstream::Context) -> Result<kv::Store> {
     ensure_kept(js, LINKS_BUCKET).await
+}
+
+/// The KV bucket of the owners of message threads ([`OWNERS_BUCKET`]), created when missing and the credentials allow
+/// it (the human's). Its stream keeps one message per key and refuses another, so the first record of a thread stays
+/// whoever writes after it; entries expire with the stream's messages.
+pub async fn ensure_owners(js: &jetstream::Context) -> Result<kv::Store> {
+    if let Ok(store) = js.get_key_value(OWNERS_BUCKET).await {
+        return Ok(store);
+    }
+    let created = js
+        .create_stream(stream::Config {
+            name: format!("KV_{OWNERS_BUCKET}"),
+            description: Some("The owner of each thread humans and webhooks message ants on, first record kept".into()),
+            subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
+            max_messages_per_subject: 1,
+            discard: stream::DiscardPolicy::New,
+            discard_new_per_subject: true,
+            max_age: RETENTION,
+            storage: stream::StorageType::File,
+            num_replicas: 1,
+            allow_direct: true,
+            deny_delete: true,
+            deny_purge: true,
+            ..Default::default()
+        })
+        .await;
+    created.context("creating the owners bucket (with credentials, `ants init` as the human creates it)")?;
+    js.get_key_value(OWNERS_BUCKET).await.context("opening the owners bucket")
 }
 
 /// A file-backed bucket whose entries expire with the stream's messages.

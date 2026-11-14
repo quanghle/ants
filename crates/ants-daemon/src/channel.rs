@@ -24,6 +24,7 @@ use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 
 use crate::links;
+use crate::owners::Owners;
 pub use crate::reading::Reading;
 use crate::webhooks::Webhooks;
 
@@ -523,6 +524,8 @@ pub struct Threads {
     webhooks: Webhooks,
     /// The senders found taking part in each thread so far ([`Threads::origin_for`]).
     parts: Mutex<HashSet<(ThreadId, UserId)>>,
+    /// The owners recorded for threads humans and webhooks message ants on.
+    owners: Owners,
 }
 
 impl Threads {
@@ -535,8 +538,9 @@ impl Threads {
             one_read: tokio::sync::Mutex::new(()),
             origins: Mutex::default(),
             roots: Mutex::default(),
-            webhooks: Webhooks::new(js),
+            webhooks: Webhooks::new(js.clone()),
             parts: Mutex::default(),
+            owners: Owners::new(js),
         }
     }
 
@@ -553,6 +557,17 @@ impl Threads {
         let Some(channel) = self.root(thread, seq).await? else { return Ok(None) };
         let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
         self.origin(&on_thread, seq, humans).await.map(Some)
+    }
+
+    /// Whether a top-level channel post stored before stream sequence `seq` started `thread` ([`Threads::origin_of`]).
+    pub async fn is_channel_thread(&self, thread: &ThreadId, seq: u64) -> Result<bool> {
+        Ok(self.root(thread, seq).await?.is_some())
+    }
+
+    /// The owner recorded for `thread` by the human or webhook that first messaged an ant on it
+    /// ([`Owners::owner_of`]).
+    pub async fn recorded_owner(&self, thread: &ThreadId) -> Result<Option<UserId>> {
+        self.owners.owner_of(thread).await
     }
 
     /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` has a link
