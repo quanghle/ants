@@ -566,7 +566,7 @@ impl Inbox<'_> {
             post.webhook = false;
         }
         let humans = self.humans.humans();
-        if post.from == *self.ant && !self.notify_mentioned(msg, &post, channels, &humans).await {
+        if (post.from == *self.ant || post.webhook) && !self.notify_mentioned(msg, &post, channels, &humans).await {
             return None;
         }
         let mut wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
@@ -590,8 +590,9 @@ impl Inbox<'_> {
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage, owned })), resume: None })
     }
 
-    /// Notify the human members the ant's own `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the
-    /// post is acked. False when that failed: the post is naked, to be tried again.
+    /// Notify the human members `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the post is acked,
+    /// when the ant sends its notices: its own post, or a webhook's, checked against the webhook's marker, in a channel
+    /// the ant is the messenger of. False when that failed: the post is naked, to be tried again.
     async fn notify_mentioned(
         &self,
         msg: &jetstream::Message,
@@ -604,7 +605,7 @@ impl Inbox<'_> {
             return true;
         }
         if channels.get(&post.channel).is_none_or(|entry| mentioned.any(|m| !entry.is_member(m))) {
-            // The post may have overtaken the change that made the human a member.
+            // The post may have overtaken the change that made the human a member, or the ant the messenger.
             channels.refresh(&post.channel).await;
         }
         let Some(seq) = stream_seq(msg) else {
@@ -3331,7 +3332,7 @@ mod tests {
         let check = async {
             let notice = next_envelope(&mut alice_inbox).await;
             assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&bus.dev, &alice, &own.thread_id));
-            assert_eq!(notice.mention, Some(ants_proto::Mention { channel: ops.clone(), post: own.id }));
+            assert_eq!(notice.mention, Some(ants_proto::Mention { channel: ops.clone(), post: own.id, author: None }));
             assert_eq!(notice.text, own.text);
             assert_eq!(next_post(&mut replies).await.id, own.id);
             let answer = next_post(&mut replies).await;
@@ -3393,5 +3394,52 @@ mod tests {
         let notified = bus.threads.notify_mentioned(&other, seq + 100, Some(&entry), &humans).await.unwrap();
         assert_eq!(notified, std::slice::from_ref(&alice));
         assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 2);
+    }
+
+    #[tokio::test]
+    async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
+        let Some((mut bus, _)) = Bus::start().await else { return };
+        bus.humans = Registry::with(UserId::human(), &["alice"]);
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (alice, github, dev_b) = (
+            "alice".parse::<UserId>().unwrap(),
+            "github".parse::<UserId>().unwrap(),
+            "dev-b".parse::<UserId>().unwrap(),
+        );
+        bus.mark_webhook(&github).await;
+        // dev-a is the messenger of ops, not a member; ci has the default messenger.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member(alice.clone());
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let ops = entry.channel.clone();
+        let (ci, _) = bus.channel("ci", &["alice"]).await;
+        let hook = ChannelPost::new(ops.clone(), github.clone(), "deploy failed").from_webhook(vec![alice.clone()]);
+        let hook_seq = bus.post(&hook).await;
+        // An ant's post marked as a webhook's is its own daemon's to tell; another channel's messenger tells of ci's.
+        bus.post(&ChannelPost::new(ops.clone(), dev_b, "forged").from_webhook(vec![alice.clone()])).await;
+        let seq = bus.post(&ChannelPost::new(ci, github.clone(), "ci red").from_webhook(vec![alice.clone()])).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(log.lock().unwrap().answered.is_empty(), "a mention of a human wakes nobody");
+        assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 1);
+        let notice: Envelope = serde_json::from_slice(
+            &bus.stream.get_last_raw_message_by_subject(&subject::inbox(&alice, &bus.dev)).await.unwrap().payload,
+        )
+        .unwrap();
+        assert_eq!((&notice.from, &notice.thread_id, notice.webhook), (&bus.dev, &hook.thread_id, false));
+        let mention = ants_proto::Mention { channel: ops.clone(), post: hook.id, author: Some(github) };
+        assert_eq!((notice.text.as_str(), notice.mention), (hook.text.as_str(), Some(mention)));
+
+        // Taken again, the post finds its marker.
+        let humans = bus.humans.humans();
+        assert!(bus.threads.notify_mentioned(&hook, hook_seq, Some(&entry), &humans).await.unwrap().is_empty());
+        assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 1);
     }
 }

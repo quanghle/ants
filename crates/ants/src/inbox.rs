@@ -172,8 +172,8 @@ pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope
     Ok(found)
 }
 
-/// A message for the terminal: a header line, then the text indented. A mention notice names its channel, and how to
-/// answer there.
+/// A message for the terminal: a header line, then the text indented. A mention notice names its channel, the
+/// sender that relayed it if any, and how to answer there.
 pub fn render(e: &Envelope) -> String {
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let text: Vec<String> = e.text.lines().map(|line| format!("  {line}")).collect();
@@ -181,10 +181,13 @@ pub fn render(e: &Envelope) -> String {
         return format!("{at}  {} on thread {}\n{}\n", e.from, e.thread_id, text.join("\n"));
     };
     let (channel, thread) = (&mention.channel, &e.thread_id);
+    let (author, relayed) = match &mention.author {
+        Some(author) => (author, format!(" (relayed by {})", e.from)),
+        None => (&e.from, String::new()),
+    };
     format!(
-        "{at}  {} mentioned {} in #{channel} on thread {thread}\n{}\n  (`ants post {channel} --thread {thread} ...` \
-         answers on the thread)\n",
-        e.from,
+        "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}\n{}\n  (`ants post {channel} --thread \
+         {thread} ...` answers on the thread)\n",
         e.to,
         text.join("\n")
     )
@@ -206,6 +209,17 @@ mod tests {
         let unread = inbox.unread(&select).await.unwrap();
         inbox.release().await.unwrap();
         unread
+    }
+
+    #[test]
+    fn a_relayed_mention_notice_shows_the_post_s_author_and_the_relay() {
+        let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
+        let post = ants_proto::ChannelPost::new("ops".parse().unwrap(), "github".parse().unwrap(), "deploy failed")
+            .from_webhook(vec![alice.clone()]);
+        let shown = render(&post.relayed_notice(&alice, &dev_a));
+        let header = format!("github mentioned alice in #ops on thread {} (relayed by dev-a)\n", post.thread_id);
+        assert!(shown.contains(&header), "{shown}");
+        assert!(shown.contains("\n  deploy failed\n"), "{shown}");
     }
 
     /// Runs as the human and dev-a with their own credentials, so it also checks the human's permissions.

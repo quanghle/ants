@@ -688,9 +688,11 @@ impl Threads {
 }
 
 impl Threads {
-    /// Put the [`ChannelPost::mention_notice`] of `post`, the ant's own at stream sequence `seq`, in the inbox of each
-    /// human member of `entry` it @mentions, once each: its msg id makes JetStream drop a copy stored again soon after,
-    /// and a marker in the ant's sessions keys ([`mention_key`]) one stored again later, as on a redelivery after a
+    /// Put the [`ChannelPost::mention_notice`] of `post`, at stream sequence `seq`, in the inbox of each human member
+    /// of `entry` it @mentions, once each, when the ant sends its notices ([`ChannelEntry::notifier`]): the ant's own
+    /// post, or a webhook's in a channel the ant is the messenger of, whose notices it relays
+    /// ([`ChannelPost::relayed_notice`]). The notice's msg id makes JetStream drop a copy stored again soon after, and
+    /// a marker in the ant's sessions keys ([`mention_key`]) one stored again later, as on a redelivery after a
     /// restart. Returns the humans notified now.
     pub async fn notify_mentioned(
         &self,
@@ -700,12 +702,17 @@ impl Threads {
         humans: &Humans,
     ) -> Result<Vec<UserId>> {
         let mut notified = Vec::new();
-        for human in entry.map(|entry| entry.notified(post, humans)).unwrap_or_default() {
+        let Some(entry) = entry.filter(|entry| entry.notifier(post) == self.ant) else { return Ok(notified) };
+        for human in entry.notified(post, humans) {
             let key = mention_key(&self.ant, seq, &human);
             if self.seen.get(&key).await.context("reading a mention marker")?.is_some() {
                 continue;
             }
-            let notice = post.mention_notice(&human);
+            let notice = if post.from == self.ant {
+                post.mention_notice(&human)
+            } else {
+                post.relayed_notice(&human, &self.ant)
+            };
             crate::bus::store(&self.js, notice.subject(), &notice, &post.mention_msg_id(&human))
                 .await
                 .with_context(|| format!("notifying {human} of the mention"))?;
