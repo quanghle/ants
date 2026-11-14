@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::caps::{Caps, Ledger};
+use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
 use ants_daemon::mcp::Roster;
 use ants_daemon::{bus, chains};
 use ants_proto::{Envelope, EscalationReason, RosterEntry, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
-use async_nats::jetstream::{self, kv};
+use async_nats::jetstream;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 
@@ -44,7 +45,7 @@ fn roster() -> Roster {
     })
 }
 
-fn escalator(js: &jetstream::Context, sessions: &kv::Store) -> Escalator {
+fn escalator(js: &jetstream::Context, sessions: &DirectKv) -> Escalator {
     let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
@@ -61,7 +62,7 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
     let Some(server) = Server::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
-    let sessions = bus::ensure_sessions(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
     let mut to_lead = client.subscribe(subject::inbox_of(&ant("lead"))).await.unwrap();
     let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
     let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
@@ -129,7 +130,7 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
     let Some(server) = Server::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
-    let sessions = bus::ensure_sessions(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
     let kept = bus::ensure_chains(&js).await.unwrap();
     chains::publish(&js, &ant("lead"), &[ant("boss")]).await.unwrap();
     let revision = kept.entry("lead").await.unwrap().unwrap().revision;
@@ -173,7 +174,7 @@ async fn an_escalation_on_a_thread_spun_off_a_channel_thread_passes_the_link_on(
     let Some(server) = Server::start() else { return };
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
-    let sessions = bus::ensure_sessions(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
     bus::ensure_links(&js).await.unwrap();
     let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
     let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();

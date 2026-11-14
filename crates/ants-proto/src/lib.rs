@@ -714,7 +714,9 @@ impl Permissions {
     /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
     /// the channels, humans and owners buckets but never writes them, reads which users are webhooks (their
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
-    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
+    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. Of
+    /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
+    /// ants): it reads single keys by direct gets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
@@ -766,8 +768,6 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan_read}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan_read}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
-            format!("$JS.API.STREAM.INFO.{sessions}"),
-            format!("$JS.API.STREAM.INFO.{attempts}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
@@ -790,7 +790,6 @@ impl Permissions {
             format!("$JS.API.CONSUMER.CREATE.{links}"),
             format!("$JS.FC.{links}.>"),
             // And the owners of single threads.
-            format!("$JS.API.STREAM.INFO.{owners}"),
             format!("$JS.API.DIRECT.GET.{owners}.>"),
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
@@ -802,6 +801,10 @@ impl Permissions {
                 // Creating a KV bucket first looks up the account's JetStream limits.
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+                // Stream info lists every key of a bucket, so only a human may ask for it of these three.
+                format!("$JS.API.STREAM.INFO.{sessions}"),
+                format!("$JS.API.STREAM.INFO.{attempts}"),
+                format!("$JS.API.STREAM.INFO.{owners}"),
                 format!("$JS.API.STREAM.CREATE.{sessions}"),
                 format!("$JS.API.STREAM.CREATE.{attempts}"),
                 format!("$JS.API.STREAM.CREATE.{channels}"),
@@ -1002,7 +1005,6 @@ impl Permissions {
     pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
         let seen = kv_stream(WEBHOOKS_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
-        let owners = kv_stream(OWNERS_BUCKET);
         let own = format!("$KV.{WEBHOOKS_BUCKET}.{webhook}.>");
         let mut publish: Vec<String> = Vec::new();
         for destination in destinations {
@@ -1024,7 +1026,7 @@ impl Permissions {
         ]);
         if destinations.iter().any(|d| matches!(d, Destination::Ant(_))) {
             // Recording the owner of the threads it starts in an inbox, where no record is.
-            publish.extend([format!("$JS.API.STREAM.INFO.{owners}"), format!("$KV.{OWNERS_BUCKET}.*")]);
+            publish.push(format!("$KV.{OWNERS_BUCKET}.*"));
         }
         publish.dedup();
         Self { publish, subscribe: vec![format!("{}.>", inbox_prefix(webhook))] }
@@ -3273,7 +3275,6 @@ mod tests {
                 "$JS.API.STREAM.INFO.KV_ants_webhooks",
                 "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
                 "$KV.ants_webhooks.github.>",
-                "$JS.API.STREAM.INFO.KV_ants_owners",
                 "$KV.ants_owners.*",
             ]
         );

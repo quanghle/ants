@@ -482,6 +482,7 @@ struct Seen {
 struct Bus {
     client: async_nats::Client,
     js: jetstream::Context,
+    js_domain: Option<JsDomain>,
     seen: kv::Store,
 }
 
@@ -572,7 +573,7 @@ async fn connect(hook: &Hook, nats: &str, js_domain: Option<&JsDomain>) -> Resul
         }
     };
     tracing::info!(webhook = %name, to = ?hook.config.destination, "webhook ready");
-    let _ = hook.bus.set(Bus { client, js, seen });
+    let _ = hook.bus.set(Bus { client, js, js_domain: js_domain.cloned(), seen });
     Ok(())
 }
 
@@ -670,7 +671,7 @@ impl Hook {
                     .with_owner(hook.owner.clone())
                     .from_webhook();
                 if let Some(owner) = &hook.owner {
-                    owners::recording(&bus.js, &message.thread_id, owner).await;
+                    owners::recording(&bus.js, bus.js_domain.as_ref(), &message.thread_id, owner).await;
                 }
                 (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
             }

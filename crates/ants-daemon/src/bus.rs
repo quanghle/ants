@@ -19,6 +19,7 @@ use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
 
+use crate::direct_kv::DirectKv;
 use crate::reading::{self, Reading};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
@@ -266,14 +267,40 @@ pub fn missing_subjects(subjects: &[String]) -> Vec<String> {
     STREAM_SUBJECTS.iter().filter(|s| !subjects.iter().any(|have| have == *s)).map(|s| (*s).to_owned()).collect()
 }
 
-/// The KV bucket mapping threads to harness sessions, created when missing and the credentials allow it.
-pub async fn ensure_sessions(js: &jetstream::Context) -> Result<kv::Store> {
-    ensure_kept(js, SESSIONS_BUCKET).await
+/// The KV bucket mapping threads to harness sessions, under `ant`'s own keys, created when missing and the credentials
+/// allow it. Read and written without stream info ([`DirectKv`]), which no ant's credentials allow. `js_domain` is the
+/// domain `js` was made for ([`jetstream`]).
+pub async fn ensure_sessions(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<DirectKv> {
+    ensure_own(js, js_domain, SESSIONS_BUCKET, ant).await
 }
 
-/// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`]), created when missing and the credentials allow it.
-pub async fn ensure_attempts(js: &jetstream::Context) -> Result<kv::Store> {
-    ensure_kept(js, ATTEMPTS_BUCKET).await
+/// The KV bucket of attempt markers ([`ATTEMPTS_BUCKET`]), under `ant`'s own keys, as [`ensure_sessions`].
+pub async fn ensure_attempts(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<DirectKv> {
+    ensure_own(js, js_domain, ATTEMPTS_BUCKET, ant).await
+}
+
+/// The sessions and attempts buckets, created when missing: `ants init`, with the human's credentials.
+pub async fn init_own_buckets(js: &jetstream::Context) -> Result<()> {
+    for bucket in [SESSIONS_BUCKET, ATTEMPTS_BUCKET] {
+        ensure_kept(js, bucket).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_own(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    bucket: &str,
+    ant: &UserId,
+) -> Result<DirectKv> {
+    let kv = DirectKv::new(js, js_domain, bucket).await?;
+    match kv.exists(ant).await {
+        Ok(true) => {}
+        Ok(false) => _ = create_kept(js, bucket).await?,
+        // Through a leaf node, a direct get of a missing stream goes unanswered rather than finding no responders.
+        Err(unanswered) => _ = create_kept(js, bucket).await.map_err(|e| unanswered.context(format!("{e:#}")))?,
+    }
+    Ok(kv)
 }
 
 /// The KV bucket of the channels ([`CHANNELS_BUCKET`]), created when missing and the credentials allow it (the
@@ -349,6 +376,10 @@ async fn ensure_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store>
     if let Ok(store) = js.get_key_value(bucket).await {
         return Ok(store);
     }
+    create_kept(js, bucket).await
+}
+
+async fn create_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store> {
     js.create_key_value(kv::Config {
         bucket: bucket.to_owned(),
         history: 1,

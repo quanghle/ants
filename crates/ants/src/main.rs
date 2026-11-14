@@ -670,8 +670,7 @@ async fn main() -> Result<()> {
             let (_, js) = nats.connect_only("ants-cli").await?;
             bus::init_stream(&js).await?;
             bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
-            bus::ensure_sessions(&js).await?;
-            bus::ensure_attempts(&js).await?;
+            bus::init_own_buckets(&js).await?;
             bus::ensure_channels(&js).await?;
             bus::ensure_chains(&js).await?;
             bus::ensure_links(&js).await?;
@@ -962,7 +961,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words
         false => bus::live_inbox(&client, &nats.me.id).await?,
     };
     if let Some(owner) = &envelope.owner {
-        owners::recording(&js, &envelope.thread_id, owner).await;
+        owners::recording(&js, nats.domain, &envelope.thread_id, owner).await;
     }
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");

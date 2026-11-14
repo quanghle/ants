@@ -21,10 +21,10 @@ use ants_proto::{
     ChannelId, Escalation, ThreadId, UserId, daily_spend_key, escalation_deadlines_key, thread_spend_key,
 };
 use anyhow::{Context as _, Result};
-use async_nats::jetstream::kv;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::direct_kv::DirectKv;
 use crate::harness::Spend;
 
 /// Spend caps; None is no cap.
@@ -108,14 +108,14 @@ struct DaySpend {
 
 #[derive(Clone)]
 enum Store {
-    Kv(Box<kv::Store>),
+    Kv(Box<DirectKv>),
     Memory(Arc<Mutex<HashMap<String, Vec<u8>>>>),
 }
 
 impl Store {
     async fn get<T: for<'de> Deserialize<'de> + Default>(&self, key: String) -> Result<T> {
         let bytes = match self {
-            Self::Kv(kv) => kv.get(&key).await.with_context(|| format!("reading {key}"))?.map(|b| b.to_vec()),
+            Self::Kv(kv) => kv.get(&key).await?,
             Self::Memory(map) => map.lock().expect("spend store").get(&key).cloned(),
         };
         match bytes {
@@ -128,7 +128,7 @@ impl Store {
         let bytes = serde_json::to_vec(value)?;
         match self {
             Self::Kv(kv) => {
-                kv.put(&key, bytes.into()).await.with_context(|| format!("storing {key}"))?;
+                kv.put(&key, bytes).await?;
             }
             Self::Memory(map) => {
                 map.lock().expect("spend store").insert(key, bytes);
@@ -151,7 +151,7 @@ pub struct Ledger {
 
 impl Ledger {
     /// Spend kept in the KV bucket [`ants_proto::SESSIONS_BUCKET`].
-    pub fn kv(kv: kv::Store, ant: UserId, caps: Caps) -> Self {
+    pub fn kv(kv: DirectKv, ant: UserId, caps: Caps) -> Self {
         Self::with_store(Store::Kv(Box::new(kv)), ant, caps)
     }
 
