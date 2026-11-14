@@ -220,6 +220,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     .await?;
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
     mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
+    mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
     let launch = Launch::new(
         config.harness.clone(),

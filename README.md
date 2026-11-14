@@ -421,8 +421,8 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 
 | Tool | Description |
 |---|---|
-| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
-| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans). |
+| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored; warns when no daemon serves the ant now. |
+| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans, and an ant no daemon serves now at once, sending nothing). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
 | `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command). |
 | `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
@@ -433,7 +433,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | List owned channels, show one, or change members/messenger via `ants channel serve`. |
 | `escalate(issue)` | Escalate the thread one level up its origin chain (or to the owner) with reason `asked`. |
 
-Human traffic costs 0 turns; agent-to-agent sends/replies cost 1 turn (`ask_agent` requires 1 turn left for the reply), and self-messaging is refused. `ask_agent` hears replies immediately on live inbox and `_INBOX.<ant>.stored.*` subscriptions without waiting behind the active prompt; late replies persist in `<home>/mcp.json` and prepend a count on later prompts until `check_inbox` drains them.
+Human traffic costs 0 turns; agent-to-agent sends/replies cost 1 turn (`ask_agent` requires 1 turn left for the reply), and self-messaging is refused. Before an ant gets a message, its `ants_roster` entry is read (one key, giving up after 3s): when no daemon serves it now (no entry, a `stale` one, or a signed-out harness), `ask_agent` (and `route` waiting on a reply) is refused at once with nothing sent, and `send_message` still sends, the message waiting in the ant's inbox, with a warning; both say why and name ants to message instead (the closest names in the roster, by edit distance or prefix, or for a stale or signed-out ant the served ants sharing a capability with that ant). Humans and the channel manager are never looked up, and a roster that cannot be read holds nothing back. `ask_agent` hears replies immediately on live inbox and `_INBOX.<ant>.stored.*` subscriptions without waiting behind the active prompt; late replies persist in `<home>/mcp.json` and prepend a count on later prompts until `check_inbox` drains them.
 
 ## Messenger
 
