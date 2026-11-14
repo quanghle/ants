@@ -700,7 +700,10 @@ impl Bus {
             }
         };
         let message = jetstream::message::PublishMessage::build().payload(payload.into()).message_id(message_id);
-        let ack = self.js.send_publish(subject, message).await?.await.context("waiting for the hub to store it")?;
+        let ack = match self.js.send_publish(subject.clone(), message).await?.await {
+            Ok(ack) => ack,
+            Err(e) => return Err(bus::explain(&self.js, &subject, e).await).context("waiting for the hub to store it"),
+        };
         if ack.duplicate {
             let thread = self.seen(&key).await.ok().flatten().map(|seen| seen.thread);
             return Ok(Delivered { thread, duplicate: true });
