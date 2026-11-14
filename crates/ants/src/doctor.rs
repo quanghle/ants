@@ -289,7 +289,8 @@ async fn connect(url: &str, creds: Option<&Path>, user: &UserId) -> Result<async
         .custom_inbox_prefix(ants_proto::inbox_prefix(user))
         .event_callback(|_| async {});
     if let Some(path) = creds {
-        options = options.credentials_file(path).await.map_err(|e| Unreached::Other(format!("{e}")))?;
+        options = bus::authenticate(options, path, ants_daemon::keystore::os())
+            .map_err(|e| Unreached::Other(format!("{e:#}")))?;
     }
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, options.connect(url)).await {
         Ok(Ok(client)) => Ok(client),

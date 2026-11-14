@@ -12,6 +12,7 @@ use nkeys::KeyPair;
 
 use crate::auth;
 use crate::enroll;
+use crate::keys;
 use crate::leaf;
 use crate::serve::AntOptions;
 use crate::service::{Action, Outcome, Service, Services, failure};
@@ -109,7 +110,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         (None, None) => None,
     };
     if let Some(jwt) = &jwt {
-        auth::write_creds(&out, jwt, &user)?;
+        keys::write(&out, jwt, &user)?;
         let seed = seed_path(&out);
         if seed.exists() {
             std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
@@ -240,9 +241,8 @@ fn seed_path(creds: &Path) -> PathBuf {
 /// The ant's user key: the one of its credentials at `out`, or the one waiting beside them, or a new one, written
 /// there.
 fn user_key(out: &Path) -> Result<KeyPair> {
-    if let Ok(text) = std::fs::read_to_string(out) {
-        let seed = auth::creds_seed(&text).with_context(|| format!("no seed in {}", out.display()))?;
-        return KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()));
+    if out.exists() {
+        return auth::read_creds(out).map(|(_, user)| user);
     }
     let seed = seed_path(out);
     if seed.exists() {

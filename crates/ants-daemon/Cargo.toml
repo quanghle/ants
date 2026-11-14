@@ -19,6 +19,7 @@ futures.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+nkeys = "0.4.5"
 rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,10 @@ toml.workspace = true
 tower-service = "0.3.3"
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+# The keychain holding NKey seeds (crate::keystore); rustls-native-certs already brings it in.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", default-features = false }
 
 [dev-dependencies]
 ants-test-support.workspace = true
