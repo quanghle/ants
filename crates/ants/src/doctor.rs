@@ -272,10 +272,12 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.push(answered);
     if !reached {
         checks.push(Check::skip("hub", "JetStream does not answer"));
+        checks.push(Check::skip("consumers", "JetStream does not answer"));
         checks.push(Check::skip("versions", "JetStream does not answer"));
         return (checks, None);
     }
     checks.extend(check_hub(&js, identity).await);
+    checks.push(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
@@ -458,6 +460,53 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
             }
         })
         .collect()
+}
+
+/// The consumers of the `ANTS` stream against the most it takes ([`consumer_limit`]): past that, creating one fails,
+/// so an ant cannot read its inbox. Warns from four fifths of it.
+async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Check {
+    let check = "consumers";
+    if !identity.rights.may_publish(&hub::Object::Stream.info_subject()) {
+        return Check::skip(
+            check,
+            format!("the credentials get no stream info of {STREAM}: run `ants doctor` as a human"),
+        );
+    }
+    let info = match js.get_stream(STREAM).await {
+        Ok(stream) => stream.cached_info().clone(),
+        Err(e) => return Check::skip(check, format!("no stream info of {STREAM}: {e}")),
+    };
+    consumers(info.state.consumer_count, consumer_limit(&info.config))
+}
+
+/// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server 2.15 and
+/// later give a stream by default (`default_max_consumers` in its configuration may change that); None for no limit.
+fn consumer_limit(config: &jetstream::stream::Config) -> Option<usize> {
+    if let Ok(max) = usize::try_from(config.max_consumers)
+        && max > 0
+    {
+        return Some(max);
+    }
+    let version = config.metadata.get("_nats.ver")?;
+    let mut parts = version.split(['.', '-']).map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next()?, parts.next()?);
+    ((major, minor) >= (2, 15)).then_some(1000)
+}
+
+fn consumers(count: usize, limit: Option<usize>) -> Check {
+    let check = "consumers";
+    let Some(limit) = limit else {
+        return Check::ok(check, format!("{count} on stream {STREAM}, which takes any number"));
+    };
+    let detail = format!("{count} on stream {STREAM}, which takes {limit}");
+    if count.saturating_mul(5) < limit.saturating_mul(4) {
+        return Check::ok(check, detail);
+    }
+    let raise = match usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
+        true => "ants init".to_owned(),
+        false => format!("nats stream edit {STREAM} --max-consumers {}", limit.saturating_mul(2)),
+    };
+    Check::warn(check, format!("{detail}: once full, no ant can open a consumer to read its inbox"), vec![raise])
 }
 
 /// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
@@ -961,6 +1010,26 @@ mod tests {
         let hub = named(&checks, "hub");
         assert_eq!(hub.len(), 1, "{checks:#?}");
         assert!(hub[0].detail.contains("presence not checked"), "{}", hub[0]);
+    }
+
+    #[test]
+    fn consumers_warn_near_the_limit_the_hub_enforces() {
+        let mut config = jetstream::stream::Config::default();
+        assert_eq!(consumer_limit(&config), None, "no limit before nats-server 2.15");
+        config.metadata.insert("_nats.ver".to_owned(), "2.14.9".to_owned());
+        assert_eq!(consumer_limit(&config), None);
+        config.metadata.insert("_nats.ver".to_owned(), "2.15.0-beta.1".to_owned());
+        config.max_consumers = -1;
+        assert_eq!(consumer_limit(&config), Some(1000), "-1 leaves the default");
+        config.max_consumers = hub::MAX_CONSUMERS;
+        assert_eq!(consumer_limit(&config), Some(10_000));
+
+        assert_eq!(consumers(799, Some(1000)).status, Status::Ok);
+        let near = consumers(800, Some(1000));
+        assert_eq!((near.status, near.fix.as_slice()), (Status::Warn, ["ants init".to_owned()].as_slice()));
+        let full = consumers(9_000, Some(10_000));
+        assert_eq!(full.fix, [format!("nats stream edit {STREAM} --max-consumers 20000")]);
+        assert_eq!(consumers(5_000, None).status, Status::Ok);
     }
 
     #[tokio::test]

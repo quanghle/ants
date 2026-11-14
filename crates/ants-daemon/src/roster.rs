@@ -179,18 +179,30 @@ async fn claim(kv: &kv::Store, entry: &RosterEntry) -> Result<Claim> {
     }
 }
 
-/// Wait until [`may_start`] allows `entry`, looking at the roster every `every`, then put `entry`, started now, and
-/// return the revision put, for [`hold`]. The put expects the entry it looked at, so of two daemons starting at once
-/// only one goes ahead; the other waits on.
+/// How often [`wait_for_turn`] looks at the roster when a watch shows the entry's expiry: only in case the watch
+/// misses it.
+pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
+
+/// Wait until [`may_start`] allows `entry`, then put `entry`, started now, and return the revision put, for [`hold`].
+/// The put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
+/// It looks again as soon as a watch of the entry shows it deleted or expired, which a bucket with limit markers
+/// shows (nats-server 2.11 or later, [`crate::hub::has_limit_markers`]), and otherwise every `every`, as an expiry
+/// without a marker goes unseen; with markers, only every [`LOOK_AGAIN`].
 pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<u64> {
     let key = entry.key().to_owned();
-    let mut ticks = tokio::time::interval(every);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut changes = match kv.watch(&key).await {
+        Ok(changes) => Some(changes),
+        Err(e) => {
+            tracing::warn!(ant = key, error = %e, "watching the roster entry; looking at the roster every {every:?}");
+            None
+        }
+    };
+    let markers = crate::hub::has_limit_markers(&kv.stream.cached_info().config);
     let mut waiting_for = None;
     loop {
-        ticks.tick().await;
         let now = Utc::now();
         (entry.started_at, entry.heartbeat_at) = (now, now);
+        let mut wait = every;
         match claim(kv, entry).await {
             Ok(Claim::Put(revision)) => return Ok(revision),
             Ok(Claim::Held { machine, instance }) => {
@@ -198,9 +210,27 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
                     tracing::info!(ant = key, machine, "waiting while another daemon serves it");
                     waiting_for = Some(instance);
                 }
+                if markers && changes.is_some() {
+                    wait = every.max(LOOK_AGAIN);
+                }
             }
-            Ok(Claim::Raced) => tracing::info!(ant = key, "roster entry changed; looking again"),
+            Ok(Claim::Raced) => {
+                tracing::info!(ant = key, "roster entry changed; looking again");
+                continue;
+            }
             Err(e) => tracing::warn!(ant = key, error = format!("{e:#}"), "looking at the roster; trying again"),
+        }
+        let look_again = tokio::time::sleep(wait);
+        tokio::pin!(look_again);
+        loop {
+            tokio::select! {
+                () = &mut look_again => break,
+                change = next_change(&mut changes) => match change {
+                    Some(change) if change.operation == kv::Operation::Put => {}
+                    // Deleted or expired, or the watch ended: look now.
+                    _ => break,
+                },
+            }
         }
     }
 }

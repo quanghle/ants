@@ -994,6 +994,8 @@ impl Permissions {
                 // Creating a KV bucket first looks up the account's JetStream limits.
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+                // Adding what an older version lacks, such as the markers of expired entries.
+                format!("$JS.API.STREAM.UPDATE.{roster_stream}"),
                 // Stream info lists every key of a bucket, so only a human may ask for it of these three.
                 format!("$JS.API.STREAM.INFO.{sessions}"),
                 format!("$JS.API.STREAM.INFO.{attempts}"),
@@ -1583,7 +1585,7 @@ impl FromStr for DeviceId {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(3);
 
 /// The first permissions version whose credentials ask for their own renewal over NATS ([`subject::renew`],
 /// [`RenewRequest`]); older ones are renewed on the machine holding the team keys.
