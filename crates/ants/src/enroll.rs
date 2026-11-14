@@ -637,7 +637,7 @@ mod tests {
         let (m1_node, m1_conf) = spawn_leaf(&m1, &on_m1, false);
         let (m2_node, _) = spawn_leaf(&m2, &[(human.clone(), Role::Human)], true);
         let (_a, a_js) = bus::connect(&m1_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
-        eventually("m1 reaches the hub", async || bus::ensure_stream(&a_js).await.is_ok()).await;
+        eventually("m1 reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
         let setup = crate::outbox::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
         crate::outbox::admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
 
@@ -669,14 +669,14 @@ mod tests {
         let c_creds = hub.dir().join("dev-c-enrolled.creds");
         auth::write_creds(&c_creds, &approval.jwt, &user).unwrap();
         let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
-        assert!(bus::ensure_stream(&c_js).await.is_err(), "the uplink does not carry dev-c yet");
+        assert!(bus::open_stream(&c_js, &dev_c).await.is_err(), "the uplink does not carry dev-c yet");
         auth::write_creds(&uplink_creds, &renewed, &key).unwrap();
         drop((_a, _c));
         drop(m1_node);
         let (m1_node, _) = spawn_leaf(&m1, &on_m1, false);
 
         let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
-        eventually("dev-c reaches the hub", async || bus::ensure_stream(&c_js).await.is_ok()).await;
+        eventually("dev-c reaches the hub", async || bus::open_stream(&c_js, &dev_c).await.is_ok()).await;
         let direct = ants_proto::Envelope::new(dev_c.clone(), human.clone(), "hello");
         assert_eq!(bus::publish(&c_js, &direct).await.unwrap(), bus::Stored::Hub);
         // Its notes kept in m1's outbox reach the hub's stream: only its own admission takes them.
