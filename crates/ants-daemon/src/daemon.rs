@@ -317,6 +317,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         () = escalator.deadlines() => {}
         () = pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY) => {}
         () = inbox.hear_cancels() => {}
+        () = crate::creds::recheck(config.creds.as_deref()) => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;

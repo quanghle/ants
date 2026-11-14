@@ -157,6 +157,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "chrono",
+ "data-encoding",
  "futures",
  "http-body-util",
  "hyper",

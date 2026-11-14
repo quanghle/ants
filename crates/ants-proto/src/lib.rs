@@ -1447,6 +1447,43 @@ impl FromStr for DeviceId {
     }
 }
 
+/// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
+/// uplinks, the channel manager, enrollment), stamped into each user JWT it issues as the tag
+/// [`PermissionsVersion::tag`]. Credentials carrying an older version, or none, were issued before the permissions
+/// changed: ants processes using them warn and name the command that renews them.
+///
+/// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_leaf`],
+/// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
+/// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
+/// user JWT.
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+
+/// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PermissionsVersion(pub u32);
+
+impl PermissionsVersion {
+    /// Prefix of the user JWT tag carrying the version.
+    pub const TAG: &str = "ants-perms:";
+
+    /// The user JWT tag carrying the version.
+    pub fn tag(&self) -> String {
+        format!("{}{}", Self::TAG, self.0)
+    }
+
+    /// The version among a user JWT's `tags`, if any.
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<Self> {
+        tags.into_iter().find_map(|tag| tag.strip_prefix(Self::TAG)?.parse().ok().map(Self))
+    }
+}
+
+impl fmt::Display for PermissionsVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// What a device of a human follows as it comes, so it needs no push of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4383,5 +4420,16 @@ mod tests {
         assert_eq!(DeviceId::from_tags(["team", tag.as_str()]), Some(device));
         assert_eq!(DeviceId::from_tags(["ants-device:not-a-uuid"]), None);
         assert_eq!(device.to_string().parse::<DeviceId>().unwrap(), device);
+    }
+
+    #[test]
+    fn the_permissions_version_travels_as_a_user_jwt_tag() {
+        let tag = PERMISSIONS_VERSION.tag();
+        assert_eq!(tag, format!("ants-perms:{}", PERMISSIONS_VERSION.0));
+        let device = DeviceId::generate().tag();
+        assert_eq!(PermissionsVersion::from_tags([device.as_str(), tag.as_str()]), Some(PERMISSIONS_VERSION));
+        assert_eq!(PermissionsVersion::from_tags([device.as_str()]), None);
+        assert_eq!(PermissionsVersion::from_tags(["ants-perms:x"]), None);
+        assert!(PermissionsVersion(0) < PERMISSIONS_VERSION);
     }
 }

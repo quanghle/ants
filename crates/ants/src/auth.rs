@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_proto::{DeviceId, JsDomain, Machine, Permissions, Role, UserId};
+use ants_proto::{DeviceId, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -306,8 +306,9 @@ fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, V
 }
 
 /// Renew `jwt`, the uplink user JWT of `machine`'s leaf node issued from the account key in `dir`, for the same key,
-/// allowing `more` besides what it allows. Everything else in it stays as it is. Refused if the hub would not take
-/// the renewed JWT ([`MAX_UPLINK_JWT`]).
+/// allowing `more` besides what it allows. Everything else in it stays as it is, its permissions version
+/// ([`PERMISSIONS_VERSION`]) too: the rights of its other users are still those of that version. Refused if the hub
+/// would not take the renewed JWT ([`MAX_UPLINK_JWT`]).
 pub fn extend_leaf(dir: &Path, jwt: &str, machine: &Machine, more: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let (claims, body) = leaf_claims(&account.public_key(), jwt, machine)
@@ -600,7 +601,7 @@ fn account_jwt(operator: &KeyPair, account: &KeyPair, revocations: &BTreeMap<Str
 }
 
 /// A user JWT for the public key `user` with `permissions`, plus the `extra` claims, expiring at `exp` (seconds since
-/// the epoch) if given.
+/// the epoch) if given. Its tags carry [`PERMISSIONS_VERSION`].
 fn user_jwt(
     account: &KeyPair,
     user: &str,
@@ -620,6 +621,9 @@ fn user_jwt(
     if let (Value::Object(nats), Value::Object(extra)) = (&mut nats, extra) {
         nats.extend(extra);
     }
+    let mut tags = nats["tags"].as_array().cloned().unwrap_or_default();
+    tags.push(PERMISSIONS_VERSION.tag().into());
+    nats["tags"] = tags.into();
     jwt(account, user, name, nats, exp)
 }
 
@@ -824,6 +828,56 @@ pub(crate) mod tests {
         revoke::revoke(&team, Some("leaf-m1"), &[]).unwrap();
         let err = extend_leaf(&team, &jwt, &m1, none()).unwrap_err().to_string();
         assert!(err.contains("revoked"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn issued_credentials_carry_the_current_permissions_version_and_name_their_renewal() {
+        use ants_daemon::creds::{self, VersionStatus};
+        let dir = ants_test_support::scratch_dir("creds-check");
+        let team = dir.join("auth");
+        init(&team).unwrap();
+        let hub: JsDomain = "hub".parse().unwrap();
+        let renewal = |name: &str| {
+            let finding = creds::check(&team.join(format!("{name}.creds"))).unwrap();
+            assert_eq!(finding.version_status(), VersionStatus::Current, "{name}");
+            assert!(finding.warnings(now().unwrap()).is_empty(), "{name}: {:?}", finding.warnings(now().unwrap()));
+            finding.renew()
+        };
+        let out = |name: &str| team.join(format!("{name}.creds"));
+        issue(&team, &p("dev-a"), Role::Ant, Some(&hub), &out("dev-a")).unwrap();
+        assert_eq!(renewal("dev-a"), ["ants auth user dev-a --js-domain hub"]);
+        issue(&team, &p("alice"), Role::Human, None, &out("alice")).unwrap();
+        assert_eq!(renewal("alice"), ["ants auth user alice --human"]);
+        let destinations = [Destination::Ant(p("dev-a")), Destination::Channel("ops".parse().unwrap())];
+        let hook = Permissions::for_webhook(&p("hook"), &destinations);
+        issue_with(&team, &p("hook"), Kind::Webhook, hook, &out("hook")).unwrap();
+        assert_eq!(renewal("hook"), ["ants auth user hook --webhook --to dev-a --channel ops"]);
+        issue_channel_manager(&team, None, &out("channel-manager")).unwrap();
+        assert_eq!(renewal("channel-manager"), ["ants auth channel-manager"]);
+        let m1: Machine = "m1".parse().unwrap();
+        let members = members(&[p("dev-a")], &[p("alice")]);
+        issue_leaf(&team, &m1, &members, &[p("hook")], true, Some(&hub), &out("leaf-m1")).unwrap();
+        assert_eq!(
+            renewal("leaf-m1"),
+            [
+                "ants auth leaf m1 --ant dev-a --human alice --webhook hook --enroll-approver --js-domain hub",
+                "ants leaf outbox m1 --ant dev-a --human alice --js-domain hub",
+            ]
+        );
+        let system = creds::check(&leaf_system_creds(&out("leaf-m1"))).unwrap();
+        assert_eq!(
+            (system.kind.clone(), system.version_status()),
+            (creds::Kind::LeafSystem { machine: m1.clone() }, VersionStatus::Current)
+        );
+        let (jwt, _) = read_creds(&out("leaf-m1")).unwrap();
+        let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_js_domain(Some(&hub));
+        let renewed = creds::Finding::from_jwt(&extend_leaf(&team, &jwt, &m1, more).unwrap()).unwrap();
+        assert_eq!(renewed.version_status(), VersionStatus::Current);
+        assert!(
+            renewed.renew()[0].starts_with("ants auth leaf m1 --ant dev-a --ant dev-c --human alice"),
+            "{renewed:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

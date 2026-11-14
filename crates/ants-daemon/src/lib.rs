@@ -8,6 +8,7 @@ pub mod chains;
 pub mod chanadm;
 pub mod channel;
 pub mod config;
+pub mod creds;
 pub mod daemon;
 pub mod dead;
 pub mod direct_kv;
