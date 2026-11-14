@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
-    PRESENCE_TTL, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
+    PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
     STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
@@ -36,13 +36,14 @@ pub enum Object {
     Links,
     Owners,
     Webhooks,
+    Reactions,
     Read,
     Presence,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -53,6 +54,7 @@ impl Object {
         Self::Links,
         Self::Owners,
         Self::Webhooks,
+        Self::Reactions,
         Self::Read,
         Self::Presence,
     ];
@@ -70,6 +72,7 @@ impl Object {
             Self::Links => LINKS_BUCKET,
             Self::Owners => OWNERS_BUCKET,
             Self::Webhooks => WEBHOOKS_BUCKET,
+            Self::Reactions => REACTIONS_BUCKET,
             Self::Read => READ_BUCKET,
             Self::Presence => PRESENCE_BUCKET,
         })
@@ -92,6 +95,7 @@ impl Object {
         match self {
             Self::Stream => Spec::Stream(Box::new(stream_config())),
             Self::Owners => Spec::Stream(Box::new(owners_config())),
+            Self::Reactions => Spec::Stream(Box::new(reactions_config())),
             Self::Roster => Spec::Bucket(Box::new(roster_config(ROSTER_TTL))),
             Self::Sessions | Self::Attempts | Self::Links => {
                 Spec::Bucket(Box::new(kept_config(self.bucket().unwrap_or_default())))
@@ -545,6 +549,25 @@ pub fn owners_config() -> stream::Config {
     };
     crate::owners::first_records_only(&mut config);
     config
+}
+
+/// The stream of the reactions bucket ([`REACTIONS_BUCKET`]): a KV bucket of history 1 whose stream denies deletes,
+/// purges and rollups, which would remove others' reactions as well, and drops reactions with the stream's messages.
+pub fn reactions_config() -> stream::Config {
+    stream::Config {
+        name: format!("KV_{REACTIONS_BUCKET}"),
+        description: Some("Reactions to messages, each under its reactor's key".into()),
+        subjects: vec![format!("$KV.{REACTIONS_BUCKET}.>")],
+        max_age: RETENTION,
+        max_messages_per_subject: 1,
+        discard: stream::DiscardPolicy::New,
+        storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        deny_delete: true,
+        deny_purge: true,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

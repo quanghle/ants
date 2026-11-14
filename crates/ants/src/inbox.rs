@@ -13,8 +13,9 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use ants_daemon::bus;
+use ants_daemon::reactions::{self, Reacted};
 use ants_daemon::reading::{self, Reading};
-use ants_proto::{Envelope, READ_BUCKET, ReadMarker, STREAM, ThreadId, UserId, inbox_consumer, subject};
+use ants_proto::{Envelope, READ_BUCKET, ReadMarker, STREAM, ThreadId, UserId, Uuid, inbox_consumer, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::consumer::{DeliverPolicy, PullConsumer};
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
@@ -320,13 +321,41 @@ pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope
     Ok(false)
 }
 
-/// A message for the terminal: a header line, then the text indented. A mention notice names its channel, the
-/// sender that relayed it if any, and how to answer there.
-pub fn render(e: &Envelope) -> String {
+/// A message as `ants inbox --json` prints it: the envelope with the reactions to it.
+#[derive(serde::Serialize)]
+pub struct Shown<'a> {
+    #[serde(flatten)]
+    pub envelope: &'a Envelope,
+    pub reactions: &'a [Reacted],
+}
+
+/// The reactions to `messages`, none if they cannot be read.
+pub async fn reactions_or_none(js: &jetstream::Context, messages: &[Uuid]) -> reactions::Reactions {
+    reactions::load(js, messages).await.unwrap_or_else(|e| {
+        tracing::warn!("not showing reactions: {e:#}");
+        reactions::Reactions::new()
+    })
+}
+
+/// Reactions beneath a message: a line for each, naming who reacted so.
+pub fn render_reactions(reactions: &[Reacted], indent: &str) -> String {
+    reactions
+        .iter()
+        .map(|r| {
+            let by: Vec<&str> = r.by.iter().map(UserId::as_str).collect();
+            format!("{indent}reacted {}: {}\n", r.reaction, by.join(", "))
+        })
+        .collect()
+}
+
+/// A message for the terminal: a header line with its id, then the text indented and the reactions to it. A mention
+/// notice names its channel, the sender that relayed it if any, and how to answer there.
+pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let text: Vec<String> = e.text.lines().map(|line| format!("  {line}")).collect();
+    let reacted = render_reactions(reactions, "  ");
     let Some(mention) = &e.mention else {
-        return format!("{at}  {} on thread {}\n{}\n", e.from, e.thread_id, text.join("\n"));
+        return format!("{at}  {} on thread {}, message {}\n{}\n{reacted}", e.from, e.thread_id, e.id, text.join("\n"));
     };
     let (channel, thread) = (&mention.channel, &e.thread_id);
     let (author, relayed) = match &mention.author {
@@ -334,9 +363,10 @@ pub fn render(e: &Envelope) -> String {
         None => (&e.from, String::new()),
     };
     format!(
-        "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}\n{}\n  (`ants post {channel} --thread \
-         {thread} ...` answers on the thread)\n",
+        "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}, message {}\n{}\n  (`ants post \
+         {channel} --thread {thread} ...` answers on the thread)\n{reacted}",
         e.to,
+        e.id,
         text.join("\n")
     )
 }
@@ -379,8 +409,12 @@ mod tests {
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let post = ants_proto::ChannelPost::new("ops".parse().unwrap(), "github".parse().unwrap(), "deploy failed")
             .from_webhook(vec![alice.clone()]);
-        let shown = render(&post.relayed_notice(&alice, &dev_a));
-        let header = format!("github mentioned alice in #ops on thread {} (relayed by dev-a)\n", post.thread_id);
+        let notice = post.relayed_notice(&alice, &dev_a);
+        let shown = render(&notice, &[]);
+        let header = format!(
+            "github mentioned alice in #ops on thread {} (relayed by dev-a), message {}\n",
+            post.thread_id, notice.id
+        );
         assert!(shown.contains(&header), "{shown}");
         assert!(shown.contains("\n  deploy failed\n"), "{shown}");
     }

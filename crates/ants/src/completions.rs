@@ -225,6 +225,11 @@ pub fn threads() -> Vec<CompletionCandidate> {
     std::iter::once(last).chain(recent).collect()
 }
 
+/// The reactions suggested ([`ants_daemon::reactions::SUGGESTED`]); any other of the same syntax is taken too.
+pub fn reactions() -> Vec<CompletionCandidate> {
+    ants_daemon::reactions::SUGGESTED.into_iter().map(CompletionCandidate::new).collect()
+}
+
 /// The pending tool requests, as `<ant>/<id>`.
 pub fn tool_requests() -> Vec<CompletionCandidate> {
     lookup(async |js, _| {

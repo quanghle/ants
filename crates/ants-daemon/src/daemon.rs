@@ -238,6 +238,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
     mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
+    mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
     }

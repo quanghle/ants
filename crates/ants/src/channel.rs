@@ -863,7 +863,7 @@ mod tests {
         let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
         let got: Vec<_> = unread.iter().map(|e| (e.from.clone(), e.mention.as_ref().map(|m| m.post))).collect();
         assert_eq!(got, [(alice.clone(), Some(post.id)), (dev_a.clone(), Some(ant_post.id))]);
-        let shown = crate::inbox::render(&unread[1]);
+        let shown = crate::inbox::render(&unread[1], &[]);
         assert!(shown.contains(&format!("dev-a mentioned bob in #ops on thread {}", ant_post.thread_id)), "{shown}");
         assert!(shown.contains(&format!("`ants post ops --thread {} ...`", ant_post.thread_id)), "{shown}");
     }

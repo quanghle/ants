@@ -8,6 +8,8 @@
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
+//! `react` adds or removes the ant's reaction to a message, by default the one being handled (see
+//! [`crate::reactions`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -26,8 +28,8 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
     ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
-    ChannelOp, ChannelPost, Envelope, EscalationReason, NotesPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, UserId,
-    Uuid, Verdict,
+    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, ROSTER_BUCKET, Reaction, Role,
+    RosterEntry, ThreadId, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -54,7 +56,7 @@ use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::notes::NotesStore;
-use crate::{bus, ipc, links, roster};
+use crate::{bus, ipc, links, reactions, roster};
 
 /// Environment variable carrying the session's token to `ants mcp`.
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
@@ -127,6 +129,23 @@ pub fn jetstream_channels(js: async_nats::jetstream::Context) -> ChannelAccess {
             Box::pin(async move { bus::store(&js, post.subject(), &post, &post.id.to_string()).await.map(drop) })
         }),
     }
+}
+
+/// Adds the ant's reaction to a message, or removes it when the flag is set; whether that changed anything.
+pub type Reactor = Arc<dyn Fn(Uuid, Reaction, bool) -> BoxFuture<'static, Result<bool>> + Send + Sync>;
+
+/// Adds and removes `ant`'s reactions in the reactions bucket ([`reactions`]).
+pub fn jetstream_reactor(js: async_nats::jetstream::Context, js_domain: Option<JsDomain>, ant: UserId) -> Reactor {
+    Arc::new(move |message, reaction, remove| {
+        let (js, js_domain, ant) = (js.clone(), js_domain.clone(), ant.clone());
+        Box::pin(async move {
+            if remove {
+                reactions::remove(&js, js_domain.as_ref(), &ant, &message, &reaction).await
+            } else {
+                reactions::add(&js, js_domain.as_ref(), &ant, &message, &reaction).await
+            }
+        })
+    })
 }
 
 /// Reads the ants in the roster.
@@ -259,6 +278,7 @@ impl Mcp {
             lookup: OnceLock::new(),
             admin: OnceLock::new(),
             requester: OnceLock::new(),
+            reactor: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -298,6 +318,11 @@ impl Mcp {
     /// offered.
     pub fn with_requester(&self, requester: AntRequester) {
         let _ = self.hub.requester.set(requester);
+    }
+
+    /// Serve `react` through `reactor`; without it reactions are refused.
+    pub fn with_reactor(&self, reactor: Reactor) {
+        let _ = self.hub.reactor.set(reactor);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -446,6 +471,7 @@ struct Hub {
     lookup: OnceLock<RosterLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
+    reactor: OnceLock<Reactor>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -565,6 +591,27 @@ impl Hub {
             });
         }
         Err(format!("the notes of thread {thread} kept changing; read_notes and post again"))
+    }
+
+    /// Add or remove the ant's reaction to the message `args` names, by default the one `thread` is handling. A
+    /// reaction is no message: it reaches no inbox and spends no turn.
+    async fn react(&self, thread: &ThreadId, args: React) -> Result<String, String> {
+        let reactor = self.reactor.get().ok_or("reactions are not available here")?;
+        let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
+        let message = match args.message_id.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(id) => id.parse().map_err(|e| format!("message_id {id:?}: {e}"))?,
+            None => {
+                let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| e.id);
+                current.ok_or("no message is being handled on this thread; name the message by message_id")?
+            }
+        };
+        let changed = reactor(message, reaction.clone(), args.remove).await.map_err(|e| format!("{e:#}"))?;
+        Ok(match (args.remove, changed) {
+            (false, true) => format!("Reacted {reaction} to message {message}."),
+            (false, false) => format!("Already reacted {reaction} to message {message}."),
+            (true, true) => format!("Removed the reaction {reaction} to message {message}."),
+            (true, false) => format!("No reaction {reaction} to message {message} to remove."),
+        })
     }
 
     /// Escalate `thread` for `issue`: up its origin chain or, for the leader of the escalation group the thread's
@@ -1060,6 +1107,19 @@ struct CheckInbox {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct React {
+    /// The reaction: 1-64 of lowercase letters, digits and '-', such as `eyes`, `check`, `thumbsup`, `x`, `heart` or
+    /// `rocket`.
+    reaction: String,
+    /// The id of the message to react to; omitted for the message being handled on this thread.
+    #[serde(default)]
+    message_id: Option<String>,
+    /// Remove the ant's reaction instead of adding it.
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct DecideApproval {
     /// `allow_once`, `allow_always` or `reject`.
     verdict: String,
@@ -1195,8 +1255,10 @@ impl Tools {
         let envelope = self.hub.outgoing(thread, to, text, on)?;
         let unserved = self.hub.unserved(&envelope.to, Duration::ZERO).await;
         self.hub.send(&envelope).await?;
-        let sent =
-            format!("Sent to {} on thread {} ({} turns left).", envelope.to, envelope.thread_id, envelope.turn_budget);
+        let sent = format!(
+            "Sent to {} on thread {} as message {} ({} turns left).",
+            envelope.to, envelope.thread_id, envelope.id, envelope.turn_budget
+        );
         Ok(match unserved {
             Some(why) => format!("{sent} Warning: the message waits in the inbox of {}, as {why}", envelope.to),
             None => sent,
@@ -1467,7 +1529,7 @@ impl Tools {
             Ok(wait) => self.ask(&thread, &args.to, args.text, wait, &cx).await,
             Err(e) => Err(e),
         };
-        Ok(text(result.map(|reply| format!("{} replied:\n{}", reply.from, reply.text))))
+        Ok(text(result.map(|reply| format!("{} replied (message {}):\n{}", reply.from, reply.id, reply.text))))
     }
 
     #[tool(description = "Take the messages kept for this ant outside of any prompt: replies to ask_agent calls \
@@ -1487,9 +1549,25 @@ impl Tools {
         }
         let shown: Vec<String> = late
             .iter()
-            .map(|e| format!("From {} on thread {} at {}:\n{}", e.from, e.thread_id, e.sent_at.to_rfc3339(), e.text))
+            .map(|e| {
+                let at = e.sent_at.to_rfc3339();
+                format!("From {} on thread {} at {at} (message {}):\n{}", e.from, e.thread_id, e.id, e.text)
+            })
             .collect();
         Ok(text(Ok(shown.join("\n\n"))))
+    }
+
+    #[tool(description = "React to a message, such as `eyes` for seen or `check` for done, or remove the ant's \
+        reaction with `remove`. Reacts to the message being handled unless `message_id` names another (ids come with \
+        sent messages, replies and check_inbox). A reaction is no message: it wakes nobody, spends no turn and \
+        answers no ask; humans see it beneath the message. Reacting or removing again changes nothing.")]
+    async fn react(
+        &self,
+        Parameters(args): Parameters<React>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.react(&thread, args).await))
     }
 
     #[tool(description = "Decide the approval request that the message being handled brings up the chain: another \
@@ -1550,7 +1628,10 @@ impl Tools {
                 return Ok(format!("Routed to {to} for {capability}. {sent}"));
             }
             let reply = self.ask(&thread, &to, args.text, wait, &cx).await?;
-            Ok(format!("Routed to {to} for {capability}. {} replied:\n{}", reply.from, reply.text))
+            Ok(format!(
+                "Routed to {to} for {capability}. {} replied (message {}):\n{}",
+                reply.from, reply.id, reply.text
+            ))
         }
         .await;
         Ok(text(result))
@@ -1688,7 +1769,9 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          before the work starts. \
          post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain. \
          escalate sends the thread up its origin chain when stuck on it. manage_channel lists the \
-         channels a human made this ant the owner of, and changes their members and messenger. Memory and task \
+         channels a human made this ant the owner of, and changes their members and messenger. react marks a \
+         message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
+         humans see beneath it: it wakes nobody, so it acknowledges without a reply. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {
@@ -1850,7 +1933,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 11, "{tools:?}");
+        assert_eq!(tools.len(), 12, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1872,6 +1955,47 @@ mod tests {
         drop(turn);
         let (ok, _) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "late"})).await;
         assert!(!ok, "nothing goes out once the message is handled");
+    }
+
+    #[tokio::test]
+    async fn react_takes_the_current_message_or_a_named_one_and_removes() {
+        let (mcp, _sent) = start(&home("react")).await;
+        let current = from_human();
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+        let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "eyes"})).await;
+        assert!(!ok && text.contains("not available"), "{text}");
+
+        let stored: Arc<StdMutex<std::collections::BTreeSet<(Uuid, String)>>> = Arc::default();
+        let kept = stored.clone();
+        mcp.with_reactor(Arc::new(move |message, reaction: Reaction, remove| {
+            let mut stored = kept.lock().unwrap();
+            let entry = (message, reaction.as_str().to_owned());
+            let changed = if remove { stored.remove(&entry) } else { stored.insert(entry) };
+            Box::pin(async move { Ok(changed) })
+        }));
+        let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "eyes"})).await;
+        assert!(!ok && text.contains("name the message by message_id"), "{text}");
+
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "eyes"})).await;
+        assert!(ok && text == format!("Reacted eyes to message {}.", current.id), "{text}");
+        let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "eyes"})).await;
+        assert!(ok && text.starts_with("Already reacted eyes"), "{text}");
+        let other = Uuid::now_v7();
+        let args = serde_json::json!({"reaction": "check", "message_id": other.to_string()});
+        assert!(call(&client, "react", args).await.0);
+        let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "Eyes!"})).await;
+        assert!(!ok, "{text}");
+        let expected = std::collections::BTreeSet::from([(current.id, "eyes".to_owned()), (other, "check".to_owned())]);
+        assert_eq!(*stored.lock().unwrap(), expected);
+
+        let remove = serde_json::json!({"reaction": "eyes", "remove": true});
+        let (ok, text) = call(&client, "react", remove.clone()).await;
+        assert!(ok && text.starts_with("Removed the reaction eyes"), "{text}");
+        let (ok, text) = call(&client, "react", remove).await;
+        assert!(ok && text.starts_with("No reaction eyes"), "{text}");
+        assert_eq!(*stored.lock().unwrap(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
     }
 
     /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,
@@ -2120,9 +2244,10 @@ mod tests {
         let ask = sent.recv().await.unwrap();
         assert_eq!(ask.to, user("dev-c"), "not ops: idle, but signed out");
         let reply = ask.reply(user("dev-c"), "paid", Role::Ant).unwrap();
-        mcp.hub.route(reply).await;
+        mcp.hub.route(reply.clone()).await;
         let (ok, text) = asking.await.unwrap();
-        assert!(ok && text == "Routed to dev-c for billing. dev-c replied:\npaid", "{text}");
+        let routed = format!("Routed to dev-c for billing. dev-c replied (message {}):\npaid", reply.id);
+        assert!(ok && text == routed, "{text}");
 
         let client = http_client(&url, &token).await;
         let (ok, text) = call(&client, "route", serde_json::json!({"capability": "go", "text": "?"})).await;

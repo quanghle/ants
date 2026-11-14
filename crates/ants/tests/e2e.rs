@@ -120,7 +120,9 @@ fn exercise_daemon(custom_tools: bool) {
     let ask = run(ants(&["ask", "--wait", "@dev-a", "hello", "there"]));
     let stdout = String::from_utf8_lossy(&ask.stdout);
     assert!(ask.status.success(), "ants ask: {}\ndaemon log:\n{}", String::from_utf8_lossy(&ask.stderr), daemon_log());
-    assert!(stdout.starts_with("thread "), "{stdout}");
+    let mut said = stdout.lines();
+    let thread = said.next().and_then(|l| l.strip_prefix("thread ")).expect(&stdout).to_owned();
+    let message = said.next().and_then(|l| l.strip_prefix("message ")).expect(&stdout).to_owned();
     let expected = if custom_tools {
         "dev-a: stub: [ants role dev-a]\nMaintain the Rust backend.\n\n\
          [ants memory]\nUse the notes tool.\n\n[ants tasks]\nUse the ticket tool.\n\n\
@@ -142,6 +144,21 @@ fn exercise_daemon(custom_tools: bool) {
     } else {
         assert!(entry.get("whoami").is_none());
     }
+
+    // A reaction is no message: it wakes no ant.
+    let react = |args: &[&str]| {
+        let out = run(ants(&[&["react"], args].concat()));
+        assert!(out.status.success(), "ants react: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert_eq!(react(&[&message, "eyes"]), format!("reacted eyes to message {message}\n"));
+    assert_eq!(react(&[&message, "eyes"]), format!("already reacted eyes to message {message}\n"));
+    react(&[&message, "check"]);
+    assert_eq!(react(&[&message, "--remove", "check"]), format!("removed check from message {message}\n"));
+    let shown = run(ants(&["thread", "show", &thread]));
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.contains(&format!("(message {message}): hello there\n    reacted eyes: human\n")), "{shown}");
+    std::thread::sleep(Duration::from_millis(500));
 
     let (status, health) = get(&metrics, "/healthz");
     assert_eq!((status, health.as_str()), (200, "ok\n"), "daemon log:\n{}", daemon_log());
@@ -233,7 +250,7 @@ fn channels_are_managed_posted_to_and_read() {
     );
 
     let (posted, warned) = ok(&["post", "#ops", "@dev-c", "and", "@dev-z,", "look"]);
-    let thread = posted.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&posted).to_owned();
+    let thread = posted.lines().next().and_then(|t| t.strip_prefix("thread ")).expect(&posted).to_owned();
     assert!(warned.contains("@dev-z is no member of #ops"), "{warned}");
     assert!(!warned.contains("@dev-c"), "{warned}");
 
@@ -244,6 +261,7 @@ fn channels_are_managed_posted_to_and_read() {
         Killed(waiting.env_remove("ANTS_CREDS").stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
     let mut lines = std::io::BufReader::new(waiting.0.stdout.take().unwrap()).lines();
     let waited = lines.next().unwrap().unwrap().strip_prefix("thread ").unwrap().to_owned();
+    assert!(lines.next().unwrap().unwrap().starts_with("message "));
     ok(&["post", "--thread", &waited, "ops", "still", "here"]);
     assert_eq!(lines.next().unwrap().unwrap(), "human: still here");
     drop(waiting);
@@ -271,12 +289,18 @@ fn channels_are_managed_posted_to_and_read() {
     let last = ok(&["channel", "read", "ops", "--limit", "1"]).0;
     assert!(last.contains("anyone?") && !last.contains("any news?"), "{last}");
 
-    // Nobody serves the messenger: a `--wait` gives up at the timeout, with an error.
-    let asked = run(ants(&["ask", "--wait", "--timeout", "1s", "anyone", "there?"]));
-    let (stdout, stderr) = (String::from_utf8_lossy(&asked.stdout), String::from_utf8_lossy(&asked.stderr));
-    let thread = stdout.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&stdout);
-    assert_eq!(asked.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains(&format!("no reply on thread {thread} within 1s")), "{stderr}");
+    // Nobody serves the messenger: a `--wait` gives up at the timeout, with an error, a reaction meanwhile being no
+    // reply.
+    let mut asking = ants(&["ask", "--wait", "--timeout", "3s", "anyone", "there?"]);
+    let mut asking = Killed(asking.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap());
+    let mut said = std::io::BufReader::new(asking.0.stdout.take().unwrap()).lines();
+    let thread = said.next().unwrap().unwrap().strip_prefix("thread ").unwrap().to_owned();
+    let message = said.next().unwrap().unwrap().strip_prefix("message ").unwrap().to_owned();
+    ok(&["react", &message, "eyes"]);
+    let mut stderr = String::new();
+    asking.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert_eq!(asking.0.wait().unwrap().code(), Some(1), "{stderr}");
+    assert!(stderr.contains(&format!("no reply on thread {thread} within 3s")), "{stderr}");
     assert!(stderr.contains("messenger is not in the roster: no daemon serves messenger now"), "{stderr}");
     assert!(stderr.contains("--wait may not end until one does"), "{stderr}");
 
@@ -569,7 +593,7 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let out = run(ants(&["--nats", &server.url, "ask", "@dev", "hello", "there"]));
     let asked = String::from_utf8_lossy(&out.stdout);
-    let thread = asked.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&asked).to_owned();
+    let thread = asked.lines().next().and_then(|t| t.strip_prefix("thread ")).expect(&asked).to_owned();
 
     let complete = |words: &[&str]| {
         let mut command = ants(&["--"]);
@@ -583,6 +607,7 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     assert_eq!(complete(&["ants", "ask", "@"]), ["@dev", "@messenger", "@qa"]);
     assert_eq!(complete(&["ants", "thread", "show", &thread[..8]]), [thread.as_str()]);
     assert_eq!(complete(&["ants", "thread", "show", "la"]), ["last"]);
+    assert_eq!(complete(&["ants", "react", &thread, "e"]), ["eyes"]);
     drop(server);
     assert!(complete(&["ants", "post", "o"]).is_empty(), "no server, no candidates");
     let _ = std::fs::remove_dir_all(&home);
