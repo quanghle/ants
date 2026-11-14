@@ -8,6 +8,7 @@
 //! ant = "dev-a"                     # or channel = "ops", with mention = [...] or broadcast = true
 //! owner = "alice"                   # optional human owner of the threads it starts
 //! text = "Audit the dependencies and report what changed."
+//! catch_up = true                   # optional: once a daemon runs again, send the latest firing it missed
 //!
 //! [[schedule]]
 //! name = "pulse"
@@ -50,6 +51,8 @@ pub struct Entry {
     broadcast: bool,
     owner: Option<UserId>,
     text: String,
+    #[serde(default)]
+    catch_up: bool,
 }
 
 /// Whom a channel post mentions.
@@ -77,6 +80,8 @@ pub struct Schedule {
     pub mentions: Mentions,
     pub owner: Option<UserId>,
     pub text: String,
+    /// Send the latest firing missed while no daemon could, late, rather than skip it.
+    pub catch_up: bool,
 }
 
 impl Schedule {
@@ -124,6 +129,7 @@ impl Schedule {
             mentions,
             owner: entry.owner,
             text: entry.text,
+            catch_up: entry.catch_up,
         })
     }
 }
@@ -147,6 +153,26 @@ impl When {
                 DateTime::from_timestamp(next, 0)
             }
         }
+    }
+
+    /// The last firing after `after` and at or before `upto`.
+    pub fn last_in(&self, after: DateTime<Utc>, upto: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let last = match self {
+            Self::Cron(cron) => {
+                let mut last = None;
+                let mut t = after;
+                while let Some(next) = cron.next_after(t).filter(|next| *next <= upto) {
+                    last = Some(next);
+                    t = next;
+                }
+                last
+            }
+            Self::Every(every) => {
+                let step = i64::try_from(every.as_secs()).ok().filter(|s| *s > 0)?;
+                DateTime::from_timestamp(upto.timestamp().div_euclid(step).checked_mul(step)?, 0)
+            }
+        };
+        last.filter(|last| *last > after)
     }
 }
 
@@ -370,6 +396,22 @@ mod tests {
         assert_eq!(daily.next_after(at("2026-11-14T23:59:59Z")), Some(at("2026-11-15T00:00:00Z")));
     }
 
+    #[test]
+    fn the_last_firing_in_a_span_is_found() {
+        let every = When::Every(Duration::from_secs(15 * 60));
+        let last = |when: &When, after: &str, upto: &str| when.last_in(at(after), at(upto));
+        assert_eq!(last(&every, "2026-11-14T08:00:00Z", "2026-11-14T10:20:30Z"), Some(at("2026-11-14T10:15:00Z")));
+        assert_eq!(last(&every, "2026-11-14T08:00:00Z", "2026-11-14T10:15:00Z"), Some(at("2026-11-14T10:15:00Z")));
+        assert_eq!(last(&every, "2026-11-14T10:15:00Z", "2026-11-14T10:29:59Z"), None, "after is excluded");
+        let weekdays = When::Cron("0 3 * * 1-5".parse().unwrap());
+        // 2026-11-14 is a Saturday: the last weekday firing before it is Friday's.
+        assert_eq!(last(&weekdays, "2026-11-07T10:00:00Z", "2026-11-15T10:00:00Z"), Some(at("2026-11-13T03:00:00Z")));
+        assert_eq!(last(&weekdays, "2026-11-13T03:00:00Z", "2026-11-15T10:00:00Z"), None);
+        assert_eq!(last(&weekdays, "2026-11-13T02:59:00Z", "2026-11-13T03:00:00Z"), Some(at("2026-11-13T03:00:00Z")));
+        let minutely = When::Cron("* * * * *".parse().unwrap());
+        assert_eq!(last(&minutely, "2026-11-07T10:00:00Z", "2026-11-14T10:20:30Z"), Some(at("2026-11-14T10:20:00Z")));
+    }
+
     fn entry(text: &str) -> Result<Schedule> {
         let entry: Entry = toml::from_str(text)?;
         Schedule::from_entry(entry, |p| Path::new("/etc/ants").join(p))
@@ -382,8 +424,12 @@ mod tests {
                 .unwrap();
         assert_eq!(s.creds.as_deref(), Some(Path::new("/etc/ants/n.creds")));
         assert_eq!((s.destination, s.mentions), (Destination::Ant("dev-a".parse().unwrap()), Mentions::Nobody));
-        let s = entry("name = \"pulse\"\nevery = \"1h\"\nchannel = \"ops\"\nbroadcast = true\ntext = \"t\"\n").unwrap();
-        assert_eq!((s.when, s.mentions), (When::Every(Duration::from_secs(3600)), Mentions::Members));
+        assert!(!s.catch_up, "no catch-up unless asked");
+        let s = entry(
+            "name = \"pulse\"\nevery = \"1h\"\nchannel = \"ops\"\nbroadcast = true\ntext = \"t\"\ncatch_up = true\n",
+        )
+        .unwrap();
+        assert_eq!((s.when, s.mentions, s.catch_up), (When::Every(Duration::from_secs(3600)), Mentions::Members, true));
 
         let base = "name = \"pulse\"\ntext = \"t\"\n";
         for (extra, why) in [

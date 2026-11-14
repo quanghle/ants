@@ -5,12 +5,14 @@
 //! `--channel CHANNEL`, exactly as a webhook does ([`crate::webhook`]): its messages are a webhook's, delivered once
 //! per firing. Several daemons serving the same file, or one restarted, never send a firing twice: each firing has
 //! its key `<schedule>.<unix time>` in [`ants_proto::WEBHOOKS_BUCKET`] and its `Nats-Msg-Id`. A firing goes out up to
-//! [`GRACE`] late, for a daemon restarted or a hub briefly away; one missed by more is skipped, never made up.
+//! [`GRACE`] late, for a daemon restarted or a hub briefly away. One missed by more is skipped, unless the schedule
+//! sets `catch_up`: then, once a daemon runs and reaches the hub again, the latest firing missed goes out late, under
+//! the same key, and the older ones are skipped.
 
 use std::time::Duration;
 
 use ants_daemon::schedule::Schedule;
-use ants_proto::{JsDomain, webhook_seen_key};
+use ants_proto::{JsDomain, WEBHOOK_RETENTION, webhook_seen_key};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -47,7 +49,11 @@ pub async fn run(schedule: Schedule) -> Result<()> {
     let bus = Bus::connect(name, schedule.creds.as_deref(), nats, schedule.js_domain.as_ref(), "ants-schedule").await?;
     tracing::info!(schedule = %name, when = %schedule.when, to = ?schedule.destination, "schedule ready");
     let grace = TimeDelta::from_std(GRACE)?;
-    let mut cursor = Utc::now() - grace;
+    let now = Utc::now();
+    let mut cursor = now - grace;
+    if let Some(missed) = missed(&schedule, DateTime::<Utc>::MIN_UTC, now) {
+        send(&bus, &schedule, missed).await;
+    }
     loop {
         let Some(due) = schedule.when.next_after(cursor) else {
             tracing::warn!(schedule = %name, "the schedule fires no more");
@@ -56,13 +62,27 @@ pub async fn run(schedule: Schedule) -> Result<()> {
         sleep_until(due).await;
         let now = Utc::now();
         if now - due > grace {
-            tracing::warn!(schedule = %name, %due, "skipping a firing missed by more than {GRACE:?}");
+            match missed(&schedule, cursor, now) {
+                Some(missed) => send(&bus, &schedule, missed).await,
+                None => tracing::warn!(schedule = %name, %due, "skipping a firing missed by more than {GRACE:?}"),
+            }
             cursor = due.max(now - grace);
             continue;
         }
-        fire_in_time(&bus, &schedule, due).await;
+        send(&bus, &schedule, due).await;
         cursor = due;
     }
+}
+
+/// With `catch_up`, the last firing after `after` and up to `now` (looking back [`WEBHOOK_RETENTION`] at most, so its
+/// key, if sent, is still in [`ants_proto::WEBHOOKS_BUCKET`]), if more than [`GRACE`] late.
+fn missed(schedule: &Schedule, after: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    if !schedule.catch_up {
+        return None;
+    }
+    let after = after.max(now - TimeDelta::from_std(WEBHOOK_RETENTION).ok()?);
+    let last = schedule.when.last_in(after, now)?;
+    (now - last > TimeDelta::from_std(GRACE).ok()?).then_some(last)
 }
 
 /// Wait for `at` on the wall clock.
@@ -74,21 +94,27 @@ async fn sleep_until(at: DateTime<Utc>) {
     }
 }
 
-/// Send the firing due at `due`, trying again while it is at most [`GRACE`] late.
-async fn fire_in_time(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) {
+/// Send the firing due at `due`, trying again while it is at most [`GRACE`] late or, with `catch_up`, until the next
+/// firing is due.
+async fn send(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) {
     let name = &schedule.name;
-    let deadline = due + TimeDelta::from_std(GRACE).unwrap_or_default();
+    let grace = TimeDelta::from_std(GRACE).unwrap_or_default();
+    let deadline = if schedule.catch_up { schedule.when.next_after(due) } else { Some(due + grace) };
     loop {
-        match fire(bus, schedule, due).await {
+        let late = Utc::now() - due > grace;
+        match fire(bus, schedule, due, late).await {
             Ok(Delivered { thread, duplicate: false }) => {
-                tracing::info!(schedule = %name, %due, thread = ?thread, "schedule fired");
+                tracing::info!(schedule = %name, %due, late, thread = ?thread, "schedule fired");
                 return;
             }
             Ok(Delivered { thread, duplicate: true }) => {
                 tracing::info!(schedule = %name, %due, thread = ?thread, "already fired");
                 return;
             }
-            Err(e) if Utc::now() + TimeDelta::from_std(RETRY).unwrap_or_default() > deadline => {
+            Err(e)
+                if deadline
+                    .is_some_and(|deadline| Utc::now() + TimeDelta::from_std(RETRY).unwrap_or_default() > deadline) =>
+            {
                 tracing::warn!(schedule = %name, %due, error = format!("{e:#}"), "skipping a firing the hub did not take in time");
                 return;
             }
@@ -100,9 +126,13 @@ async fn fire_in_time(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) {
     }
 }
 
-/// Send the firing due at `due` as a new thread, unless it went out already.
-async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) -> Result<Delivered> {
+/// Send the firing due at `due` as a new thread, unless it went out already; a `late` one says when it was due.
+async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) -> Result<Delivered> {
     let at = due.timestamp().to_string();
+    let mut text = schedule.text.clone();
+    if late {
+        text.push_str(&format!("\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC")));
+    }
     bus.deliver(Delivery {
         from: &schedule.name,
         destination: &schedule.destination,
@@ -110,7 +140,7 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) -> Result<Deli
         owner: schedule.owner.as_ref(),
         key: webhook_seen_key(&schedule.name, &at),
         message_id: format!("schedule.{}.{at}", schedule.name),
-        text: schedule.text.clone(),
+        text,
     })
     .await
 }
@@ -122,6 +152,8 @@ mod tests {
     use ants_daemon::schedule::{Mentions, When};
     use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, UserId, WEBHOOKS_BUCKET, subject};
     use ants_proto::{webhook_marker_key, webhook_seen_key};
+
+    use chrono::Timelike as _;
 
     use super::*;
     use crate::webhook::tests::{creds, hub, stored};
@@ -141,6 +173,7 @@ mod tests {
             mentions: Mentions::Nobody,
             owner: None,
             text: "check the nightly build".to_owned(),
+            catch_up: false,
         }
     }
 
@@ -161,6 +194,51 @@ mod tests {
         assert_eq!(ok[0].nats.as_deref(), Some("nats://hub"));
     }
 
+    #[test]
+    fn catch_up_finds_the_latest_missed_firing_within_a_week() {
+        let at = |t: &str| DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc);
+        let mut hourly = schedule("pulse", None, Destination::Ant(p("dev-a")));
+        let never = DateTime::<Utc>::MIN_UTC;
+        assert_eq!(missed(&hourly, never, at("2026-11-14T10:20:00Z")), None, "no catch-up unless asked");
+        hourly.catch_up = true;
+        assert_eq!(missed(&hourly, never, at("2026-11-14T10:20:00Z")), Some(at("2026-11-14T10:00:00Z")));
+        assert_eq!(missed(&hourly, never, at("2026-11-14T10:00:59Z")), None, "within a minute it goes out on time");
+        assert_eq!(missed(&hourly, at("2026-11-14T10:00:00Z"), at("2026-11-14T10:20:00Z")), None, "after `after` only");
+        let mut yearly = hourly.clone();
+        yearly.when = When::Cron("@yearly".parse().unwrap());
+        assert_eq!(missed(&yearly, never, at("2027-01-07T10:00:00Z")), Some(at("2027-01-01T00:00:00Z")));
+        assert_eq!(missed(&yearly, never, at("2027-01-08T00:00:01Z")), None, "a week back at most");
+    }
+
+    #[tokio::test]
+    async fn a_missed_firing_is_caught_up_once_across_daemons() {
+        let Some((server, js, _)) = hub().await else { return };
+        let nightly = p("nightly");
+        let to = Destination::Ant(p("dev-a"));
+        let creds = creds(&server, &nightly, to.clone());
+        let mut schedule = schedule("nightly", Some(creds.clone()), to);
+        let due = Utc::now() - TimeDelta::minutes(10);
+        let due = due.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        schedule.when = When::Cron(format!("{} {} * * *", due.minute(), due.hour()).parse().unwrap());
+        schedule.nats = Some(server.url.clone());
+        schedule.catch_up = true;
+
+        let daemons = [tokio::spawn(run(schedule.clone())), tokio::spawn(run(schedule.clone()))];
+        let inbox = subject::inbox(&p("dev-a"), &nightly);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while stored::<Envelope>(&js, &inbox).await.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        daemons.iter().for_each(|daemon| daemon.abort());
+        let messages: Vec<Envelope> = stored(&js, &inbox).await;
+        let [message] = &messages[..] else { panic!("one message: {messages:?}") };
+        let late = format!("check the nightly build\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC"));
+        assert_eq!(message.text, late);
+        let bus = Bus::connect(&nightly, Some(&creds), &server.url, None, "test").await.unwrap();
+        assert!(fire(&bus, &schedule, due, false).await.unwrap().duplicate, "the same key as an on-time firing");
+    }
+
     #[tokio::test]
     async fn a_firing_goes_out_once_across_daemons_and_restarts() {
         let Some((server, js, _)) = hub().await else { return };
@@ -173,19 +251,19 @@ mod tests {
         let (a, b) = (connect().await.unwrap(), connect().await.unwrap());
         let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
 
-        let (first, second) = tokio::join!(fire(&a, &schedule, due), fire(&b, &schedule, due));
+        let (first, second) = tokio::join!(fire(&a, &schedule, due, false), fire(&b, &schedule, due, false));
         let (first, second) = (first.unwrap(), second.unwrap());
         assert_eq!([first.duplicate, second.duplicate].iter().filter(|d| !**d).count(), 1, "one daemon sends it");
-        let again = fire(&connect().await.unwrap(), &schedule, due).await.unwrap();
+        let again = fire(&connect().await.unwrap(), &schedule, due, false).await.unwrap();
         assert!(again.duplicate, "a restarted daemon finds it sent");
 
         // Within the stream's duplicate window, its Nats-Msg-Id keeps it once even if the bucket forgot it.
         let (_, own) = bus::connect(&server.url, Some(&creds), None, &nightly, "test").await.unwrap();
         let seen = ants_daemon::direct_kv::DirectKv::new(&own, None, WEBHOOKS_BUCKET).await.unwrap();
         seen.delete(webhook_seen_key(&nightly, "1800000000")).await.unwrap();
-        assert!(fire(&b, &schedule, due).await.unwrap().duplicate);
+        assert!(fire(&b, &schedule, due, false).await.unwrap().duplicate);
 
-        let next = fire(&a, &schedule, due + TimeDelta::hours(1)).await.unwrap();
+        let next = fire(&a, &schedule, due + TimeDelta::hours(1), false).await.unwrap();
         assert!(!next.duplicate, "the next firing is a new thread");
         let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &nightly)).await;
         let [message, later] = &messages[..] else { panic!("two messages: {messages:?}") };
@@ -208,7 +286,7 @@ mod tests {
         schedule.mentions = Mentions::Members;
         let bus = Bus::connect(&standup, Some(&creds), &server.url, None, "test").await.unwrap();
         let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-        assert!(!fire(&bus, &schedule, due).await.unwrap().duplicate);
+        assert!(!fire(&bus, &schedule, due, false).await.unwrap().duplicate);
         let posts: Vec<ChannelPost> = stored(&js, &subject::chan(&ops, &standup)).await;
         let [post] = &posts[..] else { panic!("one post: {posts:?}") };
         assert!(post.webhook && post.owner.is_none());
