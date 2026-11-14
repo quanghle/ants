@@ -292,6 +292,21 @@ restarted daemon, buries the noted letter again without another prompt. The hub'
 buries a message on its last attempt, and the consumer allows one more delivery after that one, which then carries the
 noted letter to the hub (see Limits for a letter kept on that extra delivery).
 
+A message `ANTS` sources is stored without being published on its subject, so live waiters (`ants ask --wait`, a
+persona's waiting `ask_agent`, a persona waiting for its escalation chain's decision) would miss it; only the inbox
+consumers would see it (ants-5zr). `ANTS` therefore republishes every inbox message it stores, sourced or not
+(`republish: { src: "ants.inbox.*.*", dest: "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}" }`), to
+`_INBOX.<recipient>.stored.<sender>`. Every set of credentials already reads its own `_INBOX.<persona>.>` and no other's,
+and a leaf's uplink carries those of its personas; no credentials publish under `_INBOX.<persona>.stored`, so only the
+server does. A waiter (`bus::live_inbox`) subscribes to both the inbox subject and the republished one, puts a
+republished message back on the subject in its `Nats-Subject` header and takes each message once, by `Nats-Msg-Id`
+(every inbox message carries its envelope id), or by payload without one, over the last 1024 messages: a message
+published directly comes both ways, in either order, one kept in an outbox only republished, one sent on a leaf whose
+uplink is down live on the leaf and later republished. `ants init` adds the republish to an older stream; until then a
+daemon warns and waiters hear only what is published directly. Republishing is a single extra publish per stored inbox
+message, without a consumer per waiter; a consumer would also have to be created on the hub before each wait and
+needs consumer rights a persona does not have on its inbox.
+
 Set up, as a human, with the leaf up and connected:
 
 ```sh
@@ -341,7 +356,8 @@ Verified (`the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down` in `crates/
 generated leaf with dev-a and the human on it. A message stored directly plus a copy of it in the outbox is in `ANTS`
 once. With the uplink switched to a dead port, dev-a's message, plan post, channel post and dead letter and dev-b's
 plan post and dead letter go to the outbox; after switching back, the intake has all of them, `ANTS` has dev-a's four
-and none of dev-b's, which the machine was not admitted for. A daemon's dead letter of a message failing while the
+and none of dev-b's, which the machine was not admitted for. The human, waiting as `ants ask --wait` does on the hub
+and on the leaf, gets the message stored directly and dev-a's kept message once each. A daemon's dead letter of a message failing while the
 uplink is down lands once, with its notice, after the uplink is back
 (`a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back` in `crates/ants-daemon/src/daemon.rs`).
 
@@ -351,8 +367,9 @@ Limits:
   after the uplink is back (the source's retry backoff).
 - A publish that timed out but reached the hub after all, and whose buffered copy lands after the duplicate window,
   is stored twice.
-- Live subscribers (`ants ask --wait`, a persona's `ask_agent`) see only messages published directly, not sourced
-  ones; the inbox consumers see both.
+- A live waiter hears a message only while its own connection reaches the hub: one on a leaf whose uplink is down
+  when the hub stores the message misses it, and finds it later through the inbox consumer (`ants inbox`, the
+  daemon's next delivery).
 - A daemon that replies while the uplink is down cannot ack the request. The reply goes to the outbox, under a
   message id made of the persona and the request's envelope id, and the daemon notes the request in `<home>/answered`
   of the persona; the redelivery after the uplink is back, even to a restarted daemon, is acked without being answered

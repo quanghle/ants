@@ -749,7 +749,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, wait: bool, words: Vec<S
     let envelope = ask_envelope(&nats.me, thread, words)?;
     let (client, js) = nats.connect("ants-cli").await?;
     // Subscribe first so a fast reply is not missed.
-    let mut replies = client.subscribe(subject::inbox_of(&nats.me.id)).await?;
+    let mut replies = bus::live_inbox(&client, &nats.me.id).await?;
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
     }

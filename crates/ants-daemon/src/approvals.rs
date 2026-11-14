@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, Envelope, Escalation, Hop, PersonaId, STREAM, State, ThreadId, ToolCall, Uuid,
-    Verdict, subject,
+    Verdict,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -162,7 +162,7 @@ impl NatsApprover {
         let mut decisions = self.client.subscribe(request.decision_subject()).await?;
         let mut inbox = match self.chain.escalate_to.is_empty() {
             true => None,
-            false => Some(self.client.subscribe(subject::inbox_of(&self.persona)).await?),
+            false => Some(bus::live_inbox(&self.client, &self.persona).await?),
         };
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
         self.waiting.lock().expect("waiting requests").insert(request.id, (request.clone(), chain_decided));
@@ -287,7 +287,7 @@ impl NatsApprover {
 }
 
 /// The next message of `subscriber`, if there is one; without one, never.
-async fn next_message(subscriber: &mut Option<async_nats::Subscriber>) -> Option<async_nats::Message> {
+async fn next_message(subscriber: &mut Option<bus::LiveInbox>) -> Option<async_nats::Message> {
     match subscriber {
         Some(subscriber) => subscriber.next().await,
         None => std::future::pending().await,

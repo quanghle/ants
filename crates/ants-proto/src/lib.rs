@@ -16,6 +16,12 @@ pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
 pub const STREAM_SUBJECTS: [&str; 5] =
     ["ants.inbox.>", "ants.plan.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
+/// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
+/// sources from a leaf's outbox it stores without publishing it on its subject.
+pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
+/// Where [`STREAM`] republishes a stored inbox message: the recipient's reply inboxes ([`subject::stored_inbox`]), which
+/// its credentials already read and only the server publishes to. The headers keep the original subject.
+pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}";
 /// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
 /// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
 pub const OUTBOX_STREAM: &str = "ANTS_OUT";
@@ -288,6 +294,11 @@ pub mod subject {
     /// Every message to `persona`, whoever sent it (the human's is `ants.inbox.human.*`).
     pub fn inbox_of(persona: &PersonaId) -> String {
         format!("ants.inbox.{persona}.*")
+    }
+
+    /// Every message to `persona` as the hub's stream stored it, republished there ([`super::STORED_INBOX_SOURCE`]).
+    pub fn stored_inbox(persona: &PersonaId) -> String {
+        format!("{}.stored.*", super::inbox_prefix(persona))
     }
 
     /// Every inbox subject `persona` may send on.

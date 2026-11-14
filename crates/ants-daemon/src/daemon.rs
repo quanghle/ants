@@ -188,7 +188,7 @@ async fn serve(config: &Config) -> Result<Served> {
         Some(escalator.clone()),
     )
     .await?;
-    mcp.listen(client.subscribe(subject::inbox_of(&config.persona)).await?);
+    mcp.listen(bus::live_inbox(&client, &config.persona).await?);
     let launch = Launch::new(
         config.harness,
         config.workdir.clone(),

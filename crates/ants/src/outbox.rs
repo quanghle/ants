@@ -242,6 +242,7 @@ mod tests {
     use ants_proto::{ChannelPost, DeadLetter, Envelope, JsDomain, PlanPost, ThreadId};
     use ants_test_support::NatsServer;
     use async_nats::jetstream::message::PublishMessage;
+    use futures::StreamExt as _;
 
     use super::*;
     use crate::{auth, leaf};
@@ -260,12 +261,21 @@ mod tests {
         panic!("{what}: timed out");
     }
 
+    /// The next message a waiter takes.
+    async fn next(replies: &mut bus::LiveInbox) -> Envelope {
+        let msg = tokio::time::timeout(Duration::from_secs(60), replies.next()).await.expect("no message").unwrap();
+        let envelope: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+        envelope.check_subject(&msg.subject).unwrap();
+        envelope
+    }
+
     async fn messages(js: &Context, name: &str) -> u64 {
         js.get_stream(name).await.unwrap().info().await.unwrap().state.messages
     }
 
     /// A real hub and leaf node: what a persona on the leaf sends while the uplink is down waits in the leaf's
-    /// outbox and lands in the hub's stream once, after the uplink is back; what the machine may not send stays out.
+    /// outbox and lands in the hub's stream once, after the uplink is back, and reaches a live waiter then; what the
+    /// machine may not send stays out.
     #[tokio::test]
     async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
         let (leaf_port, dead_port) = (free_port(), free_port());
@@ -287,7 +297,7 @@ mod tests {
             js.set_timeout(Duration::from_secs(2));
             (client, js)
         };
-        let (_h, h_js) = connect(&hub.url, &human).await;
+        let (h, h_js) = connect(&hub.url, &human).await;
         bus::init_stream(&h_js).await.unwrap();
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
@@ -324,6 +334,12 @@ mod tests {
         let (_a, a_js) = connect(&leaf_node.url, &dev_a).await;
         let (_b, b_js) = connect(&leaf_node.url, &dev_b).await;
         eventually("the leaf reaches the hub", async || bus::ensure_stream(&a_js).await.is_ok()).await;
+        // The human waits for replies as `ants ask --wait` does, off the machine and on it; on it, core NATS also
+        // delivers what the hub never got.
+        let (h_leaf, _) = connect(&leaf_node.url, &human).await;
+        let mut waiters = [bus::live_inbox(&h_leaf, &human).await.unwrap(), bus::live_inbox(&h, &human).await.unwrap()];
+        h.flush().await.unwrap();
+        h_leaf.flush().await.unwrap();
 
         // Before the outbox exists, a publish that cannot reach the hub fails outright.
         outbox_missing_fails(&b_js).await;
@@ -347,6 +363,10 @@ mod tests {
         let outboxed = subject::outbox(&direct.subject()).unwrap();
         a_js.send_publish(outboxed, copy).await.unwrap().await.unwrap();
         eventually("the copy reaches the intake", async || messages(&h_js, INTAKE_STREAM).await == 1).await;
+
+        for replies in &mut waiters {
+            assert_eq!(next(replies).await, direct);
+        }
 
         reload(dead_port);
         eventually("the uplink is down", async || bus::ensure_stream(&a_js).await.is_err()).await;
@@ -381,8 +401,14 @@ mod tests {
         assert_eq!(serde_json::from_slice::<DeadLetter>(&last.payload).unwrap(), dead);
         assert!(ants.get_last_raw_message_by_subject(&stray.subject()).await.is_err());
         assert!(ants.get_last_raw_message_by_subject(&stray_dead.subject()).await.is_err());
+        for replies in &mut waiters {
+            assert_eq!(next(replies).await, kept, "a waiter gets the kept message, once the hub stores it");
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(messages(&h_js, STREAM).await, 5, "stored once");
+        for replies in &mut waiters {
+            assert!(futures::FutureExt::now_or_never(replies.next()).is_none(), "each once, live or stored");
+        }
 
         remove(&h_js, &m1).await.unwrap();
         let info = h_js.get_stream(STREAM).await.unwrap().info().await.unwrap().config.clone();

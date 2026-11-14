@@ -181,8 +181,8 @@ impl Mcp {
         })
     }
 
-    /// Hand replies to waiting `ask_agent` calls as they arrive on `inbox`, a core subscription to the persona's inbox.
-    pub fn listen(&mut self, mut inbox: async_nats::Subscriber) {
+    /// Hand replies to waiting `ask_agent` calls as they arrive on `inbox`, the persona's ([`crate::bus::live_inbox`]).
+    pub fn listen(&mut self, mut inbox: crate::bus::LiveInbox) {
         let hub = self.hub.clone();
         self.tasks.push(tokio::spawn(async move {
             while let Some(msg) = inbox.next().await {

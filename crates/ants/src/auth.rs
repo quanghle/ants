@@ -511,9 +511,11 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
         }
-        // It sends only under its own name: not as the human, nor as dev-b to the human.
+        // It sends only under its own name: not as the human, nor as dev-b to the human, nor as the hub's stream
+        // republishing what dev-b sent.
         a_raw.publish(subject::inbox(&dev_a, &dev_a), "ok".into()).await.unwrap();
-        for spoof in [subject::inbox(&dev_b, &human), subject::inbox(&human, &dev_b)] {
+        let republished = format!("{}.stored.{dev_b}", inbox_prefix(&human));
+        for spoof in [subject::inbox(&dev_b, &human), subject::inbox(&human, &dev_b), republished] {
             a_raw.publish(spoof.clone(), "spoof".into()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{spoof}\"")), "{v}");
@@ -544,7 +546,10 @@ pub(crate) mod tests {
         assert!(v.contains(&format!("Publish to \"{of_b}\"")), "{v}");
         // Its own inbox it may watch live; a denial would be the next violation below.
         let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
-        for denied in [subject::inbox_of(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()] {
+        let _own = a_raw.subscribe(subject::stored_inbox(&dev_a)).await.unwrap();
+        for denied in
+            [subject::inbox_of(&dev_b), subject::stored_inbox(&dev_b), "_INBOX.>".to_owned(), subject::ALL.to_owned()]
+        {
             let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
@@ -845,6 +850,7 @@ pub(crate) mod tests {
         let stream = bus::init_stream(&h_js).await.unwrap();
         assert!(bus::missing_subjects(&stream.cached_info().config.subjects).is_empty());
         assert!(stream.cached_info().config.allow_direct, "and direct gets");
+        assert!(stream.cached_info().config.republish.is_some(), "and republishes inbox messages");
 
         let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();
         h_client.flush().await.unwrap();
