@@ -339,8 +339,20 @@ pub async fn answer(
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let (seq, request) = find(stream, id).await?;
-    let last = check(js, stream, seq, &request, verdict, now).await?;
-    decide(js, stream, &request, verdict, last).await
+    answer_request(js, stream, seq, &request, verdict, now).await
+}
+
+/// Answer `request`, stored at stream sequence `seq`, as [`answer`] does.
+pub async fn answer_request(
+    js: &jetstream::Context,
+    stream: &Stream,
+    seq: u64,
+    request: &ApprovalRequest,
+    verdict: Verdict,
+    now: DateTime<Utc>,
+) -> Result<ApprovalDecision> {
+    let last = check(js, stream, seq, request, verdict, now).await?;
+    decide(js, stream, request, verdict, last).await
 }
 
 fn answered(request: &ApprovalRequest, decision: &ApprovalDecision) -> anyhow::Error {
@@ -400,7 +412,7 @@ async fn decide(
 }
 
 /// Time left before `expires_at`, such as `4m05s`.
-fn left(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub(crate) fn left(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (expires_at - now).max(TimeDelta::zero()).num_seconds();
     match secs {
         0..60 => format!("{secs}s"),
