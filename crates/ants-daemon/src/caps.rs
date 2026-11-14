@@ -10,6 +10,9 @@
 //! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the ant's
 //! allowance comes back at 00:00 UTC. Spend is kept whether or not the ant has caps, for `ants spend` to report.
 //!
+//! Spend first passing a share of a cap short of it gives a [`Warning`], once per thread allowance or UTC day: that it
+//! was given is kept with the spend, so restarts and later prompts do not give it again.
+//!
 //! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, and the threads
 //! whose escalation has a deadline under `<ant>.escalations.deadlines`.
 
@@ -63,6 +66,78 @@ struct ThreadSpend {
     /// The thread's escalation, from when it first went anywhere until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     escalation: Option<Pending>,
+    #[serde(default, skip_serializing_if = "Warned::none")]
+    warned: Warned,
+}
+
+/// What the ant spent in a UTC day, stored as [`Spent`] is, with the warnings given.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DaySpend {
+    tokens: u64,
+    cost: f64,
+    #[serde(default, skip_serializing_if = "Warned::none")]
+    warned: Warned,
+}
+
+/// The caps whose warning was given.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct Warned {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tokens: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cost: bool,
+}
+
+impl Warned {
+    fn none(&self) -> bool {
+        !self.tokens && !self.cost
+    }
+}
+
+/// Spend that passed the warning share of a cap, short of the cap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Warning {
+    /// The cap's config key, such as `max_daily_cost`.
+    pub key: &'static str,
+    /// What was spent against the cap, as `ants spend` shows it: `850/1000 tokens` or `4.10/5.00`.
+    pub figure: String,
+    /// The share of the cap spent, in percent, rounded down.
+    pub percent: u64,
+}
+
+impl Warning {
+    /// Whether it is about the ant's daily allowance rather than the thread's.
+    pub fn daily(&self) -> bool {
+        self.key.starts_with("max_daily_")
+    }
+
+    /// The notice telling a human of it, for `ant` spending on `thread`.
+    pub fn text(&self, ant: &UserId, thread: &ThreadId) -> String {
+        let Self { key, figure, percent } = self;
+        let raise = format!(
+            "To raise the cap, set {key} of {ant} in the config file of the daemon serving it and reload the daemon \
+             (SIGHUP)."
+        );
+        if self.daily() {
+            format!(
+                "[ants] {ant} spent {figure} ({percent}%) of {key} today (UTC), last on thread {thread}. At the cap, \
+                 its prompts are cancelled and escalated until 00:00 UTC. {raise} `ants spend {ant}` shows its spend."
+            )
+        } else {
+            format!(
+                "[ants] {ant} spent {figure} ({percent}%) of {key} on thread {thread} since a human's last message \
+                 there. At the cap, its prompt there is cancelled and the thread escalated. A human's message on the \
+                 thread gives it a fresh allowance. {raise} `ants spend {ant} --thread {thread}` shows its spend."
+            )
+        }
+    }
+}
+
+/// What counting a harness's report found: the cap reached, if any, and the warnings due.
+#[derive(Debug, Default, PartialEq)]
+pub struct Recorded {
+    pub reached: Option<String>,
+    pub warnings: Vec<Warning>,
 }
 
 /// Where a thread's escalation stands.
@@ -175,8 +250,10 @@ pub struct Ledger {
     caps: Caps,
     ant: UserId,
     store: Store,
+    /// The share of a cap, in percent, past which spend gives a [`Warning`]; 0 for none.
+    warn_percent: u8,
     /// The ant's spend of the day it is for; held while it is read or stored, so updates do not cross.
-    day: tokio::sync::Mutex<Option<(String, Spent)>>,
+    day: tokio::sync::Mutex<Option<(String, DaySpend)>>,
     /// The escalation deadlines by thread, once read; held while a thread's spend is read and stored.
     threads: tokio::sync::Mutex<Option<BTreeMap<ThreadId, i64>>>,
 }
@@ -193,7 +270,13 @@ impl Ledger {
     }
 
     fn with_store(store: Store, ant: UserId, caps: Caps) -> Self {
-        Self { caps, ant, store, day: tokio::sync::Mutex::default(), threads: tokio::sync::Mutex::default() }
+        let (day, threads) = (tokio::sync::Mutex::default(), tokio::sync::Mutex::default());
+        Self { caps, ant, store, warn_percent: 0, day, threads }
+    }
+
+    /// Give a [`Warning`] once spend passes `percent` of a cap; 0 for never.
+    pub fn warn_at(self, percent: u8) -> Self {
+        Self { warn_percent: percent, ..self }
     }
 
     /// The thread starts over from nothing spent.
@@ -315,8 +398,8 @@ impl Ledger {
         self.reached_on(thread, &today()).await
     }
 
-    /// Count what a harness reported for the thread. Returns the cap reached, if any.
-    pub async fn record(&self, thread: &ThreadId, spend: &Spend) -> Result<Option<String>> {
+    /// Count what a harness reported for the thread. Returns the cap reached, if any, and the warnings due.
+    pub async fn record(&self, thread: &ThreadId, spend: &Spend) -> Result<Recorded> {
         self.record_on(thread, spend, &today()).await
     }
 
@@ -331,8 +414,9 @@ impl Ledger {
     }
 
     /// Counted whether or not the ant has caps, so `ants spend` reports it.
-    async fn record_on(&self, thread: &ThreadId, spend: &Spend, today: &str) -> Result<Option<String>> {
-        let (spent, tokens, cost) = self
+    async fn record_on(&self, thread: &ThreadId, spend: &Spend, today: &str) -> Result<Recorded> {
+        let caps = self.caps;
+        let (spent, tokens, cost, mut warnings) = self
             .update(thread, |spent| {
                 let (tokens, cost) = match spend {
                     Spend::Tokens(n) => (*n, 0.0),
@@ -340,8 +424,12 @@ impl Ledger {
                 };
                 spent.tokens += tokens;
                 spent.cost += cost;
-                let total = ThreadSpend { tokens: spent.tokens, cost: spent.cost, ..ThreadSpend::default() };
-                (true, (total, tokens, cost))
+                let total = Spent { tokens: spent.tokens, cost: spent.cost };
+                let (tokens_cap, cost_cap) =
+                    (("max_thread_tokens", caps.thread_tokens), ("max_thread_cost", caps.thread_cost));
+                let warnings = self.warnings(total, tokens_cap, cost_cap, &mut spent.warned);
+                let total = ThreadSpend { tokens: total.tokens, cost: total.cost, ..ThreadSpend::default() };
+                (true, (total, tokens, cost, warnings))
             })
             .await?;
         crate::metrics::ant(&self.ant).spent(tokens, cost);
@@ -351,13 +439,55 @@ impl Ledger {
         if tokens > 0 || cost > 0.0 {
             daily.tokens += tokens;
             daily.cost += cost;
+            let total = Spent { tokens: daily.tokens, cost: daily.cost };
+            let (tokens_cap, cost_cap) = (("max_daily_tokens", caps.daily_tokens), ("max_daily_cost", caps.daily_cost));
+            warnings.extend(self.warnings(total, tokens_cap, cost_cap, &mut daily.warned));
             self.store.put(daily_spend_key(&self.ant, today), daily).await?;
         }
-        Ok(self.check(&spent, daily))
+        Ok(Recorded { reached: self.check(&spent, daily), warnings })
+    }
+
+    /// The warnings `spent` is due against a token and a cost cap, each named by its config key: one for each cap it
+    /// passed the warning share of for the first time, short of the cap, noted in `warned`. A cap passed at once is
+    /// noted without a warning, as reaching it tells of it.
+    fn warnings(
+        &self,
+        spent: Spent,
+        (tokens_key, tokens_cap): (&'static str, Option<u64>),
+        (cost_key, cost_cap): (&'static str, Option<f64>),
+        warned: &mut Warned,
+    ) -> Vec<Warning> {
+        let percent = u64::from(self.warn_percent);
+        let mut warnings = Vec::new();
+        if percent == 0 {
+            return warnings;
+        }
+        if let Some(cap) = tokens_cap
+            && !warned.tokens
+            && u128::from(spent.tokens) * 100 >= u128::from(cap) * u128::from(percent)
+        {
+            warned.tokens = true;
+            if spent.tokens < cap {
+                let figure = format!("{}/{cap} tokens", spent.tokens);
+                let percent = (u128::from(spent.tokens) * 100 / u128::from(cap)) as u64;
+                warnings.push(Warning { key: tokens_key, figure, percent });
+            }
+        }
+        if let Some(cap) = cost_cap
+            && !warned.cost
+            && spent.cost * 100.0 >= cap * percent as f64
+        {
+            warned.cost = true;
+            if spent.cost < cap {
+                let figure = format!("{:.2}/{cap:.2}", spent.cost);
+                warnings.push(Warning { key: cost_key, figure, percent: (spent.cost / cap * 100.0) as u64 });
+            }
+        }
+        warnings
     }
 
     /// The ant's spend on `today`, read from the store when the day held is another one.
-    async fn load_day<'a>(&self, day: &'a mut Option<(String, Spent)>, today: &str) -> Result<&'a mut Spent> {
+    async fn load_day<'a>(&self, day: &'a mut Option<(String, DaySpend)>, today: &str) -> Result<&'a mut DaySpend> {
         if day.as_ref().is_none_or(|(d, _)| d != today) {
             let spent = self.store.get(daily_spend_key(&self.ant, today)).await?;
             *day = Some((today.to_owned(), spent));
@@ -365,7 +495,7 @@ impl Ledger {
         Ok(&mut day.as_mut().expect("loaded").1)
     }
 
-    fn check(&self, thread: &ThreadSpend, day: &Spent) -> Option<String> {
+    fn check(&self, thread: &ThreadSpend, day: &DaySpend) -> Option<String> {
         let caps = &self.caps;
         let since = "since a human's last message";
         let resets = "today; resets at 00:00 UTC";
@@ -386,10 +516,10 @@ impl Ledger {
     }
 }
 
-/// Forget what the thread spent. Returns whether it had spent anything.
+/// Forget what the thread spent, and the warnings given of it. Returns whether it had spent anything.
 fn forget_spend(spent: &mut ThreadSpend) -> bool {
-    let had = spent.tokens > 0 || spent.cost > 0.0;
-    (spent.tokens, spent.cost) = (0, 0.0);
+    let had = spent.tokens > 0 || spent.cost > 0.0 || !spent.warned.none();
+    (spent.tokens, spent.cost, spent.warned) = (0, 0.0, Warned::default());
     had
 }
 
@@ -431,11 +561,12 @@ mod tests {
         let caps = Caps { thread_cost: Some(1.0), ..Caps::default() };
         let ledger = Ledger::memory(ant(), caps);
         let t = thread(1);
-        assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap(), None);
-        assert_eq!(ledger.record_on(&t, &cost("s1", 0.5), DAY).await.unwrap(), None);
+        assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap().reached, None);
+        assert_eq!(ledger.record_on(&t, &cost("s1", 0.5), DAY).await.unwrap().reached, None);
         // The harness restarted and counts from zero again: 0.25 + 0.25 + 0.25.
-        assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap(), None);
-        let reached = ledger.record_on(&t, &cost("s2", 0.3), DAY).await.unwrap().expect("a new session adds it all");
+        assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap().reached, None);
+        let reached =
+            ledger.record_on(&t, &cost("s2", 0.3), DAY).await.unwrap().reached.expect("a new session adds it all");
         assert!(reached.starts_with("Thread cost cap reached (1.05 of 1.00"), "{reached}");
         assert_eq!(ledger.reached_on(&thread(2), DAY).await.unwrap(), None, "other threads have their own");
     }
@@ -444,8 +575,8 @@ mod tests {
     async fn spend_is_kept_without_caps() {
         let store = Store::Memory(Arc::default());
         let ledger = Ledger::with_store(store.clone(), ant(), Caps::default());
-        assert_eq!(ledger.record_on(&thread(1), &Spend::Tokens(70), DAY).await.unwrap(), None);
-        assert_eq!(ledger.record_on(&thread(1), &cost("s1", 0.5), DAY).await.unwrap(), None);
+        assert_eq!(ledger.record_on(&thread(1), &Spend::Tokens(70), DAY).await.unwrap().reached, None);
+        assert_eq!(ledger.record_on(&thread(1), &cost("s1", 0.5), DAY).await.unwrap().reached, None);
         let day: Spent = store.get(daily_spend_key(&ant(), DAY)).await.unwrap();
         assert_eq!(day, Spent { tokens: 70, cost: 0.5 });
         let spent: ThreadSpend = store.get(thread_spend_key(&ant(), &thread(1))).await.unwrap();
@@ -457,12 +588,12 @@ mod tests {
         let caps = Caps { thread_tokens: Some(100), daily_tokens: Some(250), ..Caps::default() };
         let ledger = Ledger::memory(ant(), caps);
         let (t1, t2) = (thread(1), thread(2));
-        let reached = ledger.record_on(&t1, &Spend::Tokens(120), DAY).await.unwrap().unwrap();
+        let reached = ledger.record_on(&t1, &Spend::Tokens(120), DAY).await.unwrap().reached.unwrap();
         assert!(reached.starts_with("Thread token cap reached (120 of 100"), "{reached}");
         ledger.fresh_allowance(&t1).await.unwrap();
         assert_eq!(ledger.reached_on(&t1, DAY).await.unwrap(), None);
-        assert_eq!(ledger.record_on(&t2, &Spend::Tokens(90), DAY).await.unwrap(), None);
-        let reached = ledger.record_on(&t1, &Spend::Tokens(50), DAY).await.unwrap().unwrap();
+        assert_eq!(ledger.record_on(&t2, &Spend::Tokens(90), DAY).await.unwrap().reached, None);
+        let reached = ledger.record_on(&t1, &Spend::Tokens(50), DAY).await.unwrap().reached.unwrap();
         assert!(reached.starts_with("Daily token cap of dev-a reached (260 of 250"), "{reached}");
         ledger.fresh_allowance(&t1).await.unwrap();
         assert!(ledger.reached_on(&t1, DAY).await.unwrap().is_some(), "the daily cap holds until the day ends");
@@ -476,11 +607,52 @@ mod tests {
         ledger.record_on(&thread(1), &cost("s1", 0.75), DAY).await.unwrap();
 
         let ledger = Ledger::with_store(store, ant(), caps);
-        let reached = ledger.record_on(&thread(1), &cost("s1", 1.0), DAY).await.unwrap();
+        let reached = ledger.record_on(&thread(1), &cost("s1", 1.0), DAY).await.unwrap().reached;
         assert_eq!(reached, None, "only the 0.25 added since the stored reading counts");
-        let reached = ledger.record_on(&thread(2), &cost("s2", 0.5), DAY).await.unwrap().unwrap();
+        let reached = ledger.record_on(&thread(2), &cost("s2", 0.5), DAY).await.unwrap().reached.unwrap();
         assert!(reached.starts_with("Daily cost cap of dev-a reached (1.50 of 1.20"), "{reached}");
         assert_eq!(ledger.reached_on(&thread(2), "2026-11-14").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_warning_comes_once_per_allowance_and_day_and_survives_a_restart() {
+        let caps = Caps { thread_tokens: Some(100), daily_cost: Some(2.0), ..Caps::default() };
+        let store = Store::Memory(Arc::default());
+        let ledger = Ledger::with_store(store.clone(), ant(), caps).warn_at(80);
+        let (t1, t2) = (thread(1), thread(2));
+        let recorded = ledger.record_on(&t1, &Spend::Tokens(79), DAY).await.unwrap();
+        assert_eq!(recorded, Recorded::default(), "short of the warning share");
+        let recorded = ledger.record_on(&t1, &Spend::Tokens(6), DAY).await.unwrap();
+        let warning = Warning { key: "max_thread_tokens", figure: "85/100 tokens".to_owned(), percent: 85 };
+        assert_eq!(recorded, Recorded { reached: None, warnings: vec![warning.clone()] });
+        assert!(!warning.daily());
+        let text = warning.text(&ant(), &t1);
+        assert!(text.starts_with("[ants] dev-a spent 85/100 tokens (85%) of max_thread_tokens on thread t1"), "{text}");
+        assert!(text.contains("set max_thread_tokens of dev-a") && text.contains("`ants spend dev-a --thread t1`"));
+
+        let ledger = Ledger::with_store(store.clone(), ant(), caps).warn_at(80);
+        let recorded = ledger.record_on(&t1, &Spend::Tokens(5), DAY).await.unwrap();
+        assert!(recorded.warnings.is_empty(), "warned already, also after a restart");
+        ledger.fresh_allowance(&t1).await.unwrap();
+        let recorded = ledger.record_on(&t1, &Spend::Tokens(90), DAY).await.unwrap();
+        assert_eq!(recorded.warnings.len(), 1, "a fresh allowance warns again");
+
+        let recorded = ledger.record_on(&t1, &cost("s1", 1.7), DAY).await.unwrap();
+        let warning = Warning { key: "max_daily_cost", figure: "1.70/2.00".to_owned(), percent: 85 };
+        assert_eq!(recorded.warnings, std::slice::from_ref(&warning));
+        assert!(warning.daily() && warning.text(&ant(), &t1).contains("today (UTC), last on thread t1"));
+        assert!(ledger.record_on(&t2, &cost("s2", 0.1), DAY).await.unwrap().warnings.is_empty(), "once a day");
+        let day: Spent = store.get(daily_spend_key(&ant(), DAY)).await.unwrap();
+        assert_eq!(day.tokens, 180, "`ants spend` still reads the day");
+        let next = ledger.record_on(&t2, &cost("s2", 1.8), "2026-11-14").await.unwrap();
+        assert_eq!(next.warnings.len(), 1, "a new day warns again");
+
+        // Passing the cap at once: reaching it tells of it, so no warning, and none later either.
+        let recorded = ledger.record_on(&t2, &Spend::Tokens(150), DAY).await.unwrap();
+        assert!(recorded.reached.is_some() && recorded.warnings.is_empty(), "{recorded:?}");
+
+        let silent = Ledger::with_store(Store::Memory(Arc::default()), ant(), caps).warn_at(0);
+        assert!(silent.record_on(&t1, &Spend::Tokens(90), DAY).await.unwrap().warnings.is_empty(), "0: never");
     }
 
     fn escalated(to: &[&str], deadline: Option<i64>) -> Pending {

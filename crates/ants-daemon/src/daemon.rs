@@ -21,7 +21,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
-use crate::caps::{Caps, Ledger};
+use crate::caps::{Caps, Ledger, Recorded, Warning};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
@@ -105,6 +105,8 @@ pub struct Config {
     pub limits: PromptLimits,
     /// Token and cost caps of each thread and of the ant.
     pub caps: Caps,
+    /// The share of a cap, in percent, past which a human is warned once; 0 for never.
+    pub spend_warn_percent: u8,
     /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
     /// daemon lists it, and hand over to a daemon that puts it later ([`roster::hold`]).
     pub defer_to_others: bool,
@@ -189,7 +191,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
-    let ledger = std::sync::Arc::new(Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps));
+    let ledger = Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps).warn_at(config.spend_warn_percent);
+    let ledger = std::sync::Arc::new(ledger);
     let escalator = Escalator::new(
         config.ant.clone(),
         config.escalation.clone(),
@@ -1324,7 +1327,7 @@ impl Inbox<'_> {
                     cancelled_by = Some(by);
                 }
                 Some(spent) = spend.recv() => {
-                    if let Some(cap) = self.record(thread, &spent).await {
+                    if let Some(cap) = self.record(envelope, &spent).await {
                         if let Some(stop) = stop_tx.take() {
                             let _ = stop.send(cap.clone());
                         }
@@ -1359,7 +1362,7 @@ impl Inbox<'_> {
         };
         // Spend reported as the prompt ended, such as its tokens.
         while let Ok(spent) = spend.try_recv() {
-            if let Some(cap) = self.record(thread, &spent).await {
+            if let Some(cap) = self.record(envelope, &spent).await {
                 reached.get_or_insert(cap);
             }
         }
@@ -1511,12 +1514,32 @@ impl Inbox<'_> {
         Ok(())
     }
 
-    /// Count what the harness spent on the thread. Returns the cap reached, if any.
-    async fn record(&self, thread: &ThreadId, spent: &Spend) -> Option<String> {
-        self.ledger.record(thread, spent).await.unwrap_or_else(|e| {
+    /// Count what the harness spent on the thread of `envelope`, warning a human of each cap nearly reached. Returns
+    /// the cap reached, if any.
+    async fn record(&self, envelope: &Envelope, spent: &Spend) -> Option<String> {
+        let thread = &envelope.thread_id;
+        let recorded = self.ledger.record(thread, spent).await.unwrap_or_else(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing what the thread spent");
-            None
-        })
+            Recorded::default()
+        });
+        for warning in &recorded.warnings {
+            self.warn(envelope, warning).await;
+        }
+        recorded.reached
+    }
+
+    /// Tell a human that spend on the thread of `envelope` passed the warning share of a cap: the thread's owner, else
+    /// the default human, of a thread cap, and the default human of a daily cap. On a thread of its own, so that
+    /// `ants ask --wait` on the thread still waits for the answer.
+    async fn warn(&self, envelope: &Envelope, warning: &Warning) {
+        let thread = &envelope.thread_id;
+        let owner = if warning.daily() { None } else { self.humans.human_owner(envelope.owner.as_ref()) };
+        let to = owner.unwrap_or_else(|| self.humans.default_human().clone());
+        tracing::info!(%thread, %to, cap = warning.key, spent = warning.figure, "spend nearing a cap; warning a human");
+        let notice = Envelope::new(self.ant.clone(), to, warning.text(self.ant, thread));
+        if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, None).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "warning a human of spend nearing a cap");
+        }
     }
 
     /// Escalate the thread for `reason` up its origin chain, in the end to its owner, else the default human
@@ -2393,6 +2416,33 @@ mod tests {
         assert_eq!(bus.unacked().await, 0);
         let log = log.lock().unwrap();
         assert_eq!((log.cancelled, log.answered.as_slice()), (1, &["go on".to_owned()][..]));
+    }
+
+    #[tokio::test]
+    async fn spend_nearing_a_cap_warns_the_human_once_on_a_thread_of_its_own() {
+        let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+        let caps = Caps { thread_cost: Some(1.0), ..Caps::default() };
+        bus.ledger = Arc::new(Ledger::memory(bus.dev.clone(), caps).warn_at(80));
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let dev_b: UserId = "dev-b".parse().unwrap();
+        let t1 = ThreadId::generate();
+        bus.send_from(dev_b.clone(), &t1, "cost 0.85").await;
+        bus.send_from(dev_b.clone(), &t1, "cost 0.9").await;
+        bus.send(&t1, "done?").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let warning = next_envelope(&mut to_human).await;
+            assert_eq!(warning.from, bus.dev);
+            assert_ne!(warning.thread_id, t1, "a thread of its own, so a wait on the thread goes on");
+            let start = format!("[ants] dev-a spent 0.85/1.00 (85%) of max_thread_cost on thread {t1} since");
+            assert!(warning.text.starts_with(&start), "{}", warning.text);
+            assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "done?".to_owned()), "no second warning");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(bus.unacked().await, 0);
     }
 
     #[tokio::test]

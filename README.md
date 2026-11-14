@@ -251,6 +251,7 @@ prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
 max_thread_cost = 5.0                      # optional; also max_thread_tokens
 max_daily_cost = 50.0                      # optional; also max_daily_tokens
+spend_warn_percent = 80                    # default; warn once past this share of a cap; 0 disables
 escalate_to = ["lead", "dev-b"]            # optional escalation chain; first ant leads
 max_escalation_hops = 3                    # default
 escalate_after = "30m"                     # default; "0" waits indefinitely
@@ -347,6 +348,7 @@ A human stops a running prompt with `ants cancel ANT THREAD`: a `CancelRequest` 
 
 - Thread allowances reset on any human message on the thread, and once per escalation level when the level's leader replies.
 - Daily allowances reset at 00:00 UTC (or on daemon restart with a higher cap).
+- Spend first passing `spend_warn_percent` (default 80, `0` disables, below 100) of a cap, short of it, sends an `[ants]` warning on a new thread: of a thread cap to the thread's owner, else the default human; of a daily cap to the default human. It shows the spend as `ants spend` does (`spent/cap` and the percentage), names the config key to raise (then reload the daemon with `SIGHUP`) and the `ants spend` command. Each cap warns once per thread allowance or UTC day, recorded with the spend in `ants_sessions`, so restarts and later prompts do not repeat it.
 - Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`, with or without caps. Claude's adapter reports both at turn end; Codex's adapter reports tokens only; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
 
 ### Spend report

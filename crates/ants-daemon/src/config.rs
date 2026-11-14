@@ -65,6 +65,7 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = crate::approvals::DEFAULT_TIMEOUT
 pub const DEFAULT_PROMPT_TIMEOUT: Duration = harness::DEFAULT_PROMPT_TIMEOUT;
 pub const DEFAULT_MAX_TOOL_CALLS: usize = harness::DEFAULT_MAX_TOOL_CALLS;
 pub const DEFAULT_ESCALATE_AFTER: Duration = escalation::DEFAULT_ESCALATE_AFTER;
+pub const DEFAULT_SPEND_WARN_PERCENT: u8 = 80;
 
 /// `~/.ants/config.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -160,6 +161,9 @@ pub struct Ant {
     pub max_daily_tokens: Option<u64>,
     /// Cost the ant may spend in a UTC day.
     pub max_daily_cost: Option<f64>,
+    /// The share of a spend cap, in percent, past which a human is warned once; 0 for never.
+    #[serde(default = "default_spend_warn_percent")]
+    pub spend_warn_percent: u8,
     /// Ants the ant's escalations go to before any human, the first one leading; published in the roster.
     #[serde(default)]
     pub escalate_to: Vec<UserId>,
@@ -196,6 +200,10 @@ fn default_prompt_timeout() -> Duration {
 
 fn default_max_tool_calls() -> usize {
     DEFAULT_MAX_TOOL_CALLS
+}
+
+fn default_spend_warn_percent() -> u8 {
+    DEFAULT_SPEND_WARN_PERCENT
 }
 
 fn default_max_escalation_hops() -> u32 {
@@ -238,6 +246,7 @@ impl Ant {
             max_thread_cost: None,
             max_daily_tokens: None,
             max_daily_cost: None,
+            spend_warn_percent: DEFAULT_SPEND_WARN_PERCENT,
             escalate_to: Vec::new(),
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
             escalate_after: DEFAULT_ESCALATE_AFTER,
@@ -248,7 +257,7 @@ impl Ant {
     /// The daemon config, with `default_nats` as the server when none is set and the harness from `harnesses`.
     pub fn into_config(self, default_nats: &str, harnesses: &Harnesses) -> Result<Config> {
         harness::validate_env(&self.env)?;
-        self.validate_chain()?;
+        self.validate()?;
         let instructions = self.prompt_instructions();
         let caps = self.caps();
         let harness = harnesses
@@ -294,6 +303,7 @@ impl Ant {
                 max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
             },
             caps,
+            spend_warn_percent: self.spend_warn_percent,
             escalation: Chain {
                 escalate_to: self.escalate_to,
                 max_hops: self.max_escalation_hops,
@@ -314,8 +324,11 @@ impl Ant {
         }
     }
 
-    /// The escalation chain names other ants, each once.
-    fn validate_chain(&self) -> Result<()> {
+    /// The escalation chain names other ants, each once, and the spend warning comes short of the caps.
+    fn validate(&self) -> Result<()> {
+        if self.spend_warn_percent >= 100 {
+            bail!("ant {}: spend_warn_percent must be below 100 (0 for no warning)", self.name);
+        }
         let mut seen = BTreeSet::new();
         for member in &self.escalate_to {
             if *member == self.name {
@@ -406,7 +419,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
             bail!("config {}: ant {} is listed twice", path.display(), ant.name);
         }
         harness::validate_env(&ant.env)?;
-        ant.validate_chain().with_context(|| format!("config {}", path.display()))?;
+        ant.validate().with_context(|| format!("config {}", path.display()))?;
         if ant.harness.is_none() {
             ant.harness.clone_from(&file.harness);
         }
@@ -664,6 +677,7 @@ pub fn entry(ant: &Ant) -> Result<String> {
         ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),
         ("max_tool_calls", ant.max_tool_calls as u64, default.max_tool_calls as u64),
         ("max_escalation_hops", ant.max_escalation_hops.into(), default.max_escalation_hops.into()),
+        ("spend_warn_percent", ant.spend_warn_percent.into(), default.spend_warn_percent.into()),
     ];
     for (key, value, default) in numbers {
         if value != default {
@@ -782,6 +796,7 @@ Review changes for correctness."""
             max_tool_calls = 50
             max_thread_cost = 2.5
             max_daily_tokens = 1000000
+            spend_warn_percent = 90
             escalate_to = ["lead", "dev-b"]
             max_escalation_hops = 2
             escalate_after = "0"
@@ -824,6 +839,7 @@ Review changes for correctness."""
         assert_eq!(config.limits, PromptLimits { timeout: None, max_tool_calls: Some(50) }, "0 is no limit");
         let caps = Caps { thread_cost: Some(2.5), daily_tokens: Some(1_000_000), ..Caps::default() };
         assert_eq!(config.caps, caps);
+        assert_eq!(config.spend_warn_percent, 90);
         let chain =
             Chain { escalate_to: vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()], max_hops: 2, after: None };
         assert_eq!(config.escalation, chain, "0 waits for the leader for good");
@@ -844,6 +860,7 @@ Review changes for correctness."""
         assert!(!config.worktrees, "threads share the workdir by default");
         assert_eq!(config.limits, PromptLimits::default());
         assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
+        assert_eq!(config.spend_warn_percent, DEFAULT_SPEND_WARN_PERCENT);
         assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
         assert_eq!(config.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
         assert!(config.home.ends_with(".ants/dev-b"));
@@ -1135,6 +1152,8 @@ Review changes for correctness."""
         assert!(err("[[ant]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
         let chain = |names: &str| err(&format!("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nescalate_to = {names}"));
         assert!(chain("[\"dev-a\"]").contains("escalate_to names the ant itself"));
+        let warn = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nspend_warn_percent = 100");
+        assert!(warn.contains("spend_warn_percent must be below 100"), "{warn}");
         assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
         assert!(chain("[\"Lead!\"]").contains("parsing config"));
     }
@@ -1235,6 +1254,7 @@ Review changes for correctness."""
         full.idle_timeout = Duration::from_mins(90);
         full.max_thread_cost = Some(2.5);
         full.max_daily_tokens = Some(1000);
+        full.spend_warn_percent = 0;
         let text = entry(&full).unwrap();
         assert!(text.contains("\nidle_timeout = \"1h30m\"\nprompt_timeout = \"0\"\n"), "{text}");
         let read: Vec<_> = parse_here(&text).unwrap().into_iter().filter(|ant| !ant.builtin).collect();
