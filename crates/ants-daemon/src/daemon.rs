@@ -44,6 +44,10 @@ const MAX_ATTEMPTS: i64 = 5;
 /// The consumer allows one more delivery, to dead-letter a message whose last attempt never finished.
 const MAX_DELIVER: i64 = MAX_ATTEMPTS + 1;
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How long a human's message from a machine's outbox waits for its thread's owner to be recorded.
+const OWNER_LANDS_WITHIN: Duration = Duration::from_secs(10);
+/// The header JetStream marks a message it sourced from another stream with.
+const STREAM_SOURCE: &str = "Nats-Stream-Source";
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
@@ -674,6 +678,26 @@ impl Inbox<'_> {
     }
 }
 
+impl Inbox<'_> {
+    /// Wait, up to [`OWNER_LANDS_WITHIN`], for the owner a human's message in `incoming` names to be recorded for its
+    /// thread when the message came from a machine's outbox: the owners bucket sources the record from the same
+    /// outbox, but apart from the hub's stream, and the ant's own messages on the thread take their owner from it.
+    async fn owner_landed(&self, incoming: &Incoming, msg: &jetstream::Message) {
+        let envelope = &incoming.envelope;
+        let sourced = msg.headers.as_ref().is_some_and(|h| h.get(STREAM_SOURCE).is_some());
+        if !sourced || incoming.post.is_some() || envelope.owner.is_none() || !self.humans.is_human(&envelope.from) {
+            return;
+        }
+        match self.threads.awaited_owner(&envelope.thread_id, OWNER_LANDS_WITHIN).await {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::debug!(thread = %envelope.thread_id, "no owner recorded for the thread"),
+            Err(e) => {
+                tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's owner")
+            }
+        }
+    }
+}
+
 /// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
 /// that buries what the daemon could not ([`dead::bury_undelivered`]).
 pub struct Claims<'a> {
@@ -851,6 +875,7 @@ impl Inbox<'_> {
         };
         self.thread_origin(&mut incoming, seq).await;
         self.sender_claims(&mut incoming, seq).await;
+        self.owner_landed(&incoming, &msg).await;
         let envelope = &incoming.envelope;
         if self.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
@@ -3176,6 +3201,45 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the named one");
+    }
+
+    #[tokio::test]
+    async fn a_human_s_message_from_an_outbox_waits_for_its_thread_s_owner_to_be_recorded() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        bus::ensure_owners(&bus.js).await.unwrap();
+        let human = UserId::human();
+        let ask = |text: &str| Envelope::new(human.clone(), bus.dev.clone(), text).with_owner(Some(human.clone()));
+        let (sourced, direct) = (ask("from the outbox"), ask("unrecorded, straight to the hub"));
+        // Sourced, as from a machine's outbox, ahead of the owner's record.
+        let outbox =
+            jetstream::stream::Config { name: "OUT".into(), subjects: vec!["out.>".into()], ..Default::default() };
+        bus.js.create_stream(outbox).await.unwrap();
+        let mut config = bus.js.get_stream(ants_proto::STREAM).await.unwrap().cached_info().config.clone();
+        config.sources = Some(vec![jetstream::stream::Source {
+            name: "OUT".into(),
+            subject_transforms: vec![jetstream::stream::SubjectTransform {
+                source: "out.>".into(),
+                destination: "ants.>".into(),
+            }],
+            ..Default::default()
+        }]);
+        bus.js.update_stream(&config).await.unwrap();
+        let out = sourced.subject().replacen("ants.", "out.", 1);
+        bus::publish_json(&bus.js, out, &sourced, None).await.unwrap();
+        let seq = bus::publish_json(&bus.js, direct.subject(), &direct, None).await.unwrap();
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(direct.id), "no record to wait for");
+            assert!(timeout(Duration::from_millis(700), to_human.next()).await.is_err(), "waiting for the record");
+            crate::owners::record(&bus.js, None, &sourced.thread_id, &human).await.unwrap();
+            assert_eq!(next_envelope(&mut to_human).await.in_reply_to, Some(sourced.id));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]

@@ -571,6 +571,11 @@ impl Threads {
         self.owners.owner_of(thread).await
     }
 
+    /// [`Threads::recorded_owner`], waiting up to `within` for a record on its way ([`Owners::wait_for`]).
+    pub async fn awaited_owner(&self, thread: &ThreadId, within: Duration) -> Result<Option<UserId>> {
+        self.owners.wait_for(thread, within).await
+    }
+
     /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` has a link
     /// to it: it takes part in the thread ([`Threads::takes_part`]), or an ant that does passed the link on to it,
     /// directly or through ants it passed the link on to in turn ([`links::passed_on`]). None otherwise: no ant links

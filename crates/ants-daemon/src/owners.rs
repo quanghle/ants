@@ -1,20 +1,27 @@
 //! The owners of the threads humans and webhooks message ants on. Before its message starts or joins a thread, a human
 //! (`ants ask`) or a webhook (`ants webhook serve`) records the thread's owner in [`OWNERS_BUCKET`] ([`record`]), which
-//! no ant's credentials write and whose first record of a thread stays. A daemon takes the owner of an ant's message on
-//! a thread no channel post started only from there ([`Owners::owner_of`]), so no ant names the owner of such a thread.
+//! no ant's credentials write and whose first record of a thread stays its owner. While the hub is out of reach, a
+//! human's record waits in the machine's outbox until the bucket sources it ([`owner_outbox`]). A daemon takes the
+//! owner of an ant's message on a thread no channel post started only from there ([`Owners::owner_of`]), so no ant
+//! names the owner of such a thread.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use ants_proto::{JsDomain, OWNERS_BUCKET, ThreadId, UserId, owner_key};
+use ants_proto::{JsDomain, OWNERS_BUCKET, ThreadId, UserId, owner_key, owner_outbox, owner_record_id};
 use anyhow::{Context as _, Result};
-use async_nats::jetstream;
+use async_nats::HeaderMap;
+use async_nats::jetstream::{self, stream};
 
 use crate::direct_kv::{DirectKv, Lookup};
 
 /// Most owners kept in memory; past it they are read again.
 const MAX_KEPT: usize = 4096;
+
+/// How often [`Owners::wait_for`] reads the bucket again.
+const RECHECK: Duration = Duration::from_millis(200);
 
 /// What a put of a second record of a thread fails with: the bucket's stream discards new messages per subject.
 const RECORDED: &str = "maximum messages per subject";
@@ -27,6 +34,13 @@ pub struct Owners {
     missing: AtomicBool,
 }
 
+/// What a read of the record of a thread found.
+enum Read {
+    Owner(UserId),
+    NoOwner,
+    NoBucket,
+}
+
 impl Owners {
     pub fn new(js: jetstream::Context) -> Self {
         Self { js, found: Mutex::default(), missing: AtomicBool::new(false) }
@@ -34,14 +48,35 @@ impl Owners {
 
     /// The owner recorded for `thread`; None when none is, or the bucket does not exist.
     pub async fn owner_of(&self, thread: &ThreadId) -> Result<Option<UserId>> {
+        Ok(match self.read(thread).await? {
+            Read::Owner(owner) => Some(owner),
+            Read::NoOwner | Read::NoBucket => None,
+        })
+    }
+
+    /// [`Owners::owner_of`], read again until a record of `thread` shows up or `within` runs out; None at once when
+    /// the bucket does not exist.
+    pub async fn wait_for(&self, thread: &ThreadId, within: Duration) -> Result<Option<UserId>> {
+        let until = tokio::time::Instant::now() + within;
+        loop {
+            match self.read(thread).await? {
+                Read::Owner(owner) => return Ok(Some(owner)),
+                Read::NoBucket => return Ok(None),
+                Read::NoOwner if tokio::time::Instant::now() >= until => return Ok(None),
+                Read::NoOwner => tokio::time::sleep(RECHECK.min(until - tokio::time::Instant::now())).await,
+            }
+        }
+    }
+
+    async fn read(&self, thread: &ThreadId) -> Result<Read> {
         if let Some(owner) = self.found.lock().expect("owners").get(thread) {
-            return Ok(Some(owner.clone()));
+            return Ok(Read::Owner(owner.clone()));
         }
         // A direct get alone, so no stream info lists the threads of every owner.
         let kv = DirectKv::new(&self.js, None, OWNERS_BUCKET).await?;
         let value = match kv.lookup(owner_key(thread)).await {
             Ok(Lookup::Value(value)) => value,
-            Ok(Lookup::NoValue) => return Ok(None),
+            Ok(Lookup::NoValue) => return Ok(Read::NoOwner),
             // A missing bucket, or credentials not reading it, leave a direct get through a leaf node unanswered.
             missing @ (Ok(Lookup::NoBucket) | Err(_)) => {
                 if !self.missing.swap(true, Ordering::Relaxed) {
@@ -53,39 +88,67 @@ impl Owners {
                          credentials reading it, ants' messages on threads no channel post started have no owner"
                     );
                 }
-                return Ok(None);
+                return Ok(Read::NoBucket);
             }
         };
         let Some(owner) = std::str::from_utf8(&value).ok().and_then(|v| v.parse::<UserId>().ok()) else {
-            return Ok(None);
+            return Ok(Read::NoOwner);
         };
         let mut found = self.found.lock().expect("owners");
         if found.len() >= MAX_KEPT {
             found.clear();
         }
         found.insert(thread.clone(), owner.clone());
-        Ok(Some(owner))
+        Ok(Read::Owner(owner))
     }
 }
 
-/// Record `owner` as the owner of `thread`, unless a record of the thread is there already: the first one stays.
-/// Needs a human's or a webhook's credentials. `js_domain` is the domain `js` was made for.
+/// Record `owner` as the owner of `thread`, unless a record of it is there already: in the owners bucket or, while
+/// the hub is out of reach, in the machine's outbox, which the bucket sources once the uplink is back
+/// ([`owner_outbox`]). The first record of a thread stays its owner: the bucket refuses another, or drops it as a
+/// repeat of the first's message id ([`owner_record_id`]). Resolves once either holds it, so the message sent after it
+/// never outruns it. Needs a human's or a webhook's credentials; only a human's reach the outbox. `js_domain` is the
+/// domain `js` was made for.
 pub async fn record(
     js: &jetstream::Context,
     js_domain: Option<&JsDomain>,
     thread: &ThreadId,
     owner: &UserId,
 ) -> Result<()> {
-    let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
-    match kv.put(owner_key(thread), owner.to_string()).await {
-        Ok(()) => Ok(()),
-        Err(e) if format!("{e:#}").contains(RECORDED) => Ok(()),
-        Err(e) => Err(e).with_context(|| {
+    let key = owner_key(thread);
+    let (id, value) = (owner_record_id(&key), owner.to_string());
+    let in_hub = async {
+        let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
+        match kv.put_as(&key, value.clone(), &id).await {
+            Err(e) if !format!("{e:#}").contains(RECORDED) => {
+                Err(e).context("recording it (with credentials, `ants init` as the human creates the bucket)")
+            }
+            _ => Ok(()),
+        }
+    };
+    let unreachable = match in_hub.await {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("Nats-Msg-Id", id.as_str());
+    let kept = match js.publish_with_headers(owner_outbox(thread), headers, value.into()).await {
+        Ok(ack) => ack.await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = kept {
+        return Err(anyhow::anyhow!(e)).with_context(|| {
             format!(
-                "recording the owner of thread {thread} (with credentials, `ants init` as the human creates the bucket)"
+                "the hub did not record the owner of thread {thread} ({unreachable:#}), nor did this machine's outbox"
             )
-        }),
+        });
     }
+    tracing::warn!(
+        %thread,
+        error = format!("{unreachable:#}"),
+        "the hub is out of reach; the thread's owner is kept in this machine's outbox"
+    );
+    Ok(())
 }
 
 /// [`record`], logging a failure: the message goes out anyway, and ants' messages on its thread have no owner.
@@ -97,6 +160,24 @@ pub async fn recording(js: &jetstream::Context, js_domain: Option<&JsDomain>, th
             "recording the thread's owner; ants' messages on the thread name no owner"
         );
     }
+}
+
+/// The stream of [`OWNERS_BUCKET`].
+pub fn owners_stream() -> String {
+    format!("KV_{OWNERS_BUCKET}")
+}
+
+/// Have the owners bucket's stream, as `config` describes it, keep the first record of each key and drop, rather than
+/// refuse, a repeat of its message id ([`owner_record_id`]) while the first is kept: a refused message stalls the
+/// source it came from, a machine's outbox. Returns whether it changed anything.
+pub fn first_records_only(config: &mut stream::Config) -> bool {
+    let before =
+        (config.max_messages_per_subject, config.discard, config.discard_new_per_subject, config.duplicate_window);
+    config.max_messages_per_subject = 1;
+    config.discard = stream::DiscardPolicy::New;
+    config.discard_new_per_subject = true;
+    config.duplicate_window = config.max_age;
+    before != (config.max_messages_per_subject, config.discard, config.discard_new_per_subject, config.duplicate_window)
 }
 
 #[cfg(test)]
@@ -112,13 +193,72 @@ mod tests {
         let owners = Owners::new(js.clone());
         let thread = ThreadId::generate();
         assert_eq!(owners.owner_of(&thread).await.unwrap(), None, "no bucket yet");
+        let started = tokio::time::Instant::now();
+        assert_eq!(owners.wait_for(&thread, Duration::from_secs(5)).await.unwrap(), None);
+        assert!(started.elapsed() < Duration::from_secs(1), "no bucket to wait on");
         bus::ensure_owners(&js).await.unwrap();
         let [alice, bob]: [UserId; 2] = ["alice".parse().unwrap(), "bob".parse().unwrap()];
         record(&js, None, &thread, &alice).await.unwrap();
         record(&js, None, &thread, &bob).await.unwrap();
-        let kv = js.get_key_value(OWNERS_BUCKET).await.unwrap();
-        assert!(kv.delete(owner_key(&thread)).await.is_err(), "nor is it deleted");
-        assert!(kv.purge(owner_key(&thread)).await.is_err(), "nor purged");
+        let key = owner_key(&thread);
+        let subject = format!("$KV.{OWNERS_BUCKET}.{key}");
+        // As the bucket sources from a machine's outbox: no check first, nor a refusal.
+        let mut headers = HeaderMap::new();
+        headers.insert("Nats-Msg-Id", owner_record_id(&key).as_str());
+        let repeat = js.publish_with_headers(subject.clone(), headers, "bob".into()).await.unwrap().await.unwrap();
+        assert!(repeat.duplicate, "dropped as a repeat");
+        assert!(js.publish(subject, "bob".into()).await.unwrap().await.is_err(), "refused without the id");
+        let mut stream = js.get_stream(owners_stream()).await.unwrap();
+        assert_eq!(stream.info().await.unwrap().state.messages, 1);
+        assert!(stream.delete_message(1).await.is_err(), "nor is it deleted");
+        assert!(stream.purge().await.is_err(), "nor purged");
+        assert_eq!(Owners::new(js.clone()).owner_of(&thread).await.unwrap(), Some(alice.clone()));
+
+        // A record on its way.
+        let later = ThreadId::generate();
+        let waited = tokio::spawn({
+            let (js, later) = (js.clone(), later.clone());
+            async move { Owners::new(js).wait_for(&later, Duration::from_secs(5)).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        record(&js, None, &later, &bob).await.unwrap();
+        assert_eq!(waited.await.unwrap(), Some(bob));
+        let none = ThreadId::generate();
+        let started = tokio::time::Instant::now();
+        assert_eq!(owners.wait_for(&none, Duration::from_millis(600)).await.unwrap(), None);
+        assert!(started.elapsed() >= Duration::from_millis(600));
+    }
+
+    #[tokio::test]
+    async fn a_bucket_from_before_drops_a_repeated_record_once_ensured() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        js.create_stream(stream::Config {
+            name: owners_stream(),
+            subjects: vec![format!("$KV.{OWNERS_BUCKET}.>")],
+            max_messages_per_subject: 1,
+            discard: stream::DiscardPolicy::New,
+            discard_new_per_subject: true,
+            max_age: Duration::from_secs(3600),
+            allow_direct: true,
+            deny_delete: true,
+            deny_purge: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let thread = ThreadId::generate();
+        let alice: UserId = "alice".parse().unwrap();
+        record(&js, None, &thread, &alice).await.unwrap();
+        bus::ensure_owners(&js).await.unwrap();
+        let config = js.get_stream(owners_stream()).await.unwrap().cached_info().config.clone();
+        assert_eq!(config.duplicate_window, Duration::from_secs(3600), "as long as a record is kept");
+        let key = owner_key(&thread);
+        let mut headers = HeaderMap::new();
+        headers.insert("Nats-Msg-Id", owner_record_id(&key).as_str());
+        let subject = format!("$KV.{OWNERS_BUCKET}.{key}");
+        let repeat = js.publish_with_headers(subject, headers, "bob".into()).await.unwrap().await.unwrap();
+        assert!(repeat.duplicate);
         assert_eq!(Owners::new(js).owner_of(&thread).await.unwrap(), Some(alice));
     }
 }
