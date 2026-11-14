@@ -718,7 +718,7 @@ mod tests {
         use std::cell::RefCell;
         let entry = |name: &str, text: &str| {
             let toml = format!("name = \"{name}\"\nevery = \"1h\"\nant = \"dev-a\"\ntext = \"{text}\"\n");
-            Schedule::from_entry(toml::from_str(&toml).unwrap(), Path::to_path_buf).unwrap()
+            Schedule::from_entry(toml::from_str(&toml).unwrap(), None, Path::to_path_buf).unwrap()
         };
         let started = RefCell::new(Vec::new());
         let spawn = |s: Schedule| {

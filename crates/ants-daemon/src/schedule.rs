@@ -4,7 +4,8 @@
 //! [[schedule]]
 //! name = "nightly"                  # sends as this user: `ants auth user nightly --webhook --to dev-a`
 //! creds = "~/.config/ants/auth/nightly.creds"
-//! cron = "0 3 * * 1-5"              # minute hour day-of-month month day-of-week, in UTC
+//! cron = "0 3 * * 1-5"              # minute hour day-of-month month day-of-week
+//! timezone = "Europe/London"        # optional: the zone cron reads in; the file's top-level timezone, then UTC
 //! ant = "dev-a"                     # or channel = "ops", with mention = [...] or broadcast = true
 //! owner = "alice"                   # optional human owner of the threads it starts
 //! text = "Audit the dependencies and report what changed."
@@ -19,6 +20,10 @@
 //!
 //! A firing time depends only on the schedule and the clock, never on when a daemon started, so every daemon serving
 //! the schedule computes the same firings and can tell them apart.
+//!
+//! A cron timetable reads in its time zone's local time, daylight saving time included: a local time skipped when the
+//! clocks go forward fires once, at the instant the clocks jump (02:30 on a night that goes from 02:00 to 03:00 fires
+//! at 03:00), and a local time repeated when they go back fires once, at its first occurrence.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -26,7 +31,8 @@ use std::time::Duration;
 
 use ants_proto::{ChannelId, Destination, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
-use chrono::{DateTime, Datelike as _, NaiveDate, NaiveTime, TimeDelta, Timelike as _, Utc};
+use chrono::{DateTime, Datelike as _, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike as _, Utc};
+use jiff::tz::{AmbiguousOffset, TimeZone};
 use serde::Deserialize;
 
 /// Shortest `every`.
@@ -43,6 +49,7 @@ pub struct Entry {
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     cron: Option<String>,
+    timezone: Option<String>,
     every: Option<String>,
     ant: Option<UserId>,
     channel: Option<ChannelId>,
@@ -85,13 +92,21 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// Check `entry`, resolving its credentials path with `resolve`.
-    pub fn from_entry(entry: Entry, resolve: impl Fn(&Path) -> PathBuf) -> Result<Self> {
+    /// Check `entry`, reading its cron in `timezone` (UTC when None) unless it names its own, and resolving its
+    /// credentials path with `resolve`.
+    pub fn from_entry(entry: Entry, timezone: Option<&TimeZone>, resolve: impl Fn(&Path) -> PathBuf) -> Result<Self> {
         if entry.name.is_human() {
             bail!("the default human is no schedule");
         }
         let when = match (entry.cron, entry.every) {
-            (Some(cron), None) => When::Cron(cron.parse()?),
+            (Some(cron), None) => {
+                let zone = match entry.timezone {
+                    Some(name) => time_zone(&name)?,
+                    None => timezone.cloned().unwrap_or(TimeZone::UTC),
+                };
+                When::Cron(cron.parse::<Cron>()?.in_zone(zone))
+            }
+            (None, Some(_)) if entry.timezone.is_some() => bail!("timezone goes with cron only"),
             (None, Some(every)) => {
                 let every = ants_proto::duration::parse(&every).map_err(|e| anyhow::anyhow!("every: {e}"))?;
                 if every < MIN_EVERY {
@@ -132,6 +147,11 @@ impl Schedule {
             catch_up: entry.catch_up,
         })
     }
+}
+
+/// The time zone named `name` in the IANA time zone database.
+pub fn time_zone(name: &str) -> Result<TimeZone> {
+    TimeZone::get(name).map_err(|e| anyhow::anyhow!("timezone {name:?}: unknown time zone ({e})"))
 }
 
 /// When a schedule fires.
@@ -179,13 +199,16 @@ impl When {
 impl fmt::Display for When {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cron(cron) => write!(f, "cron {:?}", cron.text),
+            Self::Cron(cron) if cron.zone == TimeZone::UTC => write!(f, "cron {:?}", cron.text),
+            Self::Cron(cron) => {
+                write!(f, "cron {:?} in {}", cron.text, cron.zone.iana_name().unwrap_or("a time zone"))
+            }
             Self::Every(every) => write!(f, "every {}", ants_proto::duration::format(*every)),
         }
     }
 }
 
-/// A five-field cron timetable, in UTC: minute (0-59), hour (0-23), day of month (1-31), month (1-12 or jan-dec) and
+/// A five-field cron timetable, in UTC unless [`Cron::in_zone`] says otherwise: minute (0-59), hour (0-23), day of month (1-31), month (1-12 or jan-dec) and
 /// day of week (0-7 or sun-sat, 0 and 7 both Sunday). A field is `*` or a comma-separated list of values, ranges
 /// `a-b` and steps `*/n`, `a-b/n` or `a/n`. When both day fields are restricted, a day matching either one fires, as
 /// in Vixie cron. `@yearly` (`@annually`), `@monthly`, `@weekly`, `@daily` (`@midnight`) and `@hourly` stand for
@@ -202,6 +225,8 @@ pub struct Cron {
     any_day: bool,
     /// The day-of-week field starts with `*`.
     any_weekday: bool,
+    /// The zone whose local time the fields read in.
+    zone: TimeZone,
 }
 
 const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -244,6 +269,7 @@ impl std::str::FromStr for Cron {
             weekdays,
             any_day: day.starts_with('*'),
             any_weekday: weekday.starts_with('*'),
+            zone: TimeZone::UTC,
         };
         if cron.next_after(DateTime::UNIX_EPOCH).is_none() {
             bail!("cron {shown:?}: never fires");
@@ -294,9 +320,53 @@ fn field_bits(field: &str, min: u32, max: u32, names: &[&str], first_name: u32) 
 }
 
 impl Cron {
-    /// The first minute strictly after `t` the timetable fires at; None when there is none within years.
+    /// The timetable read in `zone`'s local time.
+    #[must_use]
+    pub fn in_zone(self, zone: TimeZone) -> Self {
+        Self { zone, ..self }
+    }
+
+    /// The instant local time `at` fires at in the timetable's zone: in a gap, when the clocks go forward, the end of
+    /// the gap; in a fold, when they go back, the first occurrence.
+    fn instant(&self, at: NaiveDateTime) -> Option<DateTime<Utc>> {
+        if self.zone == TimeZone::UTC {
+            return Some(at.and_utc());
+        }
+        let civil = jiff::civil::DateTime::new(
+            i16::try_from(at.year()).ok()?,
+            i8::try_from(at.month()).ok()?,
+            i8::try_from(at.day()).ok()?,
+            i8::try_from(at.hour()).ok()?,
+            i8::try_from(at.minute()).ok()?,
+            0,
+            0,
+        )
+        .ok()?;
+        let instant = match self.zone.to_ambiguous_timestamp(civil).offset() {
+            AmbiguousOffset::Unambiguous { offset } | AmbiguousOffset::Fold { before: offset, .. } => {
+                offset.to_timestamp(civil).ok()?
+            }
+            // Read with the offset after the gap, `at` falls just before the transition that opens it.
+            AmbiguousOffset::Gap { after, .. } => {
+                self.zone.following(after.to_timestamp(civil).ok()?).next()?.timestamp()
+            }
+        };
+        DateTime::from_timestamp(instant.as_second(), instant.subsec_nanosecond().try_into().ok()?)
+    }
+
+    /// The local time of instant `t` in the timetable's zone.
+    fn local(&self, t: DateTime<Utc>) -> Option<NaiveDateTime> {
+        if self.zone == TimeZone::UTC {
+            return Some(t.naive_utc());
+        }
+        let offset = self.zone.to_offset(jiff::Timestamp::from_second(t.timestamp()).ok()?);
+        Some(t.naive_utc() + TimeDelta::seconds(offset.seconds().into()))
+    }
+
+    /// The first instant strictly after `t` the timetable fires at; None when there is none within years.
     pub fn next_after(&self, t: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let start = t.naive_utc().with_second(0)?.with_nanosecond(0)? + TimeDelta::minutes(1);
+        // Local times only grow with the instants they fire at, and none up to `t`'s own fires after `t`.
+        let start = self.local(t)?.with_second(0)?.with_nanosecond(0)? + TimeDelta::minutes(1);
         let limit = start + TimeDelta::days(CRON_HORIZON_DAYS);
         let mut at = start;
         let has = |bits: u64, n: u32| bits & (1 << n) != 0;
@@ -323,7 +393,11 @@ impl Cron {
                 at += TimeDelta::minutes(1);
                 continue;
             }
-            return Some(at.and_utc());
+            match self.instant(at)? {
+                // A repeated local time whose first occurrence is past.
+                instant if instant <= t => at += TimeDelta::minutes(1),
+                instant => return Some(instant),
+            }
         }
         None
     }
@@ -364,6 +438,52 @@ mod tests {
         assert_eq!(next("@hourly", "2026-11-14T10:20:00Z"), "2026-11-14T11:00:00+00:00");
         assert_eq!(next("@weekly", "2026-11-14T10:20:00Z"), "2026-11-15T00:00:00+00:00");
         assert_eq!(next("@yearly", "2026-11-14T10:20:00Z"), "2027-01-01T00:00:00+00:00");
+    }
+
+    fn zoned(cron: &str, zone: &str) -> When {
+        When::Cron(cron.parse::<Cron>().unwrap().in_zone(time_zone(zone).unwrap()))
+    }
+
+    /// The firings of `when` after `after`, `n` of them.
+    fn firings(when: &When, after: &str, n: usize) -> Vec<DateTime<Utc>> {
+        std::iter::successors(when.next_after(at(after)), |t| when.next_after(*t)).take(n).collect()
+    }
+
+    #[test]
+    fn cron_reads_in_its_time_zone_and_fires_once_across_daylight_saving() {
+        let ny = |cron| zoned(cron, "America/New_York");
+        // 2026-03-08 02:00 EST jumps to 03:00 EDT (07:00 UTC): a skipped time fires as the clocks jump, once.
+        let gap = [at("2026-03-08T07:00:00Z"), at("2026-03-09T06:30:00Z")];
+        assert_eq!(firings(&ny("30 2 * * *"), "2026-03-07T12:00:00Z", 2), gap);
+        assert_eq!(firings(&ny("*/15 2 * * *"), "2026-03-07T12:00:00Z", 2), [gap[0], at("2026-03-09T06:00:00Z")]);
+        let hourly = [at("2026-03-08T06:00:00Z"), at("2026-03-08T07:00:00Z"), at("2026-03-08T08:00:00Z")];
+        assert_eq!(firings(&ny("0 * * * *"), "2026-03-08T05:30:00Z", 3), hourly, "02:00 and 03:00 fire as one");
+        // 2026-11-01 02:00 EDT goes back to 01:00 EST (06:00 UTC): a repeated time fires at its first occurrence.
+        let fold = [at("2026-11-01T05:30:00Z"), at("2026-11-02T06:30:00Z")];
+        assert_eq!(firings(&ny("30 1 * * *"), "2026-10-31T12:00:00Z", 2), fold);
+        let hourly = [at("2026-11-01T05:00:00Z"), at("2026-11-01T07:00:00Z")];
+        assert_eq!(firings(&ny("0 * * * *"), "2026-11-01T04:30:00Z", 2), hourly, "01:00 EST does not fire again");
+        assert_eq!(ny("30 1 * * *").next_after(at("2026-11-01T06:15:00Z")), Some(fold[1]), "from inside the fold");
+        assert_eq!(ny("30 1 * * *").last_in(at("2026-11-01T05:30:00Z"), at("2026-11-01T06:45:00Z")), None);
+
+        // Europe/London: 2026-03-29 01:00 GMT jumps to 02:00 BST, 2026-10-25 02:00 BST goes back to 01:00 GMT.
+        let london = zoned("30 1 * * *", "Europe/London");
+        assert_eq!(
+            firings(&london, "2026-03-28T12:00:00Z", 2),
+            [at("2026-03-29T01:00:00Z"), at("2026-03-30T00:30:00Z")]
+        );
+        assert_eq!(
+            firings(&london, "2026-10-24T12:00:00Z", 2),
+            [at("2026-10-25T00:30:00Z"), at("2026-10-26T01:30:00Z")]
+        );
+
+        // Asia/Kolkata keeps +05:30 all year.
+        let kolkata = zoned("0 9 * * 1-5", "Asia/Kolkata");
+        assert_eq!(
+            firings(&kolkata, "2026-11-14T10:20:00Z", 2),
+            [at("2026-11-16T03:30:00Z"), at("2026-11-17T03:30:00Z")]
+        );
+        assert_eq!(kolkata.to_string(), "cron \"0 9 * * 1-5\" in Asia/Kolkata");
     }
 
     #[test]
@@ -414,7 +534,7 @@ mod tests {
 
     fn entry(text: &str) -> Result<Schedule> {
         let entry: Entry = toml::from_str(text)?;
-        Schedule::from_entry(entry, |p| Path::new("/etc/ants").join(p))
+        Schedule::from_entry(entry, None, |p| Path::new("/etc/ants").join(p))
     }
 
     #[test]
@@ -443,6 +563,8 @@ mod tests {
             ("every = \"15\"\nant = \"dev-a\"", "every:"),
             ("cron = \"@daily\"\nant = \"dev-a\"\nnats = \"nats://u:p@hub\"", "NATS URL"),
             ("cron = \"@daily\"\nant = \"dev-a\"\nat = \"3am\"", "unknown field `at`"),
+            ("cron = \"@daily\"\nant = \"dev-a\"\ntimezone = \"Nowhere\"", "timezone \"Nowhere\": unknown time zone"),
+            ("every = \"1h\"\nant = \"dev-a\"\ntimezone = \"UTC\"", "timezone goes with cron only"),
         ] {
             let e = format!("{:#}", entry(&format!("{base}{extra}\n")).unwrap_err());
             assert!(e.contains(why), "{extra}: {e}");
