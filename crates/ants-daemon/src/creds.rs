@@ -311,7 +311,7 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
     if leaf_only {
         let machine = name.strip_prefix("leaf-").unwrap_or(name);
         let machine: Machine = machine.parse().map_err(|e| anyhow!("a leaf node's credentials named {name}: {e}"))?;
-        if !subscribe.is_empty() && subscribe.iter().all(|s| s.starts_with("$SYS.REQ.ACCOUNT.")) {
+        if !subscribe.is_empty() && subscribe.iter().all(|s| s.starts_with("$SYS.")) {
             return Ok(Kind::LeafSystem { machine });
         }
         let users = subscribe.iter().filter_map(|s| s.strip_prefix("_INBOX.")?.strip_suffix(".>")?.parse().ok());
