@@ -29,6 +29,7 @@
 //! nor wait in `ants_sessions`: the request has its own time limit, and only the ant's own chain may decide it.
 
 use std::collections::HashMap;
+use std::mem::DropGuard;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,18 +79,6 @@ pub struct NatsApprover {
     /// The ant's escalate_to and its hop limit; an empty chain asks only the humans.
     chain: Chain,
     waiting: Waiting,
-}
-
-/// Removes a request from [`NatsApprover::waiting`] once it is decided, expired or given up.
-struct Pending<'a> {
-    waiting: &'a Waiting,
-    request: Uuid,
-}
-
-impl Drop for Pending<'_> {
-    fn drop(&mut self) {
-        self.waiting.lock().expect("waiting requests").remove(&self.request);
-    }
 }
 
 /// Something heard while a request waits.
@@ -166,7 +155,10 @@ impl NatsApprover {
         };
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
         self.waiting.lock().expect("waiting requests").insert(request.id, (request.clone(), chain_decided));
-        let _pending = Pending { waiting: &self.waiting, request: request.id };
+        // Leaves the waiting map once decided, expired or given up.
+        let _pending = DropGuard::new(request.id, |id| {
+            self.waiting.lock().expect("waiting requests").remove(&id);
+        });
         self.js
             .publish(request.subject(), serde_json::to_vec(&request)?.into())
             .await
