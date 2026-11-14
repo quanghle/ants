@@ -371,6 +371,7 @@ impl Ant {
             },
             ant: self.name,
             defer_to_others: self.builtin,
+            requester: crate::mcp::Requester::default(),
         })
     }
 
@@ -964,6 +965,58 @@ pub fn with_allow_rule(path: &Path, ant: &UserId, rule: &str) -> Result<Option<S
         bail!("cannot add {} to the allow list of {ant} in {}: add it by hand", toml_string(rule), path.display());
     }
     Ok(Some(new))
+}
+
+/// The template the config file at `path` adds `ant` from, None when the file lists the ant without one. Fails when the
+/// file does not list the ant or does not parse as TOML.
+pub fn template_of(path: &Path, ant: &UserId) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Names {
+        #[serde(default, rename = "ant")]
+        ants: Vec<Named>,
+    }
+    #[derive(Deserialize)]
+    struct Named {
+        name: String,
+        template: Option<String>,
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
+    let names: Names = toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    let entry = names
+        .ants
+        .into_iter()
+        .find(|entry| entry.name == ant.as_str())
+        .with_context(|| format!("config {} lists no ant {ant}", path.display()))?;
+    Ok(entry.template)
+}
+
+/// The `[[ant_template]]` tables of the config file at `path`, everything else in it ignored, each checked
+/// ([`AntTemplate::check`]) and named once, with any harness taken as defined. Their workdirs are resolved as
+/// [`parse`] does, and made canonical where they exist here; they need not. For the signer (`ants signer`), which
+/// checks requests for ants that run on other machines against its own copy of the templates.
+pub fn signer_templates(path: &Path) -> Result<Vec<AntTemplate>> {
+    #[derive(Deserialize)]
+    struct Templates {
+        #[serde(default, rename = "ant_template")]
+        templates: Vec<AntTemplate>,
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
+    let at = || format!("config {}", path.display());
+    let mut templates = toml::from_str::<Templates>(&text).with_context(|| format!("parsing {}", at()))?.templates;
+    let path = std::path::absolute(path)?;
+    let (base, home) = (path.parent().unwrap_or(Path::new(".")), home_dir()?);
+    let mut names = BTreeSet::new();
+    for template in &mut templates {
+        if !names.insert(template.name.clone()) {
+            bail!("{}: ant template {} is listed twice", at(), template.name);
+        }
+        template.check(|_| Ok(())).with_context(at)?;
+        for dir in &mut template.workdirs {
+            let resolved = resolve(dir, base, &home);
+            *dir = resolved.canonicalize().unwrap_or(resolved);
+        }
+    }
+    Ok(templates)
 }
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
@@ -1957,6 +2010,43 @@ Review changes for correctness."""
         assert!(err.contains("ant template worker: 1 ants are added from it, more than its max_ants of 0"), "{err}");
         let err = format!("{:#}", parse_here("[[ant]]\nname = \"dev-a\"\n").unwrap_err());
         assert!(err.contains("ant dev-a: workdir is missing"), "{err}");
+    }
+
+    #[test]
+    fn the_signer_reads_only_the_templates_and_checks_requests_against_its_copy() {
+        let dir = ants_test_support::scratch_dir("config-signer").canonicalize().unwrap();
+        std::fs::create_dir(dir.join("src")).unwrap();
+        let path = dir.join("config.toml");
+        // Workdirs of the managers' machines need not exist on the signer's, nor harnesses be defined.
+        let text =
+            with_ants("[[ant]]\nname = \"lead-a\"\ntemplate = \"worker\"\nadded_by = \"lead\"\nmodel = \"gpt-5\"\n")
+                .replace("workdirs = [\".\", \"src\"]", "workdirs = [\"src\", \"elsewhere\"]")
+                .replace("harnesses = [\"copilot\", \"claude\"]", "harnesses = [\"other\"]");
+        std::fs::write(&path, &text).unwrap();
+        let templates = signer_templates(&path).unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].workdirs, [dir.join("src"), dir.join("elsewhere")]);
+        let (lead, name): (UserId, UserId) = ("lead".parse().unwrap(), "lead-b".parse().unwrap());
+        let request: Request = serde_json::from_str(r#"{"model": "gpt-5", "prompt_timeout": "10m"}"#).unwrap();
+        let same = |dir: &Path| Ok(dir.to_owned());
+        let ant = templates[0].resolve_with(&lead, &name, &request, same).unwrap();
+        assert_eq!((ant.workdir, ant.prompt_timeout), (dir.join("src"), Duration::from_mins(10)));
+        let elsewhere = Request { workdir: Some(dir.join("elsewhere")), ..request.clone() };
+        templates[0].resolve_with(&lead, &name, &elsewhere, same).unwrap();
+        let back: Request = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(back, request, "a request goes over the wire as JSON");
+
+        assert_eq!(template_of(&path, &"lead-a".parse().unwrap()).unwrap().as_deref(), Some("worker"));
+        assert_eq!(template_of(&path, &lead).unwrap(), None);
+        assert!(template_of(&path, &name).is_err());
+        std::fs::write(
+            &path,
+            format!("{text}\n{}", TEMPLATE.split("[[ant]]").next().unwrap().replace("nats =", "x =")),
+        )
+        .unwrap();
+        let err = format!("{:#}", signer_templates(&path).unwrap_err());
+        assert!(err.contains("ant template worker is listed twice"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

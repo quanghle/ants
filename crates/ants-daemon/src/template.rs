@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{
     Ant, DEFAULT_APPROVAL_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_HARNESSES, DEFAULT_MAX_TOOL_CALLS,
@@ -179,28 +179,48 @@ fn default_spend_warn_percent() -> u8 {
 
 /// What a manager asks for when it adds an ant from a template: settings within the template's bounds, each left out
 /// taking the template's. The same keys, in an `[[ant]]` entry carrying `template`, are what the request asked for.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workdir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub whoami: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
     /// Names of the template's `allow_sets`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_sets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_thread_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_thread_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_daily_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_daily_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_harnesses: Option<usize>,
-    #[serde(default, deserialize_with = "optional_duration")]
+    #[serde(
+        default,
+        deserialize_with = "optional_duration",
+        serialize_with = "format_duration",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prompt_timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<usize>,
 }
 
@@ -225,6 +245,13 @@ pub const REQUEST_KEYS: [&str; 17] = [
     "max_tool_calls",
 ];
 
+fn format_duration<S: Serializer>(duration: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error> {
+    match duration {
+        Some(d) => serializer.serialize_str(&ants_proto::duration::format(*d)),
+        None => serializer.serialize_none(),
+    }
+}
+
 fn optional_duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
     ants_proto::duration::deserialize(deserializer).map(Some)
 }
@@ -237,6 +264,19 @@ impl AntTemplate {
         resolve: impl Fn(&Path) -> PathBuf,
         known: impl Fn(&str) -> Result<()>,
     ) -> Result<()> {
+        self.check(known)?;
+        let at = || format!("ant template {}", self.name);
+        let mut workdirs = Vec::with_capacity(self.workdirs.len());
+        for dir in &self.workdirs {
+            workdirs.push(resolve(dir).canonicalize().with_context(|| format!("{}: workdir {}", at(), dir.display()))?);
+        }
+        self.workdirs = workdirs;
+        Ok(())
+    }
+
+    /// Check the template's own settings, leaving its workdirs as they are, with every harness it lists known to
+    /// `known`.
+    pub fn check(&self, known: impl Fn(&str) -> Result<()>) -> Result<()> {
         let name = &self.name;
         if name.is_empty()
             || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
@@ -246,10 +286,6 @@ impl AntTemplate {
         let at = || format!("ant template {name}");
         if self.workdirs.is_empty() {
             bail!("{}: workdirs must list at least one directory", at());
-        }
-        for dir in &mut self.workdirs {
-            let path = resolve(dir);
-            *dir = path.canonicalize().with_context(|| format!("{}: workdir {}", at(), dir.display()))?;
         }
         for harness in &self.harnesses {
             known(harness).with_context(at)?;
@@ -281,6 +317,19 @@ impl AntTemplate {
     /// them out; refused with the bound the request breaks. Whether the manager may use the template, the name is
     /// free and the template has room is left to [`crate::config::Loaded::check_request`].
     pub fn resolve(&self, manager: &UserId, name: &UserId, request: &Request) -> Result<Ant> {
+        self.resolve_with(manager, name, request, |dir| {
+            dir.canonicalize().with_context(|| format!("workdir {}", dir.display()))
+        })
+    }
+
+    /// [`AntTemplate::resolve`], with the workdir a request names made comparable to the template's by `canonical`.
+    pub fn resolve_with(
+        &self,
+        manager: &UserId,
+        name: &UserId,
+        request: &Request,
+        canonical: impl Fn(&Path) -> Result<PathBuf>,
+    ) -> Result<Ant> {
         let t = &self.name;
         if !self.name_fits(manager, name) {
             bail!(
@@ -291,7 +340,7 @@ impl AntTemplate {
         let workdir = match &request.workdir {
             None => self.workdirs[0].clone(),
             Some(dir) => {
-                let canonical = dir.canonicalize().with_context(|| format!("workdir {}", dir.display()))?;
+                let canonical = canonical(dir)?;
                 if !self.workdirs.contains(&canonical) {
                     bail!(
                         "workdir {} is not in the workdirs of template {t} ({})",

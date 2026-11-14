@@ -1,0 +1,22 @@
+# ants: the signer (`ants signer`), signing the credentials of the ants manager ants ask for: at once within the
+# policy of the [[ant_template]] tables of its config file, on a human's approval otherwise. Run it on the machine
+# holding the team directory (~/.config/ants/auth), whose account key it signs with.
+# User unit: scripts/install-units.sh --signer fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user. Until the hub answers, the signer fails and Restart starts it again.
+
+[Unit]
+Description=ants: signer
+Wants=ants-nats.service
+After=ants-nats.service
+
+[Service]
+ExecStart="@ANTS@" signer --config "@CONFIG@"
+Environment=NO_COLOR=1
+Restart=on-failure
+RestartSec=10
+# A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
+SuccessExitStatus=75
+RestartForceExitStatus=75
+
+[Install]
+WantedBy=default.target

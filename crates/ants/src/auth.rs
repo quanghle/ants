@@ -465,6 +465,30 @@ pub fn sign_device(
     Ok((jwt, device))
 }
 
+/// Sign the user JWT of `ant`, added by `manager` from `template`, for `public_key`, with the permissions of an ant,
+/// and record the key with its template and manager, which the signer counts against the template's `max_ants`.
+pub fn sign_added(
+    dir: &Path,
+    ant: &UserId,
+    js_domain: Option<&JsDomain>,
+    public_key: &str,
+    template: &str,
+    manager: &UserId,
+) -> Result<String> {
+    check_user_key(public_key)?;
+    check_not_reserved(ant)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let permissions = Permissions::for_user(ant, Role::Ant).with_js_domain(js_domain);
+    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions, json!({}), None)?;
+    let issued = Issued {
+        template: Some(template.to_owned()),
+        added_by: Some(manager.clone()),
+        ..Issued::new(public_key, ant.as_str(), Kind::Ant, None)?
+    };
+    revoke::record(dir, &issued)?;
+    Ok(jwt)
+}
+
 /// Credentials renewed by [`renew`].
 #[derive(Debug)]
 pub struct Renewed {
@@ -565,6 +589,8 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
     let previous = issued.iter().rev().find(|i| i.key == claims.sub);
     let mut record = Issued::new(public_key, name, kind, exp)?;
     record.renewed_from = Some(claims.sub.clone());
+    record.template = previous.and_then(|p| p.template.clone());
+    record.added_by = previous.and_then(|p| p.added_by.clone());
     if let Some(device) = finding.device {
         record = record.for_device(device, previous.and_then(|p| p.label.clone()));
     }

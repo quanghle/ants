@@ -83,6 +83,13 @@ pub struct Issued {
     /// before the registry kept them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<crate::members::Members>,
+    /// The template of an ant a manager added (`ants signer`), whose `max_ants` the signer counts its live keys
+    /// against; none for other credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The manager ant that added an ant from `template`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<ants_proto::UserId>,
 }
 
 impl Issued {
@@ -100,6 +107,8 @@ impl Issued {
             perms: Some(PERMISSIONS_VERSION),
             renewed_from: None,
             members: None,
+            template: None,
+            added_by: None,
         })
     }
 
