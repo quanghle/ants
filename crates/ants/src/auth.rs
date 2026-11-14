@@ -266,7 +266,7 @@ pub fn leaf_user(machine: &Machine) -> String {
 }
 
 /// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if the hub would not take it in the leaf's CONNECT.
-/// Each ant adds about 4 KB to them, 7.5 KB with a JetStream domain.
+/// Each ant adds about 4 KB to them, 8 KB with a JetStream domain.
 fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(
@@ -1186,11 +1186,16 @@ pub(crate) mod tests {
 
     /// Issue `out`, uplink credentials of `machine` for the hub's `domain`, for as many ants as they may carry; returns
     /// the ants and the error refusing one more.
-    fn uplink_for_most_ants(team: &Path, machine: &Machine, domain: &JsDomain, out: &Path) -> (Vec<UserId>, String) {
+    pub(crate) fn uplink_for_most_ants(
+        team: &Path,
+        machine: &Machine,
+        domain: Option<&JsDomain>,
+        out: &Path,
+    ) -> (Vec<UserId>, String) {
         let mut ants = Vec::new();
         loop {
             ants.push(p(&format!("dev-{}", ants.len())));
-            if let Err(e) = issue_leaf(team, machine, &members(&ants, &[]), &[], false, Some(domain), out) {
+            if let Err(e) = issue_leaf(team, machine, &members(&ants, &[]), &[], false, domain, out) {
                 ants.pop();
                 return (ants, e.to_string());
             }
@@ -1203,7 +1208,7 @@ pub(crate) mod tests {
         let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
         init(&team).unwrap();
         let domain: JsDomain = "hub".parse().unwrap();
-        let (ants, err) = uplink_for_most_ants(&team, &m1, &domain, &out);
+        let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
         assert!(ants.len() >= 30, "only {} ants fit", ants.len());
         assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
         let (jwt, _) = read_creds(&out).unwrap();
@@ -1211,6 +1216,35 @@ pub(crate) mod tests {
         let more = Permissions::for_leaf(&m1, [(&p("dev-x"), Role::Ant)]).with_js_domain(Some(&domain));
         let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
         assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
+    /// 4.2 KB for a six-character name, 8 KB with the hub's JetStream domain: no permission is shared between two
+    /// ants, and none is a pattern matching an ant not yet added.
+    #[test]
+    fn each_ant_added_grows_the_uplink_by_the_same_measure() {
+        let dir = ants_test_support::scratch_dir("uplink-growth");
+        let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+        init(&team).unwrap();
+        let hub: JsDomain = "hub".parse().unwrap();
+        for (domain, least, most) in [(None, 3_800, 4_600), (Some(&hub), 7_500, 8_500)] {
+            issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], false, domain, &out).unwrap();
+            let (mut jwt, _) = read_creds(&out).unwrap();
+            let mut growth = Vec::new();
+            for i in 1..=5 {
+                let more = Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_js_domain(domain);
+                let renewed = extend_leaf(&team, &jwt, &m1, more).unwrap();
+                growth.push(renewed.len() - jwt.len());
+                jwt = renewed;
+            }
+            let (min, max) = (*growth.iter().min().unwrap(), *growth.iter().max().unwrap());
+            eprintln!("uplink of m1 (domain {domain:?}): {} bytes, each ant adds {growth:?}", jwt.len());
+            assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
+            assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
+            let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
+            assert!(room >= if domain.is_some() { 30 } else { 55 }, "{room} ants fit");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2586,7 +2620,7 @@ pub(crate) mod tests {
         h_js.set_timeout(Duration::from_secs(1));
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        let (ants, _) = uplink_for_most_ants(&team, &m1, &domain, &leaf_creds);
+        let (ants, _) = uplink_for_most_ants(&team, &m1, Some(&domain), &leaf_creds);
         assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 8 * 1024);
         let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
         let leaf = NatsServer::spawn_with(|dir| {
