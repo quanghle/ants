@@ -211,7 +211,9 @@ pub fn issue_leaf(
     let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)?;
+    let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
+    let members = crate::members::Members::new(members, webhooks, enroll_approver);
+    revoke::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }
 
@@ -254,7 +256,7 @@ fn system_inbox(machine: &Machine) -> String {
 const LEAF_CONNECTIONS: [&str; 2] = ["LEAFNODE", "LEAFNODE_WS"];
 
 /// The `name` of the uplink user of `machine`'s leaf node.
-fn leaf_user(machine: &Machine) -> String {
+pub fn leaf_user(machine: &Machine) -> String {
     format!("leaf-{machine}")
 }
 

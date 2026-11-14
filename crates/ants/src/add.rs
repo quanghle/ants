@@ -124,8 +124,8 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
             println!("credentials of {name} in {}", out.display());
             match &uplink {
                 Some((true, leaf, _)) => println!(
-                    "uplink credentials of {} renewed in {} to carry {name}; list {name} too when running \
-                     `ants auth leaf {}` or `ants leaf outbox {}` again",
+                    "uplink credentials of {} renewed in {} to carry {name}, which later `ants auth leaf {}` and \
+                     `ants leaf outbox {}` runs keep",
                     leaf.machine,
                     leaf.creds.display(),
                     leaf.machine,
@@ -133,14 +133,14 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
                 ),
                 Some((false, leaf, _)) => println!(
                     "{} changed while waiting and were left as they are: add {name} to the uplink with \
-                     `ants auth leaf {} --ant ...` on the machine holding the account key",
+                     `ants auth leaf {} --add-ant {name}` on the machine holding the account key",
                     leaf.creds.display(),
                     leaf.machine
                 ),
                 None => println!(
                     "behind a leaf node the request did not name (--leaf-config), add {name} to the uplink: \
-                     `ants auth leaf MACHINE --ant ...` on the machine holding the account key, then \
-                     `ants leaf outbox MACHINE --ant ...`"
+                     `ants auth leaf MACHINE --add-ant {name}` on the machine holding the account key, then \
+                     `ants leaf outbox MACHINE --add-ant {name}`"
                 ),
             }
             let mut services = Services::local();
