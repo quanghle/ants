@@ -18,13 +18,14 @@ if connection fails, report the error rather than guessing a server.
 ## Find a recipient
 
 ```sh
-ants roster            # state (live/stale), activity (idle/working/signed-out), harness, machine, capabilities, escalate_to
+ants roster            # state (live/stale), activity (idle/working/signed-out/rate-limited/out-of-quota), harness, machine, capabilities, escalate_to
 ants roster --json     # one JSON entry per line
 ```
 
 Pick a `live` ant whose capabilities match the request. Avoid a `signed-out` ant: its messages wait unanswered until a
-human runs the sign-in command listed below the table. Without a clear match, omit `@ant` so `messenger` routes by
-capability.
+human runs the sign-in command listed below the table. A `rate-limited` or `out-of-quota` ant answers late: its
+messages wait, spending no attempts, until the time listed below the table. Without a clear match, omit `@ant` so
+`messenger` routes by capability.
 
 ## Send
 

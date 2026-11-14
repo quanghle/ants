@@ -15,7 +15,9 @@ use ants_proto::{
     STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::context::{
+    CreateKeyValueError, CreateKeyValueErrorKind, GetStreamError, GetStreamErrorKind,
+};
 use async_nats::jetstream::{self, ErrorCode, kv, stream};
 
 use crate::bus::{DUPLICATE_WINDOW, RETENTION};
@@ -109,6 +111,7 @@ impl Object {
         match self {
             Self::Stream => upgrade_stream(config),
             Self::Owners if crate::owners::first_records_only(config) => vec![Drift::FirstRecordsOnly],
+            Self::Roster if add_limit_markers(config) => vec![Drift::LimitMarkers],
             _ => Vec::new(),
         }
     }
@@ -128,7 +131,7 @@ impl Object {
     async fn create(self, js: &jetstream::Context) -> Result<()> {
         let created = match self.spec() {
             Spec::Stream(config) => js.create_stream(*config).await.map(drop).map_err(anyhow::Error::from),
-            Spec::Bucket(config) => js.create_key_value(*config).await.map(drop).map_err(anyhow::Error::from),
+            Spec::Bucket(config) => create_bucket(js, *config).await.map(drop).map_err(anyhow::Error::from),
         };
         created.with_context(|| format!("creating {self}"))
     }
@@ -166,6 +169,10 @@ pub enum Drift {
     /// The owners bucket does not keep one record per key, dropping a repeat of its message id for as long as it
     /// keeps the first ([`crate::owners::first_records_only`]): its duplicate window, among others.
     FirstRecordsOnly,
+    /// The stream takes fewer consumers than [`MAX_CONSUMERS`].
+    MaxConsumers(i32),
+    /// The roster bucket leaves no marker when an entry expires ([`add_limit_markers`]).
+    LimitMarkers,
 }
 
 impl fmt::Display for Drift {
@@ -178,6 +185,8 @@ impl fmt::Display for Drift {
                 write!(f, "a duplicate window of {}", ants_proto::duration::format(*window))
             }
             Self::FirstRecordsOnly => write!(f, "a duplicate window as long as its retention, keeping first records"),
+            Self::MaxConsumers(max) => write!(f, "room for {max} consumers"),
+            Self::LimitMarkers => write!(f, "markers of expired entries"),
         }
     }
 }
@@ -304,9 +313,16 @@ pub fn stream_config() -> stream::Config {
         // An ant reads the decision stored on its approval requests with a direct get (`approvals`).
         allow_direct: true,
         republish: Some(stored_inbox()),
+        max_consumers: MAX_CONSUMERS,
         ..Default::default()
     }
 }
+
+/// The consumers the `ANTS` stream takes. Each ant has two durable ones and up to about fifteen more while reading,
+/// each human one for its notifications: room for several hundred ants all reading at once. Set explicitly, as since
+/// nats-server 2.15 a stream without a limit of its own takes 1000 (its `default_max_consumers`), and -1 does not lift
+/// that default.
+pub const MAX_CONSUMERS: i32 = 10_000;
 
 /// The duplicate window the `ANTS` stream configured as `config` should have: [`DUPLICATE_WINDOW`], or its retention
 /// if shorter, as JetStream allows no window longer than that.
@@ -328,8 +344,9 @@ pub fn stored_inbox() -> stream::Republish {
 }
 
 /// Add to `config`, the `ANTS` stream's, the subjects of [`STREAM_SUBJECTS`] it lacks, direct gets, the
-/// republishing of stored inbox messages and a [`duplicate_window`] as long as it should be, keeping its other
-/// subjects and settings, a longer window too. Returns what it lacked.
+/// republishing of stored inbox messages, a [`duplicate_window`] as long as it should be and room for
+/// [`MAX_CONSUMERS`], keeping its other subjects and settings, a longer window and more room too. Returns what it
+/// lacked.
 pub fn upgrade_stream(config: &mut stream::Config) -> Vec<Drift> {
     let mut drift = Vec::new();
     let missing = crate::bus::missing_subjects(&config.subjects);
@@ -350,16 +367,64 @@ pub fn upgrade_stream(config: &mut stream::Config) -> Vec<Drift> {
         config.duplicate_window = window;
         drift.push(Drift::DuplicateWindow(window));
     }
+    if config.max_consumers < MAX_CONSUMERS {
+        config.max_consumers = MAX_CONSUMERS;
+        drift.push(Drift::MaxConsumers(MAX_CONSUMERS));
+    }
     drift
 }
 
-/// The roster bucket ([`ROSTER_BUCKET`]), whose entries expire `ttl` after their last put.
+/// Whether the hub answering with `config`, a stream's, runs nats-server 2.11 or later (JetStream API level 1),
+/// which can leave a marker when an entry expires. Such a server names its level in the metadata of every stream
+/// info; an older one names none.
+pub fn supports_limit_markers(config: &stream::Config) -> bool {
+    let level = config.metadata.get("_nats.level").and_then(|level| level.parse::<u32>().ok());
+    level.is_some_and(|level| level >= 1)
+}
+
+/// Whether `config`, a bucket's, leaves a marker when an entry expires.
+pub fn has_limit_markers(config: &stream::Config) -> bool {
+    config.allow_message_ttl && config.subject_delete_marker_ttl.is_some()
+}
+
+/// Make `config`, a bucket's, leave a marker when an entry expires, kept as long as an entry lives (at least the
+/// second the server allows), if the hub supports it ([`supports_limit_markers`]) and the bucket leaves none yet:
+/// then watchers see the expiry as a purge. Returns whether it changed `config`. Once on, the server does not let it
+/// be turned off.
+pub fn add_limit_markers(config: &mut stream::Config) -> bool {
+    if has_limit_markers(config) || !supports_limit_markers(config) {
+        return false;
+    }
+    config.allow_message_ttl = true;
+    config.subject_delete_marker_ttl = Some(config.max_age.max(Duration::from_secs(1)));
+    true
+}
+
+/// Create the bucket configured as `config`, without the markers of expired entries if the hub runs a nats-server
+/// older than 2.11, which leaves none.
+pub async fn create_bucket(js: &jetstream::Context, mut config: kv::Config) -> Result<kv::Store, CreateKeyValueError> {
+    match js.create_key_value(config.clone()).await {
+        Err(e) if e.kind() == CreateKeyValueErrorKind::LimitMarkersNotSupported => {
+            tracing::debug!(
+                bucket = config.bucket,
+                "the hub runs nats-server older than 2.11: no markers of expired entries"
+            );
+            config.limit_markers = None;
+            js.create_key_value(config).await
+        }
+        created => created,
+    }
+}
+
+/// The roster bucket ([`ROSTER_BUCKET`]), whose entries expire `ttl` after their last put, each leaving a marker kept
+/// as long, so watchers see it go.
 pub fn roster_config(ttl: Duration) -> kv::Config {
     kv::Config {
         bucket: ROSTER_BUCKET.to_owned(),
         description: "Ants being served, refreshed by daemon heartbeats".to_owned(),
         history: 1,
         max_age: ttl,
+        limit_markers: Some(ttl),
         // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
         storage: stream::StorageType::Memory,
         ..Default::default()
@@ -504,7 +569,7 @@ mod tests {
 
     /// Only what `ants init` owns changes: other subjects, sources and settings stay.
     #[tokio::test]
-    async fn an_outdated_stream_and_owners_bucket_are_upgraded_keeping_the_rest() {
+    async fn an_outdated_stream_and_buckets_are_upgraded_keeping_the_rest() {
         let Some(server) = NatsServer::start() else { return };
         let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
         js.create_stream(stream::Config {
@@ -529,6 +594,9 @@ mod tests {
         let mut owners = owners_config();
         owners.duplicate_window = Duration::from_secs(120);
         js.create_stream(owners).await.unwrap();
+        let roster =
+            js.create_key_value(kv::Config { limit_markers: None, ..roster_config(ROSTER_TTL) }).await.unwrap();
+        assert!(!has_limit_markers(&roster.stream.cached_info().config), "as created before");
 
         let findings = check(&js, |_| true).await;
         let stream_drift = vec![
@@ -536,17 +604,23 @@ mod tests {
             Drift::DirectGets,
             Drift::Republish,
             Drift::DuplicateWindow(Duration::from_secs(3600)),
+            Drift::MaxConsumers(MAX_CONSUMERS),
         ];
         let outdated: Vec<_> = problems(&findings).into_iter().filter(|(_, drift)| drift.is_some()).collect();
         assert_eq!(
             outdated,
-            [(Object::Stream, Some(stream_drift)), (Object::Owners, Some(vec![Drift::FirstRecordsOnly]))]
+            [
+                (Object::Stream, Some(stream_drift)),
+                (Object::Roster, Some(vec![Drift::LimitMarkers])),
+                (Object::Owners, Some(vec![Drift::FirstRecordsOnly]))
+            ]
         );
         assert_eq!(
             findings[0].to_string(),
             "stream ANTS lacks subjects ants.dead.>; direct gets; the republishing of stored inbox messages; a \
-             duplicate window of 1h"
+             duplicate window of 1h; room for 10000 consumers"
         );
+        assert_eq!(findings[1].fixed(), "upgraded bucket ants_roster, adding markers of expired entries");
         for finding in &findings {
             apply(&js, finding).await.unwrap();
         }
@@ -559,6 +633,14 @@ mod tests {
         assert_eq!(config.max_age, Duration::from_secs(3600), "and the retention");
         assert_eq!(config.duplicate_window, Duration::from_secs(3600), "no longer than the retention");
         assert!(config.allow_direct && config.republish == Some(stored_inbox()));
+        assert_eq!(config.max_consumers, MAX_CONSUMERS);
+        let roster = js.get_stream(Object::Roster.stream_name()).await.unwrap().cached_info().config.clone();
+        assert!(has_limit_markers(&roster), "added to the existing bucket");
+        assert_eq!((roster.max_age, roster.subject_delete_marker_ttl), (ROSTER_TTL, Some(ROSTER_TTL)));
+        let mut more = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
+        more.max_consumers = MAX_CONSUMERS * 2;
+        js.update_stream(&more).await.unwrap();
+        assert!(check(&js, |_| true).await.is_empty(), "room for more consumers stays");
         let owners = js.get_stream(crate::owners::owners_stream()).await.unwrap().cached_info().config.clone();
         assert_eq!(owners.duplicate_window, RETENTION);
     }

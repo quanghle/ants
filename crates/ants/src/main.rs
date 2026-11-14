@@ -120,9 +120,10 @@ enum Command {
     Spend {
         /// Only this ant.
         ant: Option<UserId>,
-        /// What the ant, or each ant on the thread, spent on it since a human's last message there.
-        #[arg(long)]
-        thread: Option<ThreadId>,
+        /// What the ant, or each ant on the thread, spent on it since a human's last message there: its id, a unique
+        /// start of one, or `last`.
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<thread::Pick>,
         /// UTC days to report, today included.
         #[arg(long, default_value_t = spend::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..=366),
               conflicts_with = "thread")]
@@ -177,8 +178,8 @@ enum Command {
         /// Subject filter, or an ant to follow its progress on every thread.
         #[arg(default_value = subject::ALL)]
         subject: String,
-        /// With an ant, follow only this thread.
-        thread: Option<ThreadId>,
+        /// With an ant, follow only this thread: its id, a unique start of one, or `last`.
+        thread: Option<thread::Pick>,
     },
     /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
@@ -398,9 +399,9 @@ enum ChannelCommand {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Only this thread.
-        #[arg(long)]
-        thread: Option<ThreadId>,
+        /// Only this thread: its id, a unique start of one, or `last`.
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<thread::Pick>,
         /// Only the last this many threads.
         #[arg(long, conflicts_with = "thread")]
         limit: Option<usize>,
@@ -595,6 +596,11 @@ enum AuthCommand {
         /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
         #[arg(long, conflicts_with = "webhook")]
         label: Option<String>,
+        /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service), never in a file,
+        /// for credentials used on this machine: the file names the stored key, written only once the seed reads
+        /// back and authenticates at --nats, unless no server answers there.
+        #[arg(long, conflicts_with = "public_key")]
+        store_key: bool,
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
@@ -620,6 +626,9 @@ enum AuthCommand {
         /// Where to write the credentials (default: <dir>/channel-manager.creds).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Keep the NKey seed in the OS credential store, never in a file, as `ants auth user --store-key` does.
+        #[arg(long)]
+        store_key: bool,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
@@ -947,10 +956,7 @@ async fn main() -> Result<()> {
         Command::Thread(ThreadCommand::Show { thread, since, json }) => {
             thread::show(&nats()?, thread, since, json).await
         }
-        Command::Watch { subject, thread } => {
-            let filter = watch_filter(&subject, thread.as_ref())?;
-            watch(&nats()?, filter).await
-        }
+        Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
             let nats = nats()?;
@@ -1065,7 +1071,18 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key, label }) => {
+        Command::Auth(AuthCommand::User {
+            user,
+            human,
+            webhook,
+            to,
+            channels,
+            dir,
+            out,
+            public_key,
+            label,
+            store_key,
+        }) => {
             let kind = match webhook {
                 true => revoke::Kind::Webhook,
                 false => auth::role(&user, human).into(),
@@ -1085,6 +1102,17 @@ async fn main() -> Result<()> {
             .with_js_domain(domain);
             let dir = team_dir(dir)?;
             let label = label.as_deref();
+            if store_key {
+                let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+                let key = nkeys::KeyPair::new_user();
+                let (jwt, device) = auth::sign_device(&dir, &user, kind, permissions, label, &key.public_key())?;
+                keys::issue_stored(&out, &jwt, &key, &cli.nats).await?;
+                println!("{}", out.display());
+                if let Some(device) = device {
+                    eprintln!("device {device}");
+                }
+                return Ok(());
+            }
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
                 let device = auth::issue_device(&dir, &user, kind, permissions, label, &out)?;
@@ -1184,10 +1212,17 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Auth(AuthCommand::ChannelManager { dir, out }) => {
+        Command::Auth(AuthCommand::ChannelManager { dir, out, store_key }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));
-            auth::issue_channel_manager(&dir, domain, &out)?;
+            match store_key {
+                true => {
+                    let key = nkeys::KeyPair::new_user();
+                    let jwt = auth::sign_channel_manager(&dir, domain, &key.public_key())?;
+                    keys::issue_stored(&out, &jwt, &key, &cli.nats).await?;
+                }
+                false => auth::issue_channel_manager(&dir, domain, &out)?,
+            }
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
@@ -1740,6 +1775,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             if channel::get(&kv, &channel).await?.is_none() {
                 tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
             }
+            let thread = thread::resolve(thread, &js, &nats.me).await?;
             let mut threads = channel::threads(channel::read(&js, &nats.me, &channel).await?);
             if let Some(thread) = &thread {
                 threads.retain(|t| t.id == *thread);
@@ -2003,17 +2039,26 @@ async fn cancel_outcome(
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
 fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
-    match target.parse::<UserId>().ok() {
+    match watched_ant(target, thread.is_some())? {
         Some(ant) => Ok(thread.map_or_else(|| subject::status_of(&ant), |t| subject::status(&ant, t))),
-        None if thread.is_some() => bail!("a thread can only follow an ant, not the subject filter {target:?}"),
         None => Ok(target.to_owned()),
     }
 }
 
-async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
+/// The ant `target` names for `ants watch`, None for a subject filter, which follows no `thread`.
+fn watched_ant(target: &str, thread: bool) -> Result<Option<UserId>> {
+    match target.parse::<UserId>().ok() {
+        None if thread => bail!("a thread can only follow an ant, not the subject filter {target:?}"),
+        ant => Ok(ant),
+    }
+}
+
+async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::Pick>) -> Result<()> {
     use std::io::Write as _;
 
-    let (client, _) = nats.connect("ants-watch").await?;
+    watched_ant(target, thread.is_some())?;
+    let (client, js) = nats.connect("ants-watch").await?;
+    let filter = watch_filter(target, thread::resolve(thread, &js, &nats.me).await?.as_ref())?;
     let mut sub = client.subscribe(filter).await?;
     let mut printer = Printer::default();
     while let Some(msg) = sub.next().await {
@@ -2208,6 +2253,19 @@ mod tests {
         assert_eq!(watch_filter("ants.notes.>", None).unwrap(), "ants.notes.>");
         assert_eq!(watch_filter(">", None).unwrap(), ">");
         assert!(watch_filter("ants.>", Some(&t1)).is_err());
+        assert!(watched_ant("ants.>", true).is_err());
+    }
+
+    #[test]
+    fn watch_spend_and_channel_read_take_a_start_of_a_thread_id_or_last() {
+        let start = Some(thread::Pick::Prefix("0199".to_owned()));
+        let cli = Cli::try_parse_from(["ants", "watch", "dev-a", "0199"]).unwrap();
+        assert_matches!(cli.command, Command::Watch { thread, .. } if thread == start);
+        let cli = Cli::try_parse_from(["ants", "spend", "--thread", "0199"]).unwrap();
+        assert_matches!(cli.command, Command::Spend { thread, .. } if thread == start);
+        let cli = Cli::try_parse_from(["ants", "channel", "read", "ops", "--thread", "last"]).unwrap();
+        let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command else { panic!("not channel read") };
+        assert_eq!(thread, Some(thread::Pick::Last));
     }
 
     #[test]

@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded, UserId,
+    ANTS_VERSION, Activity, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded,
+    UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -28,14 +29,15 @@ pub struct Registration {
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
-/// harnesses and whether the harness is signed out.
+/// harnesses and whether the harness is signed out or held back by a provider limit.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
     harnesses: AtomicUsize,
     signed_out: Mutex<Option<SignInNeeded>>,
-    /// Wakes the heartbeats when the ant turns idle or working, or its harness signed out or in, so the roster shows
-    /// it before the next beat.
+    limited: Mutex<Option<HarnessLimit>>,
+    /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in, or a provider limit
+    /// starts or ends, so the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -65,6 +67,19 @@ impl Workload {
         self.signed_out.lock().expect("signed out").clone()
     }
 
+    /// Note the provider limit messages wait out, or with `None` that they no longer wait.
+    pub fn set_limited(&self, limited: Option<HarnessLimit>) {
+        let mut current = self.limited.lock().expect("limited");
+        if *current != limited {
+            *current = limited;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn limited(&self) -> Option<HarnessLimit> {
+        self.limited.lock().expect("limited").clone()
+    }
+
     pub fn handling(&self) -> usize {
         self.handling.load(Ordering::Relaxed)
     }
@@ -84,6 +99,7 @@ impl Workload {
         entry.handling = Some(count(self.handling()));
         entry.harnesses = Some(count(self.harnesses()));
         entry.signed_out = self.signed_out();
+        entry.limited = self.limited();
     }
 }
 
@@ -118,6 +134,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         version: Some(ANTS_VERSION.to_owned()),
         perms: Some(PERMISSIONS_VERSION),
         signed_out: None,
+        limited: None,
     }
 }
 
@@ -179,18 +196,30 @@ async fn claim(kv: &kv::Store, entry: &RosterEntry) -> Result<Claim> {
     }
 }
 
-/// Wait until [`may_start`] allows `entry`, looking at the roster every `every`, then put `entry`, started now, and
-/// return the revision put, for [`hold`]. The put expects the entry it looked at, so of two daemons starting at once
-/// only one goes ahead; the other waits on.
+/// How often [`wait_for_turn`] looks at the roster when a watch shows the entry's expiry: only in case the watch
+/// misses it.
+pub const LOOK_AGAIN: Duration = Duration::from_secs(60);
+
+/// Wait until [`may_start`] allows `entry`, then put `entry`, started now, and return the revision put, for [`hold`].
+/// The put expects the entry it looked at, so of two daemons starting at once only one goes ahead; the other waits on.
+/// It looks again as soon as a watch of the entry shows it deleted or expired, which a bucket with limit markers
+/// shows (nats-server 2.11 or later, [`crate::hub::has_limit_markers`]), and otherwise every `every`, as an expiry
+/// without a marker goes unseen; with markers, only every [`LOOK_AGAIN`].
 pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Duration) -> Result<u64> {
     let key = entry.key().to_owned();
-    let mut ticks = tokio::time::interval(every);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut changes = match kv.watch(&key).await {
+        Ok(changes) => Some(changes),
+        Err(e) => {
+            tracing::warn!(ant = key, error = %e, "watching the roster entry; looking at the roster every {every:?}");
+            None
+        }
+    };
+    let markers = crate::hub::has_limit_markers(&kv.stream.cached_info().config);
     let mut waiting_for = None;
     loop {
-        ticks.tick().await;
         let now = Utc::now();
         (entry.started_at, entry.heartbeat_at) = (now, now);
+        let mut wait = every;
         match claim(kv, entry).await {
             Ok(Claim::Put(revision)) => return Ok(revision),
             Ok(Claim::Held { machine, instance }) => {
@@ -198,9 +227,27 @@ pub async fn wait_for_turn(kv: &kv::Store, entry: &mut RosterEntry, every: Durat
                     tracing::info!(ant = key, machine, "waiting while another daemon serves it");
                     waiting_for = Some(instance);
                 }
+                if markers && changes.is_some() {
+                    wait = every.max(LOOK_AGAIN);
+                }
             }
-            Ok(Claim::Raced) => tracing::info!(ant = key, "roster entry changed; looking again"),
+            Ok(Claim::Raced) => {
+                tracing::info!(ant = key, "roster entry changed; looking again");
+                continue;
+            }
             Err(e) => tracing::warn!(ant = key, error = format!("{e:#}"), "looking at the roster; trying again"),
+        }
+        let look_again = tokio::time::sleep(wait);
+        tokio::pin!(look_again);
+        loop {
+            tokio::select! {
+                () = &mut look_again => break,
+                change = next_change(&mut changes) => match change {
+                    Some(change) if change.operation == kv::Operation::Put => {}
+                    // Deleted or expired, or the watch ended: look now.
+                    _ => break,
+                },
+            }
         }
     }
 }
@@ -250,7 +297,11 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
             () = changed => false,
         };
         if let Some(workload) = workload {
-            if !beat && entry.activity == Some(workload.activity()) && entry.signed_out == workload.signed_out() {
+            if !beat
+                && entry.activity == Some(workload.activity())
+                && entry.signed_out == workload.signed_out()
+                && entry.limited == workload.limited()
+            {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
             }
@@ -461,7 +512,8 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
 }
 
 /// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
-/// harness is signed in before those signed out, then live entries before stale ones, then idle ants before those
+/// harness is signed in before those signed out, then those held back by no provider limit before limited ones, then
+/// live entries before stale ones, then idle ants before those
 /// of unknown activity (older daemons) and those working, then the fewest messages in hand, then the first by id. The
 /// same roster at the same time always gives the same answer.
 pub fn pick<'a>(
@@ -476,7 +528,14 @@ pub fn pick<'a>(
             None | Some(Activity::Unknown) => 1,
             Some(Activity::Working) => 2,
         };
-        (e.signed_out.is_some(), !is_live(e, now), busyness, e.handling.unwrap_or(u32::MAX), &e.ant)
+        (
+            e.signed_out.is_some(),
+            e.limited.is_some(),
+            !is_live(e, now),
+            busyness,
+            e.handling.unwrap_or(u32::MAX),
+            &e.ant,
+        )
     })
 }
 
@@ -527,6 +586,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         }
     }
 
@@ -561,6 +621,15 @@ mod tests {
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "signing in shows at once");
         workload.stamp(&mut stamped);
         assert_eq!(stamped.signed_out, None);
+
+        let now = Utc::now();
+        let limited = HarnessLimit { kind: ants_proto::LimitKind::Quota, since: now, until: now };
+        workload.set_limited(Some(limited.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "a limit shows at once");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.limited, Some(limited));
+        workload.set_limited(None);
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "its end too");
     }
 
     #[test]
@@ -619,6 +688,11 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "a heartbeat ahead of this clock counts as live");
         entries[0].signed_out = Some(SignInNeeded { since: now, sign_in: None });
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a signed-in ant, even stale, before a signed-out one");
+        let until = now + chrono::Duration::seconds(60);
+        entries[1].limited = Some(HarnessLimit { kind: ants_proto::LimitKind::RateLimit, since: now, until });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a limited ant before a signed-out one");
+        entries[0].signed_out = None;
+        assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "an ant held back by no limit before a limited one");
     }
 
     #[test]

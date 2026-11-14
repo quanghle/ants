@@ -35,6 +35,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         version: None,
         perms: None,
         signed_out: None,
+        limited: None,
     }
 }
 
@@ -203,6 +204,28 @@ async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     assert!(a.is_finished() != b.is_finished(), "exactly one of two daemons starting at once goes ahead");
     a.abort();
     b.abort();
+}
+
+/// The roster leaves a marker when an entry expires, so a daemon waiting for its turn takes over within about a second
+/// of the expiry, without looking at the roster in between.
+#[tokio::test]
+async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let ttl = Duration::from_secs(2);
+    let kv = bus::ensure_roster(&js, ttl).await.unwrap();
+    assert!(ants_daemon::hub::has_limit_markers(&kv.stream.cached_info().config), "nats-server 2.11 or later");
+
+    let there = Registration::start(kv.clone(), entry_on("messenger", "there"), Duration::from_secs(60)).await;
+    let put_at = Instant::now();
+    drop(there.unwrap());
+    let mut here = entry_on("messenger", "here");
+    let every = Duration::from_secs(60);
+    tokio::time::timeout(ttl * 3, roster::wait_for_turn(&kv, &mut here, every)).await.expect("took over").unwrap();
+    let took = put_at.elapsed();
+    assert!(took >= ttl - Duration::from_millis(500), "took over before the entry expired: {took:?}");
+    assert!(took <= ttl + Duration::from_millis(1500), "took over {took:?} after the put");
+    assert_eq!(read(&kv, "messenger").await.unwrap().instance, here.instance);
 }
 
 /// Poll until `registration` is lost, or fail after `limit`.

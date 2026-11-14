@@ -409,15 +409,23 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
 /// and the humans, writes the channels bucket and posts in channels as [`UserId::channel_manager`]
 /// ([`Permissions::for_channel_manager`]).
 pub fn issue_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
-    let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
+    let jwt = sign_channel_manager(dir, js_domain, &key.public_key())?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
+}
+
+/// Sign the user JWT of the channel manager for `public_key`, with the permissions [`issue_channel_manager`] gives,
+/// and record its key.
+pub fn sign_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, public_key: &str) -> Result<String> {
+    check_user_key(public_key)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
     let permissions = Permissions::for_channel_manager().with_js_domain(js_domain);
     let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
     let answer_once = json!({ "resp": { "max": 1, "ttl": ttl } });
     let name = UserId::channel_manager();
-    let jwt = user_jwt(&account, &key.public_key(), name.as_str(), permissions, answer_once, None)?;
-    write_secret(out, &creds(&jwt, &seed(&key)?))?;
-    revoke::record(dir, &Issued::new(&key.public_key(), name.as_str(), Kind::ChannelManager, None)?)
+    let jwt = user_jwt(&account, public_key, name.as_str(), permissions, answer_once, None)?;
+    revoke::record(dir, &Issued::new(public_key, name.as_str(), Kind::ChannelManager, None)?)?;
+    Ok(jwt)
 }
 
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
@@ -1452,10 +1460,10 @@ pub(crate) mod tests {
     async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
-        let (_h, h_js) = server.connect(&human).await;
+        let (h, h_js) = server.connect(&human).await;
         bus::ensure_stream(&h_js).await.unwrap();
         let (_a, a_js) = server.connect(&dev_a).await;
-        let (_b, b_js) = server.connect(&dev_b).await;
+        let (b, b_js) = server.connect(&dev_b).await;
         let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
 
         let first = NotesPost::spend(thread.clone(), dev_a.clone(), "draft", 8, None).unwrap();
@@ -1496,6 +1504,12 @@ pub(crate) mod tests {
             assert_eq!((&read.posts[..], read.last_seq), (&[first.clone(), answer.clone()][..], seen.last_seq + 2));
         }
         assert_eq!(next().await, forged, "the daemon's read carries on where it was");
+        // The human's reads go by batched direct gets, which no ant's credentials allow.
+        let batch = format!(r#"{{"batch":2,"next_by_subj":"{}"}}"#, subject::notes_of(&thread));
+        let got = h.request(format!("$JS.API.DIRECT.GET.{STREAM}"), batch.clone().into()).await.unwrap();
+        assert!(got.headers.unwrap().get("Nats-Num-Pending").is_some(), "a batch");
+        let denied = b.request(format!("$JS.API.DIRECT.GET.{STREAM}"), batch.into());
+        assert!(!matches!(timeout(Duration::from_secs(1), denied).await, Ok(Ok(_))), "an ant gets no batch");
 
         // dev-a's notes consumer filters thread notes only, and dev-b's is not dev-a's to use.
         let consumer = |name: String, filter: String| jetstream::consumer::pull::Config {
@@ -1598,6 +1612,7 @@ pub(crate) mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         };
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
@@ -1940,6 +1955,7 @@ pub(crate) mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         };
         let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
         b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

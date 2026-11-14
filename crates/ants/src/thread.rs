@@ -1,7 +1,7 @@
 //! `ants thread`: the threads in the ANTS stream, across inboxes (both ways), channel posts, notes, escalations, tool
 //! requests and their decisions, and dead letters.
 //!
-//! Read back by a human one message at a time (`STREAM.MSG.GET`, [`Reading::Gets`]), so nothing is consumed or acked
+//! Read back by a human by message gets (batched direct gets, [`Reading::Gets`]), so nothing is consumed or acked
 //! and no consumer is left behind. Only notes subjects name their thread, so a read goes through every message stored
 //! in its time window: `--since` bounds it, and `ants thread show` of a thread with a time-ordered id starts at the
 //! thread's start.
@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
+use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, NotesPost, ThreadId, UserId, Uuid,
@@ -28,6 +29,9 @@ use crate::tools;
 const OPENING: usize = 72;
 /// How far back a start of a thread id looks for the threads of the CLI's user.
 pub const RECENT: Duration = Duration::from_hours(7 * 24);
+/// How long after its time-ordered id is made a thread's first message may be stored, clocks' skew included, for a start
+/// of an id matched among threads of any user.
+const LATE: Duration = Duration::from_mins(10);
 /// How many threads an error on a start of a thread id lists.
 const LISTED: usize = 10;
 
@@ -412,8 +416,8 @@ pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, mut t
 }
 
 /// What a THREAD argument or `--thread` picks: a whole thread id (a UUID), taken as given; a start of one (or a whole
-/// id of another form), among the threads the CLI's user took part in lately ([`RECENT`]); or `last`, the thread of
-/// the latest message to or from that user.
+/// id of another form), among the threads the CLI's user took part in lately ([`RECENT`]), else among any user's; or
+/// `last`, the thread of the latest message to or from that user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
     Id(ThreadId),
@@ -451,10 +455,12 @@ impl Pick {
         if !me.role.is_human() {
             bail!("the credentials of {} are an ant's, which read no thread back: give the whole thread id", me.id);
         }
-        match prefix {
-            Some(prefix) => select(&recent(js, &me.id, window(RECENT)).await?, &prefix, &me.id),
-            None => last(js, &me.id).await,
+        let Some(prefix) = prefix else { return last(js, &me.id).await };
+        let own = recent(js, &me.id, window(RECENT)).await?;
+        if let Some(thread) = select(&own, &prefix, &me.id)? {
+            return Ok(thread);
         }
+        select_any(&any_recent(js, &prefix).await?, &own, &prefix, &me.id)
     }
 }
 
@@ -512,26 +518,108 @@ async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::Deliver
     Ok(threads)
 }
 
-/// The one thread among `threads` (the latest message of each, most recent first) whose id is `prefix`, else starts
-/// with it. The error on none or several lists the threads to choose from.
-fn select(threads: &[Entry], prefix: &str, user: &UserId) -> Result<ThreadId> {
-    if let Some(exact) = threads.iter().find(|e| e.thread_id.as_str() == prefix) {
-        return Ok(exact.thread_id.clone());
+/// The latest message of each thread with an id starting with `prefix` stored in the last [`RECENT`], whoever took
+/// part in it, most recent first. For a start of a time-ordered id, only the messages stored while such an id was
+/// made, give or take the clocks' skew ([`CLOCK_SLACK`]) and up to [`LATE`] after, are read: a thread's first message
+/// is.
+async fn any_recent(js: &jetstream::Context, prefix: &str) -> Result<Vec<Entry>> {
+    let now = SystemTime::now();
+    let floor = now.checked_sub(RECENT).unwrap_or(SystemTime::UNIX_EPOCH);
+    let (from, to) = match made_within(prefix) {
+        Some((first, last)) => (first.checked_sub(CLOCK_SLACK).unwrap_or(first).max(floor), (last + LATE).min(now)),
+        None => (floor, now),
+    };
+    if from > to {
+        return Ok(Vec::new());
     }
-    let found: Vec<&Entry> = threads.iter().filter(|e| e.thread_id.as_str().starts_with(prefix)).collect();
+    let mut threads: HashMap<ThreadId, Entry> = HashMap::new();
+    let mut parser = Parser::default();
+    let start = consumer::DeliverPolicy::ByStartTime { start_time: from.into() };
+    reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
+        if stored > to {
+            return ControlFlow::Break(());
+        }
+        let entry = parser.entry(seq, stored.into(), subject, payload);
+        if let Some(entry) = entry.filter(|e| !e.forged && e.thread_id.as_str().starts_with(prefix)) {
+            threads.insert(entry.thread_id.clone(), entry);
+        }
+        ControlFlow::Continue(())
+    })
+    .await?;
+    let mut threads: Vec<Entry> = threads.into_values().collect();
+    threads.sort_by_key(|e| std::cmp::Reverse(e.seq));
+    Ok(threads)
+}
+
+/// The span in which a time-ordered (version 7 UUID) thread id starting with `prefix` was made, from the time its
+/// first 12 hex digits carry; None when no such id starts so, or the start leaves the time open.
+fn made_within(prefix: &str) -> Option<(SystemTime, SystemTime)> {
+    let bytes = prefix.as_bytes();
+    if bytes.get(14).is_some_and(|&b| b != b'7') {
+        return None;
+    }
+    let mut digits = String::new();
+    for (i, &b) in bytes.iter().take(13).enumerate() {
+        match (i, b) {
+            (8, b'-') => {}
+            (8, _) => return None,
+            (_, b) if b.is_ascii_hexdigit() => digits.push(b as char),
+            _ => return None,
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    let millis = |pad: char| {
+        let padded: String = digits.chars().chain(std::iter::repeat(pad)).take(12).collect();
+        u64::from_str_radix(&padded, 16).ok()
+    };
+    let at = |ms: u64| SystemTime::UNIX_EPOCH + Duration::from_millis(ms);
+    Some((at(millis('0')?), at(millis('f')? + 1)))
+}
+
+/// Threads among `threads` whose id is `prefix`, else those starting with it.
+fn matching<'a>(threads: &'a [Entry], prefix: &str) -> Vec<&'a Entry> {
+    match threads.iter().find(|e| e.thread_id.as_str() == prefix) {
+        Some(exact) => vec![exact],
+        None => threads.iter().filter(|e| e.thread_id.as_str().starts_with(prefix)).collect(),
+    }
+}
+
+/// The one thread among `threads` `user` took part in (the latest message of each, most recent first) whose id is
+/// `prefix`, else starts with it; None when none does. The error on several lists them.
+fn select(threads: &[Entry], prefix: &str, user: &UserId) -> Result<Option<ThreadId>> {
+    let found = matching(threads, prefix);
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.thread_id.clone())),
+        _ => bail!(
+            "{} threads {user} took part in over the last {} days start with {prefix}; give more of the id:\n{}",
+            found.len(),
+            RECENT.as_secs() / 86_400,
+            listing(found.iter().copied())
+        ),
+    }
+}
+
+/// The one thread among `threads` (any user's, the latest message of each, most recent first) whose id is `prefix`,
+/// else starts with it, for a `user` who took part in none of them. The error on none lists `own`, the threads `user`
+/// took part in, and the one on several lists those found.
+fn select_any(threads: &[Entry], own: &[Entry], prefix: &str, user: &UserId) -> Result<ThreadId> {
+    let found = matching(threads, prefix);
     let days = RECENT.as_secs() / 86_400;
     match found.as_slice() {
         [one] => Ok(one.thread_id.clone()),
-        [] if threads.is_empty() => {
-            bail!("no thread {user} took part in over the last {days} days: give the whole thread id")
+        [] if own.is_empty() => {
+            bail!("no thread over the last {days} days starts with {prefix}: give the whole thread id")
         }
         [] => bail!(
-            "no thread {user} took part in over the last {days} days starts with {prefix}; give the whole id of an \
-             older one, or pick one of the most recent:\n{}",
-            listing(threads.iter())
+            "no thread over the last {days} days starts with {prefix}; give the whole id of an older one, or pick one \
+             of the most recent {user} took part in:\n{}",
+            listing(own.iter())
         ),
         _ => bail!(
-            "{} threads {user} took part in over the last {days} days start with {prefix}; give more of the id:\n{}",
+            "{} threads over the last {days} days start with {prefix}, none of them with {user}; give more of the id:\n{}",
             found.len(),
             listing(found.iter().copied())
         ),
@@ -794,20 +882,45 @@ mod tests {
         };
         // The latest message of each thread, most recent first.
         let threads = [entry("ab12", 3), entry("ab1", 2), entry("cd34", 1)];
-        assert_eq!(select(&threads, "ab1", &alice).unwrap(), t("ab1"), "a whole id wins");
-        assert_eq!(select(&threads, "c", &alice).unwrap(), t("cd34"));
+        assert_eq!(select(&threads, "ab1", &alice).unwrap(), Some(t("ab1")), "a whole id wins");
+        assert_eq!(select(&threads, "c", &alice).unwrap(), Some(t("cd34")));
+        assert_eq!(select(&threads, "ef", &alice).unwrap(), None);
 
         let several = select(&threads, "ab", &alice).unwrap_err().to_string();
         assert!(several.starts_with("2 threads alice took part in over the last 7 days start with ab"), "{several}");
         assert!(several.contains("\n  ab12  2023-11-14 22:13:23  alice -> dev-a: on ab12…\n  ab1  "), "{several}");
         assert!(!several.contains("cd34"), "{several}");
 
-        let none = select(&threads, "ef", &alice).unwrap_err().to_string();
+        // Among any user's threads, when none of alice's matches.
+        let others = [entry("ef56", 5), entry("ef5", 4)];
+        assert_eq!(select_any(&others, &threads, "ef5", &alice).unwrap(), t("ef5"), "a whole id wins");
+        let several = select_any(&others, &threads, "ef", &alice).unwrap_err().to_string();
+        assert!(several.starts_with("2 threads over the last 7 days start with ef, none of them with alice"));
+        assert!(several.contains("\n  ef56 ") && !several.contains("ab12"), "{several}");
+        let none = select_any(&[], &threads, "ef", &alice).unwrap_err().to_string();
         assert!(none.contains("starts with ef; give the whole id of an older one"), "{none}");
         assert!(none.contains("\n  ab12 ") && none.contains("\n  cd34 "), "{none}");
         let many: Vec<Entry> = (0..12).map(|i| entry(&format!("t{i}"), i)).collect();
-        assert!(select(&many, "x", &alice).unwrap_err().to_string().ends_with("\n  and 2 more"));
-        assert!(select(&[], "ab", &alice).unwrap_err().to_string().contains("give the whole thread id"));
+        assert!(select_any(&[], &many, "x", &alice).unwrap_err().to_string().ends_with("\n  and 2 more"));
+        assert!(select_any(&[], &[], "ab", &alice).unwrap_err().to_string().contains("give the whole thread id"));
+    }
+
+    #[test]
+    fn a_start_of_a_time_ordered_id_bounds_when_it_was_made() {
+        let id = ThreadId::generate();
+        let made = ants_daemon::channel::thread_start(&id).unwrap() + CLOCK_SLACK;
+        for len in [1, 8, 9, 11, 13, 20, 36] {
+            let (first, last) = made_within(&id.as_str()[..len]).unwrap();
+            assert!(first <= made && made < last, "{len}");
+        }
+        let (first, last) = made_within(&id.as_str()[..8]).unwrap();
+        assert_eq!(last.duration_since(first).unwrap(), Duration::from_millis(1 << 16));
+        let (first, last) = made_within(&id.as_str()[..13]).unwrap();
+        assert_eq!(last.duration_since(first).unwrap(), Duration::from_millis(1));
+        let v4 = Uuid::new_v4().to_string();
+        assert_eq!(made_within(&v4[..15]), None, "no version 7 UUID");
+        assert_eq!(made_within("t1"), None);
+        assert_eq!(made_within("0199a3b4c"), None, "no hyphen after 8 digits");
     }
 
     #[tokio::test]
@@ -824,11 +937,18 @@ mod tests {
         let posted = ChannelPost::new("ops".parse().unwrap(), alice.clone(), "deploy?");
         let others = Envelope::new(dev_a.clone(), dev_b.clone(), "between ants");
         let reply = asked.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+        // Two threads between ants made in the same millisecond a minute ago, so the same 13 characters start them.
+        let millis = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - 60_000;
+        let made = |tail: u128| t(&Uuid::from_u128((millis << 80) | (0x7 << 76) | (0x8 << 60) | tail).to_string());
+        let twins =
+            [0x1_0000, 0x2_0000].map(|tail| Envelope::on_thread(made(tail), dev_b.clone(), dev_a.clone(), "twin"));
         for (subject, payload) in [
             (asked.subject(), json(&asked)),
             (posted.subject(), json(&posted)),
             (reply.subject(), json(&reply)),
             (others.subject(), json(&others)),
+            (twins[0].subject(), json(&twins[0])),
+            (twins[1].subject(), json(&twins[1])),
         ] {
             js.publish(subject, payload.into()).await.unwrap().await.unwrap();
         }
@@ -836,7 +956,13 @@ mod tests {
         assert_eq!(resolve("last").await.unwrap(), asked.thread_id, "the reply is the latest of alice's");
         let start = |thread: &ThreadId| thread.as_str()[..thread.as_str().len() - 4].to_owned();
         assert_eq!(resolve(&start(&posted.thread_id)).await.unwrap(), posted.thread_id);
-        let unknown = resolve(&start(&others.thread_id)).await.unwrap_err().to_string();
+        assert_eq!(resolve(&start(&others.thread_id)).await.unwrap(), others.thread_id, "a thread between ants");
+        assert_eq!(resolve(&start(&twins[1].thread_id)).await.unwrap(), twins[1].thread_id);
+        let twin = resolve(&twins[0].thread_id.as_str()[..13]).await.unwrap_err().to_string();
+        assert!(twin.starts_with("2 threads over the last 7 days start with"), "{twin}");
+        assert!(twin.contains(&format!("\n  {} ", twins[1].thread_id)), "{twin}");
+        let unknown = resolve("ffff").await.unwrap_err().to_string();
+        assert!(unknown.contains("no thread over the last 7 days starts with ffff"), "{unknown}");
         assert!(unknown.contains(&format!("\n  {} ", asked.thread_id)), "{unknown}");
         assert!(unknown.contains(&format!("\n  {} ", posted.thread_id)), "{unknown}");
         assert!(!unknown.contains(&format!("\n  {} ", others.thread_id)), "{unknown}");

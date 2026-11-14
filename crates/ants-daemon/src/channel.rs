@@ -924,6 +924,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };
         let text = triage_prompt(&root, &entry, &[a], &humans(), &context, 7);

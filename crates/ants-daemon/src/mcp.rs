@@ -72,6 +72,10 @@ const MAX_ROUTED: usize = 1024;
 const POST_TRIES: usize = 5;
 /// Most recent posts `read_notes` shows.
 const SHOWN_POSTS: usize = 50;
+/// How long a recipient's roster lookup may take before the message goes without it.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+/// Names of the roster a message to an ant no daemon serves lists at most.
+const SHOWN_NAMES: usize = 10;
 
 /// Publishes an envelope and resolves once JetStream has stored it.
 pub type Outbox = Arc<dyn Fn(Envelope) -> BoxFuture<'static, Result<()>> + Send + Sync>;
@@ -133,6 +137,26 @@ pub fn jetstream_roster(js: async_nats::jetstream::Context) -> Roster {
     })
 }
 
+/// Reads one ant's roster entry, None when the roster lists none.
+pub type RosterLookup = Arc<dyn Fn(UserId) -> BoxFuture<'static, Result<Option<RosterEntry>>> + Send + Sync>;
+
+/// Reads the ant's key in the roster bucket.
+pub fn jetstream_lookup(js: async_nats::jetstream::Context) -> RosterLookup {
+    Arc::new(move |ant| {
+        let js = js.clone();
+        Box::pin(async move {
+            let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
+            let Some(value) = kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))?
+            else {
+                return Ok(None);
+            };
+            let entry: RosterEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
+            entry.check_key(ant.as_str())?;
+            Ok(Some(entry))
+        })
+    })
+}
+
 /// The MCP server of one ant. Dropping it stops the listeners.
 pub struct Mcp {
     hub: Arc<Hub>,
@@ -177,6 +201,7 @@ impl Mcp {
             humans,
             escalator,
             channels: std::sync::OnceLock::new(),
+            lookup: OnceLock::new(),
             admin: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
@@ -207,6 +232,12 @@ impl Mcp {
     /// Serve `post_channel` through `channels`; without them it is refused.
     pub fn with_channels(&self, channels: ChannelAccess) {
         let _ = self.hub.channels.set(channels);
+    }
+
+    /// Look recipients up through `lookup` before `send_message` and `ask_agent` reach them; without it no
+    /// recipient is looked up.
+    pub fn with_lookup(&self, lookup: RosterLookup) {
+        let _ = self.hub.lookup.set(lookup);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -349,6 +380,7 @@ struct Hub {
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
     channels: std::sync::OnceLock<ChannelAccess>,
+    lookup: OnceLock<RosterLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
@@ -658,6 +690,34 @@ impl Hub {
         })?;
         entries.retain(|e| e.ant != self.ant);
         Ok(entries)
+    }
+
+    /// Why no daemon serves the ant `to` now, by its roster entry, with names from the roster `to` may stand for; None
+    /// when one does, `to` is a human or the channel manager, or the roster cannot be read, so a lookup never holds a
+    /// message back.
+    async fn unserved(&self, to: &UserId) -> Option<String> {
+        let lookup = self.lookup.get()?;
+        if self.humans.is_human(to) || *to == UserId::channel_manager() {
+            return None;
+        }
+        let entry = match tokio::time::timeout(LOOKUP_TIMEOUT, lookup(to.clone())).await {
+            Ok(Ok(entry)) => entry,
+            Ok(Err(e)) => {
+                tracing::debug!(%to, error = format!("{e:#}"), "not looking the recipient up");
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(%to, "not looking the recipient up: no answer within {LOOKUP_TIMEOUT:?}");
+                return None;
+            }
+        };
+        let now = chrono::Utc::now();
+        let why = why_unserved(to, entry.as_ref(), now)?;
+        let others = match tokio::time::timeout(LOOKUP_TIMEOUT, self.others()).await {
+            Ok(Ok(others)) => others,
+            _ => return Some(format!("{why}.")),
+        };
+        Some(format!("{why}. {}", alternatives(to, entry.as_ref(), &others, now)))
     }
 
     /// Send `envelope` and wait up to `wait` (or until `cancelled`) for its reply.
@@ -996,14 +1056,21 @@ impl Tools {
             .ok_or_else(|| ErrorData::invalid_request("no ants session behind this connection", None))
     }
 
-    /// Send `text` to `to` as `send_message` does.
+    /// Send `text` to `to` as `send_message` does, noting when no daemon serves `to` now: the message waits for one.
     async fn send_to(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<String, String> {
         let envelope = self.hub.outgoing(thread, to, text, on)?;
+        let unserved = self.hub.unserved(&envelope.to).await;
         self.hub.send(&envelope).await?;
-        Ok(format!("Sent to {} on thread {} ({} turns left).", envelope.to, envelope.thread_id, envelope.turn_budget))
+        let sent =
+            format!("Sent to {} on thread {} ({} turns left).", envelope.to, envelope.thread_id, envelope.turn_budget);
+        Ok(match unserved {
+            Some(why) => format!("{sent} Warning: the message waits in the inbox of {}, as {why}", envelope.to),
+            None => sent,
+        })
     }
 
-    /// Ask `to` as `ask_agent` does, and return the reply.
+    /// Ask `to` as `ask_agent` does, and return the reply. Refused at once, with nothing sent, when no daemon serves
+    /// `to` now, rather than waiting out the reply that cannot come.
     async fn ask(
         &self,
         thread: &ThreadId,
@@ -1018,6 +1085,12 @@ impl Tools {
         }
         if envelope.turn_budget == 0 {
             return Err(format!("thread {thread} has no turns left for a reply; ask the human instead"));
+        }
+        if let Some(why) = self.hub.unserved(&envelope.to).await {
+            return Err(format!(
+                "Not sent, as {why} send_message leaves a message waiting in the inbox of {} instead.",
+                envelope.to
+            ));
         }
         self.hub.ask(envelope, wait, cx.ct.cancelled()).await
     }
@@ -1043,9 +1116,10 @@ fn describe(entries: &[&RosterEntry]) -> String {
         .map(|e| {
             let capabilities =
                 if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
-            let activity = match (&e.signed_out, e.activity) {
-                (Some(_), _) => ", signed out".to_owned(),
-                (None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
+            let activity = match (&e.signed_out, &e.limited, e.activity) {
+                (Some(_), _, _) => ", signed out".to_owned(),
+                (None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
+                (None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
             };
             let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
@@ -1055,6 +1129,14 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",
                     out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     e.ant
+                );
+            } else if let Some(limited) = &e.limited {
+                let _ = write!(
+                    text,
+                    "\n  harness held back by a provider limit ({}): messages to {} wait until about {}",
+                    limited.kind.as_str(),
+                    e.ant,
+                    limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 );
             }
             if let Some(whoami) = &e.whoami
@@ -1095,6 +1177,88 @@ fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
     format!("No other ant in the roster has capability {capability:?}. Capabilities there: {}.", known.join(", "))
 }
 
+/// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
+/// [`roster::is_live`]) or a harness signed out.
+fn why_unserved(ant: &UserId, entry: Option<&RosterEntry>, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let Some(entry) = entry else {
+        return Some(format!("{ant} is not in the roster: no daemon serves {ant} now"));
+    };
+    if !roster::is_live(entry, now) {
+        let ago = (now - entry.heartbeat_at).to_std().unwrap_or_default();
+        return Some(format!(
+            "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
+            entry.machine,
+            ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
+        ));
+    }
+    let out = entry.signed_out.as_ref()?;
+    Some(format!(
+        "the harness of {ant} ({} on {}) is signed out since {}: messages to {ant} wait unanswered until a human signs \
+         the harness in",
+        entry.harness,
+        entry.machine,
+        out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    ))
+}
+
+/// What to message instead of `ant`, which no daemon serves, from the `others` in the roster: for an ant missing
+/// from it the names closest to `ant` (the name may be misspelt), else the served ants sharing a capability of its
+/// `entry`.
+fn alternatives(
+    ant: &UserId,
+    entry: Option<&RosterEntry>,
+    others: &[RosterEntry],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let names = |entries: &[&RosterEntry]| entries.iter().map(|e| e.ant.as_str()).collect::<Vec<_>>().join(", ");
+    if let Some(entry) = entry {
+        let sharing: Vec<&RosterEntry> = others
+            .iter()
+            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none())
+            .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
+            .take(SHOWN_NAMES)
+            .collect();
+        if sharing.is_empty() {
+            return format!("No served ant shares a capability of {ant}; list_ants shows the ants in the roster.");
+        }
+        return format!("Served ants sharing a capability of {ant}: {}.", names(&sharing));
+    }
+    let wanted = ant.as_str().to_lowercase();
+    let most = wanted.chars().count().div_ceil(3).max(1);
+    let mut close: Vec<(usize, &RosterEntry)> = others
+        .iter()
+        .filter_map(|e| {
+            let name = e.ant.as_str().to_lowercase();
+            let distance = edit_distance(&wanted, &name);
+            (distance <= most || name.starts_with(&wanted) || wanted.starts_with(&name)).then_some((distance, e))
+        })
+        .collect();
+    close.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.ant.cmp(&y.ant)));
+    let close: Vec<&RosterEntry> = close.into_iter().map(|(_, e)| e).take(3).collect();
+    match others.len() {
+        _ if !close.is_empty() => format!("Closest names in the roster: {}.", names(&close)),
+        0 => "No other ant is in the roster.".to_owned(),
+        n if n <= SHOWN_NAMES => format!("In the roster: {}.", names(&others.iter().collect::<Vec<_>>())),
+        n => format!("No name in the roster is close; list_ants shows the {n} ants there."),
+    }
+}
+
+/// The edits (insertions, deletions, substitutions of a character) that turn `a` into `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substituted = diagonal + usize::from(ca != *cb);
+            diagonal = row[j + 1];
+            row[j + 1] = substituted.min(row[j] + 1).min(diagonal + 1);
+        }
+    }
+    row[b.len()]
+}
+
 /// The most recent posts of a thread's notes, oldest first, with what its budget has left.
 fn describe_notes(thread: &ThreadId, posts: &[NotesPost]) -> String {
     let Some(last) = posts.last() else { return format!("Thread {thread} has no notes yet.") };
@@ -1122,7 +1286,8 @@ impl Tools {
     #[tool(description = "Send a message to another ant, or to `human`, and return at once. It goes on the \
         current thread unless `thread` says otherwise. A message between agents spends one turn of the thread's \
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
-        message.")]
+        message. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
+        message still goes and waits, and the result warns so, naming ants from the roster to message instead.")]
     async fn send_message(
         &self,
         Parameters(args): Parameters<SendMessage>,
@@ -1134,7 +1299,8 @@ impl Tools {
 
     #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
-        check_inbox.")]
+        check_inbox. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
+        call is refused at once with nothing sent, saying why and naming ants from the roster to ask instead.")]
     async fn ask_agent(
         &self,
         Parameters(args): Parameters<AskAgent>,
@@ -1455,6 +1621,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         }
     }
 
@@ -1712,7 +1879,10 @@ mod tests {
         out.activity = Some(ants_proto::Activity::Idle);
         let since = "2026-01-01T00:00:00Z".parse().unwrap();
         out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
-        let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs];
+        let mut limited = listed("dev-q", &[]);
+        let until = "2026-01-01T00:10:00Z".parse().unwrap();
+        limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
+        let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
         let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
         let current = from_human();
         let _turn = mcp.begin(&current);
@@ -1729,6 +1899,13 @@ mod tests {
             text.contains(
                 "ops: billing (copilot on m1, signed out)\n  harness signed out since 2026-01-01T00:00:00Z: messages \
                  to ops wait unanswered until a human signs it in (`copilot login` on m1)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "dev-q: no capabilities (copilot on m1, out-of-quota)\n  harness held back by a provider limit \
+                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z"
             ),
             "{text}"
         );
@@ -1757,6 +1934,84 @@ mod tests {
         let (ok, text) = call(&client, "route", serde_json::json!({"capability": "go", "text": "?"})).await;
         assert!(!ok && text.contains("Capabilities there: billing, rust."), "{text}");
         assert!(sent.try_recv().is_err(), "nothing is sent without an ant to take it");
+    }
+
+    /// Looks ants up in `roster`.
+    fn lookup_in(roster: Vec<RosterEntry>) -> RosterLookup {
+        Arc::new(move |ant| {
+            let entry = roster.iter().find(|e| e.ant == ant).cloned();
+            Box::pin(async move { Ok(entry) })
+        })
+    }
+
+    #[tokio::test]
+    async fn messages_to_an_ant_no_daemon_serves_say_so() {
+        let mut stale = listed("dev-c", &["rust"]);
+        stale.heartbeat_at -= chrono::Duration::minutes(10);
+        let mut out = listed("ops", &["billing"]);
+        let since = "2026-01-01T00:00:00Z".parse().unwrap();
+        out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
+        let roster = vec![listed("dev-a", &["rust"]), listed("dev-b", &["rust"]), stale, out];
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let (mcp, mut sent) = start_with(&home("unserved"), roster.clone(), Arc::default(), humans).await;
+        mcp.with_lookup(lookup_in(roster));
+        let current = from_human();
+        let _turn = mcp.begin(&current);
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+
+        let ask = |to: &str| serde_json::json!({"to": to, "text": "?"});
+        let (ok, text) = call(&client, "ask_agent", ask("dev-bb")).await;
+        assert!(!ok, "{text}");
+        assert_eq!(
+            text,
+            "Not sent, as dev-bb is not in the roster: no daemon serves dev-bb now. Closest names in the roster: \
+             dev-b, dev-c. send_message leaves a message waiting in the inbox of dev-bb instead."
+        );
+        let (ok, text) = call(&client, "ask_agent", ask("zed")).await;
+        assert!(!ok && text.contains("now. In the roster: dev-b, dev-c, ops."), "{text}");
+        let (ok, text) = call(&client, "ask_agent", ask("dev-c")).await;
+        assert!(!ok && text.contains("dev-c is stale in the roster: the daemon on m1 last beat 10m"), "{text}");
+        assert!(text.contains("Served ants sharing a capability of dev-c: dev-b."), "{text}");
+        let (ok, text) = call(&client, "ask_agent", ask("ops")).await;
+        assert!(
+            !ok && text.contains(
+                "the harness of ops (copilot on m1) is signed out since 2026-01-01T00:00:00Z: messages to ops wait \
+                 unanswered until a human signs the harness in. No served ant shares a capability of ops"
+            ),
+            "{text}"
+        );
+        assert!(sent.try_recv().is_err(), "an ask no daemon can answer is not sent");
+
+        let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-bb", "text": "hi"})).await;
+        assert!(ok, "{text}");
+        assert!(
+            text.ends_with(
+                "turns left). Warning: the message waits in the inbox of dev-bb, as dev-bb is not in the roster: no \
+                 daemon serves dev-bb now. Closest names in the roster: dev-b, dev-c."
+            ),
+            "{text}"
+        );
+        assert_eq!(sent.recv().await.unwrap().to, user("dev-bb"), "sent all the same");
+        for to in ["dev-b", "alice", "human"] {
+            let (ok, text) = call(&client, "send_message", serde_json::json!({"to": to, "text": "hi"})).await;
+            assert!(ok && !text.contains("Warning"), "{to}: {text}");
+            assert_eq!(sent.recv().await.unwrap().to, user(to));
+        }
+
+        // A roster that cannot be read holds nothing back.
+        let (mcp, mut sent) = start(&home("unserved-unread")).await;
+        mcp.with_lookup(Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("no roster")) })));
+        let _turn = mcp.begin(&current);
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+        let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-x", "text": "hi"})).await;
+        assert!(ok && !text.contains("Warning"), "{text}");
+        assert_eq!(sent.recv().await.unwrap().to, user("dev-x"));
+        let (ok, text) =
+            call(&client, "ask_agent", serde_json::json!({"to": "dev-x", "text": "?", "timeout": "1s"})).await;
+        assert!(!ok && text.starts_with("no reply from dev-x within 1s"), "{text}");
+        assert_eq!(sent.recv().await.unwrap().to, user("dev-x"));
     }
 
     #[tokio::test]

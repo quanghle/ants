@@ -5,7 +5,8 @@
 //!
 //! A store protects seeds at rest, not from a process running with access to it: a connection keeps the seed it
 //! loaded in memory, to sign the server's challenge again on every reconnect. Errors name what to do and never the
-//! seed. Other platforms have no store here; their credentials keep the seed in the file.
+//! seed; a store locked or not running yet, as before its user logs in, fails with [`Unavailable`], which another
+//! attempt may cure. Other platforms have no store here; their credentials keep the seed in the file.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -24,6 +25,24 @@ pub trait Store: Send + Sync {
     fn set(&self, key: &str, seed: &str) -> Result<()>;
     /// Delete the seed of `key`; nothing to delete is no error.
     fn delete(&self, key: &str) -> Result<()>;
+}
+
+/// The error of a store that is locked or not available yet, as before its user logs in: unlike a seed missing from it,
+/// another attempt may succeed once the store is unlocked.
+#[derive(Debug)]
+pub struct Unavailable(pub String);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// Whether `e` comes of a store that is locked or not available yet ([`Unavailable`]).
+pub fn is_unavailable(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| cause.is::<Unavailable>())
 }
 
 /// The OS credential store of this machine.
@@ -78,7 +97,11 @@ mod keychain {
             -25291 | -25307 => "no keychain is available: log in to the Mac's desktop to open the login keychain",
             _ => "check the login keychain in Keychain Access",
         };
-        anyhow::anyhow!("macOS keychain: {e} ({}): {fix}", e.code())
+        let message = format!("macOS keychain: {e} ({}): {fix}", e.code());
+        match e.code() {
+            -25308 | -25291 | -25307 => super::Unavailable(message).into(),
+            _ => anyhow::anyhow!(message),
+        }
     }
 }
 
@@ -109,7 +132,7 @@ mod secret_service {
 
     use anyhow::{Result, anyhow, bail};
 
-    use super::{SERVICE, Store};
+    use super::{SERVICE, Store, Unavailable};
 
     /// How long `secret-tool` may run, as it waits for an unlock prompt for as long as the prompt stays open.
     const TIMEOUT: Duration = Duration::from_secs(60);
@@ -169,12 +192,13 @@ mod secret_service {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!(
+                    return Err(Unavailable(format!(
                         "Secret Service (secret-tool {}): no answer within {} s: answer the keyring's unlock prompt \
                          on the desktop, or unlock the keyring before running ants",
                         args[0],
                         self.timeout.as_secs()
-                    );
+                    ))
+                    .into());
                 }
                 std::thread::sleep(Duration::from_millis(20));
             };
@@ -208,7 +232,10 @@ mod secret_service {
             let label = format!("ants NKey seed {key}");
             match self.run(&["store", "--label", &label, "service", SERVICE, "account", key], Some(seed))? {
                 Some(_) => Ok(()),
-                None => Err(failure("store", "failed without a message")),
+                None => bail!(
+                    "Secret Service (secret-tool store): failed without a message: check that a Secret Service runs in \
+                 this session and that its keyring is unlocked"
+                ),
             }
         }
 
@@ -224,7 +251,8 @@ mod secret_service {
         failure(command, "the keyring holding the entry is locked")
     }
 
-    /// An error of `secret-tool command` naming what to do about it.
+    /// An error of `secret-tool command` naming what to do about it: [`Unavailable`], as a session bus, Secret
+    /// Service or unlocked keyring may come once the user logs in.
     fn failure(command: &str, error: &str) -> anyhow::Error {
         let fix = if error.contains("D-Bus") || error.contains("Could not connect") {
             "no D-Bus session bus is reachable, as in a system service, cron or WSL without one: run ants in the \
@@ -242,7 +270,7 @@ mod secret_service {
         } else {
             "check that a Secret Service runs in this session and that its keyring is unlocked"
         };
-        anyhow!("Secret Service (secret-tool {command}): {error}: {fix}; {UNSTORE}")
+        Unavailable(format!("Secret Service (secret-tool {command}): {error}: {fix}; {UNSTORE}")).into()
     }
 
     #[cfg(all(test, unix))]
@@ -273,7 +301,9 @@ mod secret_service {
   *) exit 1 ;;
 esac"#,
             );
-            let error = tool.get(KEY).unwrap_err().to_string();
+            let error = tool.get(KEY).unwrap_err();
+            assert!(super::super::is_unavailable(&error), "{error}");
+            let error = error.to_string();
             assert!(error.contains("secret-tool lookup") && error.contains("unlock the keyring"), "{error}");
             let error = tool.delete(KEY).unwrap_err().to_string();
             assert!(error.contains("secret-tool clear") && error.contains("locked"), "{error}");
@@ -309,8 +339,8 @@ esac"#,
             let (mut tool, dir) = fake("exec sleep 30");
             tool.timeout = Duration::from_millis(200);
             let started = Instant::now();
-            let error = tool.get(KEY).unwrap_err().to_string();
-            assert!(error.contains("no answer within"), "{error}");
+            let error = tool.get(KEY).unwrap_err();
+            assert!(super::super::is_unavailable(&error) && error.to_string().contains("no answer within"), "{error}");
             assert!(started.elapsed() < Duration::from_secs(10));
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -465,7 +495,7 @@ impl Memory {
 
     fn check(&self) -> Result<()> {
         if self.locked.load(Ordering::SeqCst) {
-            bail!("the credential store is locked: unlock it");
+            return Err(Unavailable("the credential store is locked: unlock it".to_owned()).into());
         }
         Ok(())
     }
