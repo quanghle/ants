@@ -4,7 +4,7 @@ Headless agent teams across machines, communicating with each other and with hum
 
 - **Backbone:** NATS + JetStream for durable inboxes, channels, thread notes, approvals and dead letters, plus NATS KV for roster, session, attempt, channel, human, chain, link and webhook state.
 - **Transport:** `wss://`/`ws://` behind a reverse proxy, `tls://`, a Dev Tunnel, or the plain-HTTPS fallback bridge (`ants bridge`), optionally with a local store-and-forward leaf node per machine. See [Transport options](#transport-options) and [docs/transport.md](docs/transport.md).
-- **Harnesses:** ACP (Agent Client Protocol) agents over stdio: Copilot CLI (`copilot --acp`, default), Claude Code (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or custom `[harnesses.NAME]` definitions. See [Harnesses](#harnesses).
+- **Harnesses:** ACP (Agent Client Protocol) agents over stdio: Copilot CLI (`copilot --acp`, default), Claude Code (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or custom `[harnesses.NAME]` definitions such as Codex (`codex-acp`). See [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS.
 
 ## Architecture
@@ -235,7 +235,17 @@ large = { args = ["--context-window", "1m"] }  # appended to launch args
 huge = { model_suffix = "-1m" }                # appended to explicit `model`
 ```
 
+Codex runs through its ACP adapter as a custom definition (`npm install -g @agentclientprotocol/codex-acp`; sign in with `codex-acp login`, or set `OPENAI_API_KEY` or `CODEX_API_KEY` together with `DEFAULT_AUTH_REQUEST`):
+
+```toml
+[harnesses.codex]
+command = "codex-acp"
+mode = "read-only"                             # default `agent` lets Codex's auto-reviewer approve actions
+# env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }  # sign in with the API key from the environment
+```
+
 - **Claude Code:** forced to `default` mode (`auto` approves tools internally). Built-in read-only tools/commands (`Read`, `Grep`, `ls`, `echo`) and `~/.claude/settings.json` / `.claude/settings*.json` rules still run unasked; loads `CLAUDE.md` and hooks.
+- **Codex:** `read-only` asks before edits, network access and commands that need to leave Codex's read-only sandbox; commands that only read run in that sandbox unasked (`workspace-write` also edits the workdir unasked, `agent-full-access` never asks). Reports MCP tool calls as `execute` titled `mcp.<server>.<tool>` (matched by `other:` rules). Loads `~/.codex/config.toml` and `AGENTS.md`.
 - **Antigravity CLI:** forced to `default` mode (`agentMode` `auto` runs edits/commands unasked). Workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` rules still apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain sign-in requires services to run as the signed-in OS user (logs: `~/.gemini/antigravity-cli/log/`).
 
 ### Model, reasoning effort and context
@@ -257,7 +267,7 @@ Crossing a limit or cap cancels the prompt via ACP `session/cancel` (restarting 
 - Per-prompt limits reset every prompt.
 - Thread allowances reset on any human message on the thread, and once per escalation level when the level's leader replies.
 - Daily allowances reset at 00:00 UTC (or on daemon restart with a higher cap).
-- Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude's adapter reports both at turn end; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
+- Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude's adapter reports both at turn end; Codex's adapter reports tokens only; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
 
 ## Roster, identity and memory
 
@@ -292,7 +302,7 @@ Tool calls requested by a harness are checked against the ant's allowlist (`allo
 | `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`) |
 | `edit:/srv/notes/*` | Exact absolute path glob |
 | `fetch:https://docs.rs/*` | Matching URLs |
-| `other:send_message` / `other:bd-*` | MCP and `other` tools by title |
+| `other:send_message` / `other:bd-*` | MCP and `other` tools by title, or by the tool in Claude Code's `mcp__<server>__<tool>` and Codex's `mcp.<server>.<tool>` titles |
 
 Matched calls auto-approve with `allow_once`. Unmatched calls set `waiting_approval`, publish an `ApprovalRequest` on `ants.approvals.<ant>`, and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject` before rejecting:
 

@@ -16,7 +16,8 @@
 //!   path relative to the workdir, and never a file outside it. `edit:*` allows edits anywhere in the workdir.
 //! - `fetch`: the URL (`raw_input.url`), else the title.
 //! - anything else: the title the harness shows, such as an MCP tool's name. Claude Code titles MCP tools
-//!   `mcp__<server>__<tool>`; the pattern may match that or just the tool.
+//!   `mcp__<server>__<tool>` and Codex `mcp.<server>.<tool>`; the pattern may match that or just the tool. Codex
+//!   reports MCP tool calls as `execute`; they count as `other`.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -80,19 +81,33 @@ impl Rule {
                 let url = tool.fields.raw_input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
                 url.or(tool.fields.title.as_deref()).is_some_and(|t| glob(pattern, t))
             }
-            _ => tool
-                .fields
-                .title
-                .as_deref()
-                .is_some_and(|t| glob(pattern, t) || mcp_tool(t).is_some_and(|t| glob(pattern, t))),
+            _ => {
+                tool.fields.title.as_deref().is_some_and(|t| glob(pattern, t))
+                    || mcp_tool(tool.fields).is_some_and(|t| glob(pattern, t))
+            }
         }
     }
 }
 
-/// The tool of a Claude Code MCP tool title, `mcp__<server>__<tool>`.
-fn mcp_tool(title: &str) -> Option<&str> {
-    let (server, tool) = title.strip_prefix("mcp__")?.split_once("__")?;
-    (!server.is_empty() && !tool.is_empty()).then_some(tool)
+/// The tool an MCP tool call runs, from Claude Code's title `mcp__<server>__<tool>` or Codex's call.
+fn mcp_tool(fields: &ToolCallUpdateFields) -> Option<&str> {
+    let title = fields.title.as_deref()?;
+    if let Some((server, tool)) = title.strip_prefix("mcp__").and_then(|t| t.split_once("__")) {
+        return (!server.is_empty() && !tool.is_empty()).then_some(tool);
+    }
+    codex_mcp_tool(fields)
+}
+
+/// The tool of a Codex MCP tool call: titled `mcp.<server>.<tool>`, with the server and tool, but no command, in its
+/// raw input.
+fn codex_mcp_tool(fields: &ToolCallUpdateFields) -> Option<&str> {
+    let input = fields.raw_input.as_ref()?;
+    if input.get("command").is_some() {
+        return None;
+    }
+    let (server, tool) = (input.get("server")?.as_str()?, input.get("tool")?.as_str()?);
+    let title = fields.title.as_deref()?.strip_prefix("mcp.")?.strip_prefix(server)?.strip_prefix('.')?;
+    (!server.is_empty() && !tool.is_empty() && title == tool).then_some(tool)
 }
 
 /// Tool requests an ant may run without asking; see the [module docs](self) for the rules.
@@ -188,6 +203,9 @@ struct Tool<'a> {
 }
 
 fn kind_name(fields: &ToolCallUpdateFields) -> String {
+    if codex_mcp_tool(fields).is_some() {
+        return "other".to_owned();
+    }
     fields
         .kind
         .and_then(|k| serde_json::to_value(k).ok())
@@ -428,6 +446,14 @@ mod tests {
         let claude = request(ToolKind::Other, "mcp__ants__send_message", json!({}), &[]);
         assert!(allows(&["other:send_message"], &claude) && allows(&["other:mcp__ants__*"], &claude));
         assert!(!allows(&["other:ants"], &claude));
+        let input = json!({ "server": "ants", "tool": "send_message", "arguments": { "to": "dev-b" } });
+        let codex = request(ToolKind::Execute, "mcp.ants.send_message", input.clone(), &[]);
+        assert!(allows(&["other:send_message"], &codex) && allows(&["other:mcp.ants.*"], &codex));
+        assert!(!allows(&["other:ants"], &codex) && !allows(&["execute"], &codex), "it counts as other");
+        let mut command = input;
+        command["command"] = json!("mcp.ants.send_message");
+        let lookalike = request(ToolKind::Execute, "mcp.ants.send_message", command, &[]);
+        assert!(!allows(&["other:send_message"], &lookalike) && allows(&["execute"], &lookalike));
         let fetch = request(ToolKind::Fetch, "Fetch", json!({ "url": "https://docs.rs/tokio" }), &[]);
         assert!(allows(&["fetch:https://docs.rs/*"], &fetch));
         assert!(!allows(&["fetch:https://evil/*"], &fetch));

@@ -1,6 +1,6 @@
 //! ACP client side: start harnesses over stdio, keep their sessions, and run prompts through them.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -13,7 +13,7 @@ use agent_client_protocol::v1::schema::{
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    TextContent, ToolCallId,
+    TextContent, ToolCall, ToolCallId, ToolCallUpdate,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, DynConnectTo};
 use ants_proto::{PlanStep, StatusUpdate, ThreadId};
@@ -481,7 +481,8 @@ pub async fn prompt_once(launch: &Launch, text: &str) -> Result<String> {
 /// The prompt in flight, as the session's notifications fill it in.
 struct Current {
     text: String,
-    tool_calls: HashSet<ToolCallId>,
+    /// What the session reported of each tool call, without its content or output.
+    tool_calls: HashMap<ToolCallId, ToolCall>,
     max_tool_calls: Option<usize>,
     too_many: Arc<Notify>,
     spend: Option<mpsc::UnboundedSender<Spend>>,
@@ -519,15 +520,46 @@ impl Observed {
                     current.text.push_str(&t.text);
                 }
             }
-            SessionUpdate::ToolCall(call) => {
-                current.tool_calls.insert(call.tool_call_id);
+            SessionUpdate::ToolCall(mut call) => {
+                strip(&mut call);
+                current.tool_calls.insert(call.tool_call_id.clone(), call);
                 if current.max_tool_calls.is_some_and(|max| current.tool_calls.len() > max) {
                     current.too_many.notify_one();
+                }
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                if let Some(call) = current.tool_calls.get_mut(&update.tool_call_id) {
+                    call.update(update.fields);
+                    strip(call);
                 }
             }
             _ => {}
         }
     }
+
+    /// Fill in what a permission request leaves out of its tool call from what the session reported of that call,
+    /// as an ACP tool call update only carries the fields that change. Codex asks to run an MCP tool by its id alone.
+    fn describe(&self, request: &mut ToolCallUpdate) {
+        let Some(known) = self.current.as_ref().and_then(|c| c.tool_calls.get(&request.tool_call_id)) else { return };
+        let fields = &mut request.fields;
+        fields.kind.get_or_insert(known.kind);
+        fields.title.get_or_insert_with(|| known.title.clone());
+        if fields.name.is_none() {
+            fields.name.clone_from(&known.name);
+        }
+        if fields.raw_input.is_none() {
+            fields.raw_input.clone_from(&known.raw_input);
+        }
+        if fields.locations.is_none() && !known.locations.is_empty() {
+            fields.locations = Some(known.locations.clone());
+        }
+    }
+}
+
+/// Drop a tool call's content and output, which permission requests do not need.
+fn strip(call: &mut ToolCall) {
+    call.content = Vec::new();
+    call.raw_output = None;
 }
 
 /// The status update a session update streams, if any. A tool call update counts only when its title or status
@@ -580,7 +612,7 @@ async fn serve(
     mut turns: mpsc::Receiver<Turn>,
 ) {
     let observed: Arc<Mutex<Observed>> = Arc::default();
-    let sink = observed.clone();
+    let (sink, known) = (observed.clone(), observed.clone());
     // Bumped when a prompt is cancelled, which answers the permission requests still waiting.
     let (cancelled, cancels) = watch::channel(0u64);
     let (policy, thread, workdir) = (launch.policy.clone(), launch.thread.clone(), launch.cwd.clone());
@@ -596,7 +628,8 @@ async fn serve(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, cx| {
+            async move |mut request: RequestPermissionRequest, responder, cx| {
+                known.lock().expect("observed").describe(&mut request.tool_call);
                 tracing::info!(tool = ?request.tool_call, "harness asked for permission");
                 let (policy, thread, workdir) = (policy.clone(), thread.clone(), workdir.clone());
                 let mut cancel = cancels.clone();
@@ -631,7 +664,7 @@ async fn serve(
                     }
                     observed.current = Some(Current {
                         text: String::new(),
-                        tool_calls: HashSet::new(),
+                        tool_calls: HashMap::new(),
                         max_tool_calls: limits.max_tool_calls,
                         too_many: too_many.clone(),
                         spend: spend.clone(),
@@ -849,11 +882,15 @@ async fn set_mode(
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, InitializeResponse, LoadSessionResponse, NewSessionResponse, SessionConfigSelectGroup,
-        SessionConfigSelectOption, SessionMode, SetSessionConfigOptionResponse, SetSessionModeResponse,
+        AgentCapabilities, ContentChunk, InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, SessionConfigSelectGroup, SessionConfigSelectOption, SessionMode,
+        SetSessionConfigOptionResponse, SetSessionModeResponse, StopReason, ToolCallStatus, ToolCallUpdateFields,
+        ToolKind,
     };
+    use serde_json::json;
 
     use super::*;
+    use crate::permission::Allowlist;
 
     /// A fake harness starting its sessions in `auto`, offering `modes`; returns the modes it was switched to.
     fn launch(modes: &'static [&'static str]) -> (Launch, Arc<Mutex<Vec<String>>>) {
@@ -915,6 +952,81 @@ mod tests {
         let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
         assert!(err.contains("does not offer session mode default"), "{err}");
         assert!(set.lock().unwrap().is_empty());
+    }
+
+    /// A fake harness asking permission as Codex does for an MCP tool: it reports the call, then asks by the call's
+    /// id alone. Replies with the option chosen.
+    fn codex(policy: PermissionPolicy) -> Launch {
+        let connect: Connector = Arc::new(|| {
+            DynConnectTo::new(
+                Agent
+                    .v1()
+                    .name("codex")
+                    .on_receive_request(
+                        async move |init: InitializeRequest, responder, _cx| {
+                            responder.respond(InitializeResponse::new(init.protocol_version))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: NewSessionRequest, responder, _cx| {
+                            responder.respond(NewSessionResponse::new("s1"))
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |prompt: PromptRequest, responder, cx| {
+                            let sender = cx.clone();
+                            cx.spawn(async move {
+                                let session = prompt.session_id;
+                                let input = json!({ "server": "ants", "tool": "send_message", "arguments": {} });
+                                let call = ToolCall::new("c1", "mcp.ants.send_message")
+                                    .kind(ToolKind::Execute)
+                                    .raw_input(input);
+                                sender.send_notification(SessionNotification::new(
+                                    session.clone(),
+                                    SessionUpdate::ToolCall(call),
+                                ))?;
+                                let fields =
+                                    ToolCallUpdateFields::new().kind(ToolKind::Execute).status(ToolCallStatus::Pending);
+                                let options = vec![
+                                    PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                                    PermissionOption::new("cancel", "Cancel", PermissionOptionKind::RejectOnce),
+                                ];
+                                let ask = RequestPermissionRequest::new(
+                                    session.clone(),
+                                    ToolCallUpdate::new("c1", fields),
+                                    options,
+                                );
+                                let chosen = match sender.send_request(ask).block_task().await?.outcome {
+                                    RequestPermissionOutcome::Selected(s) => s.option_id.0.to_string(),
+                                    _ => "cancelled".to_owned(),
+                                };
+                                sender.send_notification(SessionNotification::new(
+                                    session,
+                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                                        TextContent::new(chosen),
+                                    ))),
+                                ))?;
+                                responder.respond(PromptResponse::new(StopReason::EndTurn))
+                            })
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    ),
+            )
+        });
+        Launch::with_transport(connect, PathBuf::from("/"), policy)
+    }
+
+    #[tokio::test]
+    async fn permission_requests_are_matched_with_the_tool_call_they_name() {
+        for (rule, chosen) in [("other:send_message", "allow"), ("execute", "cancel"), ("other:check_inbox", "cancel")]
+        {
+            let policy = PermissionPolicy::new(Allowlist::parse(&[rule]).unwrap(), None);
+            let session = Session::start(&codex(policy), None).await.unwrap();
+            assert_eq!(session.prompt("go").await.unwrap(), chosen, "{rule}");
+            session.close().await;
+        }
     }
 
     fn command_line(
