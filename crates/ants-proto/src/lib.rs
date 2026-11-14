@@ -773,7 +773,8 @@ impl Permissions {
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. Of
     /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
-    /// ants): it reads single keys by direct gets. The filter of each of its consumers is
+    /// ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every subject stored,
+    /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, reads every ant's thread and daily spend in the
@@ -809,8 +810,8 @@ impl Permissions {
         let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
         let mut publish: Vec<String> = sendable.iter().cloned().chain(outbox).collect();
         publish.extend([
-            format!("$JS.API.STREAM.INFO.{STREAM}"),
             format!("$JS.API.STREAM.INFO.{roster_stream}"),
+            // Also how its connection finds JetStream, and the stream, whose info it does not get.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox_of(user)),
@@ -857,6 +858,8 @@ impl Permissions {
         if role.is_human() {
             let notify = notify_consumer(user);
             publish.extend([
+                // Stream info lists every subject stored (who messages whom), so only a human may ask for it.
+                format!("$JS.API.STREAM.INFO.{STREAM}"),
                 // The consumer of its notifications: one filter puts it in the subject, several leave it out.
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}"),
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}.>"),
@@ -1059,7 +1062,12 @@ impl Permissions {
         let user = UserId::channel_manager();
         let (roster, channels, humans) =
             (kv_stream(ROSTER_BUCKET), kv_stream(CHANNELS_BUCKET), kv_stream(HUMANS_BUCKET));
-        let mut publish = vec![subject::chan_from(&user), format!("$KV.{CHANNELS_BUCKET}.>")];
+        let mut publish = vec![
+            subject::chan_from(&user),
+            format!("$KV.{CHANNELS_BUCKET}.>"),
+            // Finding JetStream on connecting, as an ant does, without the stream's info.
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(&user)),
+        ];
         for stream in [&roster, &channels, &humans] {
             publish.extend([
                 format!("$JS.API.STREAM.INFO.{stream}"),
@@ -1084,6 +1092,7 @@ impl Permissions {
     /// under that ant's keys only). It reads the entry of each channel among `destinations`, for the members a
     /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. Nothing else: it neither writes
     /// `ants_channels` nor `ants_humans`, so it can neither change a channel nor become a human, nor reads any message.
+    /// It gets no stream info, which lists every subject stored: it reads and records its events by key alone.
     pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
         let seen = kv_stream(WEBHOOKS_BUCKET);
         let channels = kv_stream(CHANNELS_BUCKET);
@@ -1099,9 +1108,9 @@ impl Permissions {
             }
         }
         publish.extend([
-            // Finding JetStream on connecting, and the bucket.
-            format!("$JS.API.STREAM.INFO.{STREAM}"),
-            format!("$JS.API.STREAM.INFO.{seen}"),
+            // Finding JetStream on connecting: the info of a consumer named after it, which none creates. No stream
+            // info, which lists every subject stored, so who messages whom and the events of other webhooks.
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(webhook)),
             // Get and create of its own events.
             format!("$JS.API.DIRECT.GET.{seen}.{own}"),
             own,
@@ -3574,8 +3583,7 @@ mod tests {
                 "ants.inbox.dev-a.github",
                 "ants.chan.ops.github",
                 "$JS.API.DIRECT.GET.KV_ants_channels.$KV.ants_channels.ops",
-                "$JS.API.STREAM.INFO.ANTS",
-                "$JS.API.STREAM.INFO.KV_ants_webhooks",
+                "$JS.API.CONSUMER.INFO.ANTS.inbox-github",
                 "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
                 "$KV.ants_webhooks.github.>",
                 "$KV.ants_owners.*.dev-a",
@@ -3589,6 +3597,30 @@ mod tests {
         assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_webhooks.github.>"));
         let human = Permissions::for_user(&UserId::human(), Role::Human);
         assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_webhooks"), "ants init creates it");
+    }
+
+    #[test]
+    fn only_humans_get_the_info_of_the_stream_and_of_the_webhooks_bucket() {
+        let infos = |perms: &Permissions| -> Vec<String> {
+            perms
+                .publish
+                .iter()
+                .filter(|s| s.ends_with(".STREAM.INFO.ANTS") || s.ends_with(".STREAM.INFO.KV_ants_webhooks"))
+                .cloned()
+                .collect()
+        };
+        let hook = Permissions::for_webhook(&p("github"), &[Destination::Ant(p("dev-a"))]);
+        for perms in [Permissions::for_user(&p("dev-a"), Role::Ant), hook, Permissions::for_channel_manager()] {
+            let domain: JsDomain = "hub".parse().unwrap();
+            assert_eq!(infos(&perms.with_js_domain(Some(&domain))), Vec::<String>::new());
+        }
+        let human = Permissions::for_user(&UserId::human(), Role::Human);
+        assert_eq!(infos(&human), ["$JS.API.STREAM.INFO.ANTS", "$JS.API.STREAM.INFO.KV_ants_webhooks"]);
+        // Each finds JetStream on connecting through the info of a consumer named after it.
+        let manager = Permissions::for_channel_manager();
+        assert!(manager.publish.iter().any(|s| s == "$JS.API.CONSUMER.INFO.ANTS.inbox-channel-manager"));
+        let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+        assert!(ant.publish.iter().any(|s| s == "$JS.API.CONSUMER.INFO.ANTS.inbox-dev-a"));
     }
 
     #[test]

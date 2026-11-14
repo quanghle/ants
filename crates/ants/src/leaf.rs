@@ -425,9 +425,9 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    async fn reaches_hub_stream(js: &jetstream::Context, expected: bool) -> bool {
+    async fn reaches_hub_stream(js: &jetstream::Context, user: &UserId, expected: bool) -> bool {
         for _ in 0..50 {
-            if bus::ensure_stream(js).await.is_ok() == expected {
+            if bus::open_stream(js, user).await.is_ok() == expected {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -482,7 +482,7 @@ mod tests {
         let (_a, mut a_js) =
             bus::connect(&leaf_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
         a_js.set_timeout(Duration::from_secs(1));
-        assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over nats-leaf://");
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over nats-leaf://");
         // Only dev-a is on the leaf, so the uplink allows no inbox, notes or channel subject without a wildcard before
         // the sender. The hub's stream interest crosses all the same: the leaf has no outbox to fall back on.
         let to_human = Envelope::new(dev_a.clone(), human.clone(), "hi");
@@ -512,10 +512,10 @@ mod tests {
             assert!(status.success());
         };
         reload(format!("nats-leaf://127.0.0.1:{dead_port}"));
-        assert!(reaches_hub_stream(&a_js, false).await, "the old uplink outlived the reload");
+        assert!(reaches_hub_stream(&a_js, &dev_a, false).await, "the old uplink outlived the reload");
         reload(format!("ws://127.0.0.1:{ws_port}/nats"));
-        assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over ws://");
-        let stream = bus::ensure_stream(&a_js).await.unwrap();
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over ws://");
+        let stream = bus::open_stream(&a_js, &dev_a).await.unwrap();
         bus::inbox_consumer(&stream, &dev_a, Duration::from_secs(5), 5, 2).await.unwrap();
     }
 }

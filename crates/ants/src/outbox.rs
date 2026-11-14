@@ -451,7 +451,7 @@ pub(crate) mod tests {
         };
         let (_a, a_js) = connect(&leaf_node.url, &dev_a).await;
         let (_b, b_js) = connect(&leaf_node.url, &dev_b).await;
-        eventually("the leaf reaches the hub", async || bus::ensure_stream(&a_js).await.is_ok()).await;
+        eventually("the leaf reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
         // The human waits for replies as `ants ask --wait` does, off the machine and on it; on it, core NATS also
         // delivers what the hub never got.
         let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
@@ -494,7 +494,7 @@ pub(crate) mod tests {
         }
 
         reload(dead_port);
-        eventually("the uplink is down", async || bus::ensure_stream(&a_js).await.is_err()).await;
+        eventually("the uplink is down", async || bus::open_stream(&a_js, &dev_a).await.is_err()).await;
         let kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
         assert_eq!(bus::publish(&a_js, &kept).await.unwrap(), bus::Stored::Outbox);
         let thread: ThreadId = "t1".parse().unwrap();
@@ -572,7 +572,7 @@ pub(crate) mod tests {
 
         // What the hub stores while the uplink is down never comes live on the leaf; its waiter reads it back.
         reload(dead_port);
-        eventually("the uplink is down again", async || bus::ensure_stream(&a_js).await.is_err()).await;
+        eventually("the uplink is down again", async || bus::open_stream(&a_js, &dev_a).await.is_err()).await;
         let (_b_hub, b_hub_js) = connect(&hub.url, &dev_b).await;
         let away = Envelope::new(dev_b.clone(), human.clone(), "away");
         assert_eq!(bus::publish(&b_hub_js, &away).await.unwrap(), bus::Stored::Hub);
@@ -652,11 +652,11 @@ pub(crate) mod tests {
             let status = Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap();
             assert!(status.success());
             let (_, js) = connect(&leaf_node.url, &dev_a).await;
-            eventually("the uplink goes up or down", async || bus::ensure_stream(&js).await.is_ok() == up).await;
+            eventually("the uplink goes up or down", async || bus::open_stream(&js, &dev_a).await.is_ok() == up).await;
         };
         let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
         let (a_leaf, a_leaf_js) = connect(&leaf_node.url, &dev_a).await;
-        eventually("the leaf reaches the hub", async || bus::ensure_stream(&a_leaf_js).await.is_ok()).await;
+        eventually("the leaf reaches the hub", async || bus::open_stream(&a_leaf_js, &dev_a).await.is_ok()).await;
         let setup = super::connect(&hub.url, Some(&hub.dir().join("human.creds")), &human, &m1).await.unwrap();
         admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
         sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
