@@ -72,6 +72,10 @@ pub struct AntOptions {
     /// Most harness processes alive at once, one per active thread (default: 4).
     #[arg(long)]
     max_harnesses: Option<usize>,
+    /// Give each thread its own git worktree of the workdir's repository, under the ant's home, so threads running
+    /// at once do not share a checkout. A workdir outside a git repository stays shared.
+    #[arg(long)]
+    worktrees: bool,
     /// How long a thread's harness stays without a message before it stops; its session resumes on the next message
     /// (a duration such as 90s, 10m or 1h; default: 10m).
     #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
@@ -119,6 +123,7 @@ impl AntOptions {
             || self.allow_tools
             || self.approval_timeout.is_some()
             || self.max_harnesses.is_some()
+            || self.worktrees
             || self.idle_timeout.is_some()
             || self.prompt_timeout.is_some()
             || self.max_tool_calls.is_some()
@@ -167,6 +172,7 @@ impl AntOptions {
         if let Some(n) = self.max_harnesses {
             p.max_harnesses = n;
         }
+        p.worktrees |= self.worktrees;
         if let Some(timeout) = self.idle_timeout {
             p.idle_timeout = timeout;
         }

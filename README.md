@@ -150,6 +150,8 @@ Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying
 
 Human replies wait in durable consumer `inbox-<name>` (`inbox-human` for `human`) until read. Each ant maintains up to `max_harnesses` (default 4) ACP processes, one per active thread: concurrent across threads, sequential per thread, retrying failures in order. Idle harnesses stop after `idle_timeout` (`10m`) and resume via ACP `session/load` using `<ant>.<thread>` in `ants_sessions`; busy harnesses are never evicted. First Ctrl-C or `SIGTERM` drains prompts in flight; a second Ctrl-C exits immediately for redelivery.
 
+Threads of one ant share its workdir unless `worktrees = true` (or `--worktrees`) gives each thread its own git worktree of the workdir's repository: `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, started from the repository's `HEAD` (uncommitted changes in the workdir are not carried over). Sessions of the thread work at the workdir's place inside it, and allowlist paths resolve against it. The worktree is created on the thread's first prompt, reused when its harness starts again (`session/load` sees the same directory), and removed with `git worktree remove --force` once `<ant>.<thread>` has expired from `ants_sessions` (checked at start and hourly, for threads with no live harness), deleting the branch unless it holds commits not merged into the repository's `HEAD`. A workdir outside a git work tree, or a missing `git`, is logged once and stays shared; a worktree that cannot be created (an empty repository, the branch checked out elsewhere) logs a warning and the thread works in the shared workdir.
+
 Held messages send 20s progress acks against a 60s `ack_wait` (ignoring duplicate deliveries while held). Delivery is at-least-once and acks only after storing the reply:
 
 1. Before prompting, the daemon writes `<ant>.<seq>` in `ants_attempts`. On redelivery after a cut-off, finding that marker resumes the session and prepends a warning that prior tool calls may have run.
@@ -187,6 +189,7 @@ allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
+worktrees = false                          # default; true gives each thread its own git worktree
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -303,7 +306,7 @@ Tool calls requested by a harness are checked against the ant's allowlist (`allo
 | `*` | Every tool call |
 | `<kind>` | ACP tool kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other` |
 | `execute:cargo test*` | Commands matching glob; commands containing `;`, `&`, `\|`, `<`, `>`, `` ` `` or `$(` never match |
-| `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`) |
+| `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`; with `worktrees = true`, the thread's worktree) |
 | `edit:/srv/notes/*` | Exact absolute path glob |
 | `fetch:https://docs.rs/*` | Matching URLs |
 | `other:send_message` / `other:bd-*` | MCP and `other` tools by title, or by the tool in Claude Code's `mcp__<server>__<tool>` and Codex's `mcp.<server>.<tool>` titles |

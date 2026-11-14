@@ -31,6 +31,7 @@ use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
+use crate::worktrees::Worktrees;
 use crate::{bus, roster};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
@@ -50,6 +51,8 @@ const OWNER_LANDS_WITHIN: Duration = Duration::from_secs(10);
 const STREAM_SOURCE: &str = "Nats-Stream-Source";
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
+/// How often the worktrees of threads whose session expired are looked for, besides at start.
+const PRUNE_WORKTREES_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
 
@@ -89,6 +92,8 @@ pub struct Config {
     pub approval_timeout: Duration,
     /// Most harness processes alive at once; the least recently used idle one stops to make room.
     pub max_harnesses: usize,
+    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]).
+    pub worktrees: bool,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
     /// Capabilities the ant advertises in the roster.
@@ -224,7 +229,12 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     answered.prune(bus::RETENTION).await;
     let buried = Buried::new(&config.home);
     buried.prune(bus::RETENTION).await;
-    let pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
+    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
+    if config.worktrees
+        && let Some(worktrees) = Worktrees::find(&config.ant, &config.workdir, &config.home).await
+    {
+        pool = pool.with_worktrees(worktrees);
+    }
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
     let (channels, posts) = match channels(&js, &stream, &config.ant, in_hand).await {
@@ -246,6 +256,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         model_settings = ?config.model_settings,
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
+        worktrees = config.worktrees,
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,
         allow = ?config.allow,
@@ -297,6 +308,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     tokio::select! {
         () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
         () = escalator.deadlines() => {}
+        () = pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY) => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;

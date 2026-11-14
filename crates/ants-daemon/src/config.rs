@@ -13,6 +13,7 @@
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
+//! worktrees = true                  # a git worktree per thread, under the ant's home
 //! harness = "my-agent"
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
@@ -120,6 +121,9 @@ pub struct Ant {
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_harnesses")]
     pub max_harnesses: usize,
+    /// Give each thread its own git worktree of the workdir's repository under the home.
+    #[serde(default)]
+    pub worktrees: bool,
     #[serde(default = "default_idle_timeout", deserialize_with = "ants_proto::duration::deserialize")]
     pub idle_timeout: Duration,
     /// How long a prompt may run before it is cancelled; 0 for no limit.
@@ -206,6 +210,7 @@ impl Ant {
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
+            worktrees: false,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             prompt_timeout: DEFAULT_PROMPT_TIMEOUT,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
@@ -258,6 +263,7 @@ impl Ant {
             harness,
             model_settings,
             max_harnesses: self.max_harnesses,
+            worktrees: self.worktrees,
             idle_timeout: self.idle_timeout,
             allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
             approval_timeout: self.approval_timeout,
@@ -526,6 +532,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());
     }
+    if ant.worktrees {
+        set("worktrees", "true".to_owned());
+    }
     if !ant.allow.is_empty() {
         set("allow", strings(&mut ant.allow.iter().map(String::as_str)));
     }
@@ -645,6 +654,7 @@ Review changes for correctness."""
             allow = ["read", "search"]
             capabilities = ["rust", "review"]
             max_harnesses = 2
+            worktrees = true
             idle_timeout = "1m"
             prompt_timeout = "0"
             max_tool_calls = 50
@@ -695,6 +705,7 @@ Review changes for correctness."""
         let chain =
             Chain { escalate_to: vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()], max_hops: 2, after: None };
         assert_eq!(config.escalation, chain, "0 waits for the leader for good");
+        assert!(config.worktrees);
 
         let b = ants[1].clone();
         assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
@@ -708,6 +719,7 @@ Review changes for correctness."""
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
         assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
         assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
+        assert!(!config.worktrees, "threads share the workdir by default");
         assert_eq!(config.limits, PromptLimits::default());
         assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
         assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
@@ -1022,6 +1034,7 @@ Review changes for correctness."""
         full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
         full.escalate_to = vec!["lead".parse().unwrap()];
         full.max_harnesses = 1;
+        full.worktrees = true;
         full.prompt_timeout = Duration::ZERO;
         full.idle_timeout = Duration::from_secs(5_400);
         full.max_thread_cost = Some(2.5);

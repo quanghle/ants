@@ -24,6 +24,7 @@ pub mod reading;
 pub mod roster;
 pub mod status;
 pub mod webhooks;
+pub mod worktrees;
 
 pub use daemon::{Config, Stop, run, run_until};
 pub use harness::{Harness, Harnesses, Launch};
