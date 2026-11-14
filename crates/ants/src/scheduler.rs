@@ -194,8 +194,10 @@ mod tests {
         assert_eq!(message.owner.as_ref(), Some(&p("alice")));
         let recorded = Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
         assert_eq!(recorded, Some(p("alice")));
-        let marker = seen.get(webhook_marker_key(&nightly)).await.unwrap();
-        assert_eq!(marker.as_deref(), Some(&b"nightly"[..]), "daemons take its messages as a webhook's");
+        let marker =
+            seen.get(webhook_marker_key(&nightly)).await.unwrap().expect("daemons take its messages as a webhook's");
+        let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(marker.version, ants_proto::ANTS_VERSION, "it publishes its version");
     }
 
     #[tokio::test]

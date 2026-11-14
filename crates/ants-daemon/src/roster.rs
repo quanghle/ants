@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ants_proto::{Activity, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
+use ants_proto::{ANTS_VERSION, Activity, PERMISSIONS_VERSION, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, Utc};
@@ -97,6 +97,8 @@ pub async fn entry(config: &Config) -> RosterEntry {
         handling: None,
         harnesses: None,
         escalate_to: config.escalation.escalate_to.clone(),
+        version: Some(ANTS_VERSION.to_owned()),
+        perms: Some(PERMISSIONS_VERSION),
     }
 }
 
@@ -503,6 +505,8 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
         }
     }
 

@@ -32,6 +32,8 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         handling: None,
         harnesses: None,
         escalate_to: Vec::new(),
+        version: None,
+        perms: None,
     }
 }
 

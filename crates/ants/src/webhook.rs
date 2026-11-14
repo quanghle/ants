@@ -26,8 +26,8 @@ use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::schedule::Mentions;
 use ants_daemon::{bus, owners};
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
-    WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
+    UserId, WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
@@ -68,8 +68,6 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const ID_HASH_LEN: usize = 32;
 /// Least time between two warnings about rejected requests of one webhook.
 const WARN_EVERY: Duration = Duration::from_secs(60);
-/// How often a webhook that delivers puts its marker again, well within [`ants_proto::WEBHOOK_RETENTION`].
-const MARK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `~/.ants/webhooks.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -528,8 +526,18 @@ pub(crate) struct Bus {
     js_domain: Option<JsDomain>,
     /// Without stream info, which would list the events of every webhook.
     seen: DirectKv,
+    /// What its marker holds: the version of ants this runs ([`ants_proto::Serving`]).
+    marker: Vec<u8>,
     /// When it last put its marker.
-    marked: Mutex<Option<Instant>>,
+    marked: Arc<Mutex<Option<Instant>>>,
+    /// Puts the marker every [`SERVING_EVERY`].
+    keeper: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        self.keeper.abort();
+    }
 }
 
 /// An event to deliver, once.
@@ -669,7 +677,14 @@ impl Bus {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(30));
         }
-        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marked: Mutex::default() })
+        let (marker, marked) = (crate::versions::serving().await, Arc::new(Mutex::new(None)));
+        let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
+        let keeper = tokio::spawn(async move {
+            let (seen, key, marker, marked) = keeping;
+            let put = move || *marked.lock().unwrap() = Some(Instant::now());
+            crate::versions::keep_putting(seen, key, marker, put).await;
+        });
+        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
     }
 
     /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
@@ -718,13 +733,13 @@ impl Bus {
         Ok(Delivered { thread: Some(thread), duplicate: false })
     }
 
-    /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`MARK_EVERY`]: without it, daemons
+    /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`SERVING_EVERY`]: without it, daemons
     /// take its messages for an ant's, and answer it in its own inbox.
     async fn mark(&self, name: &UserId) -> Result<()> {
-        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < MARK_EVERY) {
+        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
             return Ok(());
         }
-        self.seen.put(webhook_marker_key(name), name.to_string()).await.context("putting the marker")?;
+        self.seen.put(webhook_marker_key(name), self.marker.clone()).await.context("putting the marker")?;
         *self.marked.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
@@ -1222,8 +1237,10 @@ pub(crate) mod tests {
         let recorded = owners::Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
         assert_eq!(recorded, Some(p("alice")), "ants' messages on the thread name its owner as recorded");
         assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
-        let marker = seen.get(webhook_marker_key(&github)).await.unwrap();
-        assert_eq!(marker.as_deref(), Some(&b"github"[..]), "daemons take its messages as a webhook's");
+        let marker =
+            seen.get(webhook_marker_key(&github)).await.unwrap().expect("daemons take its messages as a webhook's");
+        let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(marker, ants_proto::Serving::here(ants_daemon::roster::machine().await), "it publishes its version");
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ mod service;
 mod spend;
 mod thread;
 mod tools;
+mod versions;
 mod webhook;
 
 use std::path::{Path, PathBuf};
