@@ -8,8 +8,11 @@
 //! decided or expired, or an escalation older than [`ESCALATION_MAX_AGE`], is skipped; a sink that fails is logged
 //! and the others still get the notice.
 //!
-//! Besides ntfy, Slack and Telegram, a sink may be a command (`exec`), given the notice as JSON on its standard input,
-//! or an HTTP endpoint (`http`), given the same JSON in a `POST` signed with HMAC-SHA256 ([`notice_json`]).
+//! Every sink kind takes the same [`Notice`] through the same path, [`dispatch`]: [`Sink::request`] puts it in the
+//! kind's form, a [`Delivery`] (a JSON `POST` for ntfy, Slack, Telegram and `http`, a command for `exec`), and
+//! [`send_to`] delivers it within the sink's timeout, with errors that never name a URL, token or argument. An `exec`
+//! sink gets the notice as JSON on its standard input, an `http` one the same JSON in a `POST` signed with
+//! HMAC-SHA256 ([`notice_json`]).
 //!
 //! A sink may be the push target of one device of the human (`device`): it gets no notice of what that device follows
 //! as it comes, the human's inbox for an escalation and the tool requests for an approval, while the device's
@@ -912,12 +915,8 @@ pub async fn test(human: &Human, machine: &str) -> Vec<(String, Result<()>)> {
         buttons: Vec::new(),
         urgent: false,
     };
-    let notice = &notice;
-    let sends = human.sinks.iter().map(|target| async move {
-        let sent = send_to(target, notice).await;
-        (format!("{target:?}"), sent)
-    });
-    futures::future::join_all(sends).await
+    let sent = dispatch(human, &notice, |_| true).await;
+    sent.into_iter().map(|(target, sent)| (format!("{target:?}"), sent)).collect()
 }
 
 /// What `GET` on the approval links of `public_url` without a link's query answers, within `wait`: the status and the
@@ -933,14 +932,24 @@ pub async fn probe_links(public_url: &str, wait: Duration) -> Result<(StatusCode
 /// Send `notice` to every sink of `human` at once, but those of the devices `away` leaves out; a failure is logged,
 /// never fatal.
 async fn send(human: &Human, notice: &Notice, away: impl Fn(&DeviceId) -> bool) {
-    let targets = human.sinks.iter().filter(|t| t.device.as_ref().is_none_or(&away));
-    let sends = targets.map(|target| async move {
-        match send_to(target, notice).await {
+    for (target, sent) in dispatch(human, notice, |t| t.device.as_ref().is_none_or(&away)).await {
+        match sent {
             Ok(()) => tracing::debug!(human = %human.name, sink = target.sink.label(), "notified"),
             Err(e) => tracing::warn!(human = %human.name, sink = target.sink.label(), "notifying: {e:#}"),
         }
-    });
-    futures::future::join_all(sends).await;
+    }
+}
+
+/// Send `notice` to the sinks of `human` that `wanted` keeps, all at once, each in its kind's form
+/// ([`Sink::request`]) and within its timeout: each sink and how it went, a failure stopping no other.
+async fn dispatch<'a>(
+    human: &'a Human,
+    notice: &Notice,
+    wanted: impl Fn(&Target) -> bool,
+) -> Vec<(&'a Target, Result<()>)> {
+    let sends =
+        human.sinks.iter().filter(|t| wanted(t)).map(|target| async move { (target, send_to(target, notice).await) });
+    futures::future::join_all(sends).await
 }
 
 // ---- watching --------------------------------------------------------------------------------------------------
@@ -1543,6 +1552,78 @@ mod tests {
         assert_eq!(html("<a href=\"x\">&'"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
         let old = Uuid::from_u128((1_000_000_000_u128 << 80) | (7 << 76) | (2 << 62));
         assert!(!is_recent(&old, Utc::now()) && is_recent(&Uuid::now_v7(), Utc::now()));
+    }
+
+    #[test]
+    fn an_old_style_config_sends_what_it_sent_before() {
+        // The [[human]] example of the README before exec and http sinks, as it stood.
+        let alice = human(
+            "name = \"alice\"\ncreds = \"~/.config/ants/auth/alice.creds\"\nants = [\"dev-a\", \"dev-b\"]\n\
+             approvals = true\nescalations = true\n\
+             [[notify]]\nkind = \"ntfy\"\ntopic = \"alice-ants-7f3k\"\nsecret_env = \"BOT_TOKEN\"\n\
+             [[notify]]\nkind = \"slack\"\nsecret_env = \"SLACK_URL\"\n\
+             [[notify]]\nkind = \"telegram\"\nchat = \"123456789\"\nsecret_env = \"BOT_TOKEN\"\n\
+             [[notify]]\nkind = \"ntfy\"\ntopic = \"alice-laptop-9c2e\"\ndevice = \"01968f7e-0000-7000-8000-000000000000\"\n",
+        )
+        .unwrap();
+        assert!(alice.sinks.iter().all(|t| t.timeout == SEND_TIMEOUT));
+        let notice = Notice {
+            about: About::Test { id: Uuid::now_v7() },
+            human: p("alice"),
+            title: "dev-a asks".to_owned(),
+            text: "a <b> & c".to_owned(),
+            buttons: vec![Button {
+                label: "Reject",
+                url: "https://hub.example/x".to_owned(),
+                verdict: Verdict::Reject,
+            }],
+            urgent: true,
+        };
+        let sent: Vec<_> = alice.sinks.iter().map(|t| posted(t.sink.request(&notice))).collect();
+        let reject = json!({ "action": "http", "label": "Reject", "url": "https://hub.example/x", "method": "POST", "clear": true });
+        assert_eq!(
+            sent,
+            [
+                (
+                    "https://ntfy.sh".to_owned(),
+                    Some("123:abc".to_owned()),
+                    json!({
+                        "topic": "alice-ants-7f3k", "title": "dev-a asks", "message": "a <b> & c", "tags": ["ant"],
+                        "priority": 4, "actions": [reject]
+                    })
+                ),
+                (
+                    "https://hooks.slack.com/services/T0/B0/xyz".to_owned(),
+                    None,
+                    json!({
+                        "text": "dev-a asks",
+                        "blocks": [
+                            { "type": "section", "text": { "type": "mrkdwn", "text": "*dev-a asks*\na &lt;b&gt; &amp; c" } },
+                            { "type": "actions", "elements": [{
+                                "type": "button", "text": { "type": "plain_text", "text": "Reject" },
+                                "url": "https://hub.example/x", "action_id": "ants-reject", "style": "danger"
+                            }] }
+                        ]
+                    })
+                ),
+                (
+                    "https://api.telegram.org/bot123:abc/sendMessage".to_owned(),
+                    None,
+                    json!({
+                        "chat_id": "123456789", "text": "dev-a asks\n\na <b> & c", "disable_web_page_preview": true,
+                        "reply_markup": { "inline_keyboard": [[{ "text": "Reject", "url": "https://hub.example/x" }]] }
+                    })
+                ),
+                (
+                    "https://ntfy.sh".to_owned(),
+                    None,
+                    json!({
+                        "topic": "alice-laptop-9c2e", "title": "dev-a asks", "message": "a <b> & c", "tags": ["ant"],
+                        "priority": 4, "actions": [reject]
+                    })
+                ),
+            ]
+        );
     }
 
     #[test]
