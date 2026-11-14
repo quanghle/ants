@@ -33,7 +33,8 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Connect to NATS as `user`. `url` may be `nats://`, `tls://`, `ws://` or `wss://`, so the same binary works over a
 /// dev tunnel, a reverse proxy or a direct WebSocket endpoint. `creds` is a `.creds` file from `ants auth user`, and
-/// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]).
+/// `js_domain` the hub's JetStream domain, if it has one (see [`jetstream`]). Credentials outdated or expiring soon
+/// get a warning naming the command that renews them ([`crate::creds::warn`]).
 pub async fn connect(
     url: &str,
     creds: Option<&Path>,
@@ -139,6 +140,8 @@ pub async fn connect_retrying(
     }
 }
 
+/// The options of a connection as `user`, named `name`, with the credentials file `creds`, after warning about what
+/// [`crate::creds::warn`] finds in it.
 async fn options(creds: Option<&Path>, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {
     let options = async_nats::ConnectOptions::new()
         .name(name)
@@ -147,6 +150,7 @@ async fn options(creds: Option<&Path>, user: &UserId, name: &str) -> Result<asyn
         .event_callback(|event| async move { log_event(event) });
     match creds {
         Some(path) => {
+            crate::creds::warn(path);
             options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))
         }
         None => Ok(options),

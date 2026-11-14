@@ -13,7 +13,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use ants_proto::DeviceId;
+use ants_proto::{DeviceId, PERMISSIONS_VERSION, PermissionsVersion};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -67,13 +67,26 @@ pub struct Issued {
     /// The label of a human's device, for display: a later line of the same key relabels it ([`rename`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The permissions version its JWT carries ([`PERMISSIONS_VERSION`]); none for keys issued before versions were
+    /// stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perms: Option<PermissionsVersion>,
 }
 
 impl Issued {
     /// A key issued now.
     pub fn new(key: &str, name: &str, kind: Kind, expires_at: Option<u64>) -> Result<Self> {
         let issued_at = auth::now()?;
-        Ok(Self { key: key.to_owned(), name: name.to_owned(), kind, issued_at, expires_at, device: None, label: None })
+        Ok(Self {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            kind,
+            issued_at,
+            expires_at,
+            device: None,
+            label: None,
+            perms: Some(PERMISSIONS_VERSION),
+        })
     }
 
     /// The key, for `device` labelled `label`.
@@ -355,10 +368,137 @@ pub fn list(dir: &Path) -> Result<()> {
 }
 
 fn time(secs: u64) -> String {
-    i64::try_from(secs)
-        .ok()
-        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-        .map_or_else(|| secs.to_string(), |t| t.to_rfc3339())
+    ants_daemon::creds::time(secs)
+}
+
+/// One key of the registry, as `ants auth issued` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Listed {
+    /// Its latest line in [`ISSUED`].
+    #[serde(flatten)]
+    pub issued: Issued,
+    pub revoked: bool,
+    /// A later key was issued for the same name and kind; never for a human's, each of which is another device.
+    pub reissued: bool,
+    /// Its permissions version is not [`PERMISSIONS_VERSION`].
+    pub outdated: bool,
+    /// It expires within [`ants_daemon::creds::EXPIRY_WARNING`].
+    pub expiring: bool,
+    /// The commands that renew it, when it is in use (neither revoked, reissued, expired nor an enrollment's) and
+    /// outdated or expiring: from its `.creds` file in the team directory when there is one
+    /// ([`ants_daemon::creds::Finding::renew`]), else with placeholders for what only that file tells.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub renew: Vec<String>,
+}
+
+/// The keys of the registry of `dir` at `now`, oldest first, each once.
+pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
+    let revoked = revoked(dir)?;
+    let mut latest: Vec<Issued> = Vec::new();
+    for one in issued(dir)? {
+        match latest.iter_mut().find(|known| known.key == one.key) {
+            Some(known) => *known = Issued { issued_at: known.issued_at, ..one },
+            None => latest.push(one),
+        }
+    }
+    let files = team_findings(dir)?;
+    let mut listed = Vec::new();
+    for (n, one) in latest.iter().enumerate() {
+        let reissued = one.kind != Kind::Human
+            && latest[n + 1..].iter().any(|later| later.name == one.name && later.kind == one.kind);
+        let revoked = revoked.iter().any(|r| r.key == one.key);
+        let expired = one.expires_at.is_some_and(|exp| exp <= now);
+        let expiring =
+            !expired && one.expires_at.is_some_and(|exp| exp - now <= ants_daemon::creds::EXPIRY_WARNING.as_secs());
+        let outdated = one.perms != Some(PERMISSIONS_VERSION);
+        let in_use = !revoked && !reissued && !expired && one.kind != Kind::Enrollment;
+        let renew = match (in_use && (outdated || expiring), files.iter().find(|f| f.key == one.key)) {
+            (false, _) => Vec::new(),
+            (true, Some(file)) => file.renew(),
+            (true, None) => renew_without_file(one),
+        };
+        listed.push(Listed { issued: one.clone(), revoked, reissued, outdated, expiring, renew });
+    }
+    Ok(listed)
+}
+
+/// The command renewing `issued` when no `.creds` file tells more: placeholders stand for a webhook's destinations,
+/// a leaf node's members and the hub's JetStream domain.
+fn renew_without_file(issued: &Issued) -> Vec<String> {
+    let name = &issued.name;
+    let domain = "[--js-domain DOMAIN]";
+    vec![match issued.kind {
+        Kind::Ant => format!("ants auth user {name} {domain}"),
+        Kind::Human => format!("ants auth user {name} --human {domain}"),
+        Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
+        Kind::Leaf => format!(
+            "ants auth leaf {} --ant ANT... --human HUMAN... --webhook WEBHOOK... {domain}",
+            name.strip_prefix("leaf-").unwrap_or(name)
+        ),
+        Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
+        Kind::Enrollment => format!("ants auth enroll {}", name.strip_prefix("enroll-").unwrap_or(name)),
+    }]
+}
+
+/// What [`ants_daemon::creds`] finds in the `.creds` files in `dir` that the team's account signed.
+fn team_findings(dir: &Path) -> Result<Vec<ants_daemon::creds::Finding>> {
+    let account = auth::account_key(dir)?;
+    let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "creds") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Some(jwt) = auth::creds_jwt(&text) else { continue };
+        if auth::verified(jwt).is_ok_and(|claims| claims.iss == account)
+            && let Ok(finding) = ants_daemon::creds::Finding::from_jwt(jwt)
+        {
+            found.push(finding);
+        }
+    }
+    Ok(found)
+}
+
+/// Print the keys of the registry of `dir` ([`listing`]): key, name, kind, when issued, expiry, permissions version,
+/// whether revoked or reissued, and under each one to renew, why and how; with `json`, one JSON object per line.
+pub fn list_issued(dir: &Path, json: bool) -> Result<()> {
+    let now = auth::now()?;
+    let listed = listing(dir, now)?;
+    if listed.is_empty() && !json {
+        println!("no credentials issued in {}", dir.display());
+    }
+    for l in listed {
+        if json {
+            println!("{}", serde_json::to_string(&l)?);
+            continue;
+        }
+        let i = &l.issued;
+        let kind = serde_json::to_value(i.kind)?.as_str().unwrap_or("?").to_owned();
+        let expiry = match i.expires_at {
+            Some(exp) if exp <= now => format!("expired {}", time(exp)),
+            Some(exp) => format!("expires {}", time(exp)),
+            None => "no expiry".to_owned(),
+        };
+        let perms = i.perms.map_or_else(|| "-".to_owned(), |v| v.to_string());
+        let revoked = if l.revoked { "  revoked" } else { "" };
+        let reissued = if l.reissued { "  reissued" } else { "" };
+        println!(
+            "{}  {}  {kind}  issued {}  {expiry}  perms {perms}{revoked}{reissued}",
+            i.key,
+            i.name,
+            time(i.issued_at)
+        );
+        if !l.renew.is_empty() {
+            let why: Vec<&str> = [(l.outdated, "outdated permissions"), (l.expiring, "expires soon")]
+                .into_iter()
+                .filter_map(|(yes, why)| yes.then_some(why))
+                .collect();
+            println!("  renew ({}): {}", why.join(", "), l.renew.join(", then "));
+        }
+    }
+    Ok(())
 }
 
 /// Send the team's account JWT, with its revocations, to the server at `url`, as a user of the system account signed
@@ -449,6 +589,52 @@ mod tests {
         apply(&team).unwrap();
         let left: Vec<Option<String>> = revoked(&team).unwrap().into_iter().map(|r| r.name).collect();
         assert_eq!(left, vec![Some("alice".to_owned()); 3]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_listing_names_the_renewal_of_credentials_in_use_that_are_outdated_or_expire_soon() {
+        let dir = ants_test_support::scratch_dir("issued");
+        let team = dir.join("auth");
+        auth::init(&team).unwrap();
+        let ant = |name: &str, out: &Path| {
+            auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap()
+        };
+        ant("dev-a", &dir.join("dev-a-old.creds"));
+        ant("dev-a", &team.join("dev-a.creds"));
+        ant("dev-b", &dir.join("dev-b.creds"));
+        ant("dev-c", &team.join("dev-c.creds"));
+        auth::issue_enrollment(&team, &"dev-d".parse().unwrap(), Duration::from_secs(60), &dir.join("e.creds"))
+            .unwrap();
+        let now = auth::now().unwrap();
+        // dev-a's keys predate versions; dev-b's expires in a day.
+        let lines: String = issued(&team)
+            .unwrap()
+            .into_iter()
+            .map(|i| match i.name.as_str() {
+                "dev-a" => Issued { perms: None, ..i },
+                "dev-b" => Issued { expires_at: Some(now + 86_400), ..i },
+                _ => i,
+            })
+            .map(|i| serde_json::to_string(&i).unwrap() + "\n")
+            .collect();
+        fs::write(team.join(ISSUED), lines).unwrap();
+
+        let listed = listing(&team, now).unwrap();
+        let summary: Vec<(&str, bool, bool, bool, Vec<String>)> = listed
+            .iter()
+            .map(|l| (l.issued.name.as_str(), l.reissued, l.outdated, l.expiring, l.renew.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("dev-a", true, true, false, vec![]),
+                ("dev-a", false, true, false, vec!["ants auth user dev-a".to_owned()]),
+                ("dev-b", false, false, true, vec!["ants auth user dev-b [--js-domain DOMAIN]".to_owned()]),
+                ("dev-c", false, false, false, vec![]),
+                ("enroll-dev-d", false, false, true, vec![]),
+            ]
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

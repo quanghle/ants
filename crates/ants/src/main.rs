@@ -619,6 +619,17 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
+    /// List the keys issued here: key, name, kind, when issued, expiry, permissions version (`-` for credentials
+    /// issued before versions), and whether revoked or reissued since. Credentials in use that are outdated or expire
+    /// within 7 days get a line naming the command that renews them.
+    Issued {
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Push the team's account, with its revocations, to the server of --nats (the hub), as `ants auth revoke`
     /// does.
     Push {
@@ -1041,6 +1052,7 @@ async fn main() -> Result<()> {
             push(&cli.nats, &dir).await
         }
         Command::Auth(AuthCommand::Revoked { dir }) => revoke::list(&team_dir(dir)?),
+        Command::Auth(AuthCommand::Issued { json, dir }) => revoke::list_issued(&team_dir(dir)?, json),
         Command::Auth(AuthCommand::Devices { human, json, dir }) => {
             revoke::list_devices(&team_dir(dir)?, human.as_str(), json)
         }
@@ -1080,6 +1092,7 @@ async fn main() -> Result<()> {
                 listen: &listen,
             };
             leaf::write(&config, &out)?;
+            ants_daemon::creds::warn(&creds);
             println!(
                 "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
