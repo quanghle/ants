@@ -73,6 +73,10 @@ pub struct Issued {
     /// stamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perms: Option<PermissionsVersion>,
+    /// The key of the credentials these renew (`ants renew`), of the same name, kind and device, which stays valid
+    /// until it expires or is revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewed_from: Option<String>,
     /// The members of a leaf node's uplink ([`crate::members`]); none for other credentials, and for an uplink issued
     /// before the registry kept them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,7 @@ impl Issued {
             device: None,
             label: None,
             perms: Some(PERMISSIONS_VERSION),
+            renewed_from: None,
             members: None,
         })
     }
@@ -126,7 +131,8 @@ pub struct Device {
     pub revoked: bool,
 }
 
-/// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human.
+/// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human, but one
+/// per device id, with its latest key, for a device whose credentials were renewed (`ants renew`).
 pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
     let revoked = revoked(dir)?;
     let mut found: Vec<Device> = Vec::new();
@@ -139,7 +145,8 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
             issued_at: one.issued_at,
             expires_at: one.expires_at,
         };
-        match found.iter_mut().find(|d| d.key == device.key) {
+        let same = |d: &Device| d.key == device.key || (device.device.is_some() && d.device == device.device);
+        match found.iter_mut().find(|d| same(d)) {
             Some(known) => *known = Device { issued_at: known.issued_at, ..device },
             None => found.push(device),
         }
@@ -169,10 +176,23 @@ pub fn select<'a>(devices: &'a [Device], name: &str, selector: &str) -> Result<&
     }
 }
 
-/// The keys of the devices of the human `name` in `dir` that `selectors` name ([`select`]), to revoke them alone.
+/// The keys of the devices of the human `name` in `dir` that `selectors` name ([`select`]), to revoke them alone: each
+/// key a device had, its renewed credentials' and the earlier ones.
 pub fn device_keys(dir: &Path, name: &str, selectors: &[String]) -> Result<Vec<String>> {
     let devices = devices(dir, name)?;
-    selectors.iter().map(|selector| Ok(select(&devices, name, selector)?.key.clone())).collect()
+    let issued = issued(dir)?;
+    let mut keys = Vec::new();
+    for selector in selectors {
+        let device = select(&devices, name, selector)?;
+        let of_device = |i: &&Issued| {
+            i.name == name && i.kind == Kind::Human && device.device.is_some() && i.device == device.device
+        };
+        keys.push(device.key.clone());
+        keys.extend(issued.iter().filter(of_device).map(|i| i.key.clone()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+    Ok(keys)
 }
 
 /// Label the device of the human `name` that `selector` names ([`select`]) `label`, appending its line to the registry
@@ -385,7 +405,8 @@ pub struct Listed {
     #[serde(flatten)]
     pub issued: Issued,
     pub revoked: bool,
-    /// A later key was issued for the same name and kind; never for a human's, each of which is another device.
+    /// A later key was issued for the same name and kind; for a human's, only a later key of the same device (renewed
+    /// credentials), as each other one is another device.
     pub reissued: bool,
     /// Its permissions version is not [`PERMISSIONS_VERSION`].
     pub outdated: bool,
@@ -411,8 +432,9 @@ pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
     let files = team_findings(dir)?;
     let mut listed = Vec::new();
     for (n, one) in latest.iter().enumerate() {
-        let reissued = one.kind != Kind::Human
-            && latest[n + 1..].iter().any(|later| later.name == one.name && later.kind == one.kind);
+        let device = |later: &Issued| one.kind != Kind::Human || (one.device.is_some() && later.device == one.device);
+        let reissued =
+            latest[n + 1..].iter().any(|later| later.name == one.name && later.kind == one.kind && device(later));
         let revoked = revoked.iter().any(|r| r.key == one.key);
         let expired = one.expires_at.is_some_and(|exp| exp <= now);
         let expiring =

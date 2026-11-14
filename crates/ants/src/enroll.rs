@@ -1,6 +1,7 @@
 //! Enrollment over NATS: a new ant's machine asks for its credentials with enrollment credentials from
 //! `ants auth enroll` ([`request`]), and `ants enroll` on the machine holding the account key lists, approves or
-//! rejects what it hears ([`Approver`]).
+//! rejects what it hears ([`Approver`]). The approver also renews credentials whose holders ask over NATS
+//! ([`crate::renew`]).
 //!
 //! Requests are core NATS messages and stored nowhere: the asking machine repeats its request every
 //! [`ENROLL_REPEAT`] until an answer comes or its enrollment credentials expire, and `ants enroll` listens for
@@ -178,14 +179,14 @@ fn now() -> Result<u64> {
 /// `ants enroll` on the machine holding the account key, connected with short-lived credentials it issues itself
 /// ([`auth::approver_creds`]).
 pub struct Approver {
-    client: async_nats::Client,
+    pub(crate) client: async_nats::Client,
     hub: async_nats::jetstream::Context,
     js_domain: Option<JsDomain>,
     /// The team's account, which must have issued the credentials a request proves.
-    account: String,
+    pub(crate) account: String,
     /// User keys revoked in the team directory (`ants auth revoke`), whose credentials prove nothing.
-    revoked: HashSet<String>,
-    listen: Duration,
+    pub(crate) revoked: HashSet<String>,
+    pub(crate) listen: Duration,
 }
 
 /// What [`Approver::approve`] did.

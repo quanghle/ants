@@ -14,6 +14,7 @@ mod members;
 mod notify;
 mod outbox;
 mod presence;
+mod renew;
 mod revoke;
 mod roster;
 mod scheduler;
@@ -199,9 +200,14 @@ enum Command {
     /// daemon service of the config file to serve the ant, when it runs (scripts/install-units.sh).
     Add(Box<add::AddArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
-    /// list them, approve or reject one.
+    /// list them, approve or reject one; and renewal requests (`ants renew`): list them, renew one or all.
     #[command(subcommand)]
     Enroll(EnrollCommand),
+    /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
+    /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
+    /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
+    /// Credentials expired, or older than renewal over NATS, are renewed with `ants auth` instead.
+    Renew(renew::RenewArgs),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
         /// The daemon's MCP socket.
@@ -746,6 +752,29 @@ enum EnrollCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
+    /// List the renewal requests heard (`ants renew`), the latest of each name and key.
+    Renewals {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the team, for the new key,
+    /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
+    /// With --auto, renew every credentials asking, as they ask, until stopped.
+    Renew {
+        /// The name the credentials carry: an ant, a human, a webhook, channel-manager or leaf-<machine>.
+        #[arg(required_unless_present = "auto")]
+        name: Option<String>,
+        /// The asking holder's new public key, needed when several ask for NAME.
+        #[arg(long, value_name = "KEY", conflicts_with = "auto")]
+        public_key: Option<String>,
+        /// Keep running and renew every credentials whose holder asks, without an approval each.
+        #[arg(long, conflicts_with = "name")]
+        auto: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Refuse the credentials an ant asks for, to every machine asking for it or the one of --public-key.
     Reject {
         ant: UserId,
@@ -1070,6 +1099,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
+        Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Enroll(command) => {
             let dir = |dir| team_dir(dir);
             match command {
@@ -1092,6 +1122,27 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                    Ok(())
+                }
+                EnrollCommand::Renewals { dir: d } => {
+                    let approver = enroll::Approver::connect(&cli.nats, &dir(d)?, domain, enroll::LISTEN).await?;
+                    approver.list_renewals().await
+                }
+                EnrollCommand::Renew { name: None, auto: true, dir: d, .. } => {
+                    let dir = dir(d)?;
+                    eprintln!("renewing credentials as their holders ask (Ctrl-C stops)");
+                    let stop = async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    };
+                    let (listen, reconnect) = (enroll::LISTEN, renew::AUTO_RECONNECT);
+                    renew::auto(&cli.nats, &dir, domain, listen, reconnect, renew::print_renewed, stop).await
+                }
+                EnrollCommand::Renew { name, public_key, dir: d, .. } => {
+                    let dir = dir(d)?;
+                    let name = name.context("name the credentials to renew, or give --auto")?;
+                    let approver = enroll::Approver::connect(&cli.nats, &dir, domain, enroll::LISTEN).await?;
+                    let (request, renewed) = approver.renew(&dir, &name, public_key.as_deref()).await?;
+                    renew::print_renewed(&request, &renewed);
                     Ok(())
                 }
                 EnrollCommand::Reject { ant, public_key, reason, dir: d } => {
