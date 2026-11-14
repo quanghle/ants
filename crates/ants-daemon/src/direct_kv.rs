@@ -61,16 +61,34 @@ impl DirectKv {
     }
 
     pub async fn lookup(&self, key: impl AsRef<str>) -> Result<Lookup> {
+        Ok(self.lookup_last(key).await?.0)
+    }
+
+    /// [`DirectKv::lookup`], with the stream sequence of the key's last message (0 for none), which
+    /// [`DirectKv::update`] expects.
+    pub async fn lookup_last(&self, key: impl AsRef<str>) -> Result<(Lookup, u64)> {
         let key = key.as_ref();
         let msg = match self.stream.direct_get_last_for_subject(self.subject(key)).await {
             Ok(msg) => msg,
-            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok(Lookup::NoValue),
+            Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0)),
             Err(e) if matches!(e.kind(), DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, _)) => {
-                return Ok(Lookup::NoBucket);
+                return Ok((Lookup::NoBucket, 0));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
-        Ok(if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) })
+        let found = if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) };
+        Ok((found, msg.sequence))
+    }
+
+    /// Store `value` under `key` if the key's last message is still the one at stream sequence `last` (0: none), as
+    /// [`DirectKv::lookup_last`] found it. Whether it stored the value: false when the key changed meanwhile.
+    pub async fn update(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>, last: u64) -> Result<bool> {
+        let key = key.as_ref();
+        match self.put_expecting(key, value.into(), last).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("storing {key}")),
+        }
     }
 
     /// Store `value` under `key`, once JetStream has it.

@@ -15,8 +15,8 @@ use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans,
-    NotesPost, ThreadId, UserId, Uuid, subject,
+    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans, Mark,
+    NotesPost, ThreadId, ThreadMarks, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -24,7 +24,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::tools;
+use crate::{thread_meta, tools};
 
 /// How long the opening message's line in `ants thread list` may be.
 const OPENING: usize = 72;
@@ -35,6 +35,8 @@ pub const RECENT: Duration = Duration::from_hours(7 * 24);
 const LATE: Duration = Duration::from_mins(10);
 /// How many threads an error on a start of a thread id lists.
 const LISTED: usize = 10;
+/// How far back `ants thread list` reads by default.
+const SINCE: Duration = Duration::from_hours(24);
 
 /// What a stored message on a thread is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -275,6 +277,21 @@ pub struct Summary {
     /// to whom, and the escalation's note.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalated: Option<String>,
+    /// The thread's title, which any human sets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Pinned by the CLI's human.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Archived by the CLI's human.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// Archived, and a message was stored on it since.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub new_activity: bool,
+    /// The stream sequence of its last message read.
+    #[serde(skip)]
+    pub last_seq: u64,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -290,6 +307,10 @@ pub struct Select {
     pub limit: Option<usize>,
     /// Only threads with an open escalation ([`Threads::escalated`]).
     pub escalated: bool,
+    /// Only the threads the CLI's human pinned.
+    pub pinned: bool,
+    /// Only the threads the CLI's human archived; otherwise only those with a message stored since are kept of them.
+    pub archived: bool,
 }
 
 /// The threads of the entries handed to [`Threads::add`].
@@ -326,8 +347,14 @@ impl Threads {
             opening: crate::excerpt(&entry.text, OPENING),
             matched: None,
             escalated: None,
+            title: None,
+            pinned: false,
+            archived: false,
+            new_activity: false,
+            last_seq: entry.seq,
         });
         summary.messages += 1;
+        summary.last_seq = summary.last_seq.max(entry.seq);
         summary.first_at = summary.first_at.min(entry.stored_at);
         summary.last_at = summary.last_at.max(entry.stored_at);
         summary.users.extend(entry.users().cloned());
@@ -356,17 +383,29 @@ impl Threads {
         }
     }
 
-    /// The threads `select` keeps, least recently active first, and how many more it left out for its limit.
-    pub fn finish(self, select: &Select) -> (Vec<Summary>, usize) {
+    /// The threads `select` keeps, as the CLI's human marked them (`marks`), least recently active first and its
+    /// pinned ones after the others, and how many more it left out for its limit. Archived threads are left out,
+    /// unless a message was stored on one since it was archived, or `select` asks for archived threads.
+    pub fn finish(self, select: &Select, marks: &ThreadMarks) -> (Vec<Summary>, usize) {
         let mut threads: Vec<Summary> = self
             .by_id
             .into_values()
+            .map(|mut t| {
+                match marks.mark(&t.thread_id, t.last_seq) {
+                    Some(Mark::Pinned) => t.pinned = true,
+                    Some(Mark::Archived { new_activity }) => (t.archived, t.new_activity) = (true, new_activity),
+                    None => {}
+                }
+                t
+            })
             .filter(|t| select.ant.as_ref().is_none_or(|ant| t.users.contains(ant)))
             .filter(|t| select.owner.is_none() || t.owner == select.owner)
             .filter(|t| select.grep.is_none() || t.matched.is_some())
             .filter(|t| !select.escalated || t.escalated.is_some())
+            .filter(|t| !select.pinned || t.pinned)
+            .filter(|t| if select.archived { t.archived } else { !t.archived || t.new_activity })
             .collect();
-        threads.sort_by(|a, b| (a.last_at, &a.thread_id).cmp(&(b.last_at, &b.thread_id)));
+        threads.sort_by(|a, b| (a.pinned, a.last_at, &a.thread_id).cmp(&(b.pinned, b.last_at, &b.thread_id)));
         let omitted = select.limit.map_or(0, |limit| threads.len().saturating_sub(limit));
         threads.drain(..omitted);
         (threads, omitted)
@@ -378,25 +417,39 @@ fn time(at: DateTime<Utc>) -> String {
 }
 
 /// The threads as a table: one row per thread under a header, columns padded to line up, and under a thread
-/// matching `--grep` its matching line, under one with an open escalation that escalation.
+/// matching `--grep` its matching line, under one with an open escalation that escalation. A STATE column (pinned,
+/// archived, or archived+new for one with a message stored since) and a TITLE column show only when a thread listed
+/// has one.
 pub fn table(threads: &[Summary]) -> String {
-    let header = ["THREAD", "OWNER", "USERS", "FIRST", "LAST", "MSGS", "OPENING"].map(str::to_owned);
-    let rows: Vec<[String; 7]> = std::iter::once(header)
+    let marked = threads.iter().any(|t| t.pinned || t.archived);
+    let titled = threads.iter().any(|t| t.title.is_some());
+    let mut header = vec!["THREAD", "OWNER", "USERS", "FIRST", "LAST", "MSGS"];
+    header.extend(marked.then_some("STATE"));
+    header.extend(titled.then_some("TITLE"));
+    header.push("OPENING");
+    let rows: Vec<Vec<String>> = std::iter::once(header.into_iter().map(str::to_owned).collect())
         .chain(threads.iter().map(|t| {
             let users = t.users.iter().map(UserId::as_str);
             let channels = t.channels.iter().map(|c| format!("#{c}"));
-            [
+            let mut row = vec![
                 t.thread_id.to_string(),
                 t.owner.as_ref().map_or("-", UserId::as_str).to_owned(),
                 users.map(str::to_owned).chain(channels).collect::<Vec<_>>().join(","),
                 time(t.first_at),
                 time(t.last_at),
                 t.messages.to_string(),
-                t.opening.clone(),
-            ]
+            ];
+            if marked {
+                row.push(state(t).unwrap_or("-").to_owned());
+            }
+            if titled {
+                row.push(t.title.clone().unwrap_or_else(|| "-".to_owned()));
+            }
+            row.push(t.opening.clone());
+            row
         }))
         .collect();
-    let mut widths = [0; 7];
+    let mut widths = vec![0; rows[0].len()];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -404,7 +457,7 @@ pub fn table(threads: &[Summary]) -> String {
     }
     let mut lines = Vec::new();
     for (i, row) in rows.iter().enumerate() {
-        let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
+        let cells: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{cell:width$}")).collect();
         lines.push(cells.join("  ").trim_end().to_owned());
         if let Some(thread) = i.checked_sub(1).map(|i| &threads[i]) {
             for line in thread.matched.iter().chain(&thread.escalated) {
@@ -413,6 +466,16 @@ pub fn table(threads: &[Summary]) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// How the CLI's human marked a thread listed, as the STATE column says it.
+fn state(thread: &Summary) -> Option<&'static str> {
+    match (thread.pinned, thread.archived, thread.new_activity) {
+        (true, ..) => Some("pinned"),
+        (_, true, true) => Some("archived+new"),
+        (_, true, false) => Some("archived"),
+        _ => None,
+    }
 }
 
 /// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
@@ -696,7 +759,7 @@ fn listing<'a>(threads: impl ExactSizeIterator<Item = &'a Entry>) -> String {
 }
 
 /// Connect as the CLI's human: only a human's credentials get stream messages by sequence.
-async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
+pub async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
     if !nats.me.role.is_human() {
         bail!(
             "the credentials of {} are an ant's, which read no other inbox; `ants thread` reads them all with a \
@@ -707,15 +770,42 @@ async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
     Ok(nats.connect("ants-thread").await?.1)
 }
 
-/// `ants thread list`: the threads with messages stored within `since`, as `select` keeps them.
-pub async fn list(nats: &crate::Nats<'_>, since: Duration, select: &Select, json: bool) -> Result<()> {
+/// `ants thread list`: the threads with messages stored within `since` (by default [`SINCE`], or for `--pinned` and
+/// `--archived` since the earliest thread marked so started), as `select` keeps them, with their titles.
+pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select, json: bool) -> Result<()> {
     let js = connect(nats).await?;
+    let meta = match thread_meta::open(nats, &js).await {
+        Ok(meta) => Some(meta),
+        Err(e) if !select.pinned && !select.archived => {
+            tracing::warn!("not showing titles, pinned or archived threads: {e:#}");
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let marks = match &meta {
+        Some(meta) => meta.marks().await?,
+        None => ThreadMarks::default(),
+    };
+    let start = match since {
+        Some(since) => Some(window(since)),
+        None if select.pinned => marked_start(marks.pinned.keys()),
+        None if select.archived => marked_start(marks.archived.keys()),
+        None => Some(window(SINCE)),
+    };
     let mut threads = Threads::new(select.grep.as_deref());
     if select.escalated {
         threads = threads.escalated(crate::humans::load(&js, &nats.me).await);
     }
-    scan(&js, window(since), |entry| threads.add(&entry)).await?;
-    let (threads, omitted) = threads.finish(select);
+    if let Some(start) = start {
+        scan(&js, start, |entry| threads.add(&entry)).await?;
+    }
+    let (mut threads, omitted) = threads.finish(select, &marks);
+    if let Some(meta) = &meta {
+        let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
+        for thread in &mut threads {
+            thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
+        }
+    }
     if json {
         for thread in &threads {
             println!("{}", serde_json::to_string(thread)?);
@@ -731,6 +821,19 @@ pub async fn list(nats: &crate::Nats<'_>, since: Duration, select: &Select, json
     Ok(())
 }
 
+/// Where to read threads marked so from: the earliest of their starts, or everything kept when an id is not
+/// time-ordered; None when no thread is marked so.
+fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consumer::DeliverPolicy> {
+    let mut earliest = None;
+    for thread in threads {
+        let Some(start) = ants_daemon::channel::thread_start(thread) else {
+            return Some(consumer::DeliverPolicy::All);
+        };
+        earliest = Some(earliest.map_or(start, |e: SystemTime| e.min(start)));
+    }
+    earliest.map(|start| consumer::DeliverPolicy::ByStartTime { start_time: start.into() })
+}
+
 /// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
 pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
     let js = connect(nats).await?;
@@ -744,6 +847,8 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
     .await?;
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
     let mut reactions = crate::inbox::reactions_or_none(&js, &ids).await;
+    let (title, mark) =
+        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last()).await };
     for entry in &mut entries {
         if let Some(id) = entry.id {
             entry.reactions = reactions.remove(&id).unwrap_or_default();
@@ -760,6 +865,15 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
         match owner {
             Some(owner) => println!("thread {thread}, owned by {owner}"),
             None => println!("thread {thread}"),
+        }
+        if let Some(title) = title {
+            println!("title: {}", title.title);
+        }
+        match mark {
+            Some(Mark::Pinned) => println!("pinned"),
+            Some(Mark::Archived { new_activity: true }) => println!("archived, with messages since"),
+            Some(Mark::Archived { new_activity: false }) => println!("archived"),
+            None => {}
         }
         print!("{}", render(&entries));
     }
@@ -889,7 +1003,7 @@ mod tests {
         let threads = |select: &Select| {
             let mut threads = Threads::new(select.grep.as_deref());
             read.iter().for_each(|e| threads.add(e));
-            threads.finish(select)
+            threads.finish(select, &ThreadMarks::default())
         };
 
         let (all, omitted) = threads(&Select::default());
@@ -922,6 +1036,54 @@ mod tests {
     }
 
     #[test]
+    fn pinned_threads_list_last_and_archived_ones_only_with_a_message_since() {
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let on = |thread: &str| Envelope::on_thread(t(thread), alice.clone(), dev_a.clone(), thread);
+        let messages: Vec<(String, Vec<u8>)> =
+            ["t1", "t2", "t3", "t4", "t2"].map(on).iter().map(|e| (e.subject(), json(e))).collect();
+        let read = entries(&messages);
+        let mut marks = ThreadMarks::default();
+        marks.pin(&t("t1"));
+        marks.archive(&t("t2"), 3);
+        marks.archive(&t("t3"), 3);
+        let threads = |select: &Select| {
+            let mut threads = Threads::new(None);
+            read.iter().for_each(|e| threads.add(e));
+            threads.finish(select, &marks)
+        };
+        let ids = |threads: &[Summary]| -> Vec<String> { threads.iter().map(|t| t.thread_id.to_string()).collect() };
+
+        let (listed, _) = threads(&Select::default());
+        assert_eq!(ids(&listed), ["t4", "t2", "t1"], "t3 archived with nothing since, t1 pinned last");
+        let states: Vec<Option<&str>> = listed.iter().map(state).collect();
+        assert_eq!(states, [None, Some("archived+new"), Some("pinned")]);
+        let (limited, omitted) = threads(&Select { limit: Some(1), ..Default::default() });
+        assert_eq!((ids(&limited), omitted), (vec!["t1".to_owned()], 2), "the pinned outlast the limit");
+        let (pinned, _) = threads(&Select { pinned: true, ..Default::default() });
+        assert_eq!(ids(&pinned), ["t1"]);
+        let (archived, _) = threads(&Select { archived: true, ..Default::default() });
+        assert_eq!(ids(&archived), ["t3", "t2"]);
+        assert!(!archived[0].new_activity && archived[1].new_activity);
+
+        let mut listed = listed;
+        listed[1].title = Some("Release 1.2".into());
+        let table = table(&listed);
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(
+            lines[0].starts_with("THREAD  OWNER  USERS") && lines[0].contains("MSGS  STATE         TITLE"),
+            "{table}"
+        );
+        assert!(lines[2].contains("archived+new  Release 1.2  t2"), "{table}");
+        assert!(lines[1].contains("-             -            t4"), "{table}");
+        let json = serde_json::to_value(&listed[1]).unwrap();
+        assert_eq!(
+            (&json["title"], &json["archived"], &json["new_activity"]),
+            (&"Release 1.2".into(), &true.into(), &true.into())
+        );
+        assert!(serde_json::to_value(&listed[0]).unwrap().get("pinned").is_none());
+    }
+
+    #[test]
     fn an_escalation_reaching_a_human_stays_open_until_a_human_s_message_on_the_thread() {
         let (alice, dev_a, lead) = (p("alice"), p("dev-a"), p("lead"));
         let escalate = |thread: &str, to: &UserId, reason| {
@@ -942,7 +1104,7 @@ mod tests {
         humans.add("alice", ants_proto::HumanEntry::new(alice)).unwrap();
         let mut threads = Threads::new(None).escalated(humans);
         read.iter().for_each(|e| threads.add(e));
-        let (open, _) = threads.finish(&Select { escalated: true, ..Default::default() });
+        let (open, _) = threads.finish(&Select { escalated: true, ..Default::default() }, &ThreadMarks::default());
 
         assert_eq!(open.iter().map(|t| t.thread_id.as_str()).collect::<Vec<_>>(), ["t1"]);
         let since = open[0].escalated.as_deref().unwrap();
@@ -1097,7 +1259,7 @@ mod tests {
 
         let mut threads = Threads::new(None);
         scan(&js, window(Duration::from_secs(3600)), |e| threads.add(&e)).await.unwrap();
-        let (threads, _) = threads.finish(&Select::default());
+        let (threads, _) = threads.finish(&Select::default(), &ThreadMarks::default());
         assert_eq!(threads.len(), 2);
         let built = threads.iter().find(|t| t.thread_id == ask.thread_id).unwrap();
         assert_eq!((built.messages, built.owner.as_ref()), (3, Some(&alice)));

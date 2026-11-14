@@ -1856,6 +1856,56 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
+        use crate::thread_meta::{MISSING, Meta};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let thread = ThreadId::generate();
+        let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+        let (_, b_js) = server.connect_as(&bob, Role::Human).await;
+        let (_, d_js) = server.connect(&dev_a).await;
+        let missing = Meta::open(&a_js, None, &alice).await.unwrap().title(&thread).await.unwrap_err();
+        assert_eq!(missing.to_string(), MISSING, "an older hub has no bucket");
+        assert!(
+            ants_daemon::hub::create_bucket(&d_js, ants_daemon::hub::threads_config()).await.is_err(),
+            "only a human creates it"
+        );
+        ants_daemon::hub::create_bucket(&a_js, ants_daemon::hub::threads_config()).await.unwrap();
+        let (alice_meta, bob_meta) =
+            (Meta::open(&a_js, None, &alice).await.unwrap(), Meta::open(&b_js, None, &bob).await.unwrap());
+
+        assert_eq!(alice_meta.set_title(&thread, "  Release 1.2 ").await.unwrap(), None);
+        let had = bob_meta.set_title(&thread, "Release 1.2.1").await.unwrap().unwrap();
+        assert_eq!((had.title.as_str(), &had.by), ("Release 1.2", &alice), "bob renames alice's title");
+        let title = alice_meta.title(&thread).await.unwrap().unwrap();
+        assert_eq!((title.title.as_str(), &title.by), ("Release 1.2.1", &bob));
+        assert!(alice_meta.set_title(&thread, "two\nlines").await.is_err());
+        let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
+        assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
+        assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+
+        assert!(alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap());
+        assert!(!alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap(), "pinned already");
+        assert!(bob_meta.change_marks(|m| m.archive(&thread, 1)).await.unwrap());
+        assert!(alice_meta.marks().await.unwrap().pinned.contains_key(&thread), "bob's archive is bob's");
+        assert!(bob_meta.change_marks(|m| m.unarchive(&thread)).await.unwrap());
+        assert!(alice_meta.change_marks(|m| m.unpin(&thread)).await.unwrap());
+        assert_eq!(alice_meta.marks().await.unwrap(), ants_proto::ThreadMarks::default());
+        assert!(Meta::open(&a_js, None, &bob).await.unwrap().marks().await.is_err(), "alice reads no marks of bob's");
+        assert!(Meta::open(&d_js, None, &dev_a).await.unwrap().marks().await.is_err(), "an ant keeps none");
+
+        let (raw, mut errors) = server.watched_with(&alice, &server.creds_as(&alice, Role::Human)).await;
+        let forged = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::marks_key(&bob));
+        raw.publish(forged.clone(), "{}".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&forged), "forging bob's marks is denied");
+        let title = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::title_key(&thread));
+        let (raw, mut errors) = server.watched(&dev_a).await;
+        raw.publish(title.clone(), "{}".into()).await.unwrap();
+        assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+    }
+
+    #[tokio::test]
     async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_record_stays() {
         let Some(server) = Server::start() else { return };
         let (human, alice, dev_a, hook, alerts) = (UserId::human(), p("alice"), p("dev-a"), p("github"), p("alerts"));
@@ -2577,7 +2627,7 @@ pub(crate) mod tests {
                 .unwrap();
             listed.add(&entry);
             let select = crate::thread::Select { escalated: true, ..Default::default() };
-            let (open, _) = listed.finish(&select);
+            let (open, _) = listed.finish(&select, &ants_proto::ThreadMarks::default());
             assert_eq!(open.iter().map(|t| &t.thread_id).collect::<Vec<_>>(), [&ask.thread_id], "listed escalated");
             pulling.abort();
         };
