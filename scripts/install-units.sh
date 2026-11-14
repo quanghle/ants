@@ -38,7 +38,8 @@
 #
 # The daemon gets the PATH of this shell, so it finds the harness and configured tools. Logs: ~/Library/Logs/ants on
 # macOS, rotated by the agent ants.logrotate (over 10 MiB, 5 gzipped copies kept), the journal on Linux
-# (journalctl --user -u ants-daemon).
+# (journalctl --user -u ants-daemon). With ants, also installs the completions for the login shell
+# (`ants completions --install`).
 set -eu
 
 die() {
@@ -94,7 +95,7 @@ while [ $# -gt 0 ]; do
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -246,3 +247,4 @@ else
         printf 'to keep them running without a login session: loginctl enable-linger %s\n' "$(id -un)"
     fi
 fi
+[ -z "$ants" ] || "$ants" completions --install || true

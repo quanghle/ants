@@ -27,7 +27,7 @@ fn main() {
     if Path::new(&me).file_stem().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 6] = [
+    let tests: [(&str, fn()); 7] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
@@ -36,6 +36,10 @@ fn main() {
         (
             "a_configured_adapter_serves_ants_the_messenger_and_the_cli",
             a_configured_adapter_serves_ants_the_messenger_and_the_cli,
+        ),
+        (
+            "setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_threads",
+            setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_threads,
         ),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
@@ -512,6 +516,76 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     }
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ants setup` against a running server, in a scratch home and without services, twice: the second run keeps what
+/// the first wrote. Completion then reads the server from the config file setup wrote.
+fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_threads() {
+    let Some(server) = NatsServer::start() else { return };
+    let home = scratch_dir("setup");
+    let workdir = home.join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(args).env("HOME", &home).env("SHELL", "/bin/bash").current_dir(&home);
+        for var in ["ANTS_CREDS", "ANTS_CONFIG", "ANTS_NATS_URL", "ANTS_JS_DOMAIN", "XDG_DATA_HOME", "XDG_CONFIG_HOME"]
+        {
+            command.env_remove(var);
+        }
+        command
+    };
+    let setup = |ant: &str| {
+        let workdir = workdir.to_str().unwrap();
+        let args =
+            ["--nats", &server.url, "setup", "--no-services", "--no-harness", "--ant", ant, "--workdir", workdir];
+        let out = run(ants(&args));
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+        stdout
+    };
+
+    let first = setup("dev");
+    let config = home.join(".ants/config.toml");
+    for line in ["done   nats-server config", "done   ants init", "done   config", "done   completions", "ok    config"]
+    {
+        assert!(first.contains(line), "{line:?} in:\n{first}");
+    }
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains(&format!("nats = \"{}\"", server.url)), "{written}");
+    assert!(written.contains("messenger = true\n") && written.contains("name = \"dev\""), "{written}");
+    assert!(std::fs::read_to_string(home.join(".config/ants/nats.conf")).unwrap().contains("jetstream {"));
+    let script = home.join(".local/share/bash-completion/completions/ants");
+    assert!(std::fs::read_to_string(&script).unwrap().contains("ANTS_COMPLETE=\"bash\""));
+
+    let again = setup("dev");
+    for line in ["exists nats-server config", "exists config", "exists completions"] {
+        assert!(again.contains(line), "{line:?} in:\n{again}");
+    }
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), written, "a re-run keeps the config file");
+    assert!(setup("qa").contains("done   config"), "a new ant is added");
+    assert!(std::fs::read_to_string(&config).unwrap().starts_with(&written));
+
+    let out = run(ants(&["--nats", &server.url, "channel", "create", "ops"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(ants(&["--nats", &server.url, "ask", "@dev", "hello", "there"]));
+    let asked = String::from_utf8_lossy(&out.stdout);
+    let thread = asked.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&asked).to_owned();
+
+    let complete = |words: &[&str]| {
+        let mut command = ants(&["--"]);
+        command.args(words).env("ANTS_COMPLETE", "bash").env("_CLAP_IFS", "\n");
+        command.env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string());
+        let out = run(command);
+        assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    assert_eq!(complete(&["ants", "post", "o"]), ["ops"]);
+    assert_eq!(complete(&["ants", "ask", "@"]), ["@dev", "@messenger", "@qa"]);
+    assert_eq!(complete(&["ants", "thread", "show", &thread[..8]]), [thread.as_str()]);
+    assert_eq!(complete(&["ants", "thread", "show", "la"]), ["last"]);
+    drop(server);
+    assert!(complete(&["ants", "post", "o"]).is_empty(), "no server, no candidates");
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Run `command` to completion, killing it after [`WAIT`].

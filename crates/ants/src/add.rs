@@ -21,7 +21,7 @@ use crate::serve::AntOptions;
 use crate::service::{Action, Outcome, Service, Services, failure};
 
 /// The server `--nats` defaults to.
-const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
+pub const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
 
 #[derive(clap::Args, Debug)]
 pub struct AddArgs {

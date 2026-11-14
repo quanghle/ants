@@ -4,6 +4,7 @@ mod add;
 mod auth;
 mod bridge;
 mod channel;
+mod completions;
 mod defaults;
 mod doctor;
 mod enroll;
@@ -23,6 +24,7 @@ mod roster;
 mod scheduler;
 mod serve;
 mod service;
+mod setup;
 mod spend;
 mod thread;
 mod tools;
@@ -46,6 +48,7 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 use futures::StreamExt as _;
 
 #[derive(Parser)]
@@ -82,11 +85,12 @@ enum Command {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
         /// its recipient (@ant, else the messenger), not the thread's other ants.
         #[arg(long, value_name = "THREAD")]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
         /// `@ant` (optional), then the message.
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
     },
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
@@ -97,6 +101,7 @@ enum Command {
         peek: bool,
         /// Only replies on this thread (its id, a unique start of one, or `last`); the others stay unread.
         #[arg(long, value_name = "THREAD")]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
         /// At most this many replies; the rest stay unread.
         #[arg(long)]
@@ -122,10 +127,12 @@ enum Command {
     /// Caps come from the local config file for the ants it lists. Needs human credentials.
     Spend {
         /// Only this ant.
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: Option<UserId>,
         /// What the ant, or each ant on the thread, spent on it since a human's last message there: its id, a unique
         /// start of one, or `last`.
         #[arg(long, value_name = "THREAD")]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
         /// UTC days to report, today included.
         #[arg(long, default_value_t = spend::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..=366),
@@ -146,15 +153,17 @@ enum Command {
     Post {
         /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
         /// Post on an existing thread of the channel instead of starting one (its id, a unique start of one, or
         /// `last`); the thread keeps its owner.
         #[arg(long, value_name = "THREAD")]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
         /// The post; each @ant mention wakes that member.
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., add = ArgValueCandidates::new(completions::mentions))]
         words: Vec<String>,
     },
     /// Channels: named groups of ants that humans post to with `ants post`.
@@ -165,6 +174,7 @@ enum Command {
     /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.
     Notes {
         /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
         /// The post. Without it, show the notes.
         #[arg(value_name = "TEXT")]
@@ -179,17 +189,20 @@ enum Command {
     /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
         /// Subject filter, or an ant to follow its progress on every thread.
-        #[arg(default_value = subject::ALL)]
+        #[arg(default_value = subject::ALL, add = ArgValueCandidates::new(completions::ants))]
         subject: String,
         /// With an ant, follow only this thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
     },
     /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
     /// behind it on the thread still run. Needs a human's credentials.
     Cancel {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
         /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
@@ -261,6 +274,25 @@ enum Command {
         /// Config file of `ants webhook serve` (default: ~/.ants/webhooks.toml), checked when it is there.
         #[arg(long)]
         webhook_config: Option<PathBuf>,
+    },
+    /// Bring up ants on this machine, each step skipped when already done: write a local nats-server configuration
+    /// with JetStream (~/.config/ants/nats.conf) and install its service, run `ants init`, write the config file with
+    /// the messenger and the ant of --ant, check the harness, install the daemon service and the shell completions,
+    /// then run `ants doctor`. Never overwrites a file; one already there is reported and kept. Exits with status 1
+    /// when a step or a check fails.
+    Setup(Box<setup::SetupArgs>),
+    /// Print the script registering shell completions of ants for SHELL, or write it where the shell loads it from.
+    /// Besides commands and flags, it completes ants, channels, recent threads, pending tool requests and dead
+    /// letters, looked up over NATS as the command line being completed would connect, for up to 2 seconds.
+    Completions {
+        /// The shell (default with --install: the one $SHELL names).
+        #[arg(required_unless_present = "install")]
+        shell: Option<completions::Shell>,
+        /// Write the script where the shell loads it from: bash-completion's directory
+        /// (~/.local/share/bash-completion/completions), zsh's site-functions in ~/.local/share/zsh, which fpath
+        /// needs to name, or ~/.config/fish/completions.
+        #[arg(long)]
+        install: bool,
     },
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
@@ -351,31 +383,32 @@ enum ChannelCommand {
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
         /// Member, an ant or a human (repeatable, or comma-separated).
-        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant)]
+        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         members: Vec<UserId>,
         /// Ant that triages the posts of humans that @mention nobody (default: `messenger`).
-        #[arg(long, value_parser = channel::parse_ant)]
+        #[arg(long, value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         messenger: Option<UserId>,
         /// Ant that owns the channel: it changes the members and the messenger through `ants channel serve`.
-        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant)]
+        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         owner: Option<UserId>,
     },
     /// Replace the members or the messenger of a channel; what is not given stays.
     Set {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
         /// Member, an ant or a human (repeatable, or comma-separated): together, the new members.
-        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant)]
+        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         members: Option<Vec<UserId>>,
         /// Ant that triages the posts of humans that @mention nobody.
-        #[arg(long, value_parser = channel::parse_ant, conflicts_with = "default_messenger")]
+        #[arg(long, value_parser = channel::parse_ant, conflicts_with = "default_messenger", add = ArgValueCandidates::new(completions::ants))]
         messenger: Option<UserId>,
         /// Hand the triage back to the default messenger, the ant `messenger` (triage stays on).
         #[arg(long)]
         default_messenger: bool,
         /// Ant that owns the channel: it changes the members and the messenger through `ants channel serve`.
-        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant, conflicts_with = "no_owner")]
+        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant, conflicts_with = "no_owner", add = ArgValueCandidates::new(completions::ants))]
         owner: Option<UserId>,
         /// Leave the channel without an owner.
         #[arg(long)]
@@ -385,18 +418,20 @@ enum ChannelCommand {
     Add {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
         /// Ants or humans: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant)]
+        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         users: Vec<UserId>,
     },
     /// Remove members from a channel.
     Remove {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
         /// Ants or humans: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant)]
+        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         users: Vec<UserId>,
     },
     /// List the channels with the members, the messenger and the owner of each.
@@ -406,9 +441,11 @@ enum ChannelCommand {
     Read {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
         /// Only this thread: its id, a unique start of one, or `last`.
         #[arg(long, value_name = "THREAD")]
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
         /// Only the last this many threads.
         #[arg(long, conflicts_with = "thread")]
@@ -418,6 +455,7 @@ enum ChannelCommand {
     Delete {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
+        #[arg(add = ArgValueCandidates::new(completions::channels))]
         channel: ChannelId,
     },
     /// Run the channel manager, where no ant runs (on the hub, say), with the credentials of
@@ -526,7 +564,7 @@ enum ThreadCommand {
     /// last time, messages, and the first line of the first message; the most recently active last.
     List {
         /// Only threads this ant (or human) sent or received a message on.
-        #[arg(long, value_name = "ANT")]
+        #[arg(long, value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
         ant: Option<UserId>,
         /// Only threads this human owns.
         #[arg(long, value_name = "HUMAN")]
@@ -553,6 +591,7 @@ enum ThreadCommand {
     /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
     Show {
         /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
         /// How far back to read; by default from the thread's start when its id is time-ordered (as generated ids
         /// are), else everything the stream keeps.
@@ -569,9 +608,15 @@ enum DeadCommand {
     /// List dead letters, oldest first.
     List,
     /// Send a dead letter's message to its inbox again, as it was, and remove the dead letter.
-    Replay { seq: u64 },
+    Replay {
+        #[arg(add = ArgValueCandidates::new(completions::dead_letters))]
+        seq: u64,
+    },
     /// Remove a dead letter without replaying it.
-    Drop { seq: u64 },
+    Drop {
+        #[arg(add = ArgValueCandidates::new(completions::dead_letters))]
+        seq: u64,
+    },
     /// Keep dead-lettering, until Ctrl-C, the messages JetStream stops delivering without the daemon having stored
     /// them as dead letters, and print each one. `ants inbox --follow` does the same while it runs.
     Watch,
@@ -759,6 +804,7 @@ enum ToolsCommand {
     /// Show a tool request in full: its tool input, where it stands, and the commands answering it.
     Show {
         /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        #[arg(add = ArgValueCandidates::new(completions::tool_requests))]
         id: String,
         /// The request as JSON.
         #[arg(long)]
@@ -767,6 +813,7 @@ enum ToolsCommand {
     /// Allow the tool call of a pending request, once or with --always for the rest of the ant's session.
     Approve {
         /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        #[arg(add = ArgValueCandidates::new(completions::tool_requests))]
         id: String,
         /// Allow this tool for the rest of the session (allow-always), when the request offers it.
         #[arg(long)]
@@ -782,6 +829,7 @@ enum ToolsCommand {
     /// Reject the tool call of a pending request.
     Reject {
         /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        #[arg(add = ArgValueCandidates::new(completions::tool_requests))]
         id: String,
     },
 }
@@ -953,8 +1001,13 @@ impl HarnessPick {
     }
 }
 
+fn main() -> Result<()> {
+    completions::answer();
+    run()
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ANTS_LOG").unwrap_or_else(|_| "info,rmcp=warn".into()),
@@ -997,28 +1050,27 @@ async fn main() -> Result<()> {
         Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
-            let nats = nats()?;
-            let (_, js) = nats.connect_only("ants-cli").await?;
-            let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
-            for finding in fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")? {
-                println!("{}", finding.fixed());
+            for line in init_hub(&nats()?).await? {
+                println!("{line}");
             }
-            humans::register_or_warn(&js, &nats.me).await;
-            println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
-                ants_proto::STREAM,
-                ants_proto::ROSTER_BUCKET,
-                ants_proto::SESSIONS_BUCKET,
-                ants_proto::ATTEMPTS_BUCKET,
-                ants_proto::CHANNELS_BUCKET,
-                ants_proto::HUMANS_BUCKET,
-                ants_proto::CHAINS_BUCKET,
-                ants_proto::LINKS_BUCKET,
-                ants_proto::OWNERS_BUCKET,
-                ants_proto::WEBHOOKS_BUCKET,
-                ants_proto::READ_BUCKET,
-                ants_proto::PRESENCE_BUCKET
-            );
+            Ok(())
+        }
+        Command::Setup(args) => {
+            let connection = setup::Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
+            Box::pin(setup::run(&args, &connection)).await
+        }
+        Command::Completions { shell, install } => {
+            let shell = match shell.or_else(completions::Shell::login) {
+                Some(shell) => shell,
+                None => bail!("$SHELL is not bash, zsh or fish: name the shell"),
+            };
+            match install {
+                true => println!(
+                    "{}",
+                    completions::install(shell, &std::env::home_dir().context("no home directory")?, false)?
+                ),
+                false => print!("{}", shell.script(&completions::bin())?),
+            }
             Ok(())
         }
         Command::Tools(ToolsCommand::List { follow, json }) => tools::list(&nats()?, follow, json).await,
@@ -1544,6 +1596,32 @@ impl<'a> Nats<'a> {
         }
         Ok((client, js))
     }
+}
+
+/// `ants init`: create the hub's stream and buckets, or upgrade those an older version set up, and register the human
+/// of the credentials. Returns what was done, a line each.
+async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
+    let (_, js) = nats.connect_only("ants-cli").await?;
+    let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
+    let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
+    let mut lines: Vec<String> = fixed.iter().map(|finding| finding.fixed()).collect();
+    humans::register_or_warn(&js, &nats.me).await;
+    lines.push(format!(
+        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        ants_proto::STREAM,
+        ants_proto::ROSTER_BUCKET,
+        ants_proto::SESSIONS_BUCKET,
+        ants_proto::ATTEMPTS_BUCKET,
+        ants_proto::CHANNELS_BUCKET,
+        ants_proto::HUMANS_BUCKET,
+        ants_proto::CHAINS_BUCKET,
+        ants_proto::LINKS_BUCKET,
+        ants_proto::OWNERS_BUCKET,
+        ants_proto::WEBHOOKS_BUCKET,
+        ants_proto::READ_BUCKET,
+        ants_proto::PRESENCE_BUCKET
+    ));
+    Ok(lines)
 }
 
 /// Create the hub's stream and buckets that are missing and upgrade those out of date, as `ants init` does
