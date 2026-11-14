@@ -23,7 +23,7 @@ use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
-use crate::harness::{HarnessKind, Launch, ModelSettings, Prompt, PromptLimits, Spend};
+use crate::harness::{Harness, Launch, ModelSettings, Prompt, PromptLimits, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
 use crate::notes::{self, NotesStore};
@@ -75,7 +75,7 @@ pub struct Config {
     /// The ant's role instructions, shared in the roster.
     pub whoami: Option<String>,
     pub env: BTreeMap<String, String>,
-    pub harness: HarnessKind,
+    pub harness: std::sync::Arc<Harness>,
     pub model_settings: ModelSettings,
     /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
     /// goes to the human on `ants.approvals.<ant>`.
@@ -192,7 +192,7 @@ async fn serve(config: &Config) -> Result<Served> {
     mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
     let launch = Launch::new(
-        config.harness,
+        config.harness.clone(),
         config.workdir.clone(),
         config.env.clone().into_iter().collect(),
         policy,

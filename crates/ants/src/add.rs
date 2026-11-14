@@ -139,7 +139,7 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
     if js_domain.is_some() && js_domain != summary.js_domain.as_ref() {
         p.js_domain = js_domain.cloned();
     }
-    p.clone().into_config(nats)?;
+    p.clone().into_config(nats, &summary.harnesses)?;
     config::entry(&p)
 }
 
@@ -269,7 +269,7 @@ mod tests {
         let listed = std::fs::read_to_string(&config).unwrap();
         assert!(listed.starts_with("# mine\nharness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\n"), "{listed}");
         assert!(listed.contains("\nidle_timeout = \"1m30s\"\n"), "{listed}");
-        let dev_a = config::load(&config).unwrap().into_iter().find(|p| p.name.as_str() == "dev-a").unwrap();
+        let dev_a = config::load(&config).unwrap().0.into_iter().find(|p| p.name.as_str() == "dev-a").unwrap();
         assert_eq!(
             (dev_a.creds.as_deref(), dev_a.model.as_deref(), dev_a.nats, dev_a.idle_timeout),
             (Some(out.as_path()), Some("m"), None, std::time::Duration::from_secs(90))

@@ -532,7 +532,7 @@ mod tests {
         ant.whoami = Some("Maintain the Rust backend.".to_owned());
         ant.memory = Some("Use notes.".to_owned());
         ant.tasks = Some("Use tickets.".to_owned());
-        let config = ant.into_config("nats://unused").unwrap();
+        let config = ant.into_config("nats://unused", &Default::default()).unwrap();
         let instructions =
             "[ants role dev-a]\nMaintain the Rust backend.\n\n[ants memory]\nUse notes.\n\n[ants tasks]\nUse tickets.";
         let pool = Pool::new(launch.with_instructions(config.instructions), SessionStore::memory(), 1, IDLE);

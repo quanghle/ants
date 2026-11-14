@@ -1,0 +1,28 @@
+# The built-in harness definitions. A config file's [harnesses.<name>] table of the same name replaces one whole.
+
+# GitHub Copilot CLI. Sign-in: `copilot login`.
+[harnesses.copilot]
+command = "copilot"
+args = ["--acp"]
+
+[harnesses.copilot.context]
+default = { args = ["--context", "default"] }
+long_context = { args = ["--context", "long_context"] }
+
+# Claude Code through its ACP adapter, npm @agentclientprotocol/claude-agent-acp. Sign-in: `claude login`, or
+# ANTHROPIC_API_KEY. Its `auto` mode approves tools with a classifier, so sessions are switched to `default`.
+[harnesses.claude]
+command = "claude-agent-acp"
+mode = "default"
+
+[harnesses.claude.context]
+default = {}
+1m = { model_suffix = "[1m]" }
+
+# Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key. Its saved `agentMode`
+# (auto unless set) runs what it deems safe unasked, so sessions are switched to `default`. No context selector: the
+# model chooses the native window.
+[harnesses.antigravity]
+command = "agy"
+args = ["acp", "--disable-telemetry"]
+mode = "default"

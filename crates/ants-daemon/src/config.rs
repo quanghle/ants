@@ -13,9 +13,17 @@
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
+//! harness = "my-agent"
+//!
+//! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
+//! command = "~/bin/my-agent-acp"     # a path, or a bare name looked up on PATH
+//! args = ["--stdio"]
+//! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
+//! mode = "default"                  # ACP session mode every session must run in
 //! ```
 //!
-//! `~` expands to the home directory; other relative paths are relative to the file's directory.
+//! `~` expands to the home directory; other relative paths, harness commands with a `/` included, are relative to the
+//! file's directory.
 //!
 //! A file also serves the built-in messenger ([`builtin_messenger`]) unless it sets `messenger = false` or lists an
 //! ant named `messenger`; an empty file is a complete one.
@@ -26,12 +34,12 @@ use std::time::Duration;
 
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::caps::Caps;
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
-use crate::harness::{self, HarnessKind, ModelSettings, PromptLimits};
+use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -56,8 +64,10 @@ fn home_dir() -> Result<PathBuf> {
 #[serde(deny_unknown_fields)]
 struct File {
     /// Default harness of the file's ants, and the harness of the built-in messenger.
-    #[serde(default, deserialize_with = "some_harness")]
-    harness: Option<HarnessKind>,
+    harness: Option<String>,
+    /// Harness definitions, added to the built-in ones or replacing them by name.
+    #[serde(default)]
+    harnesses: BTreeMap<String, Harness>,
     /// Whether to serve the built-in messenger, unless an ant is named `messenger`.
     #[serde(default = "yes")]
     messenger: bool,
@@ -92,9 +102,8 @@ pub struct Ant {
     /// Added to the harness's inherited environment.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// The file's top-level `harness`, then the default harness, when absent.
-    #[serde(default, deserialize_with = "some_harness")]
-    pub harness: Option<HarnessKind>,
+    /// A harness name ([`Harnesses`]); the file's top-level `harness`, then [`DEFAULT_HARNESS`], when absent.
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context: Option<String>,
@@ -173,10 +182,6 @@ fn default_escalate_after() -> Duration {
     DEFAULT_ESCALATE_AFTER
 }
 
-fn some_harness<'de, D: Deserializer<'de>>(d: D) -> Result<Option<HarnessKind>, D::Error> {
-    String::deserialize(d)?.parse().map(Some).map_err(serde::de::Error::custom)
-}
-
 impl Ant {
     /// An ant with default settings.
     pub fn new(name: UserId, workdir: PathBuf) -> Self {
@@ -215,15 +220,17 @@ impl Ant {
         }
     }
 
-    /// The daemon config, with `default_nats` as the server when none is set.
-    pub fn into_config(self, default_nats: &str) -> Result<Config> {
-        validate_env(&self.env)?;
+    /// The daemon config, with `default_nats` as the server when none is set and the harness from `harnesses`.
+    pub fn into_config(self, default_nats: &str, harnesses: &Harnesses) -> Result<Config> {
+        harness::validate_env(&self.env)?;
         self.validate_chain()?;
         let instructions = self.prompt_instructions();
-        let harness = self.harness.unwrap_or_default();
+        let harness = harnesses
+            .get(self.harness.as_deref().unwrap_or(DEFAULT_HARNESS))
+            .with_context(|| format!("ant {}", self.name))?;
         let model_settings =
             ModelSettings { model: self.model, reasoning_effort: self.reasoning_effort, context: self.context };
-        model_settings.validate(harness)?;
+        model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
         if self.builtin {
             std::fs::create_dir_all(&self.workdir)
                 .with_context(|| format!("ant {}: creating workdir {}", self.name, self.workdir.display()))?;
@@ -302,25 +309,16 @@ impl Ant {
     }
 }
 
-fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
-    for (name, value) in env {
-        if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
-            bail!("invalid harness environment variable {name:?}");
-        }
-    }
-    Ok(())
-}
-
 /// The ant a file serves unless it sets `messenger = false` or lists one named `messenger`: the file's `harness`
 /// (else the default harness) with its default model, reasoning effort and context, and otherwise the settings of an ant that sets nothing. Its home and
 /// workdir are `~/.ants/messenger`, created when it starts, and its credentials
 /// `~/.config/ants/auth/messenger.creds` (where `ants auth user messenger` writes them) if that file exists.
-pub fn builtin_messenger(harness: HarnessKind, home: &Path) -> Ant {
+pub fn builtin_messenger(harness: &str, home: &Path) -> Ant {
     let name = UserId::messenger();
     let dir = home.join(".ants").join(name.as_str());
     let creds = home.join(".config/ants/auth").join(format!("{name}.creds"));
     Ant {
-        harness: Some(harness),
+        harness: Some(harness.to_owned()),
         home: Some(dir.clone()),
         creds: creds.is_file().then_some(creds),
         builtin: true,
@@ -328,34 +326,43 @@ pub fn builtin_messenger(harness: HarnessKind, home: &Path) -> Ant {
     }
 }
 
-/// Read and check the config file at `path`.
-pub fn load(path: &Path) -> Result<Vec<Ant>> {
+/// Read and check the config file at `path`: its ants, and the harnesses they may name.
+pub fn load(path: &Path) -> Result<(Vec<Ant>, Harnesses)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
     parse(&text, &std::path::absolute(path)?, &home_dir()?)
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique and workdirs
-/// exist, and add the built-in messenger unless `messenger = false` or an ant is named `messenger`.
-pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Ant>> {
+/// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
+/// exist and every harness named is defined, and add the built-in messenger unless `messenger = false` or an ant is
+/// named `messenger`.
+pub fn parse(text: &str, path: &Path, home: &Path) -> Result<(Vec<Ant>, Harnesses)> {
     let mut file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let harnesses = define(std::mem::take(&mut file.harnesses), base, home)
+        .with_context(|| format!("config {}", path.display()))?;
+    if let Some(harness) = &file.harness {
+        harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
+    }
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
     if file.messenger && !file.ants.iter().any(|ant| ant.name == UserId::messenger()) {
-        file.ants.push(builtin_messenger(file.harness.unwrap_or_default(), home));
+        file.ants.push(builtin_messenger(file.harness.as_deref().unwrap_or(DEFAULT_HARNESS), home));
     }
-    let base = path.parent().unwrap_or(Path::new("."));
     let mut names = BTreeSet::new();
     let mut ants = Vec::with_capacity(file.ants.len());
     for mut ant in file.ants {
         if !names.insert(ant.name.clone()) {
             bail!("config {}: ant {} is listed twice", path.display(), ant.name);
         }
-        validate_env(&ant.env)?;
+        harness::validate_env(&ant.env)?;
         ant.validate_chain().with_context(|| format!("config {}", path.display()))?;
         if ant.harness.is_none() {
-            ant.harness = file.harness;
+            ant.harness.clone_from(&file.harness);
+        }
+        if let Some(harness) = &ant.harness {
+            harnesses.get(harness).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
         }
         if !ant.builtin {
             let abs = |dir: &Path| resolve(dir, base, home);
@@ -376,7 +383,17 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Vec<Ant>> {
         }
         ants.push(ant);
     }
-    Ok(ants)
+    Ok((ants, harnesses))
+}
+
+/// The built-in harnesses with the file's `definitions`, their commands given as paths resolved like other paths.
+fn define(mut definitions: BTreeMap<String, Harness>, base: &Path, home: &Path) -> Result<Harnesses> {
+    for harness in definitions.values_mut() {
+        if harness.command_is_path() {
+            harness.command = resolve(&harness.command, base, home);
+        }
+    }
+    Harnesses::builtin().define(definitions)
 }
 
 fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
@@ -386,17 +403,20 @@ fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     }
 }
 
-/// What adding an ant needs to know of a config file: its top-level `nats` and `js_domain`, and the ants it
-/// lists with their credentials, resolved as [`parse`] does. Nothing else is checked.
+/// What adding an ant or running a harness directly needs to know of a config file: its top-level `nats`,
+/// `js_domain` and `harness`, its harnesses, and the ants it lists with their credentials, resolved as [`parse`]
+/// does. Nothing else is checked.
 #[derive(Debug, Default, PartialEq)]
 pub struct Summary {
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
+    pub harness: Option<String>,
+    pub harnesses: Harnesses,
     pub ants: Vec<(UserId, Option<PathBuf>)>,
 }
 
 impl Summary {
-    /// Read the summary of the file at `path`; an empty one when there is no file.
+    /// Read the summary of the file at `path`; an empty one, with the built-in harnesses, when there is no file.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text, &std::path::absolute(path)?, &home_dir()?),
@@ -408,8 +428,14 @@ impl Summary {
     fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
         let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
+        let harnesses = define(file.harnesses, base, home).with_context(|| format!("config {}", path.display()))?;
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        Ok(Self { nats: file.nats, js_domain: file.js_domain, ants })
+        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants })
+    }
+
+    /// The harness named `name`, else the file's top-level `harness`, else [`DEFAULT_HARNESS`].
+    pub fn harness(&self, name: Option<&str>) -> Result<std::sync::Arc<Harness>> {
+        self.harnesses.get(name.or(self.harness.as_deref()).unwrap_or(DEFAULT_HARNESS))
     }
 
     /// The credentials the file names for `ant`: `None` when it does not list the ant, `Some(None)` when its
@@ -489,8 +515,8 @@ pub fn entry(ant: &Ant) -> Result<String> {
             ant.env.iter().map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v))).collect();
         set("env", format!("{{ {} }}", pairs.join(", ")));
     }
-    if let Some(harness) = ant.harness {
-        set("harness", toml_string(harness.name()));
+    if let Some(harness) = &ant.harness {
+        set("harness", toml_string(harness));
     }
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());
@@ -577,8 +603,16 @@ mod tests {
 
     /// Parse as if the file sat in this crate's directory, with the workspace root as home.
     fn parse_here(text: &str) -> Result<Vec<Ant>> {
+        Ok(parse_with_harnesses(text)?.0)
+    }
+
+    fn parse_with_harnesses(text: &str) -> Result<(Vec<Ant>, Harnesses)> {
         let dir = manifest_dir();
         parse(text, &dir.join("config.toml"), dir.parent().unwrap().parent().unwrap())
+    }
+
+    fn config(ant: Ant) -> Result<Config> {
+        ant.into_config("nats://unused", &Harnesses::builtin())
     }
 
     #[test]
@@ -634,7 +668,7 @@ Review changes for correctness."""
         assert_eq!(a.home, Some(PathBuf::from("/srv/ants/dev-a")));
         assert_eq!((a.allow.len(), a.capabilities.len()), (2, 2));
         assert_eq!((a.max_harnesses, a.idle_timeout), (2, Duration::from_secs(60)));
-        let config = a.clone().into_config("nats://unused").unwrap();
+        let config = a.clone().into_config("nats://unused", &Harnesses::builtin()).unwrap();
         assert_eq!(
             config.model_settings,
             ModelSettings {
@@ -663,7 +697,7 @@ Review changes for correctness."""
         let defaults = Ant::new(b.name.clone(), b.workdir.clone());
         assert_eq!(b, Ant { nats: b.nats.clone(), js_domain: b.js_domain.clone(), human: b.human.clone(), ..defaults });
 
-        let config = b.into_config("nats://unused").unwrap();
+        let config = b.into_config("nats://unused", &Harnesses::builtin()).unwrap();
         assert_eq!(config.nats_url, "nats://127.0.0.1:4222");
         assert_eq!(config.human.as_str(), "bob", "an ant's own default human comes first");
         assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
@@ -699,19 +733,20 @@ Review changes for correctness."""
     #[test]
     fn invalid_native_settings_fail_before_starting_an_ant() {
         for (harness, model, effort, context, error) in [
-            (HarnessKind::Copilot, Some(" "), None, None, "model must not be blank"),
-            (HarnessKind::Claude, None, Some(""), None, "reasoning_effort must not be blank"),
-            (HarnessKind::Copilot, None, None, Some("128000"), "default or long_context"),
-            (HarnessKind::Claude, None, None, Some("1m"), "requires an explicit model"),
-            (HarnessKind::Claude, Some("smart[1m]"), None, Some("default"), "conflicts"),
-            (HarnessKind::Antigravity, None, None, Some("long_context"), "no separate context selector"),
+            ("copilot", Some(" "), None, None, "model must not be blank"),
+            ("claude", None, Some(""), None, "reasoning_effort must not be blank"),
+            ("copilot", None, None, Some("128000"), "harness copilot: context must be default or long_context"),
+            ("claude", None, None, Some("1m"), "harness claude: context 1m requires an explicit model"),
+            ("claude", Some("smart[1m]"), None, Some("default"), "conflicts with model smart[1m]"),
+            ("antigravity", None, None, Some("long_context"), "harness antigravity has no context setting"),
+            ("vim", None, None, None, "unknown harness \"vim\""),
         ] {
             let mut ant = Ant::new("dev-a".parse().unwrap(), manifest_dir());
-            ant.harness = Some(harness);
+            ant.harness = Some(harness.to_owned());
             ant.model = model.map(str::to_owned);
             ant.reasoning_effort = effort.map(str::to_owned);
             ant.context = context.map(str::to_owned);
-            let err = ant.into_config("nats://unused").unwrap_err().to_string();
+            let err = format!("{:#}", config(ant).unwrap_err());
             assert!(err.contains(error), "{err}");
         }
     }
@@ -721,7 +756,7 @@ Review changes for correctness."""
         for (name, value) in [("", "secret"), ("bad=name", "secret"), ("bad\0name", "secret"), ("NAME", "secret\0")] {
             let mut ant = Ant::new("dev-a".parse().unwrap(), manifest_dir());
             ant.env.insert(name.to_owned(), value.to_owned());
-            let err = ant.into_config("nats://unused").unwrap_err().to_string();
+            let err = config(ant).unwrap_err().to_string();
             assert!(err.contains("invalid harness environment variable"), "{err}");
             assert!(!err.contains("secret"), "{err}");
         }
@@ -735,7 +770,7 @@ Review changes for correctness."""
     fn falls_back_to_the_default_server_and_human() {
         let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
         assert_eq!((&ants[0].nats, &ants[0].human), (&None, &None));
-        let config = ants[0].clone().into_config("nats://leaf:4222").unwrap();
+        let config = ants[0].clone().into_config("nats://leaf:4222", &Harnesses::builtin()).unwrap();
         assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
         let err = parse_here("human = \"Not A Name\"").unwrap_err();
         assert!(format!("{err:#}").contains("human"), "{err:#}");
@@ -749,13 +784,14 @@ Review changes for correctness."""
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"antigravity\"",
         )
         .unwrap();
-        let harnesses: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness, ant.builtin)).collect();
+        let harnesses: Vec<_> =
+            ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
         assert_eq!(
             harnesses,
             [
-                ("dev-a", Some(HarnessKind::Claude), false),
-                ("dev-b", Some(HarnessKind::Antigravity), false),
-                ("messenger", Some(HarnessKind::Claude), true),
+                ("dev-a", Some("claude"), false),
+                ("dev-b", Some("antigravity"), false),
+                ("messenger", Some("claude"), true),
             ]
         );
         let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
@@ -764,7 +800,7 @@ Review changes for correctness."""
         assert_eq!((&messenger.workdir, messenger.home.as_ref()), (&dir, Some(&dir)));
         assert_eq!(messenger.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
         let stock = Ant {
-            harness: Some(HarnessKind::Claude),
+            harness: Some("claude".to_owned()),
             home: Some(dir.clone()),
             js_domain: messenger.js_domain.clone(),
             builtin: true,
@@ -775,14 +811,14 @@ Review changes for correctness."""
         let alone = parse_here("harness = \"antigravity\"").unwrap();
         assert_eq!(alone.len(), 1, "harness alone is a complete file");
         assert_eq!((alone[0].name.as_str(), alone[0].builtin), ("messenger", true));
-        assert_eq!(alone[0].harness, Some(HarnessKind::Antigravity));
+        assert_eq!(alone[0].harness.as_deref(), Some("antigravity"));
     }
 
     #[test]
     fn the_builtin_messenger_is_on_unless_turned_off() {
         let empty = parse_here("").unwrap();
-        let only: Vec<_> = empty.iter().map(|ant| (ant.name.as_str(), ant.harness, ant.builtin)).collect();
-        assert_eq!(only, [("messenger", Some(HarnessKind::Copilot), true)], "the default harness");
+        let only: Vec<_> = empty.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref(), ant.builtin)).collect();
+        assert_eq!(only, [("messenger", Some("copilot"), true)], "the default harness");
 
         let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
         let names: Vec<_> = ants.iter().map(|ant| ant.name.as_str()).collect();
@@ -799,8 +835,95 @@ Review changes for correctness."""
     fn a_listed_messenger_replaces_the_builtin_one() {
         let ants = parse_here("harness = \"claude\"\n[[ant]]\nname = \"messenger\"\nworkdir = \".\"").unwrap();
         assert_eq!(ants.len(), 1);
-        assert_eq!((ants[0].harness, ants[0].builtin), (Some(HarnessKind::Claude), false));
+        assert_eq!((ants[0].harness.as_deref(), ants[0].builtin), (Some("claude"), false));
         assert_eq!(ants[0].workdir, manifest_dir().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn harnesses_defined_in_the_file_run_ants_and_the_builtin_messenger() {
+        let (ants, harnesses) = parse_with_harnesses(
+            r#"
+            harness = "my-agent"
+
+            [[ant]]
+            name = "dev-a"
+            workdir = "."
+            env = { SHARED = "ant" }
+
+            [[ant]]
+            name = "dev-b"
+            workdir = "."
+            harness = "claude"
+
+            [harnesses.my-agent]
+            command = "bin/my-agent-acp"
+            args = ["--stdio"]
+            env = { SHARED = "definition", MY_AGENT_LOG = "warn" }
+            mode = "default"
+
+            [harnesses.home-agent]
+            command = "~/bin/agent"
+
+            [harnesses.path-agent]
+            command = "agent-acp"
+
+            [harnesses.claude]
+            command = "/opt/claude/claude-agent-acp"
+            "#,
+        )
+        .unwrap();
+        let root = manifest_dir().parent().unwrap().parent().unwrap().to_owned();
+        let harness = |name: &str| harnesses.get(name).unwrap();
+        assert_eq!(harness("my-agent").command, manifest_dir().join("bin/my-agent-acp"), "relative to the file");
+        assert_eq!(harness("home-agent").command, root.join("bin/agent"));
+        assert_eq!(harness("path-agent").command, PathBuf::from("agent-acp"), "looked up on PATH");
+        assert_eq!(harness("claude").command, PathBuf::from("/opt/claude/claude-agent-acp"));
+        assert_eq!(harness("claude").mode, None, "a definition replaces the built-in one whole");
+        assert_eq!(harness("antigravity"), Harnesses::builtin().get("antigravity").unwrap());
+
+        let named: Vec<_> = ants.iter().map(|ant| (ant.name.as_str(), ant.harness.as_deref())).collect();
+        assert_eq!(named, [("dev-a", Some("my-agent")), ("dev-b", Some("claude")), ("messenger", Some("my-agent"))]);
+        let configs: Vec<_> =
+            ants.into_iter().map(|ant| ant.into_config("nats://unused", &harnesses).unwrap()).collect();
+        assert_eq!(configs[0].harness, harness("my-agent"));
+        assert_eq!(configs[0].harness.mode.as_deref(), Some("default"));
+        assert_eq!(configs[1].harness, harness("claude"));
+        assert_eq!(configs[2].harness, harness("my-agent"));
+
+        let mut alone = Ant::new("dev-a".parse().unwrap(), manifest_dir());
+        alone.harness = Some("my-agent".to_owned());
+        let err = config(alone).unwrap_err();
+        assert!(format!("{err:#}").contains("ant dev-a: unknown harness \"my-agent\""), "{err:#}");
+    }
+
+    #[test]
+    fn unknown_harness_references_and_bad_definitions_fail_to_load() {
+        let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+        let top = err("harness = \"my-agent\"");
+        assert!(top.contains("config.toml") && top.contains("unknown harness \"my-agent\""), "{top}");
+        let ant = err("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"my-agent\"");
+        assert!(ant.contains("ant dev-a: unknown harness \"my-agent\""), "{ant}");
+        let empty = err("[harnesses.my-agent]\ncommand = \"\"");
+        assert!(
+            empty.contains("config.toml") && empty.contains("harness my-agent: command must not be empty"),
+            "{empty}"
+        );
+        assert!(err("[harnesses.my-agent]\ncommand = \"x\"\nshell = \"sh -c\"").contains("unknown field `shell`"));
+        assert!(err("[harnesses.my-agent]\nargs = []").contains("missing field `command`"));
+        assert!(err("[harnesses.\"My.Agent\"]\ncommand = \"x\"").contains("use lowercase letters"));
+        let summary =
+            Summary::parse("[harnesses.my-agent]\ncommand = \"\"", Path::new("/c/config.toml"), Path::new("/h"));
+        assert!(format!("{:#}", summary.unwrap_err()).contains("command must not be empty"));
+    }
+
+    #[test]
+    fn the_summary_resolves_harnesses_for_direct_use() {
+        let text = "harness = \"my-agent\"\n[harnesses.my-agent]\ncommand = \"./my-agent\"";
+        let summary = Summary::parse(text, Path::new("/c/config.toml"), Path::new("/h")).unwrap();
+        assert_eq!(summary.harness(None).unwrap().command, PathBuf::from("/c/./my-agent"));
+        assert_eq!(summary.harness(Some("claude")).unwrap().name(), "claude");
+        assert!(summary.harness(Some("vim")).is_err());
+        assert_eq!(Summary::default().harness(None).unwrap().name(), DEFAULT_HARNESS);
     }
 
     #[test]
@@ -808,20 +931,20 @@ Review changes for correctness."""
         let ants = parse_here("messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
         assert_eq!(ants.len(), 1);
         assert_eq!(ants[0].harness, None);
-        let config = ants[0].clone().into_config("nats://unused").unwrap();
-        assert_eq!((config.harness, config.defer_to_others), (HarnessKind::Copilot, false));
+        let config = config(ants[0].clone()).unwrap();
+        assert_eq!((config.harness.name(), config.defer_to_others), ("copilot", false));
     }
 
     #[test]
     fn the_builtin_messenger_finds_its_credentials_and_creates_its_workdir() {
         let home = ants_test_support::scratch_dir("config-home").canonicalize().unwrap();
         let auth = home.join(".config/ants/auth");
-        assert_eq!(builtin_messenger(HarnessKind::Copilot, &home).creds, None, "no credentials issued");
+        assert_eq!(builtin_messenger("copilot", &home).creds, None, "no credentials issued");
         std::fs::create_dir_all(&auth).unwrap();
         std::fs::write(auth.join("messenger.creds"), "").unwrap();
-        let messenger = builtin_messenger(HarnessKind::Copilot, &home);
+        let messenger = builtin_messenger("copilot", &home);
         assert_eq!(messenger.creds, Some(auth.join("messenger.creds")));
-        let config = messenger.into_config("nats://unused").unwrap();
+        let config = config(messenger).unwrap();
         assert!(config.defer_to_others);
         assert_eq!(config.workdir, home.join(".ants/messenger").canonicalize().unwrap());
         assert_eq!(config.model_settings, ModelSettings::default());
@@ -874,7 +997,7 @@ Review changes for correctness."""
         full.home = Some(PathBuf::from("/srv/ants/dev-b"));
         full.whoami = Some("Say \"hi\".\nThen\ttab \\ back\u{7f}.".to_owned());
         full.env.insert("A B".to_owned(), "x=\"y\"".to_owned());
-        full.harness = Some(HarnessKind::Claude);
+        full.harness = Some("claude".to_owned());
         full.model = Some("m".to_owned());
         full.allow_tools = true;
         full.allow = vec!["execute:cargo test*".to_owned()];
@@ -906,7 +1029,7 @@ Review changes for correctness."""
         add("dev-b").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with(&format!("{old}\n\n[[ant]]\nname = \"dev-b\"")), "{text}");
-        let names: Vec<_> = load(&path).unwrap().into_iter().map(|ant| ant.name.to_string()).collect();
+        let names: Vec<_> = load(&path).unwrap().0.into_iter().map(|ant| ant.name.to_string()).collect();
         assert_eq!(names, ["dev-a", "dev-b", "messenger"]);
 
         let err = format!("{:#}", add("dev-a").unwrap_err());

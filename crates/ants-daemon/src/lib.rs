@@ -21,5 +21,5 @@ pub mod roster;
 pub mod status;
 
 pub use daemon::{Config, run};
-pub use harness::{HarnessKind, Launch};
+pub use harness::{Harness, Harnesses, Launch};
 pub use permission::{Allowlist, Approver, PermissionPolicy};
