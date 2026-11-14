@@ -338,7 +338,8 @@ The daemon tells humans by the KV bucket
 looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
 ignores an `owner` that is no human, as an ant may name any, and neither escalates to it nor passes it on. On a
 thread a channel post started, it takes an ant's message's `owner` and `creator` from the thread's posts, as in the
-channel; on any other thread, it keeps the `owner` an ant's message names, unchecked, and drops its `creator`. A reply
+channel; on any other thread, it keeps the `owner` an ant's message names, unchecked, and drops its `creator` unless
+the thread was spun off a channel thread the sender takes part in (see Channels). A reply
 to any human spends no turn, a message from any human renews the thread's allowance, and `send_message` to a human
 spends no turn either; `ask_agent` refuses a human.
 
@@ -839,9 +840,14 @@ thread too, with the MCP tool `post_channel` or `ants post` under its own creden
 the messenger of: the thread has no owner until a human posts on it, and the ant is its `creator`, which every later
 post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
 post, whatever that post or a later one says, and never a human, a webhook or the channel manager. A daemon takes the
-`owner` and `creator` of a message an ant sends on the thread from the thread's posts too, and drops the `creator` of
-an ant's message on any other thread: a message started that thread, or the ant made the `creator` up. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
-Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
+`owner` and `creator` of a message an ant sends on the thread from the thread's posts too. A message an ant sends
+from the thread on another one (`send_message` with `thread`) links back to it as `origin_thread`, and so do the
+replies and messages on or from that thread: a daemon takes the `creator` of an ant's message on a thread no channel
+post started from the channel thread it links to, only when the sender is a member or the messenger of that thread's
+channel and has a post on the thread or was woken by one there. Otherwise it drops the `creator`: a message started
+that thread, or the ant made the `creator` or the link up. So an ant woken on the thread passes its creator on to the
+ants it messages from there, but those pass it no further unless they take part in the thread too. An escalation on
+a thread an ant created goes up the creator's chain, whichever ant gets stuck (see Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
 on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
 `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
 
@@ -1156,7 +1162,9 @@ the ant whose channel post started the thread (see Channels); daemons ignore a `
 takes `owner` and `creator` as a human's or a webhook's envelope carries them (a webhook names no `creator`); from an
 ant, on a thread a channel post started (the first post of any channel whose id is the thread's, among those stored
 within 5 minutes of the time in it), it takes both from the thread's posts as in the channel, and on any other thread
-it drops `creator` and keeps `owner` unchecked, as nothing stored names a message thread's owner. A daemon or
+it keeps `owner` unchecked, as nothing stored names a message thread's owner, and drops `creator` unless the envelope's
+`origin_thread` names a channel thread the sender takes part in, whose creator it takes (see Channels). An envelope
+carries `origin_thread` only with a `creator`, and envelopes without one stay valid. A daemon or
 CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. Credentials
 issued before `ants_humans` need `ants auth user` again.
 
