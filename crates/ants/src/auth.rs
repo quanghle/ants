@@ -93,7 +93,8 @@ pub fn issue_with(dir: &Path, user: &UserId, permissions: Permissions, out: &Pat
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
 /// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
-/// ([`Permissions::for_leaf`]), and connect only as a leaf node, not as a client.
+/// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
+/// machine ([`webhook_permissions`]), and connect only as a leaf node, not as a client.
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -101,23 +102,65 @@ pub fn issue_leaf(
     dir: &Path,
     machine: &Machine,
     members: &[(UserId, Role)],
+    webhooks: &[UserId],
     js_domain: Option<&JsDomain>,
     out: &Path,
 ) -> Result<()> {
-    if members.is_empty() {
-        bail!("a leaf node needs at least one ant or human");
+    if members.is_empty() && webhooks.is_empty() {
+        bail!("a leaf node needs at least one ant, human or webhook");
     }
-    members.iter().try_for_each(|(member, _)| check_not_reserved(member))?;
+    members.iter().map(|(member, _)| member).chain(webhooks).try_for_each(check_not_reserved)?;
     if js_domain.is_some_and(|domain| domain.as_str() == machine.as_str()) {
         bail!("machine {machine} would take the hub's JetStream domain; name it otherwise");
     }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let roles = members.iter().map(|(member, role)| (member, *role));
-    let permissions = Permissions::for_leaf(machine, roles).with_js_domain(js_domain);
+    let mut permissions = Permissions::for_leaf(machine, roles);
+    for webhook in webhooks {
+        let Permissions { publish, subscribe } = webhook_permissions(dir, webhook)?;
+        for (all, new) in [(&mut permissions.publish, publish), (&mut permissions.subscribe, subscribe)] {
+            all.extend(new);
+        }
+    }
+    let mut permissions = permissions.with_js_domain(js_domain);
+    for all in [&mut permissions.publish, &mut permissions.subscribe] {
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|s| seen.insert(s.clone()));
+    }
     let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
     let jwt = user_jwt(&account, &user.public_key(), &format!("leaf-{machine}"), permissions, only_leaf, None)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))
+}
+
+/// The permissions of the credentials of `webhook` in `dir`, `<webhook>.creds` as `ants auth user WEBHOOK --webhook`
+/// writes them ([`Permissions::for_webhook`]): issued by the team's account, for `webhook`, hearing only its own reply
+/// inboxes as a webhook's do.
+pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> {
+    let path = dir.join(format!("{webhook}.creds"));
+    let text = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} (issue them first: `ants auth user {webhook} --webhook --to ANT` or `--channel CHANNEL`)",
+            path.display()
+        )
+    })?;
+    let jwt = creds_jwt(&text).with_context(|| format!("{}: no user JWT", path.display()))?;
+    let (claims, body) = verified_body(jwt).with_context(|| path.display().to_string())?;
+    if claims.iss != load(&dir.join(ACCOUNT_SEED))?.public_key() {
+        bail!("{} were not issued by the team in {}", path.display(), dir.display());
+    }
+    if claims.name != webhook.as_str() {
+        bail!("{} are {}'s, not {webhook}'s", path.display(), claims.name);
+    }
+    let allowed = |kind: &str| -> Vec<String> {
+        let list = body["nats"][kind]["allow"].as_array().map(Vec::as_slice).unwrap_or_default();
+        list.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()
+    };
+    let permissions = Permissions { publish: allowed("pub"), subscribe: allowed("sub") };
+    if permissions.subscribe != [format!("{}.>", ants_proto::inbox_prefix(webhook))] {
+        bail!("{} are no webhook's: issue them with `ants auth user {webhook} --webhook`", path.display());
+    }
+    Ok(permissions)
 }
 
 /// Issue the credentials of the channel manager, `ants channel serve`, for the hub's JetStream domain if it has one,
@@ -205,6 +248,11 @@ pub struct Claims {
 
 /// Decode a JWT and check that its issuer signed it.
 pub fn verified(jwt: &str) -> Result<Claims> {
+    verified_body(jwt).map(|(claims, _)| claims)
+}
+
+/// [`verified`], with all of the JWT's claims.
+fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
     let jwt = jwt.trim();
     let (signed, signature) = jwt.rsplit_once('.').context("not a JWT")?;
     let (_, body) = signed.split_once('.').context("not a JWT")?;
@@ -214,7 +262,8 @@ pub fn verified(jwt: &str) -> Result<Claims> {
     let iss = text("iss")?;
     let issuer = KeyPair::from_public_key(&iss).map_err(|e| anyhow!("JWT issuer {iss}: {e}"))?;
     issuer.verify(signed.as_bytes(), &decode(signature)?).map_err(|_| anyhow!("JWT not signed by its issuer {iss}"))?;
-    Ok(Claims { sub: text("sub")?, iss, name: text("name")?, exp: claims["exp"].as_u64() })
+    let verified = Claims { sub: text("sub")?, iss, name: text("name")?, exp: claims["exp"].as_u64() };
+    Ok((verified, claims))
 }
 
 /// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.
@@ -1209,7 +1258,8 @@ pub(crate) mod tests {
     }
 
     /// A hub with a JetStream domain, and a leaf node without JetStream whose uplink uses `ants auth leaf` credentials
-    /// for dev-a: dev-a reaches the hub's stream through the domain; dev-b, also valid on the leaf, gets nothing across.
+    /// for dev-a and the webhook github: dev-a reaches the hub's stream through the domain, and github delivers there
+    /// (to dev-b, elsewhere); dev-b and the webhook alerts, also valid on the leaf, get nothing across.
     #[tokio::test]
     async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
         let leaf_port = free_port();
@@ -1231,10 +1281,24 @@ pub(crate) mod tests {
         bus::init_stream(&h_js).await.unwrap();
         bus::ensure_sessions(&h_js).await.unwrap();
         bus::ensure_attempts(&h_js).await.unwrap();
+        crate::webhook::ensure_bucket(&h_js).await.unwrap();
 
+        let (github, alerts) = (p("github"), p("alerts"));
+        for hook in [&github, &alerts] {
+            let permissions = Permissions::for_webhook(hook, &[Destination::Ant(dev_b.clone())]);
+            issue_with(&team, hook, permissions.with_js_domain(Some(&domain)), &team.join(format!("{hook}.creds")))
+                .unwrap();
+        }
         let leaf_creds = hub.dir().join("leaf-m1.creds");
+        let m1: Machine = "m1".parse().unwrap();
         let on_m1 = members(std::slice::from_ref(&dev_a), &[]);
-        issue_leaf(&team, &"m1".parse().unwrap(), &on_m1, Some(&domain), &leaf_creds).unwrap();
+        let missing = issue_leaf(&team, &m1, &on_m1, &[p("ci")], Some(&domain), &leaf_creds).unwrap_err();
+        assert!(format!("{missing:#}").contains("ants auth user ci --webhook"), "{missing:#}");
+        issue(&team, &p("dev-c"), Role::Ant, Some(&domain), &team.join("dev-c.creds")).unwrap();
+        let ant = issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], Some(&domain), &leaf_creds).unwrap_err();
+        assert!(format!("{ant:#}").contains("no webhook's"), "{ant:#}");
+        issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), None, &leaf_creds).unwrap();
+        issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), Some(&domain), &leaf_creds).unwrap();
         assert!(
             async_nats::ConnectOptions::with_credentials_file(&leaf_creds)
                 .await
@@ -1267,6 +1331,26 @@ pub(crate) mod tests {
         }
         let stream = stream.expect("dev-a on the leaf reaches the hub stream");
         assert!(bus::ensure_stream(&a_plain).await.is_err(), "no JetStream without the domain");
+
+        // github, as `ants webhook serve` on the leaf, keeps its events in the bucket and delivers to dev-b's inbox.
+        let hook_js = connect_to(&leaf.url, &team.join("github.creds"), Some(&domain), &github).await;
+        let mut seen = None;
+        for _ in 0..50 {
+            if let Ok(store) = hook_js.get_key_value(ants_proto::WEBHOOKS_BUCKET).await {
+                seen = Some(store);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let seen = seen.expect("github on the leaf reaches the hub's webhooks bucket");
+        seen.create(ants_proto::webhook_seen_key(&github, "e1"), "{}".into()).await.unwrap();
+        let event = Envelope::new(github.clone(), dev_b.clone(), "build red").from_webhook();
+        let stored = hook_js.publish(event.subject(), serde_json::to_vec(&event).unwrap().into()).await.unwrap();
+        let stored = stored.await.unwrap().sequence;
+        let on_hub = h_js.get_stream(STREAM).await.unwrap().get_raw_message(stored).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Envelope>(&on_hub.payload).unwrap(), event);
+        let alerts_js = connect_to(&leaf.url, &team.join("alerts.creds"), Some(&domain), &alerts).await;
+        assert!(alerts_js.get_key_value(ants_proto::WEBHOOKS_BUCKET).await.is_err(), "alerts is not on the uplink");
 
         // dev-a serves its inbox from the leaf, keeps its session, and replies.
         let mut human_inbox = h_client.subscribe(subject::inbox_of(&human)).await.unwrap();

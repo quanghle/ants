@@ -1138,6 +1138,11 @@ pub struct Envelope {
     /// sender, and the requester takes it only from its own chain ([`Envelope::chain_decision`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<ApprovalDecision>>,
+    /// A webhook's message, as `ants webhook serve` marks it: its sender is no human, whatever the humans bucket says,
+    /// and an answer to it goes to the thread's owner, if any, not to the webhook's inbox, which nobody reads
+    /// ([`Envelope::sender_role`]). It is the sender's claim, which only takes rights away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webhook: bool,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -1161,6 +1166,7 @@ impl Envelope {
             creator: None,
             escalation: None,
             approval: None,
+            webhook: false,
             sent_at: Utc::now(),
         }
     }
@@ -1168,6 +1174,16 @@ impl Envelope {
     /// The envelope with `owner` as the human who started its thread.
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The envelope as a webhook's message ([`Envelope::webhook`]).
+    pub fn from_webhook(self) -> Self {
+        Self { webhook: true, ..self }
+    }
+
+    /// The role of the sender, given the `humans`: an ant's for a webhook's message, else as `humans` says.
+    pub fn sender_role(&self, humans: &Humans) -> Role {
+        if self.webhook { Role::Ant } else { humans.role(&self.from) }
     }
 
     /// The envelope with `creator` as the ant that started its thread with a channel post.
@@ -1231,6 +1247,7 @@ impl Envelope {
             creator: self.creator.clone(),
             escalation: None,
             approval: None,
+            webhook: false,
             sent_at: Utc::now(),
         })
     }
@@ -1830,8 +1847,8 @@ impl ChannelPost {
 
     /// The ant that created the post's thread, none of the `humans`, no webhook and not the channel manager: of a
     /// top-level post its author, whatever the post says, so only the author's credentials make an ant a thread's
-    /// creator; of a later post the one it carries. Trust it only once the post passed
-    /// [`ChannelPost::check_subject`].
+    /// creator; of a later post the one it carries, which its author chose: a reader takes a thread's creator from
+    /// its stored posts instead ([`ThreadOrigin`]). Trust it only once the post passed [`ChannelPost::check_subject`].
     pub fn thread_creator(&self, humans: &Humans) -> Option<UserId> {
         let creator = if self.starts_thread() { (!self.webhook).then_some(&self.from) } else { self.creator.as_ref() };
         creator.filter(|c| !humans.contains(c) && **c != UserId::channel_manager()).cloned()
@@ -1848,11 +1865,19 @@ impl ChannelPost {
         self.mentions.is_empty() && (self.webhook || humans.contains(&self.from))
     }
 
-    /// The owner of the post's thread, one of the `humans`: the one it carries, else its author, as for a post stored
-    /// before posts carried owners. An owner that is no human is ignored: only a human owns a thread.
+    /// Whether the post is a human's: its author is one of the `humans` and it is no webhook's, so a webhook a human's
+    /// name was registered for never posts as that human.
+    pub fn by_human(&self, humans: &Humans) -> bool {
+        !self.webhook && humans.contains(&self.from)
+    }
+
+    /// The owner of the post's thread, one of the `humans`: the one it carries, else its author when a human
+    /// ([`ChannelPost::by_human`]), as for a post stored before posts carried owners. An owner that is no human is
+    /// ignored: only a human owns a thread. The owner a post carries is its author's choice: a reader takes a thread's
+    /// owner from its stored posts instead ([`ThreadOrigin`]).
     pub fn thread_owner(&self, humans: &Humans) -> Option<UserId> {
-        let human = |user: &UserId| humans.contains(user).then(|| user.clone());
-        self.owner.as_ref().and_then(human).or_else(|| human(&self.from))
+        let carried = self.owner.as_ref().filter(|owner| humans.contains(owner));
+        carried.cloned().or_else(|| self.by_human(humans).then(|| self.from.clone()))
     }
 
     /// The post as an agent's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
@@ -1868,7 +1893,7 @@ impl ChannelPost {
     /// from the post's.
     pub fn turns_left(&self, later: &[ChannelPost], humans: &Humans) -> u32 {
         later.iter().filter(|post| post.thread_id == self.thread_id).fold(self.turn_budget, |left, post| {
-            if humans.contains(&post.from) { post.turn_budget } else { left.min(post.turn_budget) }
+            if post.by_human(humans) { post.turn_budget } else { left.min(post.turn_budget) }
         })
     }
 
@@ -1920,6 +1945,65 @@ impl ChannelPost {
             from: self.from.clone(),
             channel: self.channel.clone(),
         })
+    }
+}
+
+/// Who started a channel thread, as its stored posts say. Readers go by it rather than by the `owner` and `creator`
+/// a later post carries, which its author chose: an ant could otherwise name any creator, and so the chain the
+/// thread's escalations climb, or any owner.
+///
+/// Fed the posts stored on one thread in stream order ([`ThreadOrigin::push`]), each checked against its subject
+/// ([`ChannelPost::check_subject`]):
+/// - the thread's top-level post is the first one read, when it starts the thread: a later post with the thread's id
+///   only claims to. Its author is the creator when an ant ([`ChannelPost::thread_creator`]);
+/// - the owner is the first human to post on the thread ([`ChannelPost::by_human`]), the author of the top-level post
+///   when a human; a webhook's top-level post may name the owner, a human, as its config does.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ThreadOrigin {
+    /// Whether the thread's top-level post was read.
+    pub root: bool,
+    /// Whether any post on the thread was read.
+    seen: bool,
+    pub owner: Option<UserId>,
+    pub creator: Option<UserId>,
+}
+
+impl ThreadOrigin {
+    /// The origin of the thread that `root`, a top-level post, starts, from that post alone.
+    pub fn of_root(root: &ChannelPost, humans: &Humans) -> Self {
+        let mut origin = Self::default();
+        origin.push(root, humans);
+        origin
+    }
+
+    /// Take `post`, the next post stored on the thread.
+    pub fn push(&mut self, post: &ChannelPost, humans: &Humans) {
+        let root = !self.seen && post.starts_thread();
+        self.seen = true;
+        if root {
+            self.root = true;
+            self.creator = post.thread_creator(humans);
+        }
+        if self.owner.is_none() {
+            self.owner = if post.by_human(humans) {
+                Some(post.from.clone())
+            } else if root && post.webhook {
+                post.owner.clone().filter(|owner| humans.contains(owner))
+            } else {
+                None
+            };
+        }
+    }
+
+    /// Whether later posts change nothing: the top-level post was read and the thread has its owner.
+    pub fn settled(&self) -> bool {
+        self.root && self.owner.is_some()
+    }
+
+    /// Put the thread's owner and creator on `post`, a post on the thread, in place of those it carries.
+    pub fn apply(&self, post: &mut ChannelPost) {
+        post.owner.clone_from(&self.owner);
+        post.creator.clone_from(&self.creator);
     }
 }
 
@@ -2774,6 +2858,76 @@ mod tests {
             !reply.webhook && !serde_json::to_string(&reply).unwrap().contains("webhook"),
             "replies are no webhook's"
         );
+    }
+
+    #[test]
+    fn a_webhook_under_a_human_s_name_is_no_human() {
+        let (c, bob) = ("ops".parse::<ChannelId>().unwrap(), p("bob"));
+        let mut humans = Humans::default();
+        humans.add(bob.as_str(), HumanEntry::new(bob.clone())).unwrap();
+        let hook = ChannelPost::new(c.clone(), bob.clone(), "red").from_webhook(Vec::new());
+        assert!(!hook.by_human(&humans) && ChannelPost::new(c.clone(), bob.clone(), "hi").by_human(&humans));
+        assert_eq!(hook.thread_owner(&humans), None, "it owns no thread");
+        let mut spent = hook.clone();
+        spent.turn_budget = 1;
+        let again = ChannelPost::on_thread(c, hook.thread_id.clone(), bob.clone(), "red").from_webhook(Vec::new());
+        assert_eq!(spent.turns_left(&[again], &humans), 1, "nor renews its turns");
+
+        let message = Envelope::new(bob.clone(), p("dev-a"), "red");
+        assert_eq!(
+            (message.sender_role(&humans), message.clone().from_webhook().sender_role(&humans)),
+            (Role::Human, Role::Ant)
+        );
+        assert!(!serde_json::to_string(&message).unwrap().contains("webhook"));
+        let json = serde_json::to_string(&message.clone().from_webhook()).unwrap();
+        assert!(json.contains(r#""webhook":true"#), "{json}");
+        assert!(serde_json::from_str::<Envelope>(&json).unwrap().webhook);
+        let reply = message.from_webhook().reply(p("dev-a"), "on it", Role::Human).unwrap();
+        assert!(!reply.webhook, "replies are no webhook's");
+    }
+
+    #[test]
+    fn a_thread_s_origin_comes_from_its_posts_not_from_what_a_later_post_carries() {
+        let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
+        let mut humans = Humans::default();
+        for h in [&alice, &bob] {
+            humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
+        }
+        let on =
+            |from: &UserId, thread: &ThreadId| ChannelPost::on_thread(c.clone(), thread.clone(), from.clone(), "x");
+        let root = ChannelPost::new(c.clone(), p("lead"), "@dev-a fix it").with_owner(Some(bob.clone()));
+        let thread = root.thread_id.clone();
+        let forged = on(&p("dev-a"), &thread).with_owner(Some(bob.clone())).with_creator(Some(p("boss")));
+        let mut origin = ThreadOrigin::default();
+        origin.push(&root, &humans);
+        assert_eq!((&origin.owner, &origin.creator, origin.root), (&None, &Some(p("lead")), true), "an ant owns none");
+        origin.push(&forged, &humans);
+        // A later post with the thread's id as its own only claims to start it.
+        let mut fake = on(&p("dev-b"), &thread);
+        fake.id = root.id;
+        origin.push(&fake, &humans);
+        assert_eq!((&origin.owner, &origin.creator, origin.settled()), (&None, &Some(p("lead")), false));
+        // The first human to post owns the thread.
+        origin.push(&on(&alice, &thread), &humans);
+        origin.push(&on(&bob, &thread), &humans);
+        assert_eq!((&origin.owner, origin.settled()), (&Some(alice.clone()), true));
+        let mut post = forged.clone();
+        origin.apply(&mut post);
+        assert_eq!((post.owner, post.creator), (Some(alice.clone()), Some(p("lead"))));
+
+        // With its top-level post no longer kept, the thread has no creator.
+        let mut lost = ThreadOrigin::default();
+        lost.push(&forged, &humans);
+        assert_eq!((&lost.owner, &lost.creator, lost.root), (&None, &None, false));
+        // A webhook's top-level post names the owner its config does, a human; a human's owns its thread.
+        let hook = ChannelPost::new(c.clone(), p("ci"), "red").from_webhook(Vec::new());
+        let of = |post: ChannelPost| {
+            let origin = ThreadOrigin::of_root(&post, &humans);
+            (origin.owner, origin.creator)
+        };
+        assert_eq!(of(hook.clone().with_owner(Some(alice.clone()))), (Some(alice.clone()), None));
+        assert_eq!(of(hook.with_owner(Some(p("dev-a")))), (None, None));
+        assert_eq!(of(ChannelPost::new(c, bob.clone(), "hi").with_owner(Some(alice))), (Some(bob), None));
     }
 
     #[test]

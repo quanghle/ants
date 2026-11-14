@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans,
-    JsDomain, State, ThreadId, UserId, subject,
+    JsDomain, Role, State, ThreadId, ThreadOrigin, UserId, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -532,9 +532,9 @@ impl Inbox<'_> {
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
-    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. The post kept names
-    /// its thread's owner ([`ChannelPost::thread_owner`]), a human, and its creator ([`ChannelPost::thread_creator`]),
-    /// an ant.
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A top-level post kept
+    /// names its thread's owner, a human, and its creator, an ant ([`ThreadOrigin`]); any other names none until
+    /// [`Inbox::handle`] reads its thread's.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -565,10 +565,27 @@ impl Inbox<'_> {
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         let owned = channels.get(&post.channel).is_some_and(|e| e.owner.as_ref() == Some(self.ant));
-        post.owner = post.thread_owner(&humans);
-        post.creator = post.thread_creator(&humans);
+        let origin = if post.starts_thread() { ThreadOrigin::of_root(&post, &humans) } else { ThreadOrigin::default() };
+        origin.apply(&mut post);
         let envelope = channel::as_envelope(&post, self.ant);
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage, owned })), resume: None })
+    }
+
+    /// Name the owner and creator of the thread of the channel post in `incoming`, at stream sequence `seq`, as its
+    /// thread's posts say ([`Threads::origin`]), not as the post does: its author chose those. Unread, the thread has
+    /// neither.
+    async fn thread_origin(&self, incoming: &mut Incoming, seq: u64) {
+        let Some(posted) = incoming.post.as_mut().filter(|posted| !posted.post.starts_thread()) else { return };
+        let origin = match self.threads.origin(&posted.post, seq, &self.humans.humans()).await {
+            Ok(origin) => origin,
+            Err(e) => {
+                tracing::warn!(thread = %posted.post.thread_id, error = format!("{e:#}"), "reading the thread's origin");
+                ThreadOrigin::default()
+            }
+        };
+        origin.apply(&mut posted.post);
+        incoming.envelope.owner.clone_from(&posted.post.owner);
+        incoming.envelope.creator.clone_from(&posted.post.creator);
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -616,6 +633,8 @@ impl Inbox<'_> {
                 return (thread, None);
             }
         };
+        self.thread_origin(&mut incoming, seq).await;
+        let envelope = &incoming.envelope;
         if self.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
             tracing::info!(%thread, "acking a message whose reply is stored already");
@@ -711,7 +730,7 @@ impl Inbox<'_> {
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
-        let human = self.humans.is_human(&incoming.envelope.from);
+        let human = self.humans.sender_role(&incoming.envelope).is_human();
         if incoming.post.is_none() && !human && self.escalator.took_climb(&incoming.envelope).await? {
             return Ok(false);
         }
@@ -759,7 +778,7 @@ impl Inbox<'_> {
         };
         let spent = match (&incoming.post, &read) {
             (Some(posted), Some(read)) => posted.post.reply(self.ant.clone(), "", &read.later, &humans).err(),
-            _ => envelope.reply(self.ant.clone(), "", self.humans.role(&envelope.from)).err(),
+            _ => envelope.reply(self.ant.clone(), "", self.humans.sender_role(envelope)).err(),
         };
         if let Some(ProtoError::BudgetExhausted(_)) = spent {
             // Out of turns: escalate the thread instead of spending another prompt.
@@ -890,9 +909,22 @@ impl Inbox<'_> {
                 let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
                 Reply::Post(post.spend(envelope.turn_budget)?)
             }
+            _ if envelope.webhook => {
+                // Nobody reads a webhook's inbox: the answer goes to the thread's owner, else only to the log.
+                let Some(owner) = self.humans.human_owner(envelope.owner.as_ref()) else {
+                    if let Some(limit) = limit {
+                        self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
+                    }
+                    tracing::info!(%thread, webhook = %envelope.from, answer = text, "answered a webhook with no owner");
+                    return self.done(msg, seq).await;
+                };
+                let mut reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
+                reply.to = owner;
+                Reply::Message(reply)
+            }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
-                let mut reply = envelope.reply(self.ant.clone(), text, self.humans.role(&envelope.from))?;
+                let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
                         let (store, budget) = (self.notes, envelope.turn_budget);
@@ -918,7 +950,7 @@ impl Inbox<'_> {
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
-            && !self.humans.is_human(&envelope.from)
+            && !self.humans.sender_role(envelope).is_human()
         {
             self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
         }
@@ -2459,21 +2491,58 @@ mod tests {
         let (launch, _, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (ops, mut replies) = bus.channel("ops", &["dev-a", "lead"]).await;
-        let root =
-            ChannelPost::new(ops, "lead".parse().unwrap(), "@dev-a fix it").with_creator(Some("boss".parse().unwrap()));
-        let seq = bus.post(&root).await;
+        let root = ChannelPost::new(ops.clone(), "lead".parse().unwrap(), "@dev-a fix it")
+            .with_creator(Some("boss".parse().unwrap()));
+        bus.post(&root).await;
+        // A later post names another creator and an owner, which would steer the thread's escalations.
+        let forged = ChannelPost::on_thread(ops, root.thread_id.clone(), "dev-b".parse().unwrap(), "@dev-a and this")
+            .with_owner(Some(UserId::human()))
+            .with_creator(Some("boss".parse().unwrap()));
+        let seq = bus.post(&forged).await;
 
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
-            let reply = next_post(&mut replies).await;
-            assert_eq!(
-                (&reply.thread_id, &reply.creator, &reply.owner),
-                (&root.thread_id, &Some("lead".parse().unwrap()), &None)
-            );
+            for answered in [root.id, forged.id] {
+                let reply = next_post(&mut replies).await;
+                assert_eq!(
+                    (&reply.thread_id, reply.in_reply_to, &reply.creator, &reply.owner),
+                    (&root.thread_id, Some(answered), &Some("lead".parse().unwrap()), &None)
+                );
+            }
             bus.until_posts_acked(seq).await;
             ctrl_c.add_permits(1);
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
+        let mut to_hook = bus.client.subscribe(subject::inbox_of(&hook)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let owned = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(human.clone()));
+        let owned = owned.from_webhook();
+        bus::publish_json(&bus.js, owned.subject(), &owned, None).await.unwrap();
+        let unowned = Envelope::new(hook.clone(), bus.dev.clone(), "build green").from_webhook();
+        let seq = bus::publish_json(&bus.js, unowned.subject(), &unowned, None).await.unwrap();
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_envelope(&mut to_human).await;
+            assert_eq!((&reply.from, &reply.to, reply.in_reply_to), (&bus.dev, &human, Some(owned.id)));
+            assert_eq!(reply.turn_budget, owned.turn_budget, "an answer to a human is free");
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert!(answered.len() == 2 && answered[1].contains("build green"), "{answered:?}");
+        let quiet = Duration::from_millis(200);
+        assert!(timeout(quiet, to_human.next()).await.is_err(), "the unowned answer goes nowhere");
+        assert!(timeout(quiet, to_hook.next()).await.is_err(), "nothing goes to the webhook's inbox");
     }
 
     #[tokio::test]

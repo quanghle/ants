@@ -300,7 +300,7 @@ mod tests {
         // The CLI runs on m1 too.
         let alice: UserId = "alice".parse().unwrap();
         let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
-        auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);
         let listen = format!("127.0.0.1:{}", free_port());
         let configure = |dir: &Path, port: u16| {
@@ -440,7 +440,7 @@ mod tests {
         bus::init_stream(&h_js).await.unwrap();
         let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
         let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
         let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
         let _leaf_node = NatsServer::spawn_with(|dir| {

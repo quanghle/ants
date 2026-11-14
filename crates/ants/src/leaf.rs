@@ -337,7 +337,7 @@ mod tests {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], None, &creds).unwrap();
         (dir, creds)
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);

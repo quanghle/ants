@@ -13,7 +13,9 @@ use std::time::Duration;
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
 use ants_daemon::channel::{Stored, load};
-use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, UserId, Uuid, subject};
+use ants_proto::{
+    ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, ThreadOrigin, UserId, Uuid, subject,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
@@ -237,10 +239,9 @@ pub async fn compose(
     human_post(channel, thread, me.id.clone(), owner, text).with_creator(creator)
 }
 
-/// The owner and creator of `thread` in `channel`, read through the reader consumer of `reader`: those the first of
-/// its posts still kept name ([`ChannelPost::thread_owner`] and [`ChannelPost::thread_creator`] with `humans`), or
-/// None when none does. A thread named after the post that started it is read from its start; any other from the
-/// channel's oldest post kept.
+/// The owner and creator of `thread` in `channel`, read through the reader consumer of `reader`: as its posts still
+/// kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
+/// start; any other from the channel's oldest post kept.
 pub async fn thread_origin(
     js: &jetstream::Context,
     reader: &UserId,
@@ -252,18 +253,15 @@ pub async fn thread_origin(
         Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
         None => consumer::DeliverPolicy::All,
     };
-    let (mut owner, mut creator, mut root) = (None, None, false);
+    let mut origin = ThreadOrigin::default();
     scan(js, reader, channel, start, |post| {
         if post.thread_id == *thread {
-            owner = owner.take().or_else(|| post.thread_owner(humans));
-            creator = creator.take().or_else(|| post.thread_creator(humans));
-            // The post that started the thread says whether an ant created it.
-            root |= post.starts_thread();
+            origin.push(&post, humans);
         }
-        if owner.is_some() && (creator.is_some() || root) { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        if origin.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     })
     .await?;
-    Ok((owner, creator))
+    Ok((origin.owner, origin.creator))
 }
 
 /// The posts on the thread of `post` that `room`, a subscription to its channel, receives after it: those of others

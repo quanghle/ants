@@ -660,7 +660,9 @@ impl Hook {
         }
         let (subject, payload, thread) = match &hook.destination {
             Destination::Ant(ant) => {
-                let message = Envelope::new(hook.name.clone(), ant.clone(), event.text).with_owner(hook.owner.clone());
+                let message = Envelope::new(hook.name.clone(), ant.clone(), event.text)
+                    .with_owner(hook.owner.clone())
+                    .from_webhook();
                 (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
             }
             Destination::Channel(channel) => {
@@ -1032,7 +1034,7 @@ mod tests {
         let messages: Vec<Envelope> = stored(&js, &subject::inbox(&p("dev-a"), &github)).await;
         let [message] = &messages[..] else { panic!("one message: {messages:?}") };
         assert_eq!((&message.from, &message.to, message.thread_id.as_str()), (&github, &p("dev-a"), thread.as_str()));
-        assert_eq!(message.owner, Some(p("alice")));
+        assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
         assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
     }
 

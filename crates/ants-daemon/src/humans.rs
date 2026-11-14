@@ -74,6 +74,11 @@ impl Registry {
         self.role(user).is_human()
     }
 
+    /// The role of the sender of `envelope`: an ant's for a webhook's message ([`Envelope::sender_role`]).
+    pub fn sender_role(&self, envelope: &Envelope) -> Role {
+        envelope.sender_role(&self.read())
+    }
+
     /// The humans known now.
     pub fn humans(&self) -> Humans {
         self.read().clone()

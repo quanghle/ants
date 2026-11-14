@@ -11,11 +11,13 @@
 //! [`crate::humans::Registry`]'s to say.
 
 use std::collections::{HashMap, VecDeque};
+use std::ops::ControlFlow;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId, UserId, Uuid, chan_reader,
-    channel_seen_key, subject,
+    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId, ThreadOrigin, UserId, Uuid,
+    chan_reader, channel_seen_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -38,6 +40,8 @@ const INACTIVE: Duration = Duration::from_secs(30);
 const BATCH: u64 = 256;
 /// Slack for the clocks of the thread's first poster and the server, when a read starts at the thread's start.
 const CLOCK_SLACK: Duration = Duration::from_secs(300);
+/// Most thread origins kept in memory; past it they are read again.
+const MAX_ORIGINS: usize = 4096;
 
 /// The channels in the bucket, kept current by a watch. An entry whose channel disagrees with its key is skipped, and
 /// so is a malformed one: neither is a channel.
@@ -198,7 +202,8 @@ pub fn wake(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost, huma
 }
 
 /// `post` as an inbox message from its author to `ant`, owned by the thread's owner the post carries, and created by
-/// its creator: what the attempt markers, caps, escalations and tools of the thread go by.
+/// its creator, which the daemon took from the thread's posts ([`Threads::origin`]): what the attempt markers, caps,
+/// escalations and tools of the thread go by. A webhook's post stays a webhook's ([`Envelope::webhook`]).
 pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
     Envelope {
         id: post.id,
@@ -212,6 +217,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         creator: post.creator.clone(),
         escalation: None,
         approval: None,
+        webhook: post.webhook,
         sent_at: post.sent_at,
     }
 }
@@ -251,7 +257,7 @@ impl<'a> Collect<'a> {
         }
         if seq > self.at {
             // A human's post gives the thread a fresh budget: the ones before it no longer count.
-            if self.humans.contains(&post.from) {
+            if post.by_human(self.humans) {
                 self.later.clear();
             }
             self.later.push(post);
@@ -269,6 +275,39 @@ impl<'a> Collect<'a> {
 
     fn done(self) -> Context {
         Context { posts: self.posts.into(), skipped: self.skipped, later: self.later }
+    }
+}
+
+/// Takes the posts of a channel, read in stream order.
+trait Sink {
+    /// Take the post at stream sequence `seq`; a break ends the read.
+    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()>;
+}
+
+impl Sink for Collect<'_> {
+    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()> {
+        self.push(seq, post);
+        ControlFlow::Continue(())
+    }
+}
+
+/// Folds the posts of one thread, up to stream sequence `upto`, into its [`ThreadOrigin`].
+struct Origin<'a> {
+    thread: &'a ThreadId,
+    humans: &'a Humans,
+    upto: u64,
+    origin: ThreadOrigin,
+}
+
+impl Sink for Origin<'_> {
+    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()> {
+        if seq > self.upto {
+            return ControlFlow::Break(());
+        }
+        if post.thread_id == *self.thread {
+            self.origin.push(&post, self.humans);
+        }
+        if self.origin.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     }
 }
 
@@ -366,11 +405,39 @@ pub struct Threads {
     seen: kv::Store,
     /// One read at a time: they share the reader's consumer.
     reading: tokio::sync::Mutex<()>,
+    /// The origins of threads read so far, with the stream sequence each read reached.
+    origins: Mutex<HashMap<(ChannelId, ThreadId), (ThreadOrigin, u64)>>,
 }
 
 impl Threads {
     pub fn new(js: jetstream::Context, ant: UserId, sessions: kv::Store) -> Self {
-        Self { js, ant, seen: sessions, reading: tokio::sync::Mutex::new(()) }
+        Self { js, ant, seen: sessions, reading: tokio::sync::Mutex::new(()), origins: Mutex::default() }
+    }
+
+    /// The origin of the thread of `post`, at stream sequence `seq`: who started it, as the posts stored on it up to
+    /// `post` say ([`ThreadOrigin`]), not the owner and creator `post` carries. A top-level post is its own; the
+    /// posts of any other thread are read from its start once, then on from where the last read of it ended.
+    pub async fn origin(&self, post: &ChannelPost, seq: u64, humans: &Humans) -> Result<ThreadOrigin> {
+        if post.starts_thread() {
+            return Ok(ThreadOrigin::of_root(post, humans));
+        }
+        let key = (post.channel.clone(), post.thread_id.clone());
+        let cached = self.origins.lock().expect("origins").get(&key).cloned();
+        let (origin, start) = match cached {
+            Some((origin, read)) if origin.settled() || read >= seq => return Ok(origin),
+            Some((origin, read)) => (origin, consumer::DeliverPolicy::ByStartSequence { start_sequence: read + 1 }),
+            None => (ThreadOrigin::default(), from_start(&post.thread_id)),
+        };
+        let mut fold = Origin { thread: &post.thread_id, humans, upto: seq, origin };
+        self.scan(&post.channel, start, &mut fold)
+            .await
+            .with_context(|| format!("reading the origin of thread {} of #{}", post.thread_id, post.channel))?;
+        let mut origins = self.origins.lock().expect("origins");
+        if origins.len() >= MAX_ORIGINS {
+            origins.clear();
+        }
+        origins.insert(key, (fold.origin.clone(), seq));
+        Ok(fold.origin)
     }
 
     /// The posts on the thread of `post`, at stream sequence `seq`, stored after it; with `earlier`, also those before
@@ -384,34 +451,34 @@ impl Threads {
             None => after,
             Some(Some(seen)) if seen + 1 >= seq => after,
             Some(Some(seen)) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seen + 1 },
-            Some(None) => match thread_start(&post.thread_id) {
-                Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
-                None => consumer::DeliverPolicy::All,
-            },
+            Some(None) => from_start(&post.thread_id),
         };
+        self.scan(&post.channel, start, &mut collect)
+            .await
+            .with_context(|| format!("reading thread {} of #{}", post.thread_id, post.channel))?;
+        Ok(collect.done())
+    }
+
+    /// Read the posts of `channel` from `start` into `sink`, up to the last one stored as the read starts.
+    async fn scan(&self, channel: &ChannelId, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<()> {
         let _one = self.reading.lock().await;
         let name = chan_reader(&self.ant);
         // A consumer left by an interrupted read would carry on where it stopped.
         let _ = self.js.delete_consumer_from_stream(&name, STREAM).await;
         let config = consumer::pull::Config {
             name: Some(name.clone()),
-            filter_subject: subject::chan_room(&post.channel),
+            filter_subject: subject::chan_room(channel),
             deliver_policy: start,
             ack_policy: consumer::AckPolicy::None,
             inactive_threshold: INACTIVE,
             ..Default::default()
         };
-        let consumer: consumer::PullConsumer = self
-            .js
-            .create_consumer_on_stream(config, STREAM)
-            .await
-            .with_context(|| format!("reading thread {} of #{}", post.thread_id, post.channel))?;
-        let read = read(&consumer, &mut collect).await;
+        let consumer: consumer::PullConsumer = self.js.create_consumer_on_stream(config, STREAM).await?;
+        let read = read(&consumer, sink).await;
         if let Err(e) = self.js.delete_consumer_from_stream(&name, STREAM).await {
             tracing::debug!(error = %e, consumer = name, "deleting the channel reader");
         }
-        read?;
-        Ok(collect.done())
+        read
     }
 
     /// Stream sequence of the last post on `thread` the ant was shown.
@@ -431,7 +498,7 @@ impl Threads {
     }
 }
 
-async fn read(consumer: &consumer::PullConsumer, collect: &mut Collect<'_>) -> Result<()> {
+async fn read(consumer: &consumer::PullConsumer, sink: &mut impl Sink) -> Result<()> {
     let mut left = consumer.cached_info().num_pending;
     while left > 0 {
         let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
@@ -445,7 +512,11 @@ async fn read(consumer: &consumer::PullConsumer, collect: &mut Collect<'_>) -> R
                 .map_err(|e| e.to_string())
                 .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
             match post {
-                Ok(post) => collect.push(seq, post),
+                Ok(post) => {
+                    if sink.take(seq, post).is_break() {
+                        return Ok(());
+                    }
+                }
                 Err(error) => tracing::debug!(subject = %msg.subject, error, "dropping a channel post"),
             }
         }
@@ -455,6 +526,14 @@ async fn read(consumer: &consumer::PullConsumer, collect: &mut Collect<'_>) -> R
         left = left.saturating_sub(got);
     }
     Ok(())
+}
+
+/// Where a read of `thread` from its start begins: at [`thread_start`], else at the channel's oldest post kept.
+fn from_start(thread: &ThreadId) -> consumer::DeliverPolicy {
+    match thread_start(thread) {
+        Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
+        None => consumer::DeliverPolicy::All,
+    }
 }
 
 /// When `thread` started, a little early, if its id is a time-ordered UUID as a top-level post's is.

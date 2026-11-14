@@ -20,6 +20,7 @@ service) or **researched** (documentation or source reading only).
 | `ants` itself behind an HTTP forward proxy | not possible: async-nats has no proxy support; a leaf node has |
 | JetStream API (`$JS.API.>`) from a client on a leaf node | needs a JetStream domain: `--js-domain` (ants-v6w), verified |
 | Leaf uplink credentials bounding what a machine's ants and humans may do | `ants auth leaf` (ants-hmf), verified |
+| `ants webhook serve` on a leaf, its webhooks on the uplink | `ants auth leaf --webhook` (ants-mtrx), verified |
 | Leaf configuration from `ants leaf config`, uplink switched by rewriting it and `SIGHUP` | verified (ants-32g.2) |
 | Store and forward: a leaf's outbox, sourced by the hub once the uplink is back | `ants leaf outbox` (ants-0ul), verified |
 | Reconnect after proxy restart, forwarder drop and silent link loss; durable consumer resumes | verified |

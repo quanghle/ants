@@ -459,11 +459,15 @@ enum AuthCommand {
         /// '-' and '_'.
         machine: Machine,
         /// Ant served on the machine (repeatable). `human` counts as a human.
-        #[arg(long = "ant", value_name = "ANT", required_unless_present = "humans")]
+        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "webhooks"])]
         ants: Vec<UserId>,
         /// Human running the CLI on the machine (repeatable), as issued with `ants auth user HUMAN --human`.
         #[arg(long = "human", value_name = "HUMAN")]
         humans: Vec<UserId>,
+        /// Webhook `ants webhook serve` runs on the machine (repeatable): the uplink also allows what its credentials,
+        /// <dir>/<WEBHOOK>.creds from `ants auth user WEBHOOK --webhook`, allow.
+        #[arg(long = "webhook", value_name = "WEBHOOK")]
+        webhooks: Vec<UserId>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -778,10 +782,10 @@ async fn main() -> Result<()> {
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Leaf { machine, ants, humans, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, ants, humans, webhooks, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), domain, &out)?;
+            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }

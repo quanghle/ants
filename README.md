@@ -116,7 +116,7 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants add NAME` | Lists an ant in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding an ant](#adding-an-ant). |
 | `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants add --enroll`, signs one or refuses it. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME [--human \| --webhook] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` / `channel-manager` | Issues the team's operator and account, ant, human or webhook credentials (`--webhook` with `--to ANT` or `--channel CHANNEL`; with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, leaf uplink credentials, and the channel manager's credentials. |
+| `ants auth init` / `user NAME [--human \| --webhook] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` / `channel-manager` | Issues the team's operator and account, ant, human or webhook credentials (`--webhook` with `--to ANT` or `--channel CHANNEL`; with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, leaf uplink credentials (`--ant`, `--human`, `--webhook`), and the channel manager's credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
 | `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
 | `ants webhook serve` | Takes events from outside services over HTTP and delivers each to the ant or channel its webhook names (see [Webhooks](#webhooks)). |
@@ -776,13 +776,13 @@ wakes them by @mentioning them in a post on the thread. The messenger need not b
 
 **Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which `ants
 post` prints. The ants a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
-too. A thread's owner is the human whose post started it: each post carries it as `owner`, every later post on the
-thread keeps it, whoever writes it, and `ants post --thread` reads it back from the thread's first posts kept. Only when
-no post kept names one, the posting human takes the thread. An ant can start a thread too, with the MCP tool
-`post_channel` or `ants post` under its own credentials, in a channel it is a member or the messenger of: the thread
-has no owner until a human posts on it, and the ant is its `creator`, which every later post and message on the thread
-keeps, like `owner`. The creator of a thread is always the author of its top-level post, whatever that post says, and
-never a human, a webhook or the channel manager. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
+too. A thread's owner is the human whose post started it, else the first human to post on it (or the `owner` of the
+webhook that started it): each post carries it as `owner`, but daemons and `ants post --thread` take it from the
+thread's posts kept in the stream, not from what a later post says, so no ant can name or change it. An ant can start a
+thread too, with the MCP tool `post_channel` or `ants post` under its own credentials, in a channel it is a member or
+the messenger of: the thread has no owner until a human posts on it, and the ant is its `creator`, which every later
+post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
+post, whatever that post or a later one says, and never a human, a webhook or the channel manager. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
 Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
 on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
 `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
@@ -909,7 +909,7 @@ the hub (Caddy: `handle /hooks/* { reverse_proxy 127.0.0.1:8424 }`), and takes `
 # ~/.ants/webhooks.toml
 # listen = "127.0.0.1:8424"
 # path = "/hooks"
-# nats = "nats://127.0.0.1:4222"         # else --nats; connect to the hub directly, not through a leaf node
+# nats = "nats://127.0.0.1:4222"         # else --nats; the hub, or a leaf node (see below)
 # js_domain = "hub"                      # else --js-domain
 
 [[webhook]]
@@ -953,14 +953,19 @@ channel = "ops"
   `broadcast = true` mentions every member of the channel when the event arrives.
 - **Threads**: each event starts a thread, owned by `owner` if set. A webhook is no human: its posts never renew the
   turn budget, and escalations on its threads go to `owner`, else the daemon's default human. An ant's reply to a
-  webhook's message goes to the webhook's inbox, which nobody reads; a channel's thread keeps the conversation.
+  webhook's message goes to `owner` as a reply to a human, else nowhere: the daemon only logs it. A channel's thread
+  keeps the conversation.
 
 Credentials: `ants auth user NAME --webhook` with `--to ANT` or `--channel CHANNEL` (repeatable) issues a webhook's
 (`Permissions::for_webhook`): it publishes only to its destinations and its own keys in `ants_webhooks`, reads only
 those keys and its channels' entries (for `broadcast`), and writes neither channels nor humans. The name `human` is
 refused; `ants webhook serve` refuses credentials naming another user, a human's, or ones without the configured
-destination. A webhook joins no roster and needs no `ants_humans` entry; a human registered under the same name would
-make its posts a human's.
+destination. A webhook joins no roster and needs no `ants_humans` entry. Its messages and posts carry `webhook: true`,
+so readers never take them for a human's, even when a human goes by the same name.
+
+Behind a leaf node, issue the leaf's uplink with the webhook too, `ants auth leaf MACHINE --webhook NAME`, after its
+credentials (see [Leaf nodes](#leaf-nodes)). Events cross to the hub as they arrive, without the leaf's outbox: while
+the uplink is down the server answers 503 and the source retries.
 
 ```sh
 ants auth user github --webhook --to dev-a --js-domain hub   # on the machine holding the team directory
@@ -1037,7 +1042,9 @@ on `ants.chan.*.<own name>` (and `ants.out.chan.*.<own name>` in a leaf's outbox
 channel disagrees with its subject. A post carries its thread id and the ants it @mentions; a top-level post starts
 a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it,
 and its `creator`, the ant whose top-level post started it: readers take the creator of a top-level post from its
-subject-checked sender, ignore a human, a webhook post and the channel manager, and posts without one stay valid. A
+subject-checked sender, ignore a human, a webhook post and the channel manager, and posts without one stay valid.
+Readers take both from the thread's posts kept in the stream (the first one that starts it, the first human's), not from
+what a later post carries. A webhook's post carries `webhook: true`, so it never counts as a human's. A
 channel's members, optional messenger and optional owner ant are a `ChannelEntry` in the KV bucket `ants_channels`,
 under the channel id: only humans and the channel manager write it, ants read it, and readers skip an entry whose
 channel disagrees with its key. An ant asks the channel manager for changes only on `ants.chanadm.*.<ant>`, so the
@@ -1070,7 +1077,9 @@ issues its own credentials with `ants auth user NAME --human`. A human joins `an
 credentials are issued: until then daemons take its messages for an agent's. The CLI acts as the human its credentials
 name (see CLI); daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
-without one stay valid, and daemons ignore an `owner` that is no human. An envelope may carry `creator` the same way,
+without one stay valid, and daemons ignore an `owner` that is no human. A webhook's envelope carries `webhook: true`:
+daemons treat its sender as an agent whatever `ants_humans` says, and send a reply to its `owner`, if a human, instead
+of its inbox. An envelope may carry `creator` the same way,
 the ant whose channel post started the thread (see Channels); daemons ignore a `creator` that is a human. A daemon or
 CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. Credentials
 issued before `ants_humans` need `ants auth user` again.
@@ -1162,6 +1171,7 @@ as well, and issue every credential with it:
 ```sh
 ants auth user dev-a --js-domain hub
 ants auth leaf macbook --ant dev-a --ant dev-b --human human --human alice --js-domain hub   # leaf-macbook.creds
+ants auth leaf macbook --ant dev-a --webhook github --js-domain hub   # with `ants webhook serve` for github on macbook
 ```
 
 Credentials issued with `--js-domain` allow the JetStream API both as `$JS.<domain>.API` and as the plain `$JS.API`
@@ -1169,7 +1179,8 @@ the hub maps it to (the hub checks both); without it they allow only the plain f
 `ants auth leaf` issues the credentials of the leaf's uplink (`leafnodes.remotes[].credentials`): they allow what the
 listed ants and humans may do together, and only for a leaf node connection, never a client. List each human
 that runs the CLI on the machine with `--human NAME`, `human` included (`--ant human` also counts as a human), so
-that it gets a human's rights. The leaf still checks each local client against its own credentials; the uplink credentials
+that it gets a human's rights. List each webhook `ants webhook serve` runs on the machine with `--webhook NAME`: the
+uplink also allows what its credentials, `NAME.creds` in the team directory, allow (issue them first). The leaf still checks each local client against its own credentials; the uplink credentials
 bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
 
 `ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on

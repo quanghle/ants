@@ -377,7 +377,7 @@ impl Hub {
         }
         let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
-        let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.role(&current.from) };
+        let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.sender_role(&current) };
         let mut envelope = current
             .reply(self.ant.clone(), text, role)
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?;
@@ -537,7 +537,7 @@ impl Hub {
             ));
         }
         let left = current
-            .reply(self.ant.clone(), "", self.humans.role(&current.from))
+            .reply(self.ant.clone(), "", self.humans.sender_role(&current))
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?
             .turn_budget;
         let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text).with_creator(Some(self.ant.clone()));
