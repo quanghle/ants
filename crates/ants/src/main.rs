@@ -14,6 +14,7 @@ mod revoke;
 mod roster;
 mod scheduler;
 mod serve;
+mod spend;
 mod thread;
 mod tools;
 mod webhook;
@@ -95,6 +96,26 @@ enum Command {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
+    },
+    /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
+    /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
+    /// Caps come from the local config file for the ants it lists. Needs human credentials.
+    Spend {
+        /// Only this ant.
+        ant: Option<UserId>,
+        /// What the ant, or each ant on the thread, spent on it since a human's last message there.
+        #[arg(long)]
+        thread: Option<ThreadId>,
+        /// UTC days to report, today included.
+        #[arg(long, default_value_t = spend::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..=366),
+              conflicts_with = "thread")]
+        days: u32,
+        /// One JSON object per line: per ant, or with --thread per ant on the thread.
+        #[arg(long)]
+        json: bool,
+        /// Config file with the ants' caps (default: ~/.ants/config.toml, if it exists).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
     },
     /// Post to a channel as the CLI's human. An @mention in the text wakes only that member, if an ant, or puts a
     /// notice in the member's inbox, if a human; a post that @mentions nobody goes to the channel's messenger, which
@@ -751,6 +772,14 @@ async fn main() -> Result<()> {
             show_inbox(&nats()?, &select, follow, json).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
+        Command::Spend { ant, thread, days, json, config } => {
+            let path = match config {
+                Some(path) => path,
+                None => ants_daemon::config::default_path()?,
+            };
+            let caps = ants_daemon::config::Summary::load(&path)?.caps;
+            spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
+        }
         Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
         Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
         Command::Channel(command) => channels(&nats()?, command).await,
