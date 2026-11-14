@@ -281,6 +281,8 @@ impl ThreadId {
     }
 }
 
+pub mod duration;
+
 /// Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 pub mod subject {
     use super::{ChannelId, Role, ThreadId, UserId};
