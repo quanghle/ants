@@ -7,6 +7,7 @@
 //! thread's start.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
@@ -366,9 +367,9 @@ pub fn render(entries: &[Entry]) -> String {
         let mut lines = e.text.lines();
         let first = lines.next().unwrap_or("");
         let kind = e.kind.as_str();
-        out.push_str(&format!("{}  {kind:<10}  {}{forged}{note}: {first}\n", time(e.stored_at), e.route()));
+        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}: {first}", time(e.stored_at), e.route());
         for line in lines {
-            out.push_str(&format!("    {line}\n"));
+            let _ = writeln!(out, "    {line}");
         }
     }
     out
@@ -499,12 +500,12 @@ mod tests {
     #[test]
     fn every_kind_of_stored_message_lands_on_its_thread() {
         let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
-        let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "fix it").with_owner(Some(alice.clone()));
+        let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "fix it").with_owner(Some(alice));
         let reply = ask.reply(dev_a.clone(), "done\nsee the diff", ants_proto::Role::Human).unwrap();
         let post = ChannelPost::on_thread("ops".parse().unwrap(), t("t1"), dev_b.clone(), "@dev-a nice");
         let note = NotesPost::new(t("t1"), dev_a.clone(), "plan");
         let escalation = Escalation::new(dev_a.clone(), t("t1"), EscalationReason::TurnBudget);
-        let up = Envelope::on_thread(t("t1"), dev_a.clone(), dev_b.clone(), "help").with_escalation(Some(escalation));
+        let up = Envelope::on_thread(t("t1"), dev_a.clone(), dev_b, "help").with_escalation(Some(escalation));
         let request = ApprovalRequest::new(
             dev_a.clone(),
             t("t1"),
@@ -514,7 +515,7 @@ mod tests {
         );
         let decision = request.decide(Verdict::AllowOnce);
         let dead = DeadLetter::of_envelope(dev_a.clone(), 3, 5, "harness died", ask.clone());
-        let unknown = ApprovalDecision::new(Uuid::now_v7(), dev_a.clone(), Verdict::Reject);
+        let unknown = ApprovalDecision::new(Uuid::now_v7(), dev_a, Verdict::Reject);
         let messages = [
             (ask.subject(), json(&ask)),
             (reply.subject(), json(&reply)),
@@ -567,9 +568,9 @@ mod tests {
     fn threads_sum_up_their_users_owner_times_and_opening() {
         let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
         let one = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "first line\nmore");
-        let two = Envelope::on_thread(t("t1"), dev_a.clone(), dev_b.clone(), "Deploy failed").with_owner(Some(alice));
+        let two = Envelope::on_thread(t("t1"), dev_a, dev_b.clone(), "Deploy failed").with_owner(Some(alice));
         let other = ChannelPost::on_thread("ops".parse().unwrap(), t("t2"), dev_b.clone(), "unrelated");
-        let three = two.reply(dev_b.clone(), "retrying", ants_proto::Role::Ant).unwrap();
+        let three = two.reply(dev_b, "retrying", ants_proto::Role::Ant).unwrap();
         let messages = [
             (one.subject(), json(&one)),
             (two.subject(), json(&two)),

@@ -17,6 +17,7 @@
 //! That resolver also asks the hub's, if the hub runs a `full` one, for its accounts every [`RESOLVER_SYNC`], so a leaf
 //! offline during a push catches up once it reconnects.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -223,13 +224,13 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
         match leaf.ca_file {
             Some(ca) => {
                 let ca = existing(ca, "CA file")?;
-                transport += &format!("      tls {{ ca_file: {} }}\n", quote(&ca.to_string_lossy()));
+                let _ = writeln!(transport, "      tls {{ ca_file: {} }}", quote(&ca.to_string_lossy()));
             }
             None => transport += "      tls {}\n",
         }
     }
     if let Some(proxy) = leaf.proxy {
-        transport += &format!("      proxy {{ url: {} }}\n", quote(proxy));
+        let _ = writeln!(transport, "      proxy {{ url: {} }}", quote(proxy));
     }
     let remote = |account: &str, creds: &Path| {
         format!(

@@ -84,7 +84,7 @@ pub const OWNERS_BUCKET: &str = "ants_owners";
 /// manager's key; entries expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
-pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
 /// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
 pub const READ_BUCKET: &str = "ants_read";
@@ -766,7 +766,7 @@ pub fn channel_manager_serving_subject() -> String {
 pub const ANTS_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How often `ants webhook serve`, each schedule and `ants channel serve` put their [`Serving`] again.
-pub const SERVING_EVERY: Duration = Duration::from_secs(60 * 60);
+pub const SERVING_EVERY: Duration = Duration::from_hours(1);
 
 /// What a process that is no daemon, yet uses credentials `ants auth` issues, publishes of the ants it runs: `ants
 /// webhook serve` and each schedule as the value of their marker ([`webhook_marker_key`]), `ants channel serve` under
@@ -3396,7 +3396,7 @@ mod tests {
             assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
         }
 
-        let chunk = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Message { text: "hi".into() });
+        let chunk = StatusEvent::new(p("dev-a"), t, StatusUpdate::Message { text: "hi".into() });
         assert_eq!(chunk.subject(), "ants.status.dev-a.t1");
         assert_eq!(chunk.check_subject("ants.status.dev-a.t1"), Ok(()));
         assert!(chunk.check_subject("ants.status.dev-a.t2").is_err(), "another thread");
@@ -3408,7 +3408,7 @@ mod tests {
     #[test]
     fn humans_ask_and_only_the_ant_hears_and_answers_cancel_requests() {
         let t: ThreadId = "t1".parse().unwrap();
-        let request = CancelRequest::new(p("dev-a"), t.clone(), UserId::human());
+        let request = CancelRequest::new(p("dev-a"), t, UserId::human());
         assert_eq!(
             (request.subject(), request.reply_subject()),
             ("ants.cancel.dev-a.t1".into(), "ants.cancelled.dev-a.t1".into())
@@ -3541,7 +3541,7 @@ mod tests {
         let two = ChannelPost::new(c.clone(), UserId::human(), "and this");
         assert_ne!(two.thread_id, top.thread_id, "each top-level post starts its own thread");
         assert!(two.mentions.is_empty());
-        let on = ChannelPost::on_thread(c.clone(), top.thread_id.clone(), UserId::human(), "more");
+        let on = ChannelPost::on_thread(c, top.thread_id.clone(), UserId::human(), "more");
         assert!(!on.starts_thread());
         assert_eq!(on.thread_id, top.thread_id);
 
@@ -3566,7 +3566,7 @@ mod tests {
         handoff.turn_budget = 1;
         let back = handoff.reply(p("dev-b"), "@dev-a fine", &[], &humans).unwrap();
         assert_eq!(back.turn_budget, 0);
-        let spent = Err(Error::BudgetExhausted(ask.thread_id.clone()));
+        let spent = Err(Error::BudgetExhausted(ask.thread_id));
         assert_eq!(back.reply(p("dev-a"), "@dev-b again", &[], &humans), spent);
         assert_eq!(back.reply(p("dev-a"), "@human over to you", &[], &humans), spent);
         let human = back.reply(UserId::human(), "@dev-a @dev-b go on", &[], &humans).unwrap();
@@ -3652,7 +3652,7 @@ mod tests {
             entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?"), &humans).is_empty(),
             "agents never fan out"
         );
-        let tagged = ChannelPost::new(c.clone(), p("dev-a"), "@dev-b @dev-c @dev-a @human look");
+        let tagged = ChannelPost::new(c, p("dev-a"), "@dev-b @dev-c @dev-a @human look");
         assert_eq!(entry.woken(&tagged, &humans), [p("dev-b")], "members only, not the author or the human");
         assert!(entry.woken(&ChannelPost::new("dev".parse().unwrap(), human, "@dev-a"), &humans).is_empty());
     }
@@ -3683,14 +3683,14 @@ mod tests {
         assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&p("dev-a"), &alice, &mixed.thread_id));
         assert_eq!((notice.text.as_str(), notice.turn_budget), (mixed.text.as_str(), mixed.turn_budget));
         assert_eq!((&notice.owner, &notice.creator), (&None, &None), "a notice claims no thread");
-        assert_eq!(notice.mention, Some(Mention { channel: c.clone(), post: mixed.id, author: None }));
+        assert_eq!(notice.mention, Some(Mention { channel: c, post: mixed.id, author: None }));
         assert_eq!(notice.subject(), subject::inbox(&alice, &p("dev-a")));
         assert_eq!(mixed.mention_msg_id(&alice), format!("mention.{}.alice", mixed.id));
         assert_eq!(mention_key(&p("dev-a"), 7, &alice), "dev-a.mention.7.alice");
 
         let json = serde_json::to_value(&notice).unwrap();
         assert_eq!(json["mention"]["channel"], "ops");
-        let mut old = json.clone();
+        let mut old = json;
         old.as_object_mut().unwrap().remove("mention");
         let read: Envelope = serde_json::from_value(old).unwrap();
         assert_eq!(read, Envelope { mention: None, ..notice }, "an envelope from before mentions reads as a message");
@@ -3797,7 +3797,7 @@ mod tests {
         assert_eq!(hook.thread_owner(&humans), None, "it owns no thread");
         let mut spent = hook.clone();
         spent.turn_budget = 1;
-        let again = ChannelPost::on_thread(c, hook.thread_id.clone(), bob.clone(), "red").from_webhook(Vec::new());
+        let again = ChannelPost::on_thread(c, hook.thread_id, bob.clone(), "red").from_webhook(Vec::new());
         assert_eq!(spent.turns_left(&[again], &humans), 1, "nor renews its turns");
 
         let message = Envelope::new(bob.clone(), p("dev-a"), "red");
@@ -4104,7 +4104,7 @@ mod tests {
         msg.turn_budget = 1;
         let reply = msg.reply(p("dev-b"), "draft", Role::Ant).unwrap();
         assert_eq!(reply.turn_budget, 0);
-        assert_eq!(reply.reply(p("dev-a"), "again", Role::Ant), Err(Error::BudgetExhausted(msg.thread_id.clone())));
+        assert_eq!(reply.reply(p("dev-a"), "again", Role::Ant), Err(Error::BudgetExhausted(msg.thread_id)));
     }
 
     #[test]
@@ -4120,7 +4120,7 @@ mod tests {
         let back = handoff.reply(p("dev-b"), "fine", Role::Ant).unwrap();
         assert_eq!((back.turn_budget, back.owner.clone()), (2, Some(alice.clone())), "an agent's reply spends one");
         let notice = back.follow_up(p("dev-b"), alice.clone(), "over to you");
-        assert_eq!((notice.thread_id.clone(), notice.owner.clone()), (ask.thread_id.clone(), Some(alice)));
+        assert_eq!((notice.thread_id.clone(), notice.owner.clone()), (ask.thread_id, Some(alice)));
         assert_eq!((notice.turn_budget, notice.in_reply_to), (DEFAULT_TURN_BUDGET, None));
         let ownerless = Envelope::new(p("dev-a"), p("dev-b"), "q");
         assert_eq!(ownerless.reply(p("dev-b"), "a", Role::Ant).unwrap().owner, None);
@@ -4131,7 +4131,7 @@ mod tests {
         let msg = Envelope::new(p("dev-a"), p("dev-b"), "q");
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("owner"), "{json}");
-        let owned = msg.clone().with_owner(Some(p("alice")));
+        let owned = msg.with_owner(Some(p("alice")));
         let json = serde_json::to_string(&owned).unwrap();
         assert!(json.contains(r#""owner":"alice""#), "{json}");
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), owned);
@@ -4339,7 +4339,7 @@ mod tests {
         assert!(!json.contains("escalation") && !json.contains("approval"), "{json}");
         let stuck = Escalation::new(p("dev-a"), msg.thread_id.clone(), EscalationReason::TurnBudget);
         let Hop::Chain { escalation, .. } = stuck.up(&[p("lead")], DEFAULT_MAX_ESCALATION_HOPS) else { panic!() };
-        let escalated = msg.clone().with_escalation(Some(escalation));
+        let escalated = msg.with_escalation(Some(escalation));
         let json = serde_json::to_string(&escalated).unwrap();
         assert!(
             json.contains(r#""reason":"turn_budget","level":1,"leader":"lead","visited":["dev-a","lead"]"#),
@@ -4394,7 +4394,7 @@ mod tests {
         assert_eq!(Escalation::new_from(p("dev-a"), thread.clone(), reason, None), new);
         assert_eq!(Escalation::new_from(p("dev-a"), thread.clone(), reason, Some(&p("dev-a"))), new, "its own");
 
-        let from = Escalation::new_from(p("dev-a"), thread.clone(), reason, Some(&p("lead")));
+        let from = Escalation::new_from(p("dev-a"), thread, reason, Some(&p("lead")));
         assert_eq!((from.level, &from.stuck, &from.leader), (0, &p("dev-a"), &p("lead")));
         assert_eq!(from.visited, [p("dev-a"), p("lead")]);
         let Hop::Chain { escalation: one, to } = from.up(&[p("boss"), p("dev-a")], 3) else { panic!("level 1") };
@@ -4456,7 +4456,7 @@ mod tests {
         let chain = [p("lead"), p("dev-b")];
 
         let verdict = ApprovalDecision::new(request.id, request.ant.clone(), Verdict::AllowOnce);
-        let msg = Envelope::decision(request.thread_id.clone(), p("dev-b"), verdict.clone());
+        let msg = Envelope::decision(request.thread_id.clone(), p("dev-b"), verdict);
         assert_eq!(msg.subject(), "ants.inbox.dev-a.dev-b", "the subject pins the decider");
         assert_eq!(msg.thread_id, request.thread_id);
         let json = serde_json::to_string(&msg).unwrap();

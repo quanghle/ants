@@ -498,7 +498,7 @@ pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String
     Ok(creds(&jwt, &seed(&user)?))
 }
 
-const APPROVER_TTL: Duration = Duration::from_secs(10 * 60);
+const APPROVER_TTL: Duration = Duration::from_mins(10);
 
 /// The claims of a user JWT that matter to enrollment.
 #[derive(Debug, Clone, PartialEq, Eq)]

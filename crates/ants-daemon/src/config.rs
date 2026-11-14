@@ -42,6 +42,7 @@
 //! ant named `messenger`; an empty file is a complete one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -579,7 +580,7 @@ pub fn append(path: &Path, entry: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading config {}", path.display())),
     };
-    let mut text = old.clone();
+    let mut text = old;
     if !text.is_empty() {
         if !text.ends_with('\n') {
             text.push('\n');
@@ -604,7 +605,9 @@ pub fn append(path: &Path, entry: &str) -> Result<()> {
 pub fn entry(ant: &Ant) -> Result<String> {
     let default = Ant::new(ant.name.clone(), ant.workdir.clone());
     let mut out = String::from("[[ant]]\n");
-    let mut set = |key: &str, value: String| out.push_str(&format!("{key} = {value}\n"));
+    let mut set = |key: &str, value: String| {
+        let _ = writeln!(out, "{key} = {value}");
+    };
     let path = |path: &Path| {
         path.to_str().map(toml_string).with_context(|| format!("ant {}: {} is no UTF-8", ant.name, path.display()))
     };
@@ -702,7 +705,9 @@ fn toml_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push('\t'),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -1228,7 +1233,7 @@ Review changes for correctness."""
         full.max_harnesses = 1;
         full.worktrees = true;
         full.prompt_timeout = Duration::ZERO;
-        full.idle_timeout = Duration::from_secs(5_400);
+        full.idle_timeout = Duration::from_mins(90);
         full.max_thread_cost = Some(2.5);
         full.max_daily_tokens = Some(1000);
         let text = entry(&full).unwrap();

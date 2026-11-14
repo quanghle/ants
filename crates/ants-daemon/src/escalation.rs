@@ -41,7 +41,7 @@ use crate::mcp::Roster;
 use crate::{bus, links};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
-pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_secs(1800);
+pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(step("dev-a", None, Some(&waiting)), Step::Again(waiting.clone()));
         let climb = step("dev-a", Some(&one), Some(&pending(one.clone(), &["lead"], true)));
         assert_eq!(climb, Step::Climb(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
-        let owner = pending(one.clone(), &[], false);
+        let owner = pending(one, &[], false);
         assert_eq!(step("dev-a", None, Some(&owner)), Step::Again(owner.clone()), "a human has it until answering");
     }
 
@@ -742,7 +742,7 @@ mod tests {
         let one = level(&start, &["lead", "dev-b"]);
         let expected = Escalation { reason: EscalationReason::Cap, ..one.clone() };
         assert_eq!(step("lead", Some(&one), None), Step::Climb(expected.clone()));
-        assert_eq!(step("dev-b", Some(&one), None), Step::Climb(expected.clone()));
+        assert_eq!(step("dev-b", Some(&one), None), Step::Climb(expected));
         let two = level(&one, &["boss"]);
         let lower = pending(one.clone(), &["lead"], false);
         assert_eq!(
@@ -750,7 +750,7 @@ mod tests {
             Step::Climb(Escalation { reason: EscalationReason::Cap, ..two })
         );
         let other: ThreadId = "t2".parse().unwrap();
-        let elsewhere = Escalation { thread_id: other, ..one.clone() };
+        let elsewhere = Escalation { thread_id: other, ..one };
         assert_eq!(step("lead", Some(&elsewhere), None), step("lead", None, None), "another thread's is no record");
     }
 

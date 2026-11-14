@@ -21,6 +21,7 @@
 //! the qualified ids to choose from.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use ants_daemon::{bus, chains};
 use ants_proto::{
@@ -312,7 +313,7 @@ pub fn select(requests: Vec<ApprovalRequest>, query: &Query) -> Result<ApprovalR
         n => {
             let mut names = found.iter().take(LISTED).map(qualified).collect::<Vec<_>>().join(", ");
             if n > LISTED {
-                names.push_str(&format!(" and {} more", n - LISTED));
+                let _ = write!(names, " and {} more", n - LISTED);
             }
             bail!("{n} tool requests match {query}: {names}; give more of the id or name the ant as <ant>/<id>")
         }
@@ -453,28 +454,22 @@ fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> Stri
         request.id, request.ant, request.thread_id, request.tool.kind, request.tool.title
     );
     for location in &request.tool.locations {
-        out.push_str(&format!("file     {location}\n"));
+        let _ = writeln!(out, "file     {location}");
     }
     if let Some(input) = &request.tool.input {
-        out.push_str(&format!("input    {input}\n"));
+        let _ = writeln!(out, "input    {input}");
     }
-    out.push_str(&format!("asked    {}\n", request.requested_at.format("%Y-%m-%d %H:%M:%S")));
-    match state {
-        State::Pending => {
-            out.push_str(&format!("expires  in {}\nanswer   {}", left(request.expires_at, now), commands(request)))
-        }
+    let _ = writeln!(out, "asked    {}", request.requested_at.format("%Y-%m-%d %H:%M:%S"));
+    let _ = match state {
+        State::Pending => write!(out, "expires  in {}\nanswer   {}", left(request.expires_at, now), commands(request)),
         State::Decided(d) => {
-            out.push_str(&format!("answered {} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S")))
+            write!(out, "answered {} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
         }
-        State::DecidedByAgent(by, d) => out.push_str(&format!(
-            "answered {} by {by} at {}",
-            spelling(d.verdict),
-            d.decided_at.format("%Y-%m-%d %H:%M:%S")
-        )),
-        State::Expired => {
-            out.push_str(&format!("expired  at {}, rejected", request.expires_at.format("%Y-%m-%d %H:%M:%S")))
+        State::DecidedByAgent(by, d) => {
+            write!(out, "answered {} by {by} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
         }
-    }
+        State::Expired => write!(out, "expired  at {}, rejected", request.expires_at.format("%Y-%m-%d %H:%M:%S")),
+    };
     out
 }
 

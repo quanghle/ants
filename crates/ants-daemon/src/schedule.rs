@@ -389,16 +389,16 @@ mod tests {
 
     #[test]
     fn every_fires_at_multiples_since_the_epoch() {
-        let every = When::Every(Duration::from_secs(15 * 60));
+        let every = When::Every(Duration::from_mins(15));
         assert_eq!(every.next_after(at("2026-11-14T10:20:30Z")), Some(at("2026-11-14T10:30:00Z")));
         assert_eq!(every.next_after(at("2026-11-14T10:30:00Z")), Some(at("2026-11-14T10:45:00Z")), "strictly after");
-        let daily = When::Every(Duration::from_secs(24 * 60 * 60));
+        let daily = When::Every(Duration::from_hours(24));
         assert_eq!(daily.next_after(at("2026-11-14T23:59:59Z")), Some(at("2026-11-15T00:00:00Z")));
     }
 
     #[test]
     fn the_last_firing_in_a_span_is_found() {
-        let every = When::Every(Duration::from_secs(15 * 60));
+        let every = When::Every(Duration::from_mins(15));
         let last = |when: &When, after: &str, upto: &str| when.last_in(at(after), at(upto));
         assert_eq!(last(&every, "2026-11-14T08:00:00Z", "2026-11-14T10:20:30Z"), Some(at("2026-11-14T10:15:00Z")));
         assert_eq!(last(&every, "2026-11-14T08:00:00Z", "2026-11-14T10:15:00Z"), Some(at("2026-11-14T10:15:00Z")));

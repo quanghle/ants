@@ -10,6 +10,7 @@
 //! ([`notify_mentioned`]); an ant's daemon sends those of the ant's posts.
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
@@ -505,9 +506,9 @@ pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
 fn render_post(out: &mut String, post: &ChannelPost, indent: &str) {
     let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
     let mut lines = post.text.lines();
-    out.push_str(&format!("{indent}{time} {}: {}\n", post.from, lines.next().unwrap_or("")));
+    let _ = writeln!(out, "{indent}{time} {}: {}", post.from, lines.next().unwrap_or(""));
     for line in lines {
-        out.push_str(&format!("{indent}    {line}\n"));
+        let _ = writeln!(out, "{indent}    {line}");
     }
 }
 
@@ -519,7 +520,7 @@ pub fn render(threads: &[Thread]) -> String {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("thread {}\n", thread.id));
+        let _ = writeln!(out, "thread {}", thread.id);
         let replies = if thread.has_start() {
             render_post(&mut out, &thread.posts[0], "");
             &thread.posts[1..]

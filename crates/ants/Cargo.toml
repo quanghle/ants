@@ -8,33 +8,37 @@ publish.workspace = true
 description = "ants: agent teams messaging over NATS, from the terminal"
 
 [dependencies]
-ants-proto = { path = "../ants-proto" }
+ants-proto.workspace = true
 ants-daemon = { path = "../ants-daemon" }
 clap = { version = "4.6.7", features = ["derive", "env"] }
-anyhow = "1.0.104"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-async-nats = { version = "0.52.0", default-features = false, features = ["ring", "jetstream", "nkeys", "websockets", "nuid"] }
-data-encoding = "2.11.1"
+anyhow.workspace = true
+chrono = { workspace = true, features = ["clock", "std"] }
+async-nats = { workspace = true, features = ["ring", "jetstream", "nkeys", "websockets", "nuid"] }
+data-encoding.workspace = true
 nkeys = "0.4.5"
 ring = "0.17.14"
-futures = "0.3.34"
-http-body-util = "0.1.3"
-hyper = { version = "1.9.0", default-features = false, features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
+futures.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 rustls-native-certs = "0.8.3"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
-tracing = "0.1.44"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "signal", "time", "net", "io-util", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "time", "net", "io-util", "sync"] }
 
 [dev-dependencies]
-agent-client-protocol = { version = "5.2.0", features = ["stdio"] }
-ants-test-support = { path = "../ants-test-support" }
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "sync", "time"] }
+agent-client-protocol = { workspace = true, features = ["stdio"] }
+ants-test-support.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+
+
+[lints]
+workspace = true
 
 # Its own main: run as `copilot`, the test binary is the stub harness the daemon under test starts.
 [[test]]

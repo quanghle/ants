@@ -10,7 +10,7 @@ use ants_proto::{UserId, WEBHOOKS_BUCKET, webhook_marker_subject};
 use async_nats::jetstream::{self, stream::DirectGetErrorKind};
 
 /// How long a marker found is trusted before it is read again.
-const KEEP: Duration = Duration::from_secs(60 * 60);
+const KEEP: Duration = Duration::from_hours(1);
 /// Most webhooks kept in memory; past it they are read again.
 const MAX_KEPT: usize = 1024;
 

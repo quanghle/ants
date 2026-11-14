@@ -5,6 +5,7 @@
 //! allow are made, so none just times out. Every network check has a timeout; a harness handshake has its own.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -432,7 +433,7 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
         let checked = hub::Object::ALL.len() - unseen.len();
         let mut detail = format!("stream {STREAM} and {} buckets up to date", checked.saturating_sub(1));
         if !unseen.is_empty() {
-            detail += &format!(" ({} not checked: the credentials get no stream info of it)", unseen.join(", "));
+            let _ = write!(detail, " ({} not checked: the credentials get no stream info of it)", unseen.join(", "));
         }
         return vec![Check::ok(check, detail)];
     }

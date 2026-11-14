@@ -29,6 +29,7 @@
 //! nor wait in `ants_sessions`: the request has its own time limit, and only the ant's own chain may decide it.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,7 +49,7 @@ use crate::escalation::Chain;
 use crate::permission::Approver;
 
 /// How long a tool request waits for a human by default.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How often the ant looks for the stored decision after hearing one that is not stored (yet).
 pub const RECHECK: Duration = Duration::from_millis(250);
@@ -311,10 +312,10 @@ fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
         request.tool.kind,
     );
     if !request.tool.locations.is_empty() {
-        text.push_str(&format!("\nFiles: {}", request.tool.locations.join(", ")));
+        let _ = write!(text, "\nFiles: {}", request.tool.locations.join(", "));
     }
     if let Some(input) = &request.tool.input {
-        text.push_str(&format!("\nInput: {input}"));
+        let _ = write!(text, "\nInput: {input}");
     }
     text
 }

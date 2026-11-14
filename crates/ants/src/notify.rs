@@ -20,6 +20,7 @@
 //! Telegram's open the confirmation page.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -57,7 +58,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_WAIT: Duration = Duration::from_secs(60);
 const MAX_DELIVER: i64 = 3;
 /// How long the consumer of a human no process lists any more stays.
-const INACTIVE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const INACTIVE: Duration = Duration::from_hours(7 * 24);
 /// Escalations older than this, as after a long outage, are not notified.
 const ESCALATION_MAX_AGE: TimeDelta = TimeDelta::days(1);
 /// Longest text taken from a request's input or an escalation.
@@ -509,17 +510,18 @@ fn approval_notice(
     let tool = &request.tool;
     let mut text = format!("{} ({})", tool.title, tool.kind);
     if !tool.locations.is_empty() {
-        text.push_str(&format!("\nfiles: {}", tool.locations.join(", ")));
+        let _ = write!(text, "\nfiles: {}", tool.locations.join(", "));
     }
     if let Some(input) = &tool.input {
-        text.push_str(&format!("\ninput: {}", cut(input, MAX_TEXT)));
+        let _ = write!(text, "\ninput: {}", cut(input, MAX_TEXT));
     }
     let id = tools::qualified(request);
-    text.push_str(&format!(
+    let _ = write!(
+        text,
         "\nthread {}, request {id}, rejected in {} unless answered\nants tools approve {id} | ants tools reject {id}",
         request.thread_id,
         tools::left(request.expires_at, now),
-    ));
+    );
     let buttons = links
         .map(|links| {
             request
@@ -929,10 +931,10 @@ fn details(request: &ApprovalRequest) -> String {
         html(request.thread_id.as_str())
     );
     if !tool.locations.is_empty() {
-        out.push_str(&format!("<p>Files: {}</p>", html(&tool.locations.join(", "))));
+        let _ = write!(out, "<p>Files: {}</p>", html(&tool.locations.join(", ")));
     }
     if let Some(input) = &tool.input {
-        out.push_str(&format!("<pre>{}</pre>", html(&cut(input, MAX_TEXT))));
+        let _ = write!(out, "<pre>{}</pre>", html(&cut(input, MAX_TEXT)));
     }
     out
 }
@@ -1093,7 +1095,7 @@ mod tests {
             assert_eq!(links.verify(&query.replace(from, to), Utc::now()), Err(LinkError::Forged), "{to}");
         }
         let sig = query.rsplit_once("sig=").unwrap().1;
-        assert_eq!(links.verify(&query.replace(sig, &sig.to_uppercase()), Utc::now()), Ok(action.clone()));
+        assert_eq!(links.verify(&query.replace(sig, &sig.to_uppercase()), Utc::now()), Ok(action));
         for broken in [
             "",
             &query.replace("verdict=allow_once", "verdict=maybe"),

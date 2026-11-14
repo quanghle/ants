@@ -655,7 +655,7 @@ mod tests {
         assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((false, None), (false, None)));
 
         let changed = config("dev-a", Some("smart"));
-        assert_eq!(names(reconcile(&mut running, vec![changed.clone(), config("dev-c", None)])), ["dev-c"]);
+        assert_eq!(names(reconcile(&mut running, vec![changed, config("dev-c", None)])), ["dev-c"]);
         assert_eq!(state(&running, "dev-a"), (true, Some(Some("smart".to_owned()))));
         assert_eq!(state(&running, "dev-b"), (true, None));
         assert_eq!(state(&running, "dev-c"), (false, None));
@@ -696,7 +696,7 @@ mod tests {
         let p = args("--idle-timeout 90s --prompt-timeout 0 --approval-timeout 1h30m").options.apply(ant("dev-a"));
         assert_eq!(
             (p.idle_timeout, p.prompt_timeout, p.approval_timeout),
-            (Duration::from_secs(90), Duration::ZERO, Duration::from_secs(5_400))
+            (Duration::from_secs(90), Duration::ZERO, Duration::from_mins(90))
         );
         for line in ["--idle-timeout 90", "--idle-timeout-secs 90", "--prompt-timeout 1.5h"] {
             assert!(Cmd::try_parse_from(std::iter::once("daemon").chain(line.split_whitespace())).is_err(), "{line}");

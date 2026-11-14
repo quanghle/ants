@@ -2,6 +2,7 @@
 //! largest unit first and each unit at most once, such as `90s`, `10m` or `1h30m`. A bare `0` is zero; any other
 //! number needs a unit.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
@@ -54,7 +55,7 @@ pub fn format(duration: Duration) -> String {
     let mut out = String::new();
     for (unit, size) in UNITS {
         if secs >= size {
-            out.push_str(&format!("{}{unit}", secs / size));
+            let _ = write!(out, "{}{unit}", secs / size);
             secs %= size;
         }
     }

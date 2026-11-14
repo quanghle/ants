@@ -9,6 +9,7 @@
 //! sets `catch_up`: then, once a daemon runs and reaches the hub again, the latest firing missed goes out late, under
 //! the same key, and the older ones are skipped.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use ants_daemon::schedule::Schedule;
@@ -131,7 +132,7 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) ->
     let at = due.timestamp().to_string();
     let mut text = schedule.text.clone();
     if late {
-        text.push_str(&format!("\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC")));
+        let _ = write!(text, "\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC"));
     }
     bus.deliver(Delivery {
         from: &schedule.name,
@@ -204,7 +205,7 @@ mod tests {
         assert_eq!(missed(&hourly, never, at("2026-11-14T10:20:00Z")), Some(at("2026-11-14T10:00:00Z")));
         assert_eq!(missed(&hourly, never, at("2026-11-14T10:00:59Z")), None, "within a minute it goes out on time");
         assert_eq!(missed(&hourly, at("2026-11-14T10:00:00Z"), at("2026-11-14T10:20:00Z")), None, "after `after` only");
-        let mut yearly = hourly.clone();
+        let mut yearly = hourly;
         yearly.when = When::Cron("@yearly".parse().unwrap());
         assert_eq!(missed(&yearly, never, at("2027-01-07T10:00:00Z")), Some(at("2027-01-01T00:00:00Z")));
         assert_eq!(missed(&yearly, never, at("2027-01-08T00:00:01Z")), None, "a week back at most");

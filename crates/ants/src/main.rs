@@ -2240,7 +2240,7 @@ mod tests {
             _ => panic!("{args}"),
         };
         let r = replies("ask --wait --timeout 1h30m hi");
-        assert_eq!((r.wait, r.follow, r.timeout), (true, false, Some(Duration::from_secs(5400))));
+        assert_eq!((r.wait, r.follow, r.timeout), (true, false, Some(Duration::from_mins(90))));
         let r = replies("post -f ops hi");
         assert_eq!((r.wait, r.follow, r.timeout), (false, true, None));
         for args in

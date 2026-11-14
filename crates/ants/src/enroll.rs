@@ -85,7 +85,7 @@ pub async fn request(
     let mut repeats = tokio::time::interval(repeat);
     let expiry = async {
         match left {
-            Some(left) => tokio::time::sleep(left.min(Duration::from_secs(365 * 24 * 3600))).await,
+            Some(left) => tokio::time::sleep(left.min(Duration::from_hours(365 * 24))).await,
             None => std::future::pending().await,
         }
     };

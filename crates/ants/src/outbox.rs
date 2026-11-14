@@ -34,7 +34,7 @@ use async_nats::jetstream::stream::{self, External, Source, SubjectTransform};
 use async_nats::jetstream::{self, Context};
 
 /// How long an outbox and the intake keep messages: as long as the hub's stream.
-const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const RETENTION: Duration = Duration::from_hours(30 * 24);
 /// How long to wait for the leaf node to answer through the hub.
 const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the hub may take to hear from an outbox it sources: a source that works is active within a second.

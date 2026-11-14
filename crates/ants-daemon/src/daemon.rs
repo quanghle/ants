@@ -6,6 +6,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Display;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -54,7 +55,7 @@ const STREAM_SOURCE: &str = "Nats-Stream-Source";
 /// How often idle harnesses are looked for.
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// How often the worktrees of threads whose session expired are looked for, besides at start.
-const PRUNE_WORKTREES_EVERY: Duration = Duration::from_secs(60 * 60);
+const PRUNE_WORKTREES_EVERY: Duration = Duration::from_hours(1);
 /// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
 const IN_HAND_PER_HARNESS: usize = 2;
 
@@ -1469,7 +1470,7 @@ impl Inbox<'_> {
             }
         };
         if posted.owned {
-            text.push_str(&format!("\n\n{}", channel::owner_note(&post.channel)));
+            let _ = write!(text, "\n\n{}", channel::owner_note(&post.channel));
         }
         text
     }
@@ -1537,7 +1538,7 @@ impl Inbox<'_> {
         };
         let mut text = format!("{why}; needs a decision. {last}:\n{}", envelope.text);
         if let Some(answer) = unposted {
-            text.push_str(&format!("\n\nUnposted answer from {}:\n{answer}", self.ant));
+            let _ = write!(text, "\n\nUnposted answer from {}:\n{answer}", self.ant);
         }
         let mut notice = envelope.follow_up(self.ant.clone(), human, text);
         notice.in_reply_to = Some(envelope.id);
