@@ -369,7 +369,9 @@ enum LeafCommand {
     },
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
     /// what its personas and humans send while the hub is out of reach, and have the hub's stream take from it what
-    /// they may send once the uplink is back. Run it again when the machine's personas or humans change.
+    /// they may send once the uplink is back. Run it again when the machine's personas or humans change. Fails if
+    /// the hub does not hear from the outbox within 10 s, as without `feature_flags { js_api_reply_v2: true }` on the
+    /// hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
@@ -562,6 +564,7 @@ async fn main() -> Result<()> {
             } else {
                 let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
                 outbox::admit(&leaf, &js, &machine, &auth::members(&personas, &humans)).await?;
+                outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
                 println!("outbox of {machine} ready; the hub takes from it what its personas and humans send");
             }
             Ok(())

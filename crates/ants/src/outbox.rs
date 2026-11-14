@@ -26,6 +26,8 @@ use async_nats::jetstream::{self, Context};
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long to wait for the leaf node to answer through the hub.
 const LEAF_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the hub may take to hear from an outbox it sources: a source that works is active within a second.
+pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
 
 /// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
@@ -86,6 +88,57 @@ pub async fn admit(
     }
     hub.create_or_update_stream(intake).await.context("sourcing the machine's outbox into the hub's intake")?;
     Ok(())
+}
+
+/// Wait up to `wait` for the hub's intake to hear from the outbox of `machine`, which the hub then sources.
+///
+/// Sourcing an outbox needs nats-server's `js_api_reply_v2` feature flag on the hub ([`Machine::source_replies`]):
+/// without it the leaf node cannot answer the hub, and the source stalls without an error, never active.
+pub async fn sourced(hub: &Context, machine: &Machine, wait: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let info: serde_json::Value =
+            hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")?;
+        match hearing(&info, machine) {
+            Hearing::Heard => return Ok(()),
+            Hearing::Failed(error) => anyhow::bail!("the hub cannot source the outbox of {machine}: {error}"),
+            Hearing::Silent if tokio::time::Instant::now() >= deadline => anyhow::bail!(
+                "the hub has not heard from the outbox of {machine} within {}s, so nothing kept there reaches the \
+                 hub's stream. The hub's nats-server needs `feature_flags {{ js_api_reply_v2: true }}` in its \
+                 configuration, then a restart; uplink credentials issued before store and forward existed need \
+                 `ants auth leaf` again. The setup is in place: the hub takes from the outbox once it hears from it",
+                wait.as_secs()
+            ),
+            Hearing::Silent => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Hearing {
+    Heard,
+    Silent,
+    Failed(String),
+}
+
+/// Whether the intake's source for the outbox of `machine`, in the intake's stream info (`STREAM.INFO`), has heard
+/// from the leaf node: async-nats leaves out a source's `external` and `error`, so this reads the JSON.
+fn hearing(info: &serde_json::Value, machine: &Machine) -> Hearing {
+    let error = |e: &serde_json::Value| e["description"].as_str().unwrap_or("unknown error").to_owned();
+    if let Some(e) = info.get("error") {
+        return Hearing::Failed(error(e));
+    }
+    let api = machine.api_prefix();
+    let sources = info["sources"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let Some(source) = sources.iter().find(|s| s["name"] == OUTBOX_STREAM && s["external"]["api"] == api.as_str())
+    else {
+        return Hearing::Failed("the hub's intake has no source for it".to_owned());
+    };
+    if let Some(e) = source.get("error") {
+        return Hearing::Failed(error(e));
+    }
+    // `active` is how long ago the source last heard from the leaf, -1 if it never did.
+    if source["active"].as_i64().is_some_and(|active| active >= 0) { Hearing::Heard } else { Hearing::Silent }
 }
 
 /// Stop taking anything from the outbox of `machine`. What its intake already holds stays there.
@@ -216,16 +269,7 @@ mod tests {
     #[tokio::test]
     async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
         let (leaf_port, dead_port) = (free_port(), free_port());
-        let Some(hub) = NatsServer::spawn_with(|dir| {
-            auth::init(&dir.join("auth")).unwrap();
-            format!(
-                "jetstream {{ store_dir: {:?}, domain: hub }}\ninclude \"auth/{}\"\n\
-                 leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n\
-                 feature_flags {{ js_api_reply_v2: true }}\n",
-                dir.join("js"),
-                auth::SERVER_CONF
-            )
-        }) else {
+        let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {
             return;
         };
         let team = hub.dir().join("auth");
@@ -285,6 +329,7 @@ mod tests {
         outbox_missing_fails(&b_js).await;
         let setup = super::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
         admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+        sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
         // Any human on the machine may set it up again.
         let alice_creds = hub.dir().join("alice.creds");
         auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
@@ -333,6 +378,78 @@ mod tests {
         remove(&h_js, &m1).await.unwrap();
         let info = h_js.get_stream(STREAM).await.unwrap().info().await.unwrap().config.clone();
         assert!(info.sources.unwrap_or_default().is_empty());
+    }
+
+    fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
+        NatsServer::spawn_with(|dir| {
+            auth::init(&dir.join("auth")).unwrap();
+            format!(
+                "jetstream {{ store_dir: {:?}, domain: hub }}\ninclude \"auth/{}\"\n\
+                 leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n{extra}\n",
+                dir.join("js"),
+                auth::SERVER_CONF
+            )
+        })
+    }
+
+    /// Without `js_api_reply_v2` the hub's intake never hears from a leaf's outbox, and setting it up says so.
+    #[tokio::test]
+    async fn a_hub_without_js_api_reply_v2_is_reported() {
+        let leaf_port = free_port();
+        let Some(hub) = spawn_hub(leaf_port, "") else {
+            return;
+        };
+        let team = hub.dir().join("auth");
+        let domain: JsDomain = "hub".parse().unwrap();
+        let m1: Machine = "m1".parse().unwrap();
+        let human = PersonaId::human();
+        let human_creds = hub.dir().join("human.creds");
+        auth::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
+        let (_h, h_js) = bus::connect(&hub.url, Some(&human_creds), Some(&domain), &human, "test").await.unwrap();
+        bus::init_stream(&h_js).await.unwrap();
+        let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        auth::issue_leaf(&team, &m1, &on_m1, Some(&domain), &leaf_creds).unwrap();
+        let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
+        let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+        let _leaf_node = NatsServer::spawn_with(|dir| {
+            let config = leaf::Leaf {
+                machine: &m1,
+                hub_domain: Some(&domain),
+                uplinks: &uplinks,
+                creds: &leaf_creds,
+                server_conf: &server_conf,
+                ca_file: None,
+                proxy: None,
+                listen: &listen,
+            };
+            leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+            "include \"leaf.conf\"\n".to_owned()
+        })
+        .unwrap();
+
+        let setup = super::connect(&hub.url, Some(&human_creds), &human, &m1).await.unwrap();
+        eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
+        let error = sourced(&h_js, &m1, Duration::from_secs(3)).await.unwrap_err().to_string();
+        assert!(error.contains("feature_flags { js_api_reply_v2: true }"), "{error}");
+    }
+
+    #[test]
+    fn a_source_error_or_a_missing_source_is_a_failure() {
+        let m1: Machine = "m1".parse().unwrap();
+        let info = |source: serde_json::Value| serde_json::json!({ "sources": [source] });
+        let ours = serde_json::json!({ "api": "$JS.m1.API", "deliver": "$JS.S.m1" });
+        assert_eq!(
+            hearing(&info(serde_json::json!({ "name": OUTBOX_STREAM, "external": ours, "active": 12 })), &m1),
+            Hearing::Heard
+        );
+        let failed = info(serde_json::json!({
+            "name": OUTBOX_STREAM, "external": ours, "active": -1, "error": { "code": 503, "description": "boom" },
+        }));
+        assert_eq!(hearing(&failed, &m1), Hearing::Failed("boom".to_owned()));
+        let other =
+            info(serde_json::json!({ "name": OUTBOX_STREAM, "external": { "api": "$JS.m2.API" }, "active": 1 }));
+        assert!(matches!(hearing(&other, &m1), Hearing::Failed(_)));
     }
 
     async fn outbox_missing_fails(js: &Context) {

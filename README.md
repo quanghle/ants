@@ -958,6 +958,10 @@ ants leaf outbox macbook --persona dev-a --persona dev-b --persona human --human
 ants leaf outbox macbook --remove                                                       # stop taking from the machine
 ```
 
+`ants leaf outbox` then waits up to 10 s for the hub to hear from the outbox, and fails, naming the missing
+`feature_flags { js_api_reply_v2: true }`, if it does not: the setup stays in place and takes effect once the hub has
+the flag. Running it again checks again.
+
 The hub's stream takes from a machine's outbox only what the listed personas and humans may send themselves, so issue
 the leaf's uplink credentials for the same personas and humans. Whatever needs an answer from the hub at once still
 fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_plan`, dead letters,

@@ -1,6 +1,7 @@
 # ants: the machine's nats-server, its leaf node (`ants leaf config`) or, on the hub machine, the hub.
 # User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
 # Reload a new uplink: systemctl --user reload ants-nats
+# On the hub, the configuration needs `feature_flags { js_api_reply_v2: true }` for leaf outboxes (docs/transport.md, "Hub").
 
 [Unit]
 Description=ants: local nats-server (leaf node or hub)

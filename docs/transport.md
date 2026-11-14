@@ -225,6 +225,7 @@ Configuration for ants-32g.2 (per-machine leaf templates), adding to "Hub" and "
 # hub: as in "Hub"; the parts this relies on
 jetstream { store_dir: "/var/lib/ants/js", domain: hub }
 leafnodes { listen: 127.0.0.1:7422, no_advertise: true }
+feature_flags { js_api_reply_v2: true }   # since ants-0ul, to source the leaves' outboxes
 include "server.conf"
 
 # leaf on macbook: no jetstream block (since ants-0ul, one for the outbox only, see "Leaf node per machine")
@@ -280,7 +281,10 @@ ants leaf outbox macbook --remove                                               
 
 It creates or updates the outbox through the hub (`$JS.macbook.API`), creates `ANTS_IN` with a source for the machine
 if missing, and replaces the machine's sources of `ANTS`, keeping those that did not change. New ones start after
-what `ANTS_IN` holds at the time, so earlier messages of a newly admitted persona stay out.
+what `ANTS_IN` holds at the time, so earlier messages of a newly admitted persona stay out. It then waits up to
+10 s for `ANTS_IN`'s source of the outbox to become active and fails if it does not, naming the hub's missing
+`feature_flags { js_api_reply_v2: true }` (ants-78l); the setup stays in place, and the source resumes once the hub
+has the flag. Running it again checks again.
 
 Found while building it (nats-server 2.15.3, source reading and verified):
 
@@ -293,7 +297,11 @@ Found while building it (nats-server 2.15.3, source reading and verified):
   - The hub's own requests for a source use `$JSC.R.<random>` by default, which the leaf cannot be allowed without
     allowing every other source's replies. `feature_flags { js_api_reply_v2: true }` on the hub makes them
     `$JSC.R.<domain>.<account hash>.<stream>.…`, so the leaf may publish `$JSC.R.<machine>.*.ANTS_OUT.>` only. Without
-    the flag the hub never gets an answer from the leaf and the source stalls.
+    the flag the hub never gets an answer from the leaf and the source stalls without an error: in `ANTS_IN`'s
+    stream info the source stays at `"active": -1` (never heard from), where a working one is active within a second
+    and stays so through the source consumer's heartbeats. async-nats's `SourceInfo` leaves out `external` and
+    `error`, so `ants leaf outbox` reads the raw JSON (verified: `a_hub_without_js_api_reply_v2_is_reported` in
+    `crates/ants/src/outbox.rs`).
   - The source's deliveries and flow control use `$JS.S.<machine>.>` (leaf to hub) and `$JS.FC.ANTS_OUT.>` (hub to
     leaf); the uplink credentials allow those and the outbox's stream and consumer API under `$JS.<machine>.API`.
 - **Stream interest crosses only allowances `ReverseMatch` finds.** The hub's stream listens on `ants.inbox.>`,
