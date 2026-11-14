@@ -48,15 +48,9 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
     if let Ok(store) = js.get_key_value(READ_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(kv::Config {
-        bucket: READ_BUCKET.to_owned(),
-        description: "What each human has read of its inbox, on any of its devices".to_owned(),
-        history: 1,
-        storage: jetstream::stream::StorageType::File,
-        ..Default::default()
-    })
-    .await
-    .context("creating the read bucket (credentials issued before it need `ants auth user NAME --human` again)")
+    js.create_key_value(ants_daemon::hub::read_config())
+        .await
+        .context("creating the read bucket (credentials issued before it need `ants auth user NAME --human` again)")
 }
 
 /// A message to the human, unless malformed or forged.
