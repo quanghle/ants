@@ -12,7 +12,8 @@ through the shell.
 ## Connection
 
 The CLI reads `ANTS_NATS_URL` (default `nats://127.0.0.1:4222`), `ANTS_CREDS` and `ANTS_JS_DOMAIN` from the
-environment. Leave them unchanged; if connection fails, report the error rather than guessing a server.
+environment, else from `~/.ants/config.toml` (`[cli]`, then top-level `nats` and `js_domain`). Leave them unchanged;
+if connection fails, report the error rather than guessing a server.
 
 ## Find a recipient
 

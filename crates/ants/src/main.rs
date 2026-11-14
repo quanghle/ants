@@ -4,16 +4,19 @@ mod add;
 mod auth;
 mod bridge;
 mod channel;
+mod defaults;
 mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
 mod notify;
 mod outbox;
+mod presence;
 mod revoke;
 mod roster;
 mod scheduler;
 mod serve;
+mod service;
 mod spend;
 mod thread;
 mod tools;
@@ -26,8 +29,8 @@ use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes, owners};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
-    Envelope, Escalation, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId,
-    Verdict, subject,
+    Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId,
+    UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -37,16 +40,19 @@ use futures::StreamExt as _;
 #[command(name = "ants", version, about = "Agent teams messaging over NATS")]
 struct Cli {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
+    /// Unset, the config file's `[cli]` or top-level `nats` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
+    /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
 
     /// JetStream domain of the hub (its `jetstream { domain }`), needed to reach JetStream from a leaf node without
     /// JetStream. Set it for every ants process, and when issuing credentials with `ants auth`.
+    /// Unset, the config file's `[cli]` or top-level `js_domain` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     js_domain: Option<JsDomain>,
 
@@ -179,7 +185,8 @@ enum Command {
     Daemon(Box<serve::DaemonArgs>),
     /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
-    /// key to sign; run again with --jwt or --enroll to complete the credentials. Reload the daemon (SIGHUP) to serve the ant.
+    /// key to sign; run again with --jwt or --enroll to complete the credentials. Completed credentials reload the
+    /// daemon service of the config file to serve the ant, when it runs (scripts/install-units.sh).
     Add(Box<add::AddArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
     /// list them, approve or reject one.
@@ -807,7 +814,7 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    let cli = defaults::parse()?;
     let domain = cli.js_domain.as_ref();
     let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
@@ -854,9 +861,10 @@ async fn main() -> Result<()> {
             humans::ensure(&js).await?;
             webhook::ensure_bucket(&js).await?;
             inbox::ensure_bucket(&js).await?;
+            presence::ensure_bucket(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
@@ -867,7 +875,8 @@ async fn main() -> Result<()> {
                 ants_proto::LINKS_BUCKET,
                 ants_proto::OWNERS_BUCKET,
                 ants_proto::WEBHOOKS_BUCKET,
-                ants_proto::READ_BUCKET
+                ants_proto::READ_BUCKET,
+                ants_proto::PRESENCE_BUCKET
             );
             Ok(())
         }
@@ -1496,8 +1505,19 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
             }
             std::future::pending::<()>().await
         };
+        let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });
+        // Following one thread shows no escalation on the others, so only following them all counts as reading.
+        let followed = async {
+            match select.thread {
+                None => {
+                    let device = nats.device.id;
+                    presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed).await
+                }
+                Some(_) => followed.await,
+            }
+        };
         tokio::select! {
-            followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
+            followed = followed => followed?,
             () = watch => {}
         }
     }

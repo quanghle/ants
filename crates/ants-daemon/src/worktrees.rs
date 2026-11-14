@@ -5,7 +5,8 @@
 //! what the thread committed reachable after its worktree is removed, and two worktrees never need the same branch.
 //! The worktree is created on the thread's first prompt, reused whenever its harness starts again (so session/load
 //! sees the same directory) and removed once the thread's session expired from the session store, along with its
-//! branch unless that holds commits not merged into the repository's `HEAD`.
+//! branch unless that holds commits not merged into the repository's `HEAD`. Worktrees left behind once the option is
+//! turned off are removed the same way ([`Worktrees::left_behind`]), no new one being created.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,8 @@ use tokio::sync::Mutex;
 
 pub struct Worktrees {
     ant: UserId,
-    /// Top level of the main worktree of the repository the workdir is in.
+    /// Where git is run for the repository: the top level of its main worktree, or its git directory for worktrees left
+    /// behind.
     repo: PathBuf,
     /// Where the workdir is inside the repository, so a thread works at the same place in its own worktree.
     within: PathBuf,
@@ -49,6 +51,34 @@ impl Worktrees {
                 None
             }
         }
+    }
+
+    /// The worktrees left under `home` by the ant's threads, to be removed as their sessions expire while no new one is
+    /// created. None when there are none, or, with a warning, when none of them is in a repository. The repository is
+    /// found from the worktrees, not the workdir, which may have changed since.
+    pub async fn left_behind(ant: &UserId, home: &Path) -> Option<Self> {
+        let dir = home.join("worktrees");
+        let threads = threads_in(&dir);
+        if threads.is_empty() {
+            return None;
+        }
+        for thread in &threads {
+            let path = dir.join(thread.as_str());
+            // Checked first, as git would otherwise look for a repository around the home.
+            if !path.join(".git").is_file() {
+                continue;
+            }
+            if let Ok(common) = git(&path, ["rev-parse", "--git-common-dir"]).await {
+                let repo = path.join(common.trim());
+                tracing::info!(
+                    worktrees = %dir.display(),
+                    "removing the git worktrees left by threads once their sessions expire"
+                );
+                return Some(Self { ant: ant.clone(), repo, within: PathBuf::new(), dir, changing: Mutex::new(()) });
+            }
+        }
+        tracing::warn!(worktrees = %dir.display(), "keeping the thread worktrees left in no git repository");
+        None
     }
 
     /// The directory the thread works in, in its worktree, which is created when missing.
@@ -85,11 +115,7 @@ impl Worktrees {
 
     /// The threads with a worktree.
     pub fn threads(&self) -> Vec<ThreadId> {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return Vec::new() };
-        let mut threads: Vec<ThreadId> =
-            entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect();
-        threads.sort();
-        threads
+        threads_in(&self.dir)
     }
 
     fn path(&self, thread: &ThreadId) -> PathBuf {
@@ -140,6 +166,15 @@ impl Worktrees {
         tracing::info!(%thread, worktree = %path.display(), "removed the git worktree of the expired thread");
         Ok(())
     }
+}
+
+/// The threads with a directory in `dir`.
+fn threads_in(dir: &Path) -> Vec<ThreadId> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut threads: Vec<ThreadId> =
+        entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect();
+    threads.sort();
+    threads
 }
 
 /// Run git in `dir` and return what it printed, or fail with what it printed on stderr.
@@ -246,6 +281,29 @@ pub(crate) mod tests {
             "a kept branch is checked out again"
         );
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worktrees_left_behind_are_found_from_their_repository() {
+        let Some(repo) = repo("worktrees-left") else { return };
+        let home = repo.parent().unwrap().join("home");
+        assert!(Worktrees::left_behind(&ant(), &home).await.is_none(), "no worktrees");
+        let worktrees = Worktrees::find(&ant(), &repo.join("sub"), &home).await.unwrap();
+        let (a, b) = (thread("a"), thread("b"));
+        worktrees.checkout(&a).await.unwrap();
+        worktrees.checkout(&b).await.unwrap();
+        // Not a worktree: skipped when looking for the repository, and never mistaken for a thread of the enclosing one.
+        std::fs::remove_file(home.join("worktrees/a/.git")).unwrap();
+        let moved = repo.parent().unwrap().join("moved");
+        std::fs::rename(&repo, &moved).unwrap();
+        run(&moved, &["worktree", "repair", home.join("worktrees/b").to_str().unwrap()]);
+        let left = Worktrees::left_behind(&ant(), &home).await.unwrap();
+        assert_eq!(left.prune(async |_: &ThreadId| true).await, 2);
+        assert!(left.threads().is_empty());
+        assert_eq!(run(&moved, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+        let branches = run(&moved, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
+        assert_eq!(branches, "", "merged branches are deleted");
+        std::fs::remove_dir_all(moved.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]

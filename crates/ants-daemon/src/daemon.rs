@@ -230,10 +230,12 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let buried = Buried::new(&config.home);
     buried.prune(bus::RETENTION).await;
     let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout);
-    if config.worktrees
-        && let Some(worktrees) = Worktrees::find(&config.ant, &config.workdir, &config.home).await
-    {
+    let isolating =
+        if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
+    if let Some(worktrees) = isolating {
         pool = pool.with_worktrees(worktrees);
+    } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
+        pool = pool.with_worktrees_left_behind(worktrees);
     }
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
     let messages = bus::inbox_consumer(&stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;

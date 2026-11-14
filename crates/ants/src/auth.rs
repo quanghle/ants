@@ -30,6 +30,10 @@ pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
 /// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike.
 const MAX_CONTROL_LINE: u32 = 16 * 1024;
+/// The longest uplink user JWT of a leaf node ([`issue_leaf`]): nats-server (2.14 and later) closes a leaf node
+/// connection whose CONNECT line is longer than 16 times the hub's `max_control_line`, and the line holds the JWT's
+/// signature and the leaf's names besides.
+const MAX_UPLINK_JWT: usize = 16 * MAX_CONTROL_LINE as usize - 4 * 1024;
 
 /// The default team directory, `~/.config/ants/auth`.
 pub fn default_dir() -> Result<PathBuf> {
@@ -204,6 +208,7 @@ pub fn issue_leaf(
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let name = leaf_user(machine);
     let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
+    check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)
 }
@@ -213,6 +218,20 @@ const LEAF_CONNECTIONS: [&str; 2] = ["LEAFNODE", "LEAFNODE_WS"];
 /// The `name` of the uplink user of `machine`'s leaf node.
 fn leaf_user(machine: &Machine) -> String {
     format!("leaf-{machine}")
+}
+
+/// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if the hub would not take it in the leaf's CONNECT.
+/// Each ant adds about 4 KB to them, 7.5 KB with a JetStream domain.
+fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
+    if jwt.len() > MAX_UPLINK_JWT {
+        bail!(
+            "the uplink credentials of {machine} would take {} bytes, over the {MAX_UPLINK_JWT} a hub takes in a leaf \
+             node's CONNECT (16 times max_control_line {MAX_CONTROL_LINE}, less room for the rest of the line): run \
+             some of its ants, humans or webhooks behind another leaf node, under another machine name",
+            jwt.len()
+        );
+    }
+    Ok(())
 }
 
 /// Add `more` to `permissions`, keeping each subject once, in the order first seen.
@@ -264,7 +283,9 @@ fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, V
 }
 
 /// Renew `jwt`, the uplink user JWT of `machine`'s leaf node issued from the account key in `dir`, for the same key,
-/// allowing `more` besides what it allows. Everything else in it stays as it is.
+/// allowing `more` besides what it allows. Everything else in it stays as it is, its permissions version
+/// ([`PERMISSIONS_VERSION`]) too: the rights of its other users are still those of that version. Refused if the hub
+/// would not take the renewed JWT ([`MAX_UPLINK_JWT`]).
 pub fn extend_leaf(dir: &Path, jwt: &str, machine: &Machine, more: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let (claims, body) = leaf_claims(&account.public_key(), jwt, machine)
@@ -278,7 +299,9 @@ pub fn extend_leaf(dir: &Path, jwt: &str, machine: &Machine, more: Permissions) 
     let mut nats = body["nats"].clone();
     nats["pub"]["allow"] = json!(permissions.publish);
     nats["sub"]["allow"] = json!(permissions.subscribe);
-    self::jwt(&account, &claims.sub, &claims.name, nats, claims.exp)
+    let renewed = self::jwt(&account, &claims.sub, &claims.name, nats, claims.exp)?;
+    check_uplink_size(&renewed, machine)?;
+    Ok(renewed)
 }
 
 /// Whether the user JWT `jwt` is for the key of `other` and allows everything `other` allows.
@@ -818,6 +841,44 @@ pub(crate) mod tests {
                 "ants leaf outbox m1 --ant dev-a --human alice --js-domain hub",
             ]
         );
+        let (jwt, _) = read_creds(&out("leaf-m1")).unwrap();
+        let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_js_domain(Some(&hub));
+        let renewed = creds::Finding::from_jwt(&extend_leaf(&team, &jwt, &m1, more).unwrap()).unwrap();
+        assert_eq!(renewed.version_status(), VersionStatus::Current);
+        assert!(
+            renewed.renew()[0].starts_with("ants auth leaf m1 --ant dev-a --ant dev-c --human alice"),
+            "{renewed:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Issue `out`, uplink credentials of `machine` for the hub's `domain`, for as many ants as they may carry; returns
+    /// the ants and the error refusing one more.
+    fn uplink_for_most_ants(team: &Path, machine: &Machine, domain: &JsDomain, out: &Path) -> (Vec<UserId>, String) {
+        let mut ants = Vec::new();
+        loop {
+            ants.push(p(&format!("dev-{}", ants.len())));
+            if let Err(e) = issue_leaf(team, machine, &members(&ants, &[]), &[], false, Some(domain), out) {
+                ants.pop();
+                return (ants, e.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
+        let dir = ants_test_support::scratch_dir("uplink-size");
+        let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+        init(&team).unwrap();
+        let domain: JsDomain = "hub".parse().unwrap();
+        let (ants, err) = uplink_for_most_ants(&team, &m1, &domain, &out);
+        assert!(ants.len() >= 30, "only {} ants fit", ants.len());
+        assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
+        let (jwt, _) = read_creds(&out).unwrap();
+        assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
+        let more = Permissions::for_leaf(&m1, [(&p("dev-x"), Role::Ant)]).with_js_domain(Some(&domain));
+        let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
+        assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1924,6 +1985,49 @@ pub(crate) mod tests {
         let (_, mut js) = bus::connect(url, Some(creds), domain, user, "test").await.unwrap();
         js.set_timeout(Duration::from_secs(1));
         js
+    }
+
+    /// The longest uplink credentials `ants auth leaf` issues, far over the hub's max_control_line, still connect.
+    #[tokio::test]
+    async fn the_longest_uplink_credentials_connect() {
+        let leaf_port = free_port();
+        let Some(hub) = Server::start_with(
+            "domain: hub",
+            &format!("leafnodes {{ listen: \"127.0.0.1:{leaf_port}\"\nno_advertise: true }}\n"),
+        ) else {
+            return;
+        };
+        let (domain, human, m1) = ("hub".parse::<JsDomain>().unwrap(), UserId::human(), "m1".parse().unwrap());
+        let team = hub.dir().join("auth");
+        let (_h_client, mut h_js) =
+            bus::connect(&hub.url, Some(&hub.creds_in(&human, Some(&domain))), Some(&domain), &human, "test")
+                .await
+                .unwrap();
+        h_js.set_timeout(Duration::from_secs(1));
+        bus::init_stream(&h_js).await.unwrap();
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        let (ants, _) = uplink_for_most_ants(&team, &m1, &domain, &leaf_creds);
+        assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 8 * 1024);
+        let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
+        let leaf = NatsServer::spawn_with(|dir| {
+            fs::copy(team.join(SERVER_CONF), dir.join(SERVER_CONF)).unwrap();
+            format!(
+                "include \"{SERVER_CONF}\"\nleafnodes {{ remotes: [{{ url: \"nats-leaf://127.0.0.1:{leaf_port}\"\n\
+                 account: {account}\ncredentials: {leaf_creds:?} }}] }}\n"
+            )
+        })
+        .unwrap();
+        let last = ants.last().unwrap();
+        let js = connect_to(&leaf.url, &hub.creds_in(last, Some(&domain)), Some(&domain), last).await;
+        let mut reached = false;
+        for _ in 0..50 {
+            if bus::open_stream(&js, last).await.is_ok() {
+                reached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(reached, "{last} on the leaf reaches the hub stream");
     }
 
     /// A hub with a JetStream domain, and a leaf node without JetStream whose uplink uses `ants auth leaf` credentials
