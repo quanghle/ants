@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use ants_daemon::{bus, roster};
-use ants_proto::{ROSTER_TTL, RosterEntry, UserId};
-use anyhow::Result;
+use ants_daemon::{bus, chains, roster};
+use ants_proto::{CHAINS_BUCKET, ROSTER_BUCKET, ROSTER_TTL, RosterEntry, UserId};
+use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 
@@ -62,23 +62,85 @@ fn activity(entry: &RosterEntry) -> &'static str {
 
 /// One line per ant whose harness is signed out: since when, and how to sign it in.
 pub fn signed_out(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|e| {
-            let out = e.signed_out.as_ref()?;
-            let how = match &out.sign_in {
-                Some(command) => format!("Run `{command}` on {}", e.machine),
-                None => format!("Sign {} in on {}", e.harness, e.machine),
-            };
-            Some(format!(
-                "{}: harness {} signed out for {}; messages to {} wait. {how} as the user the daemon runs as.",
-                e.ant,
-                e.harness,
-                short(since(out.since, now)),
-                e.ant
-            ))
-        })
-        .collect()
+    entries.iter().filter_map(|e| signed_out_line(e, now)).collect()
+}
+
+fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    let out = e.signed_out.as_ref()?;
+    let how = match &out.sign_in {
+        Some(command) => format!("Run `{command}` on {}", e.machine),
+        None => format!("Sign {} in on {}", e.harness, e.machine),
+    };
+    Some(format!(
+        "{}: harness {} signed out for {}; messages to {} wait. {how} as the user the daemon runs as.",
+        e.ant,
+        e.harness,
+        short(since(out.since, now)),
+        e.ant
+    ))
+}
+
+/// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
+/// kept for it either, the name may be wrong), a stale entry, or a harness signed out.
+pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
+    let Some(entry) = entry else {
+        let hint = if chain_kept { "" } else { " (`ants roster` lists the ants served: check the name)" };
+        return Some(format!("{ant} is not in the roster: no daemon serves {ant} now{hint}"));
+    };
+    if State::of(entry, now) == State::Stale {
+        return Some(format!(
+            "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
+            entry.machine,
+            short(since(entry.heartbeat_at, now))
+        ));
+    }
+    signed_out_line(entry, now)
+}
+
+/// How long [`unserved_warnings`] reads before giving up, so that an unreachable hub does not hold up a command.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A warning for each of `ants` no daemon serves now ([`unserved`]), read from the roster and the escalation chains
+/// kept. None when the roster cannot be read: a lookup is advisory, never a reason to fail.
+pub async fn unserved_warnings(js: &jetstream::Context, ants: &[&UserId]) -> Vec<String> {
+    if ants.is_empty() {
+        return Vec::new();
+    }
+    match tokio::time::timeout(LOOKUP_TIMEOUT, read_unserved(js, ants)).await {
+        Ok(Ok(warnings)) => warnings,
+        Ok(Err(e)) => {
+            tracing::debug!("not checking the roster: {e:#}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::debug!("not checking the roster: no answer within {LOOKUP_TIMEOUT:?}");
+            Vec::new()
+        }
+    }
+}
+
+async fn read_unserved(js: &jetstream::Context, ants: &[&UserId]) -> Result<Vec<String>> {
+    let kv = js.get_key_value(ROSTER_BUCKET).await.context("opening the roster")?;
+    let kept = js.get_key_value(CHAINS_BUCKET).await.ok();
+    let now = Utc::now();
+    let mut warnings = Vec::new();
+    for ant in ants {
+        let entry = match kv.get(ant.as_str()).await.with_context(|| format!("reading {ant} in the roster"))? {
+            Some(value) => {
+                let entry: RosterEntry = serde_json::from_slice(&value).with_context(|| format!("parsing {ant}"))?;
+                entry.check_key(ant.as_str())?;
+                Some(entry)
+            }
+            None => None,
+        };
+        // Only chains read and found lacking hint at a misspelt name.
+        let chain_kept = match (&entry, &kept) {
+            (None, Some(kept)) => chains::read(kept, ant).await.map_or(true, |chain| chain.is_some()),
+            _ => true,
+        };
+        warnings.extend(unserved(ant, entry.as_ref(), chain_kept, now));
+    }
+    Ok(warnings)
 }
 
 /// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an older
@@ -291,6 +353,55 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&super::json(&led, now).unwrap()).unwrap();
         assert_eq!((json["ant"].as_str(), json["state"].as_str()), (Some("dev-a"), Some("stale")));
         assert_eq!(json["escalate_to"], serde_json::json!(["lead"]));
+    }
+
+    #[test]
+    fn unserved_ants_say_why() {
+        let now = Utc::now();
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        assert_eq!(unserved(&dev_a, Some(&entry("dev-a", 60, 2, now)), false, now), None, "a live ant is served");
+        assert_eq!(
+            unserved(&dev_a, None, true, now).unwrap(),
+            "dev-a is not in the roster: no daemon serves dev-a now"
+        );
+        assert_eq!(
+            unserved(&dev_a, None, false, now).unwrap(),
+            "dev-a is not in the roster: no daemon serves dev-a now (`ants roster` lists the ants served: check the \
+             name)"
+        );
+        assert_eq!(
+            unserved(&dev_a, Some(&entry("dev-a", 600, 300, now)), true, now).unwrap(),
+            "dev-a is stale in the roster: the daemon on m1 last beat 5m ago and may not serve dev-a now"
+        );
+        let mut out = entry("dev-a", 600, 2, now);
+        out.signed_out = Some(ants_proto::SignInNeeded { since: now, sign_in: None });
+        assert!(unserved(&dev_a, Some(&out), true, now).unwrap().starts_with("dev-a: harness copilot signed out"));
+    }
+
+    /// Read with the human's credentials: an ant registered, one with only its escalation chain kept, one unknown.
+    #[tokio::test]
+    async fn the_human_learns_which_ants_no_daemon_serves() {
+        let Some(server) = Server::start() else { return };
+        let (_, human) = server.connect(&UserId::human()).await;
+        let ids: Vec<UserId> = ["dev-a", "dev-b", "dev-c"].map(|a| a.parse().unwrap()).into();
+        let ants: Vec<&UserId> = ids.iter().collect();
+        assert!(unserved_warnings(&human, &ants).await.is_empty(), "no roster to read, no warning");
+
+        bus::ensure_roster(&human, ROSTER_TTL).await.unwrap();
+        bus::ensure_chains(&human).await.unwrap();
+        let (_, js) = server.connect(&ids[0]).await;
+        let kv = bus::ensure_roster(&js, ROSTER_TTL).await.unwrap();
+        let _registration = Registration::start(kv, entry("dev-a", 60, 0, Utc::now()), ROSTER_HEARTBEAT).await.unwrap();
+        let (_, js) = server.connect(&ids[1]).await;
+        ants_daemon::chains::publish(&js, &ids[1], std::slice::from_ref(&ids[0])).await.unwrap();
+        assert_eq!(
+            unserved_warnings(&human, &ants).await,
+            [
+                "dev-b is not in the roster: no daemon serves dev-b now",
+                "dev-c is not in the roster: no daemon serves dev-c now (`ants roster` lists the ants served: check \
+                 the name)"
+            ]
+        );
     }
 
     /// With the human's credentials, so it also checks that they read the roster.
