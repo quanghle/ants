@@ -1,6 +1,7 @@
-//! The OS credential store, which may hold the NKey seed of a `.creds` file in its place: the macOS keychain, or the
-//! Secret Service on Linux (GNOME Keyring, KDE Wallet, KeePassXC) through `secret-tool`. Each seed is stored under the
-//! service [`SERVICE`] and its user's public key, so each device's or ant's key is an entry of its own.
+//! The OS credential store, which may hold the NKey seed of a `.creds` file in its place: the macOS keychain, the
+//! Secret Service on Linux (GNOME Keyring, KDE Wallet, KeePassXC) through `secret-tool`, or the Windows Credential
+//! Manager. Each seed is stored under the service [`SERVICE`] and its user's public key, so each device's or ant's key
+//! is an entry of its own.
 //!
 //! A store protects seeds at rest, not from a process running with access to it: a connection keeps the seed it
 //! loaded in memory, to sign the server's challenge again on every reconnect. Errors name what to do and never the
@@ -84,59 +85,343 @@ mod keychain {
 #[cfg(target_os = "linux")]
 impl Store for Os {
     fn get(&self, key: &str) -> Result<Option<String>> {
-        secret_tool(&["lookup", "service", SERVICE, "account", key], None)
+        secret_service::SecretTool::os().get(key)
     }
 
     fn set(&self, key: &str, seed: &str) -> Result<()> {
-        let label = format!("ants NKey seed {key}");
-        secret_tool(&["store", "--label", &label, "service", SERVICE, "account", key], Some(seed))?;
-        Ok(())
+        secret_service::SecretTool::os().set(key, seed)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        secret_tool(&["clear", "service", SERVICE, "account", key], None)?;
+        secret_service::SecretTool::os().delete(key)
+    }
+}
+
+/// The Secret Service through `secret-tool`, which reports a locked keyring by failing without a message, as it does
+/// when nothing matches: a silent lookup or clear is told apart by searching for the entry, which lists locked
+/// entries too.
+#[cfg(any(target_os = "linux", test))]
+mod secret_service {
+    use std::io::{Read as _, Write as _};
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Result, anyhow, bail};
+
+    use super::{SERVICE, Store};
+
+    /// How long `secret-tool` may run, as it waits for an unlock prompt for as long as the prompt stays open.
+    const TIMEOUT: Duration = Duration::from_secs(60);
+
+    const UNSTORE: &str = "to keep the seed in the file instead, run `ants keys unstore` where the keyring is unlocked";
+
+    /// The `secret-tool` program run, and how long it may run.
+    pub struct SecretTool {
+        pub program: PathBuf,
+        pub timeout: Duration,
+    }
+
+    impl SecretTool {
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn os() -> Self {
+            Self { program: "secret-tool".into(), timeout: TIMEOUT }
+        }
+
+        /// Whether an entry for `key` exists, locked or not. The search prints an unlocked entry's seed, which goes
+        /// no further than this.
+        fn stored(&self, key: &str) -> Result<bool> {
+            let found = self.run(&["search", "service", SERVICE, "account", key], None)?;
+            let line = format!("attribute.account = {key}");
+            Ok(found.is_some_and(|out| out.lines().any(|l| l.trim() == line)))
+        }
+
+        /// Run `secret-tool` with `args`, writing `input` (a seed) to its standard input, never to its arguments. Its
+        /// output on success; none when it fails silently, as a lookup finding nothing does.
+        fn run(&self, args: &[&str], input: Option<&str>) -> Result<Option<String>> {
+            let mut child = Command::new(&self.program)
+                .args(args)
+                .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => anyhow!(
+                        "the Secret Service needs `secret-tool`: install libsecret-tools (Debian, Ubuntu) or \
+                         libsecret (Fedora, Arch)"
+                    ),
+                    _ => anyhow!("running secret-tool: {e}"),
+                })?;
+            if let (Some(input), Some(mut stdin)) = (input, child.stdin.take())
+                && let Err(e) = stdin.write_all(input.as_bytes())
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+            // Its output is a few lines, well within the pipes' buffers, so it is read once it exits.
+            let deadline = Instant::now() + self.timeout;
+            let status = loop {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(
+                        "Secret Service (secret-tool {}): no answer within {} s: answer the keyring's unlock prompt \
+                         on the desktop, or unlock the keyring before running ants",
+                        args[0],
+                        self.timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            if let Some(mut out) = child.stdout.take() {
+                out.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut err) = child.stderr.take() {
+                err.read_to_end(&mut stderr)?;
+            }
+            let stderr = String::from_utf8_lossy(&stderr);
+            let error = stderr.trim().trim_start_matches("secret-tool:").trim();
+            match (status.success(), error) {
+                (true, _) => String::from_utf8(stdout).map(Some).map_err(|_| anyhow!("a stored seed is not text")),
+                (false, "") => Ok(None),
+                (false, error) => Err(failure(args[0], error)),
+            }
+        }
+    }
+
+    impl Store for SecretTool {
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            match self.run(&["lookup", "service", SERVICE, "account", key], None)? {
+                Some(seed) => Ok(Some(seed.trim().to_owned()).filter(|s| !s.is_empty())),
+                None if self.stored(key)? => Err(locked("lookup")),
+                None => Ok(None),
+            }
+        }
+
+        fn set(&self, key: &str, seed: &str) -> Result<()> {
+            let label = format!("ants NKey seed {key}");
+            match self.run(&["store", "--label", &label, "service", SERVICE, "account", key], Some(seed))? {
+                Some(_) => Ok(()),
+                None => Err(failure("store", "failed without a message")),
+            }
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            if self.run(&["clear", "service", SERVICE, "account", key], None)?.is_none() && self.stored(key)? {
+                return Err(locked("clear"));
+            }
+            Ok(())
+        }
+    }
+
+    fn locked(command: &str) -> anyhow::Error {
+        failure(command, "the keyring holding the entry is locked")
+    }
+
+    /// An error of `secret-tool command` naming what to do about it.
+    fn failure(command: &str, error: &str) -> anyhow::Error {
+        let fix = if error.contains("D-Bus") || error.contains("Could not connect") {
+            "no D-Bus session bus is reachable, as in a system service, cron or WSL without one: run ants in the \
+             user's login session or as a systemd user service (whose bus is $XDG_RUNTIME_DIR/bus)"
+        } else if error.contains("not activatable") || error.contains("not provided by any") {
+            "no Secret Service is installed or running in this session: install and start one (gnome-keyring, \
+             KeePassXC's Secret Service integration, KDE Wallet)"
+        } else if error.contains("locked") {
+            "unlock the keyring: a desktop login unlocks the login keyring, and an unlock prompt needs a desktop; \
+             without one, `gnome-keyring-daemon --unlock` reads the password on standard input"
+        } else if error.contains("does not exist at path") {
+            "no default keyring exists, and creating one asks for its password in a prompt that needs a desktop: \
+             create it in a desktop session, or with `gnome-keyring-daemon --unlock` reading the new password on \
+             standard input"
+        } else {
+            "check that a Secret Service runs in this session and that its keyring is unlocked"
+        };
+        anyhow!("Secret Service (secret-tool {command}): {error}: {fix}; {UNSTORE}")
+    }
+
+    #[cfg(all(test, unix))]
+    mod tests {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+
+        const KEY: &str = "UKEYTEST";
+
+        /// A `secret-tool` running the shell `script` with its arguments, and the directory to remove after.
+        fn fake(script: &str) -> (SecretTool, PathBuf) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = ants_test_support::scratch_dir("secret-tool");
+            let program = dir.join("secret-tool");
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (SecretTool { program, timeout: Duration::from_secs(10) }, dir)
+        }
+
+        #[test]
+        fn a_locked_entry_fails_rather_than_reading_as_missing() {
+            // As secret-tool does: lookup and clear fail silently, search lists the entry without its secret.
+            let (tool, dir) = fake(
+                r#"case "$1" in
+  search) printf '[/1]\nlabel = ants NKey seed\nattribute.account = %s\n' "$5"
+          echo 'secret-tool: Cannot get secret of a locked object' >&2 ;;
+  *) exit 1 ;;
+esac"#,
+            );
+            let error = tool.get(KEY).unwrap_err().to_string();
+            assert!(error.contains("secret-tool lookup") && error.contains("unlock the keyring"), "{error}");
+            let error = tool.delete(KEY).unwrap_err().to_string();
+            assert!(error.contains("secret-tool clear") && error.contains("locked"), "{error}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn a_missing_entry_reads_as_none_but_a_silent_store_fails() {
+            let (tool, dir) = fake(r#"[ "$1" = search ] || exit 1"#);
+            assert_eq!(tool.get(KEY).unwrap(), None);
+            tool.delete(KEY).unwrap();
+            let error = tool.set(KEY, "SUSEED").unwrap_err().to_string();
+            assert!(error.contains("secret-tool store") && !error.contains("SUSEED"), "{error}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn errors_name_what_is_missing() {
+            for (message, fix) in [
+                ("Cannot autolaunch D-Bus without X11 $DISPLAY", "no D-Bus session bus"),
+                ("The name is not activatable", "no Secret Service is installed"),
+                ("Object does not exist at path “/org/freedesktop/secrets/collection/login”", "no default keyring"),
+            ] {
+                let (tool, dir) = fake(&format!("echo 'secret-tool: {message}' >&2; exit 1"));
+                let error = tool.get(KEY).unwrap_err().to_string();
+                assert!(error.contains(message) && error.contains(fix), "{error}");
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn an_unanswered_unlock_prompt_times_out() {
+            let (mut tool, dir) = fake("exec sleep 30");
+            tool.timeout = Duration::from_millis(200);
+            let started = Instant::now();
+            let error = tool.get(KEY).unwrap_err().to_string();
+            assert!(error.contains("no answer within"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(10));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Store for Os {
+    fn get(&self, key: &str) -> Result<Option<String>> {
+        credman::get(key)
+    }
+
+    fn set(&self, key: &str, seed: &str) -> Result<()> {
+        credman::set(key, seed)
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        credman::delete(key)
+    }
+}
+
+/// The Windows Credential Manager: a generic credential per key, named `ants:<public key>` and kept for the user on
+/// this machine only (not roaming), encrypted by the user's logon credentials.
+#[cfg(windows)]
+mod credman {
+    use anyhow::{Result, anyhow};
+    use windows_sys::Win32::Foundation::{ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND, GetLastError, WIN32_ERROR};
+    use windows_sys::Win32::Security::Credentials::{
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    fn target(key: &str) -> Vec<u16> {
+        wide(&format!("{}:{key}", super::SERVICE))
+    }
+
+    pub fn get(key: &str) -> Result<Option<String>> {
+        let target = target(key);
+        let mut cred: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `target` is NUL-terminated and outlives the call; on success `cred` points to a credential that
+        // stays valid until freed below.
+        if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred) } == 0 {
+            return match unsafe { GetLastError() } {
+                ERROR_NOT_FOUND => Ok(None),
+                code => Err(failure(code)),
+            };
+        }
+        // SAFETY: as above; the blob is `CredentialBlobSize` bytes long, copied before the credential is freed.
+        let seed = unsafe {
+            let blob = &*cred;
+            let seed = if blob.CredentialBlob.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(blob.CredentialBlob, blob.CredentialBlobSize as usize).to_vec()
+            };
+            CredFree(cred.cast());
+            seed
+        };
+        let seed = String::from_utf8(seed).map_err(|_| anyhow!("a stored seed is not text"))?;
+        Ok(Some(seed.trim().to_owned()).filter(|s| !s.is_empty()))
+    }
+
+    pub fn set(key: &str, seed: &str) -> Result<()> {
+        let (target, user, comment) = (target(key), wide(key), wide("ants NKey seed"));
+        let cred = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: target.as_ptr().cast_mut(),
+            Comment: comment.as_ptr().cast_mut(),
+            CredentialBlobSize: u32::try_from(seed.len())?,
+            CredentialBlob: seed.as_ptr().cast_mut(),
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            UserName: user.as_ptr().cast_mut(),
+            ..Default::default()
+        };
+        // SAFETY: every pointer in `cred` points to a buffer that outlives the call, which only reads them.
+        if unsafe { CredWriteW(&cred, 0) } == 0 {
+            return Err(failure(unsafe { GetLastError() }));
+        }
         Ok(())
     }
-}
 
-/// Run `secret-tool` with `args`, writing `input` (a seed) to its standard input, never to its arguments. Its output
-/// on success; none when it fails silently, as a lookup finding nothing does.
-#[cfg(target_os = "linux")]
-fn secret_tool(args: &[&str], input: Option<&str>) -> Result<Option<String>> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-
-    const FIX: &str = "unlock the login keyring: a desktop login unlocks it, while a service without a login \
-                       session, an SSH session or WSL may have no Secret Service running or unlocked";
-    let mut child = Command::new("secret-tool")
-        .args(args)
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => anyhow::anyhow!(
-                "the Secret Service needs `secret-tool`: install libsecret-tools (Debian, Ubuntu) or libsecret \
-                 (Fedora, Arch)"
-            ),
-            _ => anyhow::anyhow!("running secret-tool: {e}"),
-        })?;
-    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin.write_all(input.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    match (out.status.success(), stderr.trim()) {
-        (true, _) => {
-            let text = String::from_utf8(out.stdout).map_err(|_| anyhow::anyhow!("a stored seed is not text"))?;
-            Ok(Some(text.trim().to_owned()).filter(|t| !t.is_empty()))
+    pub fn delete(key: &str) -> Result<()> {
+        let target = target(key);
+        // SAFETY: `target` is NUL-terminated and outlives the call.
+        if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
+            return match unsafe { GetLastError() } {
+                ERROR_NOT_FOUND => Ok(()),
+                code => Err(failure(code)),
+            };
         }
-        (false, "") => Ok(None),
-        (false, error) => bail!("Secret Service (secret-tool {}): {error}: {FIX}", args[0]),
+        Ok(())
+    }
+
+    fn failure(code: WIN32_ERROR) -> anyhow::Error {
+        let fix = match code {
+            ERROR_NO_SUCH_LOGON_SESSION => {
+                "this logon session has no credential set, as with an SSH session authenticated by key, a service \
+                 running as another account or a scheduled task not storing the password: run ants as the user in \
+                 a session logged on with the password, or keep the seed in the file (`ants keys unstore`)"
+            }
+            _ => "check the entry under Windows Credentials in Credential Manager",
+        };
+        let error = std::io::Error::from_raw_os_error(code as i32);
+        anyhow!("Windows Credential Manager: {error}: {fix}")
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl Store for Os {
     fn get(&self, _: &str) -> Result<Option<String>> {
         bail!("{UNSUPPORTED}")
@@ -151,7 +436,7 @@ impl Store for Os {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 const UNSUPPORTED: &str = "no OS credential store is supported on this platform: keep the seed in the .creds file";
 
 /// A store in memory, standing in for the OS one in tests; [`Memory::lock`] makes it fail as a locked store does.
