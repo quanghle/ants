@@ -93,6 +93,8 @@ Single machine without credentials:
 ```sh
 ants setup --ant dev-a --workdir ~/src/some-repo    # nats-server, config file, services, completions, doctor
 ants ask --wait @dev-a "summarise the open TODOs"
+ants ask @dev-a --file request.md                   # multiline message from a file (--file - reads stdin)
+ants ask @dev-a --edit                              # write it in $VISUAL / $EDITOR
 ants inbox                                          # unread replies
 ants roster                                         # active ants
 ants tools list                                     # pending tool approval requests
@@ -117,13 +119,13 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 
 | Command | Description |
 |---|---|
-| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID (`thread <id>`), then the message ID (`message <id>`). `--thread` continues an existing thread. Warns on stderr, but sends anyway, when no daemon serves the ant now (not in `ants_roster`, stale, its harness signed out, or held back by a provider limit), hinting at a misspelt name when `ants_chains` keeps no chain for it either. |
+| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT \| --file PATH \| --edit` | Send to `@ant` (`messenger` if omitted) and print the thread ID (`thread <id>`), then the message ID (`message <id>`). `--thread` continues an existing thread. The message is TEXT, or comes from a file or an editor (see [Composing messages](#composing-messages)). Warns on stderr, but sends anyway, when no daemon serves the ant now (not in `ants_roster`, stale, its harness signed out, or held back by a provider limit), hinting at a misspelt name when `ants_chains` keeps no chain for it either. |
 | `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies, each with its message ID and the reactions to it so far (`reactions` in `--json`), and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread` and `--json`, it also prints pending tool requests with the commands answering them, new ones, and how each ends (answered, by whom if an agent, or expired); without `--thread`, the device counts as reading its escalations, and without `--json` its tool requests too, see [Notifications](#notifications)). |
 | `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`rate-limited`/`out-of-quota`), the ants and permissions versions of their daemons, harnesses, capabilities, `escalate_to` chains and workdirs; below the table, a note when live daemons run mixed versions, one line per signed-out harness with its sign-in command and machine, and one per harness held back by a provider limit with when its messages are tried again. |
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants react MESSAGE REACTION [--remove]` | React to a message as the CLI's user, or remove that reaction (see [Reactions](#reactions)); reacting again or removing a reaction not there changes nothing. Wakes nobody, marks nothing read and ends no `--wait`. |
-| `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID, then the message ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
+| `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT \| --file PATH \| --edit` | Post to `ops` or `'#ops'` and print the thread ID, then the message ID (`@ant` wakes members; `@human` notifies members; no mention triages). TEXT may come from a file or an editor, as for `ants ask`. |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). Warns about ants named that no daemon serves now, as `ants ask` does. |
 | `ants channel read CHANNEL [--thread THREAD \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests; it puts the version of ants it runs at `channel-manager.serve` in `ants_webhooks` hourly. |
@@ -234,6 +236,22 @@ A check that cannot run, such as one needing a file that does not exist or right
 `contrib/skills/ants/SKILL.md` teaches an external coding agent to message ants through the CLI (`ants roster`, `ants ask`, `ants inbox --thread`, `ants watch`). Install with `copilot skill add contrib/skills/ants/SKILL.md` or copy into another agent's skills directory.
 
 ## Delivery
+
+### Composing messages
+
+`ants ask` and `ants post` take the message as the words after `@ant` (or after the channel), joined by spaces, or from one of:
+
+- `--file PATH`: the file's text, its lines kept as they are (inner blank lines, indentation, `\r\n`) but for the trailing line breaks and a leading byte order mark. `--file -` reads stdin to its end; stdin is read only then, so a script piping nothing, or a service whose stdin never closes, neither hangs nor sends anything unasked.
+- `--edit`: opens an editor on a new file in the temporary directory (mode `0600`, removed afterwards) and sends what it holds once the editor exits. The editor is the command line in `VISUAL`, else `EDITOR`, else `vi` (`notepad` on Windows), run as git runs it: through `sh -c` (`cmd /S /C` on Windows) with the file's path appended, so `EDITOR="code --wait"` works.
+
+A leading `@ant` word still picks the recipient of `ants ask` with `--file` or `--edit`; any other word with them is refused. Nothing is sent, with an error and a non-zero exit, when the message is empty or blank, when both `--file` and `--edit` are given, when the editor exits non-zero or is not found, or when the file or stdin is unreadable or not UTF-8. Saving an empty file in the editor cancels the message the same way.
+
+```sh
+ants ask @dev-a --file plan.md                         # recipient from the words, message from the file
+git diff --stat | ants post ops --file -               # stdin, only when asked for
+EDITOR="code --wait" ants ask --wait --edit @dev-a     # write in VS Code, then wait for the reply
+ants post ops --thread last --edit                     # follow up on a channel thread from the editor
+```
 
 ### Waiting for replies
 
@@ -659,6 +677,7 @@ ants channel delete ops                        # removes entry; stored posts rem
 ants post '#ops' "@dev-b deploy failed"        # wakes dev-b; prints new thread ID
 ants post ops "who owns billing?"              # no @mention -> channel messenger triages
 ants post -f --timeout 10m ops --thread <id> "status?"
+ants post ops --file notes.md                  # multiline post from a file
 ants channel read ops --limit 10
 ```
 

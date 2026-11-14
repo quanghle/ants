@@ -175,6 +175,31 @@ fn exercise_daemon(custom_tools: bool) {
     }
     assert_eq!(get(&metrics, "/nothing").0, 404);
 
+    if !custom_tools {
+        // A message from a file, or written in an editor, keeps its lines.
+        let file = dir.join("message.md");
+        std::fs::write(&file, "first line\n\n  indented\nlast\n").unwrap();
+        let ask = run(ants(&["ask", "--wait", "@dev-a", "--file", file.to_str().unwrap()]));
+        let stdout = String::from_utf8_lossy(&ask.stdout);
+        assert!(stdout.contains("dev-a: stub: first line\n\n  indented\nlast\n"), "{stdout}\n{}", daemon_log());
+        #[cfg(unix)]
+        {
+            let editor = dir.join("editor");
+            std::fs::write(&editor, "#!/bin/sh\nprintf 'from the\\n  editor\\n' > \"$1\"\n").unwrap();
+            std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let mut edit = ants(&["ask", "--wait", "--edit", "@dev-a"]);
+            edit.env_remove("VISUAL").env("EDITOR", &editor);
+            let ask = run(edit);
+            let stdout = String::from_utf8_lossy(&ask.stdout);
+            assert!(stdout.contains("dev-a: stub: from the\n  editor\n"), "{stdout}\n{}", daemon_log());
+            let mut cancel = ants(&["ask", "--edit", "@dev-a"]);
+            cancel.env("VISUAL", "true");
+            let cancelled = run(cancel);
+            assert!(!cancelled.status.success() && cancelled.stdout.is_empty(), "{cancelled:?}");
+            assert!(String::from_utf8_lossy(&cancelled.stderr).contains("the message is empty: nothing sent"));
+        }
+    }
+
     let inbox = run(ants(&["inbox"]));
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
     assert!(!String::from_utf8_lossy(&inbox.stdout).contains("stub:"), "ask --wait marked the reply read");
@@ -288,6 +313,18 @@ fn channels_are_managed_posted_to_and_read() {
     assert!(one.contains("any news?") && !one.contains("anyone?"), "{one}");
     let last = ok(&["channel", "read", "ops", "--limit", "1"]).0;
     assert!(last.contains("anyone?") && !last.contains("any news?"), "{last}");
+
+    // A post from stdin keeps its lines.
+    let mut piped =
+        Killed(ants(&["post", "ops", "--file", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+    piped.0.stdin.take().unwrap().write_all(b"@dev-b first\n  second\n").unwrap();
+    let mut posted = String::new();
+    piped.0.stdout.take().unwrap().read_to_string(&mut posted).unwrap();
+    assert!(piped.0.wait().unwrap().success(), "{posted}");
+    let multiline = posted.lines().next().and_then(|t| t.strip_prefix("thread ")).expect(&posted).to_owned();
+    let read = ok(&["channel", "read", "ops", "--thread", &multiline]).0;
+    // Indented under its first line.
+    assert!(read.contains("human: @dev-b first\n      second\n"), "{read}");
 
     // Nobody serves the messenger: a `--wait` gives up at the timeout, with an error, a reaction meanwhile being no
     // reply.
