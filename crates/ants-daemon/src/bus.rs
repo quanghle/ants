@@ -438,13 +438,9 @@ pub async fn store_acked<T: serde::Serialize>(
 ) -> Result<Option<jetstream::publish::PublishAck>> {
     let payload = serde_json::to_vec(value)?;
     let message = || jetstream::message::PublishMessage::build().payload(payload.clone().into()).message_id(msg_id);
-    let hub = match js.send_publish(subject.clone(), message()).await {
-        Ok(ack) => ack.await,
-        Err(e) => Err(e),
-    };
-    let unreachable = match hub {
+    let unreachable = match publish_to_hub(js, &subject, message()).await {
         Ok(ack) => return Ok(Some(ack)),
-        Err(e) if matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut) => e,
+        Err(e) if out_of_reach(&e) => e,
         Err(e) => return Err(e).context("waiting for JetStream to store the message"),
     };
     let Some(outbox) = subject::outbox(&subject) else {
@@ -464,6 +460,36 @@ pub async fn store_acked<T: serde::Serialize>(
     }
     tracing::warn!(%subject, "the hub's stream is out of reach ({unreachable}); kept in this machine's outbox");
     Ok(None)
+}
+
+/// Publish `value` as JSON to `subject` in the hub's stream only, never the machine's outbox, and wait until it is
+/// stored, returning the stream's ack, or `None` while the hub is out of reach (see [`store`]).
+pub async fn store_in_hub<T: serde::Serialize>(
+    js: &jetstream::Context,
+    subject: String,
+    value: &T,
+    msg_id: &str,
+) -> Result<Option<jetstream::publish::PublishAck>> {
+    let message =
+        jetstream::message::PublishMessage::build().payload(serde_json::to_vec(value)?.into()).message_id(msg_id);
+    match publish_to_hub(js, &subject, message).await {
+        Ok(ack) => Ok(Some(ack)),
+        Err(e) if out_of_reach(&e) => Ok(None),
+        Err(e) => Err(e).context("waiting for JetStream to store the message"),
+    }
+}
+
+async fn publish_to_hub(
+    js: &jetstream::Context,
+    subject: &str,
+    message: jetstream::message::PublishMessage,
+) -> Result<jetstream::publish::PublishAck, jetstream::context::PublishError> {
+    js.send_publish(subject.to_owned(), message).await?.await
+}
+
+/// Whether publishing failed because no stream answered (the leaf node's uplink is down) or none answered in time.
+fn out_of_reach(e: &jetstream::context::PublishError) -> bool {
+    matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut)
 }
 
 /// Messages to a user as they come, from [`live_inbox`].
