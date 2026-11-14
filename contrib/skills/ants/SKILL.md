@@ -113,9 +113,9 @@ than answering it unasked.
 ## Approvals
 
 An ant may wait on a tool request that a human, or an agent of its escalation chain, answers. Every human sees every
-request and the first decision wins. `ants approve` lists pending requests; one an agent of the chain decided is no
-longer listed. Do not answer them (`ants approve <id> allow-once|allow-always|reject`)
-unless the user explicitly says to; report them instead.
+request and the first decision wins. `ants tools list` lists pending requests and `ants tools show <id>` shows one; one
+an agent of the chain decided is no longer listed. Do not answer them (`ants tools approve <id> [--always]`,
+`ants tools reject <id>`) unless the user explicitly says to; report them instead.
 
 ## Reporting back
 

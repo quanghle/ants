@@ -1,4 +1,4 @@
-//! `ants approve`: the tool requests ants escalate to the humans, and their answers.
+//! `ants tools`: the tool requests ants escalate to the humans, and their answers.
 //!
 //! Requests and decisions both live in the ANTS stream, so the pending ones are read back by subject, without consuming
 //! anything: every human sees every request on `ants.approvals.<ant>` that has not expired and has no decision on
@@ -34,25 +34,7 @@ use async_nats::jetstream::stream::{LastRawMessageErrorKind, Stream};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt as _;
 
-/// A verdict as typed on the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Answer {
-    AllowOnce,
-    AllowAlways,
-    Reject,
-}
-
-impl From<Answer> for Verdict {
-    fn from(answer: Answer) -> Self {
-        match answer {
-            Answer::AllowOnce => Verdict::AllowOnce,
-            Answer::AllowAlways => Verdict::AllowAlways,
-            Answer::Reject => Verdict::Reject,
-        }
-    }
-}
-
-/// The command-line spelling of a verdict.
+/// How a verdict is printed.
 pub(crate) fn spelling(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::AllowOnce => "allow-once",
@@ -63,6 +45,21 @@ pub(crate) fn spelling(verdict: Verdict) -> &'static str {
 
 fn options(request: &ApprovalRequest) -> String {
     request.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|")
+}
+
+/// The command giving `verdict` on `request`.
+fn command(request: &ApprovalRequest, verdict: Verdict) -> String {
+    let id = qualified(request);
+    match verdict {
+        Verdict::AllowOnce => format!("ants tools approve {id}"),
+        Verdict::AllowAlways => format!("ants tools approve {id} --always"),
+        Verdict::Reject => format!("ants tools reject {id}"),
+    }
+}
+
+/// The commands answering `request` with the verdicts it offers, separated by ` | `.
+fn commands(request: &ApprovalRequest) -> String {
+    request.options.iter().map(|v| command(request, *v)).collect::<Vec<_>>().join(" | ")
 }
 
 /// Where a request stands.
@@ -85,7 +82,7 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
         let msg = match stream.get_first_raw_message_by_subject(subject::ALL_APPROVAL_REQUESTS, from).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(requests),
-            Err(e) => return Err(e).context("reading approval requests"),
+            Err(e) => return Err(e).context("reading tool requests"),
         };
         from = msg.sequence + 1;
         match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
@@ -93,7 +90,7 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
                 Ok(()) => requests.push((msg.sequence, request)),
                 Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping a request for another ant"),
             },
-            Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping unreadable approval request"),
+            Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping unreadable tool request"),
         }
     }
 }
@@ -267,7 +264,7 @@ pub fn qualified(request: &ApprovalRequest) -> String {
     format!("{}/{}", request.ant, request.id)
 }
 
-/// What `ants approve` was given to pick a request: a start of its id, and the ant when written `<ant>/<id>`.
+/// What `ants tools` was given to pick a request: a start of its id, and the ant when written `<ant>/<id>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub ant: Option<UserId>,
@@ -310,14 +307,14 @@ pub fn select(requests: Vec<ApprovalRequest>, query: &Query) -> Result<ApprovalR
     const LISTED: usize = 10;
     let mut found: Vec<_> = requests.into_iter().filter(|r| query.matches(r)).collect();
     match found.len() {
-        0 => bail!("no approval request {query}"),
+        0 => bail!("no tool request {query}"),
         1 => Ok(found.remove(0)),
         n => {
             let mut names = found.iter().take(LISTED).map(qualified).collect::<Vec<_>>().join(", ");
             if n > LISTED {
                 names.push_str(&format!(" and {} more", n - LISTED));
             }
-            bail!("{n} approval requests match {query}: {names}; give more of the id or name the ant as <ant>/<id>")
+            bail!("{n} tool requests match {query}: {names}; give more of the id or name the ant as <ant>/<id>")
         }
     }
 }
@@ -371,7 +368,7 @@ async fn check(
         }
     };
     if !request.options.contains(&verdict) {
-        bail!("{} is not offered for request {}; choose {}", spelling(verdict), qualified(request), options(request));
+        bail!("{} is not offered for request {}; answer {}", spelling(verdict), qualified(request), commands(request));
     }
     Ok(last)
 }
@@ -451,12 +448,9 @@ fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> Stri
     }
     out.push_str(&format!("asked    {}\n", request.requested_at.format("%Y-%m-%d %H:%M:%S")));
     match state {
-        State::Pending => out.push_str(&format!(
-            "expires  in {}\nanswer   ants approve {} {}",
-            left(request.expires_at, now),
-            qualified(request),
-            options(request)
-        )),
+        State::Pending => {
+            out.push_str(&format!("expires  in {}\nanswer   {}", left(request.expires_at, now), commands(request)))
+        }
         State::Decided(d) => {
             out.push_str(&format!("answered {} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S")))
         }
@@ -472,63 +466,61 @@ fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> Stri
     out
 }
 
-/// What `ants approve` was asked to do.
-pub struct Args {
-    pub id: Option<String>,
-    pub answer: Option<Answer>,
-    pub follow: bool,
-    pub json: bool,
-}
-
-pub async fn run(nats: &crate::Nats<'_>, args: Args) -> Result<()> {
-    let (client, js) = nats.connect("ants-approve").await?;
+/// `ants tools list`: the pending requests, then with `follow` new ones as they come, until interrupted.
+pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()> {
+    let (client, js) = nats.connect("ants-tools").await?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
-    let show = |request: &ApprovalRequest| -> Result<()> {
-        if args.json {
+    let print = |request: &ApprovalRequest| -> Result<()> {
+        if json {
             println!("{}", serde_json::to_string(request)?);
         } else {
             println!("{}", row(request, Utc::now()));
         }
         Ok(())
     };
-    match (&args.id, args.answer) {
-        (Some(id), Some(verdict)) => {
-            let decision = answer(&js, &stream, id, verdict.into(), Utc::now()).await?;
-            println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
-        }
-        (Some(id), None) => {
-            let (seq, request) = find(&stream, id).await?;
-            let now = Utc::now();
-            let state = state(&js, &stream, seq, &request, now).await?;
-            if args.json {
-                println!("{}", serde_json::to_string(&request)?);
-            } else {
-                println!("{}", details(&request, &state, now));
-            }
-        }
-        (None, _) => {
-            // Subscribe before listing, so a request published in between is not missed.
-            let mut live =
-                if args.follow { Some(client.subscribe(subject::ALL_APPROVAL_REQUESTS).await?) } else { None };
-            let listed = pending(&js, &stream, Utc::now()).await?;
-            if listed.is_empty() && !args.follow && !args.json {
-                println!("no pending approval requests");
-            }
-            listed.iter().try_for_each(show)?;
-            if let Some(live) = &mut live {
-                while let Some(msg) = live.next().await {
-                    let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
-                    if let Err(e) = request.check_subject(&msg.subject) {
-                        tracing::warn!(error = %e, "skipping a request for another ant");
-                    } else if !request.is_expired(Utc::now())
-                        && !listed.iter().any(|r| r.id == request.id && r.ant == request.ant)
-                    {
-                        show(&request)?;
-                    }
-                }
+    // Subscribe before listing, so a request published in between is not missed.
+    let mut live = if follow { Some(client.subscribe(subject::ALL_APPROVAL_REQUESTS).await?) } else { None };
+    let listed = pending(&js, &stream, Utc::now()).await?;
+    if listed.is_empty() && !follow && !json {
+        println!("no pending tool requests");
+    }
+    listed.iter().try_for_each(print)?;
+    if let Some(live) = &mut live {
+        while let Some(msg) = live.next().await {
+            let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
+            if let Err(e) = request.check_subject(&msg.subject) {
+                tracing::warn!(error = %e, "skipping a request for another ant");
+            } else if !request.is_expired(Utc::now())
+                && !listed.iter().any(|r| r.id == request.id && r.ant == request.ant)
+            {
+                print(&request)?;
             }
         }
     }
+    Ok(())
+}
+
+/// `ants tools show ID`: one request in full, with where it stands.
+pub async fn show(nats: &crate::Nats<'_>, id: &str, json: bool) -> Result<()> {
+    let (_, js) = nats.connect("ants-tools").await?;
+    let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+    let (seq, request) = find(&stream, id).await?;
+    if json {
+        println!("{}", serde_json::to_string(&request)?);
+    } else {
+        let now = Utc::now();
+        let state = state(&js, &stream, seq, &request, now).await?;
+        println!("{}", details(&request, &state, now));
+    }
+    Ok(())
+}
+
+/// `ants tools approve ID [--always]` and `ants tools reject ID`: answer one request with `verdict`.
+pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict) -> Result<()> {
+    let (_, js) = nats.connect("ants-tools").await?;
+    let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+    let decision = answer(&js, &stream, id, verdict, Utc::now()).await?;
+    println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
     Ok(())
 }
 
@@ -573,7 +565,7 @@ mod tests {
         bus::publish_json(&intruder, subject::approvals(&dev_b), &forged, None).await.unwrap();
         assert_eq!(titles(&pending(&human, &stream, Utc::now()).await.unwrap()), ["git push", "rm -rf build"]);
         let err = answer(&human, &stream, &forged.id.to_string(), Verdict::AllowAlways, Utc::now()).await.unwrap_err();
-        assert!(err.to_string().contains("no approval request"), "{err:#}");
+        assert!(err.to_string().contains("no tool request"), "{err:#}");
 
         let id = push.id.to_string();
         let decision = answer(&human, &stream, &id[..id.len() - 4], Verdict::AllowAlways, Utc::now()).await.unwrap();
@@ -589,7 +581,14 @@ mod tests {
         assert!(expired.to_string().contains("expired"), "{expired:#}");
         let unoffered =
             answer(&human, &stream, &rm.id.to_string(), Verdict::AllowAlways, Utc::now()).await.unwrap_err();
-        assert!(unoffered.to_string().contains("choose allow-once|reject"), "{unoffered:#}");
+        let rm_id = qualified(&rm);
+        assert_eq!(
+            unoffered.to_string(),
+            format!(
+                "allow-always is not offered for request {rm_id}; answer ants tools approve {rm_id} | \
+                 ants tools reject {rm_id}"
+            )
+        );
         assert_eq!(super::decision(&stream, &rm).await.unwrap(), None, "an unoffered verdict publishes nothing");
         let (seq, _) = find(&stream, &rm.id.to_string()).await.unwrap();
         assert_eq!(state(&human, &stream, seq, &rm, rm.expires_at).await.unwrap(), State::Expired);
@@ -614,10 +613,7 @@ mod tests {
 
         let id = real.id.to_string();
         let err = answer(&human, &stream, &id, Verdict::AllowOnce, Utc::now()).await.unwrap_err();
-        assert!(
-            err.to_string().contains(&format!("2 approval requests match {id}: dev-a/{id}, dev-b/{id};")),
-            "{err:#}"
-        );
+        assert!(err.to_string().contains(&format!("2 tool requests match {id}: dev-a/{id}, dev-b/{id};")), "{err:#}");
 
         let decision =
             answer(&human, &stream, &format!("dev-a/{}", &id[..8]), Verdict::AllowOnce, Utc::now()).await.unwrap();
@@ -728,8 +724,8 @@ mod tests {
             "invalid user id \"DEV-A\": use 1-64 of a-z, 0-9 and '-', starting with a letter or digit"
         );
         assert_eq!(pick(&format!("dev-a/{}", id.to_uppercase())), Ok(known[0].clone()));
-        assert_eq!(pick(&format!("dev-c/{id}")).unwrap_err(), format!("no approval request dev-c/{id}"));
-        assert_eq!(pick("0000").unwrap_err(), "no approval request 0000");
+        assert_eq!(pick(&format!("dev-c/{id}")).unwrap_err(), format!("no tool request dev-c/{id}"));
+        assert_eq!(pick("0000").unwrap_err(), "no tool request 0000");
         assert_eq!(pick("dev-a/").unwrap_err(), "no request id given");
         assert!(pick("dev-a/dev-b/0").unwrap_err().contains("is not a request id"));
         assert!(pick("/0").unwrap_err().contains("invalid user id"));

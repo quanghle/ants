@@ -76,7 +76,7 @@ ants daemon --ant dev-a --workdir ~/src/some-repo &
 ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
 ants roster                                         # ants being served
-ants approve                                        # tool requests waiting for an answer
+ants tools list                                     # tool requests waiting for an answer
 ants plan <thread>                                  # a thread's notes (see Thread notes)
 ants channel create ops --member dev-a,dev-b        # a channel (see Channels)
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a only; prints the thread
@@ -105,7 +105,7 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
-| `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins, a human's or that of an agent of the ant's chain. |
+| `ants tools list` / `show ID` / `approve ID` / `reject ID` | Lists pending tool requests (`--follow`, `--json`), shows one, allows it once (`--always`: for the rest of the session) or rejects it; every human sees every request, and the first decision wins, a human's or that of an agent of the ant's chain. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
 | `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects, direct gets and republishing of inbox messages an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the ants of the config file, or one ant described by flags. |
@@ -546,7 +546,7 @@ wins, whether a human's or an agent's: an agent's loses to a human's already sto
 not climb past the ant's own chain, and the time limit stays the same: the `escalate` tool refuses to send it higher,
 and no member leads it, so a member's reply to the notice goes to the requesting ant as any reply. Without a chain
 only humans decide.
-`ants approve` reads such decisions back from the requesting ant's inbox in the stream (human credentials read every
+`ants tools` reads such decisions back from the requesting ant's inbox in the stream (human credentials read every
 inbox) and takes them as the ant does: from an ant of its `escalate_to` (its roster entry's, else the one kept in
 `ants_chains`), on one of its own requests, sent before the request expired, and stored before any human's decision. A
 request so decided is no longer listed, shows `answered allow-once by lead`, and answering it is refused with
@@ -555,11 +555,13 @@ check and an agent's decision still stores a decision the ant may not act on: th
 `--allow-tools` is `--allow '*'`, for trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
 
 ```sh
-ants approve                              # pending requests: ant/id, thread, tool, files, options, time left
-ants approve --follow                     # then keep printing new ones until Ctrl-C (--json: one request per line)
-ants approve dev-a/019a7d2e               # one request in full, with the tool input; a unique start of the id will do
-ants approve dev-a/019a7d2e allow-once    # answer it: allow-once, allow-always or reject
-ants watch 'ants.approvals.>'             # requests and humans' decisions as they come
+ants tools list                            # pending requests: ant/id, thread, tool, files, options, time left
+ants tools list --follow                   # then keep printing new ones until Ctrl-C (--json: one request per line)
+ants tools show dev-a/019a7d2e             # one request in full, with the tool input; a unique start of the id will do
+ants tools approve dev-a/019a7d2e          # allow it once (allow-once)
+ants tools approve dev-a/019a7d2e --always # allow it for the rest of the session (allow-always), when offered
+ants tools reject dev-a/019a7d2e           # reject it
+ants watch 'ants.approvals.>'              # requests and humans' decisions as they come
 ```
 
 A request is named `<ant>/<id>`. Ids are unique only per ant, as any ant may publish a request reusing
@@ -1119,14 +1121,14 @@ old and a new binary cannot read each other's roster, chain, human, approval or 
 - MCP: the tool `list_personas` is now `list_ants`. Replace `other:list_personas` in each ant's `allow` list, and the
   old name in any agent instructions.
 - JSON: the field `persona` is now `ant` in roster, chain, approval, dead-letter, enrollment and status messages, and
-  so in `ants roster --json` and `ants approve --json`. A `HumanEntry` in `ants_humans` names its user in `human`.
+  so in `ants roster --json` and `ants tools list --json`. A `HumanEntry` in `ants_humans` names its user in `human`.
 - Unchanged: subjects, consumer names, KV keys, credentials and NATS permissions. No `ants auth user`, `ants auth leaf`
   or `ants init` is needed.
 
 Stored entries written under the old naming are skipped as unreadable, never deleted automatically:
 
 - Before upgrading, answer pending approvals (`ants approve`) and replay or drop dead letters (`ants dead`) with the
-  old binary. Afterwards old ones are skipped by `ants approve` and `ants dead list`, cannot be replayed or dropped,
+  old binary. Afterwards old ones are skipped by `ants tools list` and `ants dead list`, cannot be replayed or dropped,
   and expire with the stream after 30 days.
 - Each daemon rewrites the roster and chain entries of its ants on start. An old roster entry expires on its own; an
   old chain entry of an ant no longer served counts as no chain until deleted from `ants_chains`.

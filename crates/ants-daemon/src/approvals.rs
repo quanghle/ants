@@ -1,20 +1,20 @@
 //! Escalating tool requests to the humans, and to the ant's chain, over NATS.
 //!
 //! The daemon subscribes to `ants.approvals.<ant>.<request id>`, then publishes the [`ApprovalRequest`] to
-//! `ants.approvals.<ant>`, where the stream keeps it, so an `ants approve` started later still finds it. Any human
+//! `ants.approvals.<ant>`, where the stream keeps it, so an `ants tools list` started later still finds it. Any human
 //! publishes the [`ApprovalDecision`] to the request's own subject, which only humans may write to; the first decision
 //! stored wins. No decision before `expires_at` rejects the request.
 //!
 //! A decision heard on the subject is only a sign that one was published: core NATS delivers a publish the stream then
-//! refuses, as when `ants approve` loses to another human's decision, and the two may arrive in either order. So the
-//! ant acts on the decision the stream stored on the subject, read back with a direct get of its last message
+//! refuses, as when `ants tools approve` loses to another human's decision, and the two may arrive in either order. So
+//! the ant acts on the decision the stream stored on the subject, read back with a direct get of its last message
 //! (`$JS.API.DIRECT.GET.ANTS.<decision subject>`, which credentials allow for the ant's own requests only); while
-//! none is stored it looks again every [`RECHECK`]. `ants approve` stores a decision only while the subject holds none,
-//! so the last stored is the first. The stored decision is not republished to a subject of its own: an ant can point
-//! a push consumer at any subject outside the stream, and nats-server does not check its deliver subject against the
-//! ant's permissions, so only a subject the stream captures, or a reply to the ant's own request, cannot be
-//! forged. A stream without direct gets, from before them, or credentials without the permission make the ant act
-//! on the first decision it hears, as it used to, with a warning: `ants init` and `ants auth user` upgrade them.
+//! none is stored it looks again every [`RECHECK`]. `ants tools approve` and `reject` store a decision only while the
+//! subject holds none, so the last stored is the first. The stored decision is not republished to a subject of its
+//! own: an ant can point a push consumer at any subject outside the stream, and nats-server does not check its deliver
+//! subject against the ant's permissions, so only a subject the stream captures, or a reply to the ant's own request,
+//! cannot be forged. A stream without direct gets, from before them, or credentials without the permission make the ant
+//! act on the first decision it hears, as it used to, with a warning: `ants init` and `ants auth user` upgrade them.
 //!
 //! # The ant's chain
 //!
@@ -251,7 +251,7 @@ impl NatsApprover {
     }
 
     /// The decision the stream stored on `request`'s decision subject: its last message, which is also its first, as
-    /// `ants approve` stores one only while the subject holds none.
+    /// `ants tools approve` and `reject` store one only while the subject holds none.
     async fn stored(&self, request: &ApprovalRequest) -> Stored {
         let stream = match self.js.get_stream_no_info(STREAM).await {
             Ok(stream) => stream,
@@ -301,8 +301,9 @@ fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
     let (ant, id, thread) = (&request.ant, request.id, &request.thread_id);
     let mut text = format!(
         "[ants] Approval request {id} on thread {thread}: {ant} asks to run a tool outside its allowlist. Sent to \
-         {}; any of them decides with the decide_approval tool ({}). Humans may decide too, with `ants approve \
-         {ant}/{id}`; the first decision wins. Without one by {} the request is rejected.\n\nTool: {} ({})",
+         {}; any of them decides with the decide_approval tool ({}). Humans may decide too, with `ants tools \
+         approve {ant}/{id}` or `ants tools reject {ant}/{id}`; the first decision wins. Without one by {} the \
+         request is rejected.\n\nTool: {} ({})",
         to.join(", "),
         verdicts.join(", "),
         request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -391,7 +392,7 @@ mod tests {
             .unwrap();
         assert_eq!(timeout(Duration::from_secs(5), decided).await.unwrap().unwrap(), Verdict::AllowAlways);
 
-        // Both the request and the decision stay in the stream for a late `ants approve`.
+        // Both the request and the decision stay in the stream for a late `ants tools list`.
         let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
         assert_eq!(stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap().sequence, 1);
         assert!(stream.get_last_raw_message_by_subject(&decision.subject()).await.is_ok());
@@ -400,7 +401,7 @@ mod tests {
         assert_eq!(impatient.decide(thread, tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
     }
 
-    /// A decision the stream refuses, as `ants approve` loses to another human's, still reaches the ant.
+    /// A decision the stream refuses, as `ants tools approve` loses to another human's, still reaches the ant.
     async fn publish_refused(human: &async_nats::Client, decision: &ApprovalDecision) {
         let mut headers = async_nats::HeaderMap::new();
         // Nothing is stored on the subject yet, so the stream refuses this.

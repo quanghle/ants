@@ -1,7 +1,6 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
 mod add;
-mod approve;
 mod auth;
 mod bridge;
 mod channel;
@@ -12,13 +11,14 @@ mod leaf;
 mod outbox;
 mod roster;
 mod serve;
+mod tools;
 
 use std::path::{Path, PathBuf};
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, plan};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation, JsDomain, Machine,
-    PlanPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
+    PlanPost, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -130,22 +130,10 @@ enum Command {
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans and chains buckets on the server, or
     /// add the stream subjects and direct gets an older version lacks. Needs a human's credentials.
     Init,
-    /// Tool requests ants escalate: list the pending ones, show one, or answer it. Every human sees every
-    /// request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
-    Approve {
-        /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
-        /// Without it, list the pending requests.
-        id: Option<String>,
-        /// Answer the request. Without it, show the request.
-        #[arg(requires = "id")]
-        verdict: Option<approve::Answer>,
-        /// After listing, keep printing new requests until Ctrl-C.
-        #[arg(long, short, conflicts_with = "id")]
-        follow: bool,
-        /// One JSON request per line.
-        #[arg(long)]
-        json: bool,
-    },
+    /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
+    /// sees every request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
+    #[command(subcommand)]
+    Tools(ToolsCommand),
     /// Messages ants gave up on: inspect, replay or drop them.
     #[command(subcommand)]
     Dead(DeadCommand),
@@ -155,8 +143,8 @@ enum Command {
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
     /// key to sign; run again with --jwt or --enroll to complete the credentials. Restart the daemon to serve the ant.
     Add(Box<add::AddArgs>),
-    /// Enrollment requests from `ants add --enroll`, on the machine holding the account key: list them, approve or
-    /// reject one.
+    /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
+    /// list them, approve or reject one.
     #[command(subcommand)]
     Enroll(EnrollCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
@@ -367,6 +355,40 @@ enum AuthCommand {
 }
 
 #[derive(Subcommand)]
+enum ToolsCommand {
+    /// List the pending tool requests: `<ant>/<id>`, thread, tool, files, options offered and time left.
+    List {
+        /// After listing, keep printing new requests until Ctrl-C.
+        #[arg(long, short)]
+        follow: bool,
+        /// One JSON request per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a tool request in full: its tool input, where it stands, and the commands answering it.
+    Show {
+        /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        id: String,
+        /// The request as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allow the tool call of a pending request, once or with --always for the rest of the ant's session.
+    Approve {
+        /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        id: String,
+        /// Allow this tool for the rest of the session (allow-always), when the request offers it.
+        #[arg(long)]
+        always: bool,
+    },
+    /// Reject the tool call of a pending request.
+    Reject {
+        /// Request as `<ant>/<id>`, or a bare id when only one ant has it; a unique start of the id will do.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum EnrollCommand {
     /// List the enrollment requests heard, the latest of each ant and key; machines repeat theirs every few
     /// seconds while they wait.
@@ -522,10 +544,13 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Approve { id, verdict, follow, json } => {
-            let args = approve::Args { id, answer: verdict, follow, json };
-            approve::run(&nats()?, args).await
+        Command::Tools(ToolsCommand::List { follow, json }) => tools::list(&nats()?, follow, json).await,
+        Command::Tools(ToolsCommand::Show { id, json }) => tools::show(&nats()?, &id, json).await,
+        Command::Tools(ToolsCommand::Approve { id, always }) => {
+            let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };
+            tools::decide_request(&nats()?, &id, verdict).await
         }
+        Command::Tools(ToolsCommand::Reject { id }) => tools::decide_request(&nats()?, &id, Verdict::Reject).await,
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
             let ants = serve::ants(&args, &ants_daemon::config::default_path()?)?;
@@ -1091,7 +1116,7 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
             printer.line(&request_line(&r, &forged(r.check_subject(&msg.subject).is_ok())))
         } else if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
             let forged = forged(d.subject() == msg.subject.as_str());
-            printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, approve::spelling(d.verdict)))
+            printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, tools::spelling(d.verdict)))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };
@@ -1107,12 +1132,7 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
 fn envelope_line(e: &Envelope, forged: &str) -> String {
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
     if let Some(d) = &e.approval {
-        return format!(
-            "{head} decides {} on approval request {}/{}",
-            approve::spelling(d.verdict),
-            d.ant,
-            d.request_id
-        );
+        return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
     }
     match &e.escalation {
         Some(x) => format!("{head} [{}]: {}", escalation_note(x), e.text),
@@ -1133,7 +1153,7 @@ fn escalation_note(x: &Escalation) -> String {
 
 /// A tool request as `ants watch` prints it.
 fn request_line(r: &ApprovalRequest, forged: &str) -> String {
-    let options = r.options.iter().map(|v| approve::spelling(*v)).collect::<Vec<_>>().join("|");
+    let options = r.options.iter().map(|v| tools::spelling(*v)).collect::<Vec<_>>().join("|");
     let (thread, ant, id) = (&r.thread_id, &r.ant, r.id);
     format!("[{thread}] {ant}{forged} asks approval {ant}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
@@ -1342,6 +1362,35 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "add", "dev-a", "--enroll", "enroll-dev-a.creds"]).unwrap();
         assert!(matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a"));
         assert!(Cli::try_parse_from(["ants", "ant", "add", "dev-a"]).is_err());
+    }
+
+    #[test]
+    fn tool_requests_are_listed_shown_approved_and_rejected() {
+        let parse = |line: &str| Cli::try_parse_from(line.split(' ')).map(|cli| cli.command);
+        assert!(matches!(
+            parse("ants tools approve dev-a/019a --always"),
+            Ok(Command::Tools(ToolsCommand::Approve { id, always: true })) if id == "dev-a/019a"
+        ));
+        assert!(matches!(
+            parse("ants tools approve 019a"),
+            Ok(Command::Tools(ToolsCommand::Approve { id, always: false })) if id == "019a"
+        ));
+        assert!(
+            matches!(parse("ants tools reject 019a"), Ok(Command::Tools(ToolsCommand::Reject { id })) if id == "019a")
+        );
+        assert!(matches!(
+            parse("ants tools show 019a --json"),
+            Ok(Command::Tools(ToolsCommand::Show { id, json: true })) if id == "019a"
+        ));
+        assert!(matches!(
+            parse("ants tools list -f"),
+            Ok(Command::Tools(ToolsCommand::List { follow: true, json: false }))
+        ));
+        for line in
+            ["ants approve", "ants approve 019a allow-once", "ants tools approve", "ants tools reject 019a --always"]
+        {
+            assert!(parse(line).is_err(), "{line}");
+        }
     }
 
     #[test]
