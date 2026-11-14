@@ -17,6 +17,7 @@ pub mod harness;
 pub mod history;
 pub mod hub;
 pub mod humans;
+pub mod ipc;
 pub mod keystore;
 pub mod links;
 pub mod mcp;
