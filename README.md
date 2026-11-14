@@ -107,6 +107,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
 | `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
 | `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
+| `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`), rewrite `server.conf` and push the account to the `--nats` server (`--no-push` to skip); list revoked keys; push the account again. |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
@@ -457,6 +458,18 @@ ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
 ants auth user github --webhook --to dev-a --js-domain hub
 ants auth channel-manager --js-domain hub               # channel-manager.creds
 ```
+
+Every key issued or signed here (`ants auth user`, `enroll`, `channel-manager`, `leaf`, `enroll approve`) is recorded in `issued.jsonl` (key, name, kind, issue time, expiry). Credentials stay valid until they expire, unless revoked:
+
+```sh
+ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, on all devices
+ants auth revoke --key UABC... --nats wss://hub.example/nats # one key
+ants auth revoke leaf-macbook --no-push                     # a leaf uplink; enroll-<ant>, channel-manager alike
+ants auth revoked                                           # key, name, revoked at, expiry
+ants auth push --nats wss://hub.example/nats                # push the account again
+```
+
+`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`. Either way, copy the new `server.conf` to the hub and every leaf node and reload them (`SIGHUP`): restarts otherwise bring back the old account, and leaf nodes authenticate their local clients themselves, so a revoked ant behind a leaf keeps working there until its leaf has it (or until `ants auth leaf` is issued again without it). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
 
 Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all nine KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`). Upgrades that withdraw stream info of `ants_sessions`, `ants_attempts` and `ants_owners` from ants and webhooks need new ant, webhook and leaf credentials only after every daemon and `ants webhook serve` runs the new version (older ones need that stream info); until then, old credentials keep working and keep the listing open. Upgrades that add `ants_owners`, have it take records from leaf outboxes, or key it by recipient, need both for every ant, human and webhook, and `ants leaf outbox` again per machine: until then, ants' messages on threads no channel post started carry no owner, and their escalations go to the daemon's default human. Records keyed by thread alone, from before the recipient key, are not read.
 

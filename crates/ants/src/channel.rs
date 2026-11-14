@@ -812,7 +812,8 @@ mod tests {
 
         let creds = server.dir().join("github.creds");
         let permissions = ants_proto::Permissions::for_webhook(&hook, &[ants_proto::Destination::Channel(ops())]);
-        crate::auth::issue_with(&server.dir().join("auth"), &hook, permissions, &creds).unwrap();
+        crate::auth::issue_with(&server.dir().join("auth"), &hook, crate::revoke::Kind::Webhook, permissions, &creds)
+            .unwrap();
         let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
         let markers = h_js.get_key_value(ants_proto::WEBHOOKS_BUCKET).await.unwrap();
         markers.put(ants_proto::webhook_marker_key(&hook), "github".into()).await.unwrap();

@@ -42,6 +42,14 @@ include "server.conf"
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).
 - `feature_flags { js_api_reply_v2: true }` scopes JetStream source control replies to `$JSC.R.<machine>.*.ANTS_OUT.>`, required for hub outbox sourcing under scoped leaf credentials.
 
+### Revocation
+
+`server.conf` preloads the team's account JWT into a `MEMORY` resolver. `ants auth revoke NAME` (or `--key U...`) adds the user keys to the account's `revocations` (key to revocation time; JWTs of the key issued at or before it are refused), rewrites `server.conf` keeping its operator JWT (nats-server reloads no change of the trusted operator), and pushes the account JWT to the `--nats` server:
+
+- **Push:** a user of the system account, signed with `system.nk` for ten minutes, requests `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`; the server applies the account at once and closes the revoked users' connections. Pointed at a leaf node, the push updates that leaf only. An unreachable server leaves the revocation recorded in `revoked.json` and `server.conf`; `ants auth push` retries. Hubs on a `server.conf` from before revocations (whose system account allows no connection) need the new one copied and reloaded first.
+- **Reload:** copying the new `server.conf` over the hub's or a leaf's and sending `SIGHUP` applies the revocations too, also closing connections. Copy it to the hub and to every leaf node in any case: a restart otherwise loads the old account, and a leaf authenticates its local clients against its own copy, so a revoked ant behind a leaf keeps working through the leaf's uplink until the leaf reloads (or its uplink credentials are reissued without the ant).
+- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink at the hub.
+
 ## Reverse proxy
 
 Caddy passes WebSocket upgrades with no extra config and sets no idle timeout on upgraded connections:

@@ -9,6 +9,7 @@
 //! `$JS.<domain>.API`, the prefix every ants process then uses, besides the plain `$JS.API` the hub maps it to
 //! ([`Permissions::with_js_domain`]).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
 use serde_json::{Value, json};
+
+use crate::revoke::{self, Issued, Kind};
 
 const OPERATOR_SEED: &str = "operator.nk";
 const ACCOUNT_SEED: &str = "account.nk";
@@ -46,8 +49,41 @@ pub fn init(dir: &Path) -> Result<()> {
     write_secret(&dir.join(OPERATOR_SEED), &seed(&operator)?)?;
     write_secret(&dir.join(SYSTEM_SEED), &seed(&system)?)?;
     write_secret(&dir.join(ACCOUNT_SEED), &seed(&account)?)?;
-    fs::write(dir.join(SERVER_CONF), server_conf(&operator, &system, &account)?)?;
+    fs::write(dir.join(SERVER_CONF), server_conf(&operator, None, &system, &account, &BTreeMap::new())?)?;
     Ok(())
+}
+
+/// Write the `server.conf` of the team in `dir` again, its account revoking each user key of `revocations` issued
+/// at or before its time (seconds since the epoch). Returns the account's public key and JWT.
+pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Result<(String, String)> {
+    let operator = load(&dir.join(OPERATOR_SEED))?;
+    let system = load(&dir.join(SYSTEM_SEED))?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let path = dir.join(SERVER_CONF);
+    // nats-server reloads no change of the trusted operator, so the operator JWT already there stays.
+    let earlier = fs::read_to_string(&path).unwrap_or_default();
+    let operator_jwt = earlier.lines().find_map(|line| line.strip_prefix("operator: ")).filter(|jwt| {
+        verified(jwt).is_ok_and(|claims| claims.sub == operator.public_key() && claims.iss == operator.public_key())
+    });
+    fs::write(&path, server_conf(&operator, operator_jwt, &system, &account, revocations)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok((account.public_key(), account_jwt(&operator, &account, revocations)?))
+}
+
+/// The public key of the team's account in `dir`.
+pub fn account_key(dir: &Path) -> Result<String> {
+    Ok(load(&dir.join(ACCOUNT_SEED))?.public_key())
+}
+
+/// The text of short-lived credentials of the team's system account, for `ants auth push` to update the account on a
+/// server.
+pub fn system_creds(dir: &Path) -> Result<String> {
+    let system = load(&dir.join(SYSTEM_SEED))?;
+    let user = KeyPair::new_user();
+    let exp = now()? + APPROVER_TTL.as_secs();
+    let all = Permissions { publish: vec![">".to_owned()], subscribe: vec![">".to_owned()] };
+    let jwt = user_jwt(&system, &user.public_key(), "ants-auth", all, json!({}), Some(exp))?;
+    Ok(creds(&jwt, &seed(&user)?))
 }
 
 /// The role `ants auth user` issues: a human's with `--human`, and for the default human whatever the flag; else an
@@ -79,16 +115,18 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
 #[cfg(test)]
 pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
-    issue_with(dir, user, Permissions::for_user(user, role).with_js_domain(js_domain), out)
+    issue_with(dir, user, role.into(), Permissions::for_user(user, role).with_js_domain(js_domain), out)
 }
 
-/// Issue a new NATS user for `user` with `permissions`, and write its `.creds` file to `out`.
-pub fn issue_with(dir: &Path, user: &UserId, permissions: Permissions, out: &Path) -> Result<()> {
+/// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
+/// key ([`revoke::record`]).
+pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, json!({}), None)?;
-    write_secret(out, &creds(&jwt, &seed(&key)?))
+    write_secret(out, &creds(&jwt, &seed(&key)?))?;
+    revoke::record(dir, &Issued::new(&key.public_key(), user.as_str(), kind, None)?)
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
@@ -129,8 +167,10 @@ pub fn issue_leaf(
         all.retain(|s| seen.insert(s.clone()));
     }
     let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
-    let jwt = user_jwt(&account, &user.public_key(), &format!("leaf-{machine}"), permissions, only_leaf, None)?;
-    write_secret(out, &creds(&jwt, &seed(&user)?))
+    let name = format!("leaf-{machine}");
+    let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)
 }
 
 /// The permissions of the credentials of `webhook` in `dir`, `<webhook>.creds` as `ants auth user WEBHOOK --webhook`
@@ -175,7 +215,8 @@ pub fn issue_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, out: &Pat
     let answer_once = json!({ "resp": { "max": 1, "ttl": ttl } });
     let name = UserId::channel_manager();
     let jwt = user_jwt(&account, &key.public_key(), name.as_str(), permissions, answer_once, None)?;
-    write_secret(out, &creds(&jwt, &seed(&key)?))
+    write_secret(out, &creds(&jwt, &seed(&key)?))?;
+    revoke::record(dir, &Issued::new(&key.public_key(), name.as_str(), Kind::ChannelManager, None)?)
 }
 
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
@@ -187,15 +228,18 @@ pub fn sign_user(
     js_domain: Option<&JsDomain>,
     public_key: &str,
 ) -> Result<String> {
-    sign_with(dir, user, Permissions::for_user(user, role).with_js_domain(js_domain), public_key)
+    sign_with(dir, user, role.into(), Permissions::for_user(user, role).with_js_domain(js_domain), public_key)
 }
 
-/// Sign the user JWT of `user` with `permissions` for `public_key`, a user NKey generated on another machine.
-pub fn sign_with(dir: &Path, user: &UserId, permissions: Permissions, public_key: &str) -> Result<String> {
+/// Sign the user JWT of `user`, of `kind`, with `permissions` for `public_key`, a user NKey generated on another
+/// machine, and record the key ([`revoke::record`]).
+pub fn sign_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, public_key: &str) -> Result<String> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)
+    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)?;
+    revoke::record(dir, &Issued::new(public_key, user.as_str(), kind, None)?)?;
+    Ok(jwt)
 }
 
 /// Fail unless `public_key` is a user's public NKey, `U...`.
@@ -221,6 +265,7 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     let name = ants_proto::enrollment_user(ant);
     let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Enrollment, exp)?)?;
     Ok(exp)
 }
 
@@ -301,35 +346,33 @@ pub fn read_seed(path: &Path) -> Result<KeyPair> {
     KeyPair::from_seed(seed.trim()).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
-fn now() -> Result<u64> {
+pub(crate) fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
-fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Result<String> {
-    let operator_jwt = jwt(
-        operator,
-        &operator.public_key(),
-        TEAM,
-        json!({ "system_account": system.public_key(), "type": "operator", "version": 2 }),
-        None,
-    )?;
-    // JetStream needs a system account in operator mode.
-    let system_jwt = jwt(operator, &system.public_key(), "SYS", json!({ "type": "account", "version": 2 }), None)?;
-    let account_jwt = jwt(
-        operator,
-        &account.public_key(),
-        TEAM,
-        json!({
-            "limits": {
-                "subs": -1, "data": -1, "payload": -1, "imports": -1, "exports": -1, "wildcards": true,
-                "conn": -1, "leaf": -1, "mem_storage": -1, "disk_storage": -1, "streams": -1, "consumer": -1,
-            },
-            "default_permissions": { "pub": {}, "sub": {} },
-            "type": "account",
-            "version": 2,
-        }),
-        None,
-    )?;
+/// The `server.conf` of the team, with `operator_jwt` if given, else a new one.
+fn server_conf(
+    operator: &KeyPair,
+    operator_jwt: Option<&str>,
+    system: &KeyPair,
+    account: &KeyPair,
+    revocations: &BTreeMap<String, u64>,
+) -> Result<String> {
+    let operator_jwt = match operator_jwt {
+        Some(jwt) => jwt.to_owned(),
+        None => jwt(
+            operator,
+            &operator.public_key(),
+            TEAM,
+            json!({ "system_account": system.public_key(), "type": "operator", "version": 2 }),
+            None,
+        )?,
+    };
+    // JetStream needs a system account in operator mode; `ants auth push` connects to it.
+    let system_limits = json!({ "conn": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
+    let system_claims = json!({ "limits": system_limits, "type": "account", "version": 2 });
+    let system_jwt = jwt(operator, &system.public_key(), "SYS", system_claims, None)?;
+    let account_jwt = account_jwt(operator, account, revocations)?;
     Ok(format!(
         "# Written by `ants auth init`. Include it from the server configuration: include \"{SERVER_CONF}\"\n\
          # Credentials carry their permissions in the CONNECT line, longer than the 4 KB nats-server allows by default.\n\
@@ -341,6 +384,23 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
         system = system.public_key(),
         account = account.public_key(),
     ))
+}
+
+/// The JWT of the team's account, revoking the user keys of `revocations` issued at or before their time.
+fn account_jwt(operator: &KeyPair, account: &KeyPair, revocations: &BTreeMap<String, u64>) -> Result<String> {
+    let mut nats = json!({
+        "limits": {
+            "subs": -1, "data": -1, "payload": -1, "imports": -1, "exports": -1, "wildcards": true,
+            "conn": -1, "leaf": -1, "mem_storage": -1, "disk_storage": -1, "streams": -1, "consumer": -1,
+        },
+        "default_permissions": { "pub": {}, "sub": {} },
+        "type": "account",
+        "version": 2,
+    });
+    if !revocations.is_empty() {
+        nats["revocations"] = json!(revocations);
+    }
+    jwt(operator, &account.public_key(), TEAM, nats, None)
 }
 
 /// A user JWT for the public key `user` with `permissions`, plus the `extra` claims, expiring at `exp` (seconds since
@@ -1003,7 +1063,14 @@ pub(crate) mod tests {
         bus::ensure_owners(&h_js).await.unwrap();
         let issue = |webhook: &UserId, to: Destination| {
             let creds = server.dir().join(format!("{webhook}.creds"));
-            issue_with(&server.dir().join("auth"), webhook, Permissions::for_webhook(webhook, &[to]), &creds).unwrap();
+            issue_with(
+                &server.dir().join("auth"),
+                webhook,
+                crate::revoke::Kind::Webhook,
+                Permissions::for_webhook(webhook, &[to]),
+                &creds,
+            )
+            .unwrap();
             creds
         };
         let hook_creds = issue(&hook, Destination::Ant(dev_a.clone()));
@@ -1051,7 +1118,14 @@ pub(crate) mod tests {
         let (hook, dev_a, ops) = (p("github"), p("dev-a"), "ops".parse::<ChannelId>().unwrap());
         let creds = server.dir().join("github.creds");
         let destinations = [Destination::Ant(dev_a.clone()), Destination::Channel(ops.clone())];
-        issue_with(&server.dir().join("auth"), &hook, Permissions::for_webhook(&hook, &destinations), &creds).unwrap();
+        issue_with(
+            &server.dir().join("auth"),
+            &hook,
+            crate::revoke::Kind::Webhook,
+            Permissions::for_webhook(&hook, &destinations),
+            &creds,
+        )
+        .unwrap();
         let (_, h_js) = server.connect(&UserId::human()).await;
         bus::init_stream(&h_js).await.unwrap();
         crate::webhook::ensure_bucket(&h_js).await.unwrap();
@@ -1587,8 +1661,14 @@ pub(crate) mod tests {
         let (github, alerts) = (p("github"), p("alerts"));
         for hook in [&github, &alerts] {
             let permissions = Permissions::for_webhook(hook, &[Destination::Ant(dev_b.clone())]);
-            issue_with(&team, hook, permissions.with_js_domain(Some(&domain)), &team.join(format!("{hook}.creds")))
-                .unwrap();
+            issue_with(
+                &team,
+                hook,
+                crate::revoke::Kind::Webhook,
+                permissions.with_js_domain(Some(&domain)),
+                &team.join(format!("{hook}.creds")),
+            )
+            .unwrap();
         }
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         let m1: Machine = "m1".parse().unwrap();
