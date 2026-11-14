@@ -112,6 +112,16 @@ enum SinkKind {
     Telegram,
 }
 
+impl HumanEntry {
+    /// The secrets of its sinks: what each is for, its `secret_env` and its `secret_file`.
+    pub fn secrets(&self) -> impl Iterator<Item = (String, Option<&str>, Option<&Path>)> {
+        self.notify.iter().enumerate().map(|(i, sink)| {
+            let what = format!("human {} notify #{}", self.name, i + 1);
+            (what, sink.secret_env.as_deref(), sink.secret_file.as_deref())
+        })
+    }
+}
+
 /// A human to notify, checked.
 pub struct Human {
     pub name: UserId,
@@ -584,8 +594,9 @@ fn tls() -> Result<TlsConnector> {
 trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
-/// `POST` `body` as JSON to `url`. Errors never name the URL, which may hold a secret.
-async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> {
+/// `method` on `url`, with `body` as JSON if any: the status of the answer and the start of its body. Errors never
+/// name the URL, which may hold a secret.
+async fn fetch(method: Method, url: &str, bearer: Option<&str>, body: Option<&Value>) -> Result<(StatusCode, String)> {
     let uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL"))?;
     let https = uri.scheme_str() == Some("https");
     let host = uri.host().context("a URL without a host")?;
@@ -607,25 +618,70 @@ async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> 
         let _ = connection.await;
     });
     let path = uri.path_and_query().map_or("/", |p| p.as_str());
-    let mut request = Request::builder()
-        .method(Method::POST)
-        .uri(path)
-        .header(header::HOST, authority)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::USER_AGENT, "ants");
+    let mut request =
+        Request::builder().method(method).uri(path).header(header::HOST, authority).header(header::USER_AGENT, "ants");
+    if body.is_some() {
+        request = request.header(header::CONTENT_TYPE, "application/json");
+    }
     if let Some(token) = bearer {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    let request = request.body(Full::new(Bytes::from(serde_json::to_vec(body)?)))?;
-    let response = send.send_request(request).await.context("sending")?;
+    let body = match body {
+        Some(body) => Bytes::from(serde_json::to_vec(body)?),
+        None => Bytes::new(),
+    };
+    let response = send.send_request(request.body(Full::new(body))?).await.context("sending")?;
     let status = response.status();
+    let answer = Limited::new(response.into_body(), MAX_ANSWER * 8).collect().await;
+    let answer = answer.map(|b| b.to_bytes()).unwrap_or_default();
+    Ok((status, String::from_utf8_lossy(&answer[..answer.len().min(MAX_ANSWER)]).into_owned()))
+}
+
+/// `POST` `body` as JSON to `url`. Errors never name the URL, which may hold a secret.
+async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> {
+    let (status, answer) = fetch(Method::POST, url, bearer, Some(body)).await?;
     if status.is_success() {
         return Ok(());
     }
-    let answer = Limited::new(response.into_body(), MAX_ANSWER * 8).collect().await;
-    let answer = answer.map(|b| b.to_bytes()).unwrap_or_default();
-    let answer = String::from_utf8_lossy(&answer[..answer.len().min(MAX_ANSWER)]).into_owned();
     bail!("answered {status}: {}", answer.trim())
+}
+
+/// `notice` sent to `sink` within [`SEND_TIMEOUT`].
+async fn send_to(sink: &Sink, notice: &Notice) -> Result<()> {
+    let (url, bearer, body) = sink.request(notice);
+    match tokio::time::timeout(SEND_TIMEOUT, post_json(&url, bearer, &body)).await {
+        Ok(sent) => sent,
+        Err(_) => bail!("no answer within {}s", SEND_TIMEOUT.as_secs()),
+    }
+}
+
+/// Send a test notice to every sink of `human`, those of a device too, at once: each sink's label and how it went.
+pub async fn test(human: &Human, machine: &str) -> Vec<(String, Result<()>)> {
+    let notice = Notice {
+        title: format!("ants test notice for {}", human.name),
+        text: format!(
+            "Sent by `ants webhook notify-test {}` on {machine}: tool requests and escalations reach this sink.",
+            human.name
+        ),
+        buttons: Vec::new(),
+        urgent: false,
+    };
+    let notice = &notice;
+    let sends = human.sinks.iter().map(|target| async move {
+        let sent = send_to(&target.sink, notice).await;
+        (format!("{target:?}"), sent)
+    });
+    futures::future::join_all(sends).await
+}
+
+/// What `GET` on the approval links of `public_url` without a link's query answers, within `wait`: the status and the
+/// start of the body.
+pub async fn probe_links(public_url: &str, wait: Duration) -> Result<(StatusCode, String)> {
+    let url = format!("{}{APPROVAL_PATH}", http_url(public_url, "public_url")?);
+    match tokio::time::timeout(wait, fetch(Method::GET, &url, None, None)).await {
+        Ok(answer) => answer,
+        Err(_) => bail!("no answer within {}s", wait.as_secs()),
+    }
 }
 
 /// Send `notice` to every sink of `human` at once, but those of the devices `away` leaves out; a failure is logged,
@@ -633,12 +689,9 @@ async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> 
 async fn send(human: &Human, notice: &Notice, away: impl Fn(&DeviceId) -> bool) {
     let targets = human.sinks.iter().filter(|t| t.device.as_ref().is_none_or(&away));
     let sends = targets.map(|Target { sink, .. }| async move {
-        let (url, bearer, body) = sink.request(notice);
-        let sent = tokio::time::timeout(SEND_TIMEOUT, post_json(&url, bearer, &body)).await;
-        match sent {
-            Ok(Ok(())) => tracing::debug!(human = %human.name, sink = sink.label(), "notified"),
-            Ok(Err(e)) => tracing::warn!(human = %human.name, sink = sink.label(), "notifying: {e:#}"),
-            Err(_) => tracing::warn!(human = %human.name, sink = sink.label(), "notifying: timed out"),
+        match send_to(sink, notice).await {
+            Ok(()) => tracing::debug!(human = %human.name, sink = sink.label(), "notified"),
+            Err(e) => tracing::warn!(human = %human.name, sink = sink.label(), "notifying: {e:#}"),
         }
     });
     futures::future::join_all(sends).await;

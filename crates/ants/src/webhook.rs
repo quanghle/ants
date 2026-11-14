@@ -189,10 +189,7 @@ enum Piece {
 impl Config {
     /// Read and check the config file at `path`, and the credentials of each webhook against its destination.
     pub fn load(path: &Path) -> Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
-        let home = std::env::home_dir().context("no home directory")?;
-        let config = Self::parse(&text, &std::path::absolute(path)?, &home, |name| std::env::var(name).ok())?;
+        let config = Self::read(path)?;
         for hook in &config.webhooks {
             hook.check_creds().with_context(|| format!("webhook config {}", path.display()))?;
         }
@@ -202,16 +199,20 @@ impl Config {
         Ok(config)
     }
 
+    /// Read and check the config file at `path`, reading each secret, without looking at credentials.
+    pub fn read(path: &Path) -> Result<Self> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
+        let home = std::env::home_dir().context("no home directory")?;
+        Self::parse(&text, &std::path::absolute(path)?, &home, |name| std::env::var(name).ok())
+    }
+
     /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
     /// directory and read each secret, from `env` or its file.
     fn parse(text: &str, path: &Path, home: &Path, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let shown = path.display();
         let file: File = toml::from_str(text).with_context(|| format!("parsing webhook config {shown}"))?;
-        let base = path.parent().unwrap_or(Path::new("."));
-        let resolve = |p: &Path| match p.strip_prefix("~") {
-            Ok(rest) => home.join(rest),
-            Err(_) => base.join(p),
-        };
+        let resolve = resolver(path, home);
         let path = file.path.as_deref().unwrap_or(DEFAULT_PATH).trim_end_matches('/').to_owned();
         if !path.is_empty() && !path.starts_with('/') {
             bail!("webhook config {shown}: path {path:?} must start with /");
@@ -269,6 +270,54 @@ impl Config {
         let (listen, metrics, nats, js_domain) = (file.listen, file.metrics, file.nats, file.js_domain);
         Ok(Self { listen, metrics, path, nats, js_domain, webhooks, humans, links })
     }
+}
+
+/// Paths of the config file at `path` resolved: `~` expanded to `home`, relative ones against the file's directory.
+fn resolver<'a>(path: &'a Path, home: &'a Path) -> impl Fn(&Path) -> PathBuf + 'a {
+    let base = path.parent().unwrap_or(Path::new("."));
+    move |p: &Path| match p.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => base.join(p),
+    }
+}
+
+/// Where a secret of the config file comes from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SecretSource {
+    File(PathBuf),
+    Env(String),
+}
+
+/// What the config file at `path` names, without reading a secret.
+pub struct Outline {
+    /// What each secret is for and where it comes from.
+    pub secrets: Vec<(String, SecretSource)>,
+    pub public_url: Option<String>,
+}
+
+/// The config file at `path` parsed, its secrets left unread.
+pub fn outline(path: &Path) -> Result<Outline> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
+    let file: File = toml::from_str(&text).with_context(|| format!("parsing webhook config {}", path.display()))?;
+    let home = std::env::home_dir().context("no home directory")?;
+    let path = std::path::absolute(path)?;
+    let resolve = resolver(&path, &home);
+    let named = file
+        .webhooks
+        .iter()
+        .map(|w| (format!("webhook {}", w.name), w.secret_env.as_deref(), w.secret_file.as_deref()))
+        .chain(file.humans.iter().flat_map(notify::HumanEntry::secrets))
+        .chain([("action secret".to_owned(), file.action_secret_env.as_deref(), file.action_secret_file.as_deref())]);
+    let mut secrets = Vec::new();
+    for (what, env, file) in named {
+        if let Some(var) = env {
+            secrets.push((what.clone(), SecretSource::Env(var.to_owned())));
+        }
+        if let Some(file) = file {
+            secrets.push((what, SecretSource::File(resolve(file))));
+        }
+    }
+    Ok(Outline { secrets, public_url: file.public_url })
 }
 
 impl Webhook {
@@ -1455,6 +1504,54 @@ pub(crate) mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_test_notice_goes_to_every_sink_and_each_failure_is_reported() {
+        let (sink, mut posts) = sink().await;
+        let gone = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone_addr = gone.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = gone.accept().await {
+                let mut head = [0; 4096];
+                let _ = stream.read(&mut head).await;
+                let answer = "HTTP/1.1 404 Not Found\r\ncontent-length: 10\r\nconnection: close\r\n\r\nno_service";
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        let dir = ants_test_support::scratch_dir("webhook-notify-test");
+        private(&dir.join("bot"), "123:abc\n");
+        private(&dir.join("slack"), &format!("http://{gone_addr}/services/T0/B0/x\n"));
+        let path = dir.join("webhooks.toml");
+        let config = format!(
+            "[[human]]\nname = \"alice\"\napprovals = false\n\
+             [[human.notify]]\nkind = \"ntfy\"\ntopic = \"alerts\"\nurl = \"http://{sink}\"\n\
+             [[human.notify]]\nkind = \"telegram\"\nchat = \"42\"\nurl = \"http://{sink}\"\nsecret_file = \"bot\"\n\
+             [[human.notify]]\nkind = \"slack\"\nsecret_file = \"slack\"\n"
+        );
+        std::fs::write(&path, config).unwrap();
+
+        let config = Config::read(&path).unwrap();
+        let results = notify::test(&config.humans[0], "laptop").await;
+        let shown: Vec<(&str, String)> = results
+            .iter()
+            .map(|(sink, sent)| (sink.as_str(), sent.as_ref().map_or_else(|e| e.to_string(), |()| "ok".into())))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("ntfy topic alerts", "ok".to_owned()),
+                ("telegram chat 42", "ok".to_owned()),
+                ("slack", "answered 404 Not Found: no_service".to_owned()),
+            ]
+        );
+        let mut got = [next(&mut posts).await, next(&mut posts).await];
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got[0].0, "/", "ntfy");
+        assert_eq!(got[0].1["title"], "ants test notice for alice");
+        assert_eq!(got[1].0, "/bot123:abc/sendMessage");
+        assert!(got[1].1["text"].as_str().unwrap().contains("on laptop"), "{}", got[1].1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

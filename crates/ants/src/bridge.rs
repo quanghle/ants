@@ -39,7 +39,9 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::{self, pki_types::ServerName};
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::pem::PemObject as _;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 
 /// Where `ants bridge connect` listens: where a leaf node's `nats-leaf://` uplink goes by default.
 pub const DEFAULT_CONNECT_LISTEN: &str = "127.0.0.1:7422";
@@ -485,6 +487,30 @@ impl Remote {
         Ok(Self { dial, authority, tls, base, headers: all, proxy, traffic: Arc::default() })
     }
 
+    /// Trust only the CA certificates of the PEM file `ca`, as `SSL_CERT_FILE` makes the bridge's units do.
+    pub fn trusting(mut self, ca: &Path) -> Result<Self> {
+        if let Some((connector, _)) = &mut self.tls {
+            let mut roots = rustls::RootCertStore::empty();
+            let certs = CertificateDer::pem_file_iter(ca).with_context(|| format!("reading {}", ca.display()))?;
+            for cert in certs {
+                roots.add(cert.with_context(|| format!("reading {}", ca.display()))?)?;
+            }
+            *connector = client_config(roots)?;
+        }
+        Ok(self)
+    }
+
+    /// Whether the bridge answers, within `wait`, and takes the token: asks for a session that does not exist.
+    pub async fn probe(&self, wait: Duration) -> Result<Probe> {
+        let (status, body) = Http::new(self).once(&Method::GET, "/s/0?off=0", &Bytes::new(), wait).await?;
+        let body = String::from_utf8_lossy(&body[..body.len().min(200)]).trim().to_owned();
+        Ok(match status {
+            StatusCode::NOT_FOUND if body == "no such session" => Probe::Answers,
+            StatusCode::UNAUTHORIZED => Probe::Refused(body),
+            _ => Probe::Other(status, body),
+        })
+    }
+
     /// What the bridge carries, as it goes.
     pub fn traffic(&self) -> Arc<Traffic> {
         self.traffic.clone()
@@ -535,6 +561,17 @@ impl Remote {
     }
 }
 
+/// What a bridge answered [`Remote::probe`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// As a bridge taking the token does.
+    Answers,
+    /// The token is missing or wrong: this answer.
+    Refused(String),
+    /// Not as a bridge does: this status and answer.
+    Other(StatusCode, String),
+}
+
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
@@ -545,6 +582,10 @@ pub(crate) fn tls_connector() -> Result<TlsConnector> {
     if added == 0 {
         bail!("no trusted CA certificates found (errors: {:?}); SSL_CERT_FILE names a PEM file of them", native.errors);
     }
+    client_config(roots)
+}
+
+fn client_config(roots: rustls::RootCertStore) -> Result<TlsConnector> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?

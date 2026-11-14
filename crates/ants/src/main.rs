@@ -236,8 +236,9 @@ enum Command {
     Harness(HarnessCommand),
     /// Check the machine's ants setup end to end: the config file, credentials, the server and JetStream, the hub's
     /// stream and buckets, each ant's harness, whether the hub keeps pushed accounts across restarts (with the team
-    /// keys), the leaf node and its outbox, and the installed services. Prints one line per check (ok, warn, fail or
-    /// skip) with the command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
+    /// keys), the leaf node and its outbox, the installed services, the webhooks' config file and its secrets, and the
+    /// Dev Tunnel and HTTPS bridge services installed. Prints one line per check (ok, warn, fail or skip) with the
+    /// command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
     Doctor {
         /// Config file of the machine's ants (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
@@ -255,6 +256,9 @@ enum Command {
         /// whether it keeps pushed accounts across restarts.
         #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
         team: Option<PathBuf>,
+        /// Config file of `ants webhook serve` (default: ~/.ants/webhooks.toml), checked when it is there.
+        #[arg(long)]
+        webhook_config: Option<PathBuf>,
     },
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
@@ -442,6 +446,15 @@ enum WebhookCommand {
         metrics: Option<SocketAddr>,
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
+    },
+    /// Send a test notice through each ntfy, Slack or Telegram sink of HUMAN in the config file, those of a device
+    /// too, and print how each went; exits with status 1 when one fails. Needs no NATS.
+    NotifyTest {
+        /// A `[[human]]` of the config file.
+        human: UserId,
+        /// The webhooks' config file (default: ~/.ants/webhooks.toml).
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -1036,7 +1049,7 @@ async fn main() -> Result<()> {
             println!("{reply}");
             Ok(())
         }
-        Command::Doctor { config, leaf_config, no_harness, json, team } => {
+        Command::Doctor { config, leaf_config, no_harness, json, team, webhook_config } => {
             let setup = doctor::Setup {
                 nats: cli.nats.clone(),
                 creds: cli.creds.clone(),
@@ -1051,6 +1064,11 @@ async fn main() -> Result<()> {
                 },
                 harnesses: !no_harness,
                 team: team_dir(team)?,
+                webhooks: match webhook_config {
+                    Some(path) => path,
+                    None => webhook::default_path()?,
+                },
+                home: std::env::home_dir(),
             };
             let checks = Box::pin(doctor::run(&setup)).await;
             for check in &checks {
@@ -1363,6 +1381,33 @@ async fn main() -> Result<()> {
                 tracing::info!("approval links on http://{addr}{}/_approval", config.path);
             }
             upgrade::or_exit(webhook::serve(config, &nats, domain.as_ref(), listener), &upgrade).await
+        }
+        Command::Webhook(WebhookCommand::NotifyTest { human, config }) => {
+            let path = match config {
+                Some(path) => path,
+                None => webhook::default_path()?,
+            };
+            let config = webhook::Config::read(&path)?;
+            let Some(entry) = config.humans.iter().find(|h| h.name == human) else {
+                let names: Vec<&str> = config.humans.iter().map(|h| h.name.as_str()).collect();
+                match names.is_empty() {
+                    true => bail!("{} lists no [[human]]", path.display()),
+                    false => bail!("{} lists no human {human}, only {}", path.display(), names.join(", ")),
+                }
+            };
+            let machine = ants_daemon::roster::machine().await;
+            let results = notify::test(entry, &machine).await;
+            for (sink, sent) in &results {
+                match sent {
+                    Ok(()) => println!("ok    {sink}"),
+                    Err(e) => println!("fail  {sink}: {e:#}"),
+                }
+            }
+            let failed = results.iter().filter(|(_, sent)| sent.is_err()).count();
+            match failed {
+                0 => Ok(()),
+                _ => bail!("{failed} of {} sinks of {human} failed", results.len()),
+            }
         }
         Command::Bridge(BridgeCommand::Connect {
             url,

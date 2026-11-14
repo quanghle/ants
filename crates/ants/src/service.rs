@@ -13,6 +13,16 @@ pub enum Service {
     Daemon,
     /// `nats-server -c FILE`: the machine's leaf node, or the hub.
     Nats,
+    /// `ants webhook serve --config FILE`.
+    Webhook,
+    /// `devtunnel connect TUNNEL`, a leaf node's uplink through a Dev Tunnel.
+    DevTunnel,
+    /// `devtunnel host TUNNEL`, on the hub machine.
+    DevTunnelHost,
+    /// `ants bridge connect URL`, a leaf node's uplink through the HTTPS fallback bridge.
+    Bridge,
+    /// `ants bridge serve`, on the hub machine.
+    BridgeServe,
 }
 
 impl Service {
@@ -20,6 +30,11 @@ impl Service {
         match self {
             Service::Daemon => "ants.daemon",
             Service::Nats => "ants.nats",
+            Service::Webhook => "ants.webhook",
+            Service::DevTunnel => "ants.devtunnel",
+            Service::DevTunnelHost => "ants.devtunnel-host",
+            Service::Bridge => "ants.bridge",
+            Service::BridgeServe => "ants.bridge-serve",
         }
     }
 
@@ -27,7 +42,34 @@ impl Service {
         match self {
             Service::Daemon => "ants-daemon",
             Service::Nats => "ants-nats",
+            Service::Webhook => "ants-webhook",
+            Service::DevTunnel => "ants-devtunnel",
+            Service::DevTunnelHost => "ants-devtunnel-host",
+            Service::Bridge => "ants-bridge",
+            Service::BridgeServe => "ants-bridge-serve",
         }
+    }
+}
+
+/// What an installed unit runs, as [`Services::unit`] reads it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Unit {
+    /// The program and its arguments.
+    pub args: Vec<String>,
+    /// The file on its standard input.
+    pub stdin: Option<PathBuf>,
+    /// The environment it sets.
+    pub env: Vec<(String, String)>,
+}
+
+impl Unit {
+    /// The value following the argument `flag`.
+    pub fn flag(&self, flag: &str) -> Option<&str> {
+        self.args.iter().position(|a| a == flag).and_then(|i| self.args.get(i + 1)).map(String::as_str)
+    }
+
+    pub fn env(&self, name: &str) -> Option<&str> {
+        self.env.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 }
 
@@ -95,18 +137,30 @@ impl Services {
     /// The services of the current user, found under `$HOME` and driven with launchctl on macOS and systemctl on Linux;
     /// none elsewhere.
     pub fn local() -> Self {
+        Self::under(std::env::home_dir())
+    }
+
+    /// The services of the current user whose units are under `home`.
+    pub fn under(home: Option<PathBuf>) -> Self {
         let manager = match std::env::consts::OS {
             "macos" => Some(Manager::Launchd),
             "linux" => Some(Manager::Systemd),
             _ => None,
         };
-        let home = std::env::home_dir();
         Services { manager: manager.filter(|_| home.is_some()), home: home.unwrap_or_default(), run: Box::new(run) }
+    }
+
+    /// The services under `home` of this platform's manager, answering commands with `answer`.
+    #[cfg(test)]
+    pub(crate) fn answering(home: &Path, answer: impl Fn(&str) -> Ran + 'static) -> Self {
+        let manager = if cfg!(target_os = "macos") { Manager::Launchd } else { Manager::Systemd };
+        let run = move |args: &[&str]| Ok(answer(&args.join(" ")));
+        Services { manager: Some(manager), home: home.to_owned(), run: Box::new(run) }
     }
 
     /// `action` on the installed `service` running `file`, when it runs; the service of another file is left alone.
     pub fn apply(&mut self, service: Service, action: Action, file: &Path) -> Outcome {
-        let (manager, target) = match self.locate(service, file) {
+        let (manager, target) = match self.locate(service, Some(file)) {
             Ok(found) => found,
             Err(State::Unknown(command, e)) => return Outcome::Failed(command, e),
             Err(_) => return Outcome::Unmanaged,
@@ -124,6 +178,36 @@ impl Services {
 
     /// Whether `service` is installed to run `file`, and whether it runs.
     pub fn state(&mut self, service: Service, file: &Path) -> State {
+        self.state_of(service, Some(file))
+    }
+
+    /// Whether `service` is installed, to run whatever file, and whether it runs.
+    pub fn status(&mut self, service: Service) -> State {
+        self.state_of(service, None)
+    }
+
+    /// What `service` runs, when installed.
+    pub fn unit(&self, service: Service) -> Option<Unit> {
+        let manager = self.manager?;
+        let text = std::fs::read_to_string(self.unit_file(manager, service)).ok()?;
+        Some(match manager {
+            Manager::Launchd => plist_unit(&text),
+            Manager::Systemd => systemd_unit(&text),
+        })
+    }
+
+    /// The command doing `action` on the installed `service` by hand, on this machine.
+    pub fn by_hand(&self, service: Service, action: Action) -> Option<String> {
+        Some(
+            match self.manager? {
+                Manager::Launchd => command(Manager::Launchd, action, &format!("gui/$(id -u)/{}", service.label())),
+                Manager::Systemd => command(Manager::Systemd, action, service.unit()),
+            }
+            .join(" "),
+        )
+    }
+
+    fn state_of(&mut self, service: Service, file: Option<&Path>) -> State {
         match self.locate(service, file) {
             Ok((manager, target)) => match self.running(manager, &target) {
                 Some(true) => State::Running,
@@ -144,13 +228,13 @@ impl Services {
         }
     }
 
-    /// The manager and target (`gui/<uid>/<label>`, or the unit) of `service` installed to run `file`, or the state
-    /// of a service not installed so.
-    fn locate(&mut self, service: Service, file: &Path) -> Result<(Manager, String), State> {
+    /// The manager and target (`gui/<uid>/<label>`, or the unit) of `service` installed to run `file` (any file when
+    /// None), or the state of a service not installed so.
+    fn locate(&mut self, service: Service, file: Option<&Path>) -> Result<(Manager, String), State> {
         let Some(manager) = self.manager else { return Err(State::Unsupported) };
         let unit_file = self.unit_file(manager, service);
         match std::fs::read_to_string(&unit_file) {
-            Ok(text) if runs(manager, &text, file) => {}
+            Ok(text) if file.is_none_or(|file| runs(manager, &text, file)) => {}
             Ok(_) => return Err(State::Other(unit_file)),
             Err(_) => return Err(State::NotInstalled),
         }
@@ -231,6 +315,89 @@ fn runs(manager: Manager, text: &str, file: &Path) -> bool {
         }
         Manager::Systemd => text.contains(&format!("\"{}\"", p.replace('%', "%%"))),
     })
+}
+
+/// The text between `start` and the following `end` in `text`, after `from`.
+fn between<'a>(text: &'a str, from: usize, start: &str, end: &str) -> Option<(&'a str, usize)> {
+    let at = from + text[from..].find(start)? + start.len();
+    let len = text[at..].find(end)?;
+    Some((&text[at..at + len], at + len + end.len()))
+}
+
+fn xml_unescape(text: &str) -> String {
+    text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// What a launchd property list runs: its `ProgramArguments`, `StandardInPath` and `EnvironmentVariables`.
+fn plist_unit(text: &str) -> Unit {
+    let mut unit = Unit::default();
+    let value = |key: &str, open: &str, close: &str| {
+        let at = text.find(&format!("<key>{key}</key>"))?;
+        between(text, at, open, close).map(|(inner, _)| inner)
+    };
+    let strings = |inner: &str| {
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some((s, next)) = between(inner, from, "<string>", "</string>") {
+            found.push(xml_unescape(s));
+            from = next;
+        }
+        found
+    };
+    if let Some(array) = value("ProgramArguments", "<array>", "</array>") {
+        unit.args = strings(array);
+    }
+    unit.stdin = value("StandardInPath", "<string>", "</string>").map(|p| PathBuf::from(xml_unescape(p)));
+    if let Some(dict) = value("EnvironmentVariables", "<dict>", "</dict>") {
+        let mut from = 0;
+        while let Some((key, next)) = between(dict, from, "<key>", "</key>") {
+            let Some((value, after)) = between(dict, next, "<string>", "</string>") else { break };
+            unit.env.push((xml_unescape(key), xml_unescape(value)));
+            from = after;
+        }
+    }
+    unit
+}
+
+/// The words of a systemd command line or value: double quotes group, a backslash escapes, `%%` is `%`.
+fn systemd_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quoted = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                word.get_or_insert_default();
+            }
+            '\\' => word.get_or_insert_default().extend(chars.next()),
+            c if c.is_whitespace() && !quoted => words.extend(word.take()),
+            c => word.get_or_insert_default().push(c),
+        }
+    }
+    words.extend(word);
+    words.into_iter().map(|w| w.replace("%%", "%")).collect()
+}
+
+/// What a systemd unit runs: its `ExecStart`, `StandardInput=file:` and `Environment`.
+fn systemd_unit(text: &str) -> Unit {
+    let mut unit = Unit::default();
+    let joined = text.replace("\\\n", " ");
+    for line in joined.lines().map(str::trim) {
+        if let Some(exec) = line.strip_prefix("ExecStart=") {
+            unit.args = systemd_words(exec);
+        } else if let Some(file) = line.strip_prefix("StandardInput=file:") {
+            unit.stdin = Some(PathBuf::from(file.replace("%%", "%")));
+        } else if let Some(env) = line.strip_prefix("Environment=") {
+            for pair in systemd_words(env) {
+                if let Some((name, value)) = pair.split_once('=') {
+                    unit.env.push((name.to_owned(), value.to_owned()));
+                }
+            }
+        }
+    }
+    unit
 }
 
 fn run(args: &[&str]) -> std::io::Result<Ran> {
@@ -424,6 +591,31 @@ mod tests {
         assert_eq!(read("nats.log"), "short\n");
         assert!(!logs.join("nats.log.1.gz").exists() && !logs.join("notes.txt.1.gz").exists());
         std::fs::remove_dir_all(&logs).unwrap();
+    }
+
+    #[test]
+    fn a_unit_reads_back_the_arguments_input_and_environment_install_units_wrote() {
+        let systemd = "# ExecStart=\"/not/this\"\n[Service]\nExecStart=\"/opt/a b/ants\" bridge connect \\\n    \
+                       --token-file \"/home/q/100%%/token\" \\\n    \"https://hub.example/bridge\"\n\
+                       Environment=NO_COLOR=1\nEnvironment=\"SSL_CERT_FILE=/etc/ca b.pem\"\n\
+                       StandardInput=file:/home/q/100%%/tunnel\n";
+        let unit = systemd_unit(systemd);
+        assert_eq!(
+            unit.args,
+            ["/opt/a b/ants", "bridge", "connect", "--token-file", "/home/q/100%/token", "https://hub.example/bridge"]
+        );
+        assert_eq!(unit.flag("--token-file"), Some("/home/q/100%/token"));
+        assert_eq!((unit.env("NO_COLOR"), unit.env("SSL_CERT_FILE")), (Some("1"), Some("/etc/ca b.pem")));
+        assert_eq!(unit.stdin.as_deref(), Some(Path::new("/home/q/100%/tunnel")));
+
+        let plist = "<key>ProgramArguments</key>\n<array>\n\t<string>/bin/devtunnel</string>\n\t\
+                     <string>connect</string>\n\t<string>a&amp;b</string>\n</array>\n<key>StandardInPath</key>\n\
+                     <string>/t&lt;1&gt;</string>\n<key>EnvironmentVariables</key>\n<dict>\n\t<key>NO_COLOR</key>\n\t\
+                     <string>1</string>\n</dict>\n<key>StandardOutPath</key>\n<string>/log</string>\n";
+        let unit = plist_unit(plist);
+        assert_eq!(unit.args, ["/bin/devtunnel", "connect", "a&b"]);
+        assert_eq!(unit.stdin.as_deref(), Some(Path::new("/t<1>")));
+        assert_eq!(unit.env, [("NO_COLOR".to_owned(), "1".to_owned())]);
     }
 
     #[test]
