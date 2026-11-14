@@ -270,18 +270,62 @@ name = "dev-b"
 nats = "nats://127.0.0.1:4222"
 workdir = "~/src/repo-b"
 creds = "~/.config/ants/auth/dev-b.creds"
+
+[[ant_template]]                           # see Ant templates
+name = "worker"
+managers = ["lead"]
+max_ants = 3
+workdirs = ["~/src/repo-a"]
+models = { "claude-sonnet-4-5" = "high" }
+
+[[ant]]                                    # added from a template: other settings come from it
+name = "lead-docs"
+template = "worker"
+added_by = "lead"
+creds = "~/.config/ants/auth/lead-docs.creds"
+model = "claude-sonnet-4-5"
 ```
 
-`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant or schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
+`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant, template or schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
 Flag and file precedence on `ants daemon`:
 
 - `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled) and runs its schedules.
 - `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present.
-- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`. With `--ant`, no schedule runs.
+- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`; an ant added from a template refuses ant flags. With `--ant`, no schedule runs.
 - Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
+`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use, a top-level default or the `[[ant_template]]` they were added from) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
+
+### Ant templates
+
+An `[[ant_template]]` bounds the worker ants a manager ant may add: each such ant is an `[[ant]]` entry naming the template (`template`) and the manager that added it (`added_by`), and setting only `name`, `creds`, `nats`, `js_domain` and the keys a request may choose below; any other key fails config loading. Its other settings come from the template each time the file loads, and on every load and `SIGHUP` reload each such ant is checked against the template as it is then: a setting outside its bounds fails loading with an error naming the bound. Its escalations go to its manager first (`escalate_to = [manager]`). Added ants never add ants: neither a template's `managers` nor an `added_by` may name an ant added from a template.
+
+```toml
+[[ant_template]]
+name = "worker"                            # lowercase letters, digits, '-' and '_'
+managers = ["lead"]                        # ants that may add ants from it, by exact name; default none
+name_pattern = "<manager>-*"               # default; <manager> is the manager's name, * any text
+max_ants = 3                               # required; ants the file may list from it
+workdirs = ["~/src/repo-a", "~/src/repo-b"] # required; allowed workdirs, the first the default
+harnesses = ["claude"]                     # allowed harnesses, the first the default; default: the top-level harness only
+models = { "claude-sonnet-4-5" = "high", "claude-haiku-4-5" = "max" } # model ID = highest reasoning_effort
+contexts = ["1m"]                          # allowed context values; default: the harness default only
+max_thread_cost = 2.0                      # ceilings and defaults: max_thread_tokens/cost, max_daily_tokens/cost
+max_daily_cost = 10.0
+max_harnesses = 2                          # ceiling and default; default 4
+prompt_timeout = "20m"                     # ceiling and default; default "30m"; "0": no ceiling
+max_tool_calls = 300                       # ceiling and default; default 300; 0: no ceiling
+allow = ["read", "search"]                 # tool rules every ant from it has
+allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named rule sets an ant may pick
+pool_daily_cost = 25.0                     # optional; all its ants together per UTC day; also pool_daily_tokens
+whoami = "Implement what the manager assigns." # defaults an ant may replace: whoami, memory, tasks, capabilities
+capabilities = ["rust"]
+env = { CARGO_TARGET_DIR = "target" }      # fixed for its ants: env, worktrees, idle_timeout,
+worktrees = true                           # approval_timeout, spend_warn_percent (defaults as for [[ant]])
+```
+
+An ant added from a template may set, within the template's bounds: `workdir` (one of `workdirs`), `harness` (one of `harnesses`), `model` (one of `models`, required when the template lists any, else not allowed), `reasoning_effort` (ranked `low` < `medium` < `high` < `xhigh` < `max`, at most the model's), `context` (one of `contexts`), `allow_sets` (names from `allow_sets`, added to `allow`), `whoami`, `memory`, `tasks`, `capabilities`, and `max_thread_tokens`, `max_thread_cost`, `max_daily_tokens`, `max_daily_cost`, `max_harnesses`, `prompt_timeout` and `max_tool_calls`, each no higher than the template's (a cap the template leaves unset has no ceiling; a `prompt_timeout` or `max_tool_calls` of `0`, no limit, only where the template's is `0`). Its name must fit `name_pattern`, and the file may list at most `max_ants` ants from the template. Removing a manager from `managers` stops it adding ants; the ants it added stay.
 
 ## Harnesses
 

@@ -28,6 +28,18 @@
 //! env = { MY_AGENT_LOG = "warn" }   # under the ant's own env
 //! mode = "default"                  # ACP session mode every session must run in
 //!
+//! [[ant_template]]                  # what a manager ant may add worker ants as; see crate::template
+//! name = "worker"
+//! managers = ["lead"]
+//! max_ants = 3
+//! workdirs = ["~/src/repo-a"]
+//!
+//! [[ant]]                           # an ant added from a template: its other settings come from the template
+//! name = "lead-docs"
+//! template = "worker"
+//! added_by = "lead"
+//! creds = "~/.config/ants/auth/lead-docs.creds"
+//!
 //! [[schedule]]                      # a prompt on a timetable; see crate::schedule
 //! name = "nightly"
 //! cron = "0 3 * * *"
@@ -56,6 +68,7 @@ use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::schedule::{self, Schedule};
+use crate::template::{AntTemplate, REQUEST_KEYS, Request};
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -95,11 +108,16 @@ struct File {
     metrics: Option<SocketAddr>,
     #[serde(default)]
     cli: CliSection,
+    #[serde(default, rename = "ant_template")]
+    ant_templates: Vec<AntTemplate>,
     #[serde(default, rename = "ant")]
     ants: Vec<Ant>,
     #[serde(default, rename = "schedule")]
     schedules: Vec<schedule::Entry>,
 }
+
+/// The keys of an `[[ant]]` entry added from a template besides those of a [`Request`].
+const TEMPLATED_KEYS: [&str; 6] = ["name", "template", "added_by", "creds", "nats", "js_domain"];
 
 /// One ant the daemon serves, as the config file (or the command line) describes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -114,7 +132,16 @@ pub struct Ant {
     /// The default human, who gets what is meant for the owner of a thread that has none: escalations, dead-letter
     /// notices. The file's top-level `human`, then `human`, when absent.
     pub human: Option<UserId>,
+    /// Required, except of an ant added from a template, whose default is the template's first workdir.
+    #[serde(default)]
     pub workdir: PathBuf,
+    /// The `[[ant_template]]` the ant was added from, which bounds its settings and gives those it leaves out.
+    pub template: Option<String>,
+    /// The manager ant that added it from its template.
+    pub added_by: Option<UserId>,
+    /// The template's named sets of tool rules it has, besides the template's `allow`.
+    #[serde(default)]
+    pub allow_sets: Vec<String>,
     /// Default: `~/.ants/<name>`.
     pub home: Option<PathBuf>,
     /// Role instructions shared in the roster and prepended to every prompt.
@@ -233,6 +260,9 @@ impl Ant {
             js_domain: None,
             human: None,
             workdir,
+            template: None,
+            added_by: None,
+            allow_sets: Vec::new(),
             home: None,
             whoami: None,
             memory: None,
@@ -390,9 +420,51 @@ pub struct Loaded {
     pub ants: Vec<Ant>,
     /// The harnesses the ants may name.
     pub harnesses: Harnesses,
+    /// The templates manager ants may add ants from, workdirs resolved.
+    pub templates: Vec<AntTemplate>,
     pub schedules: Vec<Schedule>,
     /// Where to serve health and metrics, if anywhere.
     pub metrics: Option<SocketAddr>,
+    /// The file's directory, which relative paths are relative to, and the home directory `~` stands for.
+    base: PathBuf,
+    home: PathBuf,
+}
+
+impl Loaded {
+    /// Check that `manager` may add an ant named `name` from `template` as `request` asks: the template exists and
+    /// lists the manager among its `managers`, the manager was not itself added from a template, no ant or schedule
+    /// has the name, the template has room under its `max_ants`, and the request keeps within the template's bounds
+    /// ([`AntTemplate::resolve`]). Returns the ant as the file would list it once its entry ([`template_entry`]) is
+    /// added; the error tells the first bound broken. A relative or `~` workdir in the request is resolved as in the
+    /// file.
+    pub fn check_request(&self, manager: &UserId, name: &UserId, template: &str, request: &Request) -> Result<Ant> {
+        let t = self.templates.iter().find(|t| t.name == template).with_context(|| {
+            let names: Vec<_> = self.templates.iter().map(|t| t.name.as_str()).collect();
+            format!("no ant template {template} (the config file has: {})", list_or_none(&names))
+        })?;
+        if !t.managers.contains(manager) {
+            bail!("{manager} is not among the managers of template {template}");
+        }
+        if self.ants.iter().any(|a| a.name == *manager && a.template.is_some()) {
+            bail!("{manager} was added from a template, and added ants never add ants");
+        }
+        if self.ants.iter().any(|a| a.name == *name) || self.schedules.iter().any(|s| s.name == *name) {
+            bail!("the config file already lists {name}");
+        }
+        let count = self.ants.iter().filter(|a| a.template.as_deref() == Some(template)).count();
+        if count >= t.max_ants {
+            bail!("template {template} has {count} ants already, its max_ants");
+        }
+        let request = Request {
+            workdir: request.workdir.as_deref().map(|d| resolve(d, &self.base, &self.home)),
+            ..request.clone()
+        };
+        t.resolve(manager, name, &request)
+    }
+}
+
+fn list_or_none(items: &[&str]) -> String {
+    if items.is_empty() { "none".to_owned() } else { items.join(", ") }
 }
 
 /// Read and check the config file at `path`: its ants, the harnesses they may name, and its schedules.
@@ -423,11 +495,19 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if file.messenger && !file.ants.iter().any(|ant| ant.name == UserId::messenger()) {
         file.ants.push(builtin_messenger(file.harness.as_deref().unwrap_or(DEFAULT_HARNESS), home));
     }
+    let templates = templates(std::mem::take(&mut file.ant_templates), &harnesses, base, home)
+        .with_context(|| format!("config {}", path.display()))?;
+    let tables = ant_tables(text)?;
     let mut names = BTreeSet::new();
     let mut ants = Vec::with_capacity(file.ants.len());
-    for mut ant in file.ants {
+    for (i, mut ant) in file.ants.into_iter().enumerate() {
         if !names.insert(ant.name.clone()) {
             bail!("config {}: ant {} is listed twice", path.display(), ant.name);
+        }
+        if !ant.builtin {
+            let table = tables.get(i).context("the [[ant]] entries read differently twice")?;
+            ant = from_template(ant, table, &templates, base, home)
+                .with_context(|| format!("config {}", path.display()))?;
         }
         harness::validate_env(&ant.env)?;
         ant.validate().with_context(|| format!("config {}", path.display()))?;
@@ -459,6 +539,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         ants.push(ant);
     }
+    check_added(&ants, &templates).with_context(|| format!("config {}", path.display()))?;
     let mut schedules: Vec<Schedule> = Vec::with_capacity(file.schedules.len());
     for entry in file.schedules {
         let name = entry.name.clone();
@@ -482,7 +563,104 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
-    Ok(Loaded { ants, harnesses, schedules, metrics: file.metrics })
+    let (base, home) = (base.to_owned(), home.to_owned());
+    Ok(Loaded { ants, harnesses, templates, schedules, metrics: file.metrics, base, home })
+}
+
+/// The file's `templates`, checked, each named once, their workdirs resolved and the harnesses they list defined.
+fn templates(
+    mut templates: Vec<AntTemplate>,
+    harnesses: &Harnesses,
+    base: &Path,
+    home: &Path,
+) -> Result<Vec<AntTemplate>> {
+    let mut names = BTreeSet::new();
+    for template in &mut templates {
+        if !names.insert(template.name.clone()) {
+            bail!("ant template {} is listed twice", template.name);
+        }
+        template.validate(|dir| resolve(dir, base, home), |name| harnesses.get(name).map(drop))?;
+    }
+    Ok(templates)
+}
+
+/// The `[[ant]]` tables of the file `text`, as written, to tell which keys an entry sets.
+fn ant_tables(text: &str) -> Result<Vec<toml::Table>> {
+    #[derive(Deserialize)]
+    struct Tables {
+        #[serde(default, rename = "ant")]
+        ants: Vec<toml::Table>,
+    }
+    Ok(toml::from_str::<Tables>(text)?.ants)
+}
+
+/// `ant`, written as `table`, with the settings of its template when it names one: the template's, as the entry's
+/// keys of a [`Request`] choose within the template's bounds, with the entry's own credentials and connection. Only
+/// those keys may be set, so the template bounds every setting.
+fn from_template(ant: Ant, table: &toml::Table, templates: &[AntTemplate], base: &Path, home: &Path) -> Result<Ant> {
+    let name = &ant.name;
+    let Some(template) = &ant.template else {
+        if ant.added_by.is_some() || !ant.allow_sets.is_empty() {
+            bail!("ant {name}: added_by and allow_sets are for an ant added from a template; set template too");
+        }
+        if ant.workdir.as_os_str().is_empty() {
+            bail!("ant {name}: workdir is missing");
+        }
+        return Ok(ant);
+    };
+    let t = templates
+        .iter()
+        .find(|t| t.name == *template)
+        .with_context(|| format!("ant {name}: no [[ant_template]] named {template}"))?;
+    let manager = ant.added_by.as_ref().with_context(|| {
+        format!("ant {name}: added from template {template}, so added_by must name the manager ant that added it")
+    })?;
+    if let Some(key) =
+        table.keys().find(|k| !TEMPLATED_KEYS.contains(&k.as_str()) && !REQUEST_KEYS.contains(&k.as_str()))
+    {
+        bail!(
+            "ant {name}: {key} comes from template {template}; an ant added from a template sets only {}, and what \
+             the template lets it choose: {}",
+            TEMPLATED_KEYS.join(", "),
+            REQUEST_KEYS.join(", ")
+        );
+    }
+    let chosen: toml::Table =
+        table.iter().filter(|(k, _)| REQUEST_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut request: Request = toml::Value::Table(chosen).try_into().with_context(|| format!("ant {name}"))?;
+    request.workdir = request.workdir.map(|dir| resolve(&dir, base, home));
+    let resolved = t.resolve(manager, name, &request).with_context(|| format!("ant {name}"))?;
+    Ok(Ant { creds: ant.creds, nats: ant.nats, js_domain: ant.js_domain, ..resolved })
+}
+
+/// Check the ants added from templates against what the templates allow together: no more of a template's than its
+/// `max_ants`, and none a manager, as added ants never add ants.
+fn check_added(ants: &[Ant], templates: &[AntTemplate]) -> Result<()> {
+    let added: BTreeSet<UserId> = ants.iter().filter(|a| a.template.is_some()).map(|a| a.name.clone()).collect();
+    for ant in ants.iter() {
+        if let Some(manager) = ant.added_by.as_ref().filter(|m| added.contains(*m)) {
+            bail!(
+                "ant {}: added_by names {manager}, itself added from a template; added ants never add ants",
+                ant.name
+            );
+        }
+    }
+    for t in templates {
+        if let Some(manager) = t.managers.iter().find(|m| added.contains(*m)) {
+            bail!("ant template {}: manager {manager} was added from a template; added ants never add ants", t.name);
+        }
+        let members: Vec<UserId> =
+            ants.iter().filter(|a| a.template.as_ref() == Some(&t.name)).map(|a| a.name.clone()).collect();
+        if members.len() > t.max_ants {
+            bail!(
+                "ant template {}: {} ants are added from it, more than its max_ants of {}",
+                t.name,
+                members.len(),
+                t.max_ants
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The built-in harnesses with the file's `definitions`, their commands given as paths resolved like other paths.
@@ -529,7 +707,7 @@ impl Summary {
         let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
         let harnesses = define(file.harnesses, base, home).with_context(|| format!("config {}", path.display()))?;
-        let caps = file.ants.iter().map(|ant| (ant.name.clone(), ant.caps())).collect();
+        let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
         Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps })
     }
@@ -543,6 +721,20 @@ impl Summary {
     /// entry names none.
     pub fn creds_of(&self, ant: &UserId) -> Option<Option<&Path>> {
         self.ants.iter().find(|(name, _)| name == ant).map(|(_, creds)| creds.as_deref())
+    }
+}
+
+/// The caps of `ant`: those of its entry, else of its template, if it names one of `templates`.
+fn summary_caps(ant: &Ant, templates: &[AntTemplate]) -> Caps {
+    let caps = ant.caps();
+    match ant.template.as_ref().and_then(|name| templates.iter().find(|t| t.name == *name)) {
+        Some(t) => Caps {
+            thread_tokens: caps.thread_tokens.or(t.max_thread_tokens),
+            thread_cost: caps.thread_cost.or(t.max_thread_cost),
+            daily_tokens: caps.daily_tokens.or(t.max_daily_tokens),
+            daily_cost: caps.daily_cost.or(t.max_daily_cost),
+        },
+        None => caps,
     }
 }
 
@@ -767,6 +959,76 @@ pub fn entry(ant: &Ant) -> Result<String> {
         if let Some(value) = value {
             set(key, toml_float(value));
         }
+    }
+    Ok(out)
+}
+
+/// The `[[ant]]` table of an ant named `name` that `manager` adds from `template` as `request` asks, with `creds` as
+/// its credentials: those and what the request sets, paths as they are. Its other settings come from the template
+/// whenever the file loads.
+pub fn template_entry(
+    name: &UserId,
+    template: &str,
+    manager: &UserId,
+    creds: Option<&Path>,
+    request: &Request,
+) -> Result<String> {
+    let mut out = String::from("[[ant]]\n");
+    let mut set = |key: &str, value: String| {
+        let _ = writeln!(out, "{key} = {value}");
+    };
+    let path = |path: &Path| {
+        path.to_str().map(toml_string).with_context(|| format!("ant {name}: {} is no UTF-8", path.display()))
+    };
+    let strings =
+        |items: &[String]| format!("[{}]", items.iter().map(|s| toml_string(s)).collect::<Vec<_>>().join(", "));
+    set("name", toml_string(name.as_str()));
+    set("template", toml_string(template));
+    set("added_by", toml_string(manager.as_str()));
+    if let Some(creds) = creds {
+        set("creds", path(creds)?);
+    }
+    if let Some(workdir) = &request.workdir {
+        set("workdir", path(workdir)?);
+    }
+    let texts = [
+        ("harness", &request.harness),
+        ("model", &request.model),
+        ("reasoning_effort", &request.reasoning_effort),
+        ("context", &request.context),
+        ("whoami", &request.whoami),
+        ("memory", &request.memory),
+        ("tasks", &request.tasks),
+    ];
+    for (key, value) in texts {
+        if let Some(value) = value {
+            set(key, toml_string(value));
+        }
+    }
+    if let Some(capabilities) = &request.capabilities {
+        set("capabilities", strings(capabilities));
+    }
+    if !request.allow_sets.is_empty() {
+        set("allow_sets", strings(&request.allow_sets));
+    }
+    let numbers = [
+        ("max_thread_tokens", request.max_thread_tokens),
+        ("max_daily_tokens", request.max_daily_tokens),
+        ("max_harnesses", request.max_harnesses.map(|n| n as u64)),
+        ("max_tool_calls", request.max_tool_calls.map(|n| n as u64)),
+    ];
+    for (key, value) in numbers {
+        if let Some(value) = value {
+            set(key, value.to_string());
+        }
+    }
+    for (key, value) in [("max_thread_cost", request.max_thread_cost), ("max_daily_cost", request.max_daily_cost)] {
+        if let Some(value) = value {
+            set(key, toml_float(value));
+        }
+    }
+    if let Some(timeout) = request.prompt_timeout {
+        set("prompt_timeout", toml_string(&ants_proto::duration::format(timeout)));
     }
     Ok(out)
 }
@@ -1394,5 +1656,194 @@ Review changes for correctness."""
         std::fs::write(&path, "ant = [{ name = \"dev-a\", workdir = \".\" }]\n").unwrap();
         assert!(add("dev-a", "read").is_err(), "an inline table is left to edit by hand");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const TEMPLATE: &str = r#"
+        nats = "nats://hub:4222"
+
+        [[ant_template]]
+        name = "worker"
+        managers = ["lead"]
+        max_ants = 2
+        workdirs = [".", "src"]
+        harnesses = ["copilot", "claude"]
+        models = { "gpt-5" = "high" }
+        max_daily_cost = 10.0
+        pool_daily_cost = 15.0
+        allow = ["read"]
+        allow_sets = { build = ["execute:cargo build*"] }
+        env = { A = "b" }
+
+        [[ant]]
+        name = "lead"
+        workdir = "."
+    "#;
+
+    fn with_ants(entries: &str) -> String {
+        format!("{TEMPLATE}\n{entries}")
+    }
+
+    #[test]
+    fn an_ant_added_from_a_template_takes_its_settings() {
+        let text = with_ants(
+            r#"
+            [[ant]]
+            name = "lead-a"
+            template = "worker"
+            added_by = "lead"
+            creds = "a.creds"
+            model = "gpt-5"
+            reasoning_effort = "medium"
+            allow_sets = ["build"]
+            max_daily_cost = 4.0
+
+            [[ant]]
+            name = "lead-b"
+            template = "worker"
+            added_by = "lead"
+            workdir = "src"
+            model = "gpt-5"
+        "#,
+        );
+        let loaded = parse_all(&text).unwrap();
+        let a = loaded.ants.iter().find(|a| a.name.as_str() == "lead-a").unwrap();
+        assert_eq!(
+            (a.workdir.clone(), a.creds.clone()),
+            (manifest_dir().canonicalize().unwrap(), Some(manifest_dir().join("a.creds")))
+        );
+        assert_eq!(
+            (a.harness.as_deref(), a.model.as_deref(), a.reasoning_effort.as_deref()),
+            (Some("copilot"), Some("gpt-5"), Some("medium"))
+        );
+        assert_eq!(
+            (a.allow.clone(), a.env.len(), a.max_daily_cost),
+            (vec!["read".to_owned(), "execute:cargo build*".to_owned()], 1, Some(4.0))
+        );
+        assert_eq!(
+            (a.escalate_to.clone(), a.nats.as_deref()),
+            (vec!["lead".parse().unwrap()], Some("nats://hub:4222"))
+        );
+        let b = loaded.ants.iter().find(|a| a.name.as_str() == "lead-b").unwrap();
+        assert_eq!(
+            (b.workdir.clone(), b.max_daily_cost),
+            (manifest_dir().join("src").canonicalize().unwrap(), Some(10.0))
+        );
+
+        let summary = Summary::parse(&text, &manifest_dir().join("config.toml"), Path::new("/home")).unwrap();
+        assert_eq!(summary.caps[&"lead-b".parse::<UserId>().unwrap()].daily_cost, Some(10.0), "the template's ceiling");
+    }
+
+    #[test]
+    fn an_ant_added_from_a_template_is_checked_against_it_on_every_load() {
+        let entry = r#"
+            [[ant]]
+            name = "lead-a"
+            template = "worker"
+            added_by = "lead"
+            model = "gpt-5"
+            max_daily_cost = 8.0
+        "#;
+        parse_all(&with_ants(entry)).unwrap();
+        let tightened = with_ants(entry).replace("max_daily_cost = 10.0", "max_daily_cost = 5.0");
+        let err = format!("{:#}", parse_all(&tightened).unwrap_err());
+        assert!(err.contains("ant lead-a: max_daily_cost 8 is above 5, the ceiling of template worker"), "{err}");
+
+        for (change, error) in [
+            (
+                ("model = \"gpt-5\"", "model = \"gpt-5\"\nenv = { B = \"c\" }"),
+                "ant lead-a: env comes from template worker",
+            ),
+            (
+                ("model = \"gpt-5\"", "model = \"gpt-5\"\nreasoning_effort = \"max\""),
+                "reasoning_effort max is above high",
+            ),
+            (("template = \"worker\"", "template = \"other\""), "ant lead-a: no [[ant_template]] named other"),
+            (("added_by = \"lead\"", ""), "added_by must name the manager ant"),
+            (("added_by = \"lead\"", "added_by = \"boss\""), "name lead-a does not fit name_pattern"),
+            (("template = \"worker\"", ""), "added_by and allow_sets are for an ant added from a template"),
+        ] {
+            let err = format!("{:#}", parse_all(&with_ants(&entry.replace(change.0, change.1))).unwrap_err());
+            assert!(err.contains(error), "{err}");
+        }
+        let err = format!(
+            "{:#}",
+            parse_all(&with_ants(entry).replace("max_ants = 2", "max_ants = 2\nmax_ant = 3")).unwrap_err()
+        );
+        assert!(err.contains("unknown field `max_ant`"), "{err}");
+        let err = format!("{:#}", parse_all(&with_ants(entry).replace("max_ants = 2", "max_ants = 0")).unwrap_err());
+        assert!(err.contains("ant template worker: 1 ants are added from it, more than its max_ants of 0"), "{err}");
+        let err = format!("{:#}", parse_here("[[ant]]\nname = \"dev-a\"\n").unwrap_err());
+        assert!(err.contains("ant dev-a: workdir is missing"), "{err}");
+    }
+
+    #[test]
+    fn added_ants_never_add_ants() {
+        let entry = r#"
+            [[ant]]
+            name = "lead-a"
+            template = "worker"
+            added_by = "lead"
+            model = "gpt-5"
+        "#;
+        let as_manager = with_ants(entry).replace("managers = [\"lead\"]", "managers = [\"lead\", \"lead-a\"]");
+        let err = format!("{:#}", parse_all(&as_manager).unwrap_err());
+        assert!(err.contains("manager lead-a was added from a template; added ants never add ants"), "{err}");
+        let nested = format!(
+            "{}\n{}",
+            with_ants(entry),
+            entry
+                .replace("name = \"lead-a\"", "name = \"lead-a-x\"")
+                .replace("added_by = \"lead\"", "added_by = \"lead-a\"")
+        );
+        let err = format!("{:#}", parse_all(&nested).unwrap_err());
+        assert!(err.contains("added_by names lead-a, itself added from a template"), "{err}");
+    }
+
+    #[test]
+    fn a_request_is_checked_and_its_entry_loads_as_the_ant_checked() {
+        let loaded = parse_all(&with_ants("")).unwrap();
+        let (lead, name): (UserId, UserId) = ("lead".parse().unwrap(), "lead-docs".parse().unwrap());
+        let request = Request {
+            workdir: Some("src".into()),
+            model: Some("gpt-5".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            harness: Some("claude".to_owned()),
+            allow_sets: vec!["build".to_owned()],
+            capabilities: Some(vec!["docs".to_owned()]),
+            whoami: Some("Write \"docs\".".to_owned()),
+            max_daily_cost: Some(2.5),
+            max_thread_tokens: Some(500),
+            max_harnesses: Some(1),
+            prompt_timeout: Some(Duration::from_mins(10)),
+            max_tool_calls: Some(40),
+            ..Request::default()
+        };
+        let checked = loaded.check_request(&lead, &name, "worker", &request).unwrap();
+        let entry = template_entry(&name, "worker", &lead, Some(Path::new("docs.creds")), &request).unwrap();
+        let reloaded = parse_all(&with_ants(&entry)).unwrap();
+        let ant = reloaded.ants.into_iter().find(|a| a.name == name).unwrap();
+        assert_eq!(
+            ant,
+            Ant { creds: Some(manifest_dir().join("docs.creds")), nats: Some("nats://hub:4222".to_owned()), ..checked }
+        );
+
+        for (manager, name, template, error) in [
+            ("lead", "lead-docs", "other", "no ant template other (the config file has: worker)"),
+            ("boss", "boss-docs", "worker", "boss is not among the managers of template worker"),
+            ("lead", "lead", "worker", "the config file already lists lead"),
+            ("lead", "dev-docs", "worker", "does not fit name_pattern"),
+        ] {
+            let err = loaded
+                .check_request(&manager.parse().unwrap(), &name.parse().unwrap(), template, &request)
+                .unwrap_err();
+            assert!(err.to_string().contains(error), "{err}");
+        }
+        let full =
+            parse_all(&format!("{}\n{entry}\n{}", with_ants(""), entry.replace("lead-docs", "lead-more"))).unwrap();
+        let err = full.check_request(&lead, &"lead-x".parse().unwrap(), "worker", &request).unwrap_err().to_string();
+        assert!(err.contains("template worker has 2 ants already, its max_ants"), "{err}");
+        let listed = with_ants(&entry).replace("managers = [\"lead\"]", "managers = [\"lead\", \"lead-docs\"]");
+        let err = format!("{:#}", parse_all(&listed).unwrap_err());
+        assert!(err.contains("manager lead-docs was added from a template"), "{err}");
     }
 }

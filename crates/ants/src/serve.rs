@@ -275,6 +275,13 @@ fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
                 .into_iter()
                 .find(|p| &p.name == name)
                 .with_context(|| format!("ant {name} is not in {}", path.display()))?;
+            if let Some(template) = p.template.as_ref().filter(|_| args.options.sets_any()) {
+                bail!(
+                    "ant {name} was added from template {template}, which bounds its settings: change its entry in {} \
+                     instead of passing ant flags such as --workdir",
+                    path.display()
+                );
+            }
             Ok(vec![args.options.apply(p)])
         }
         None if args.options.sets_any() => {
@@ -630,6 +637,11 @@ mod tests {
         assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
         let err = pick(all, &args("--workdir ."), path).unwrap_err().to_string();
         assert!(err.contains("add --ant"), "{err}");
+
+        let added = vec![Ant { template: Some("worker".to_owned()), ..ant("lead-a") }];
+        assert_eq!(pick(added.clone(), &args("--ant lead-a"), path).unwrap(), added);
+        let err = pick(added, &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
+        assert!(err.contains("ant lead-a was added from template worker"), "{err}");
     }
 
     #[test]
