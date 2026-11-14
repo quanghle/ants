@@ -6,6 +6,7 @@ members = ["crates/ants-proto", "crates/ants-daemon", "crates/ants", "crates/ant
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
+repository = "https://github.com/quanghle/ants"
 rust-version = "1.100"
 publish = false
 

@@ -3816,7 +3816,7 @@ mod tests {
         );
         assert_eq!(ids("@dev-b then @dev-a then @dev-b"), ["dev-b", "dev-a"], "first-seen order, no duplicates");
         assert_eq!(ids("\"@dev-a\" [@dev-b] <@dev-c>\n\t@dev-d's"), ["dev-a", "dev-b", "dev-c", "dev-d"]);
-        assert!(ids("mail a@b or q.le@outlook.com").is_empty(), "addresses mention nobody");
+        assert!(ids("mail a@b or someone@example.com").is_empty(), "addresses mention nobody");
         assert!(ids("@host.example @Dev @dev_a @a@b @ @@dev-a @-x").is_empty());
         assert_eq!(ids(&format!("@{} @ok", "x".repeat(65))), ["ok"]);
         assert_eq!(ids("end @dev-a."), ["dev-a"]);

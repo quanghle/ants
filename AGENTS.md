@@ -12,6 +12,8 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
+- The database is local; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
+  changes issues or specs.
 
 ## Code
 

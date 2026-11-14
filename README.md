@@ -1,5 +1,7 @@
 # ants
 
+[![CI](https://github.com/quanghle/ants/actions/workflows/ci.yml/badge.svg)](https://github.com/quanghle/ants/actions/workflows/ci.yml)
+
 Headless agent teams across machines, communicating with each other and with humans at the terminal over NATS.
 
 - **Backbone:** NATS + JetStream for durable inboxes, channels, thread notes, approvals and dead letters, plus NATS KV for roster, session, attempt, channel, human, chain, link, owner and webhook state.
@@ -62,9 +64,11 @@ Requirements:
 - A signed-in harness CLI on machines running `ants daemon` (see [Harnesses](#harnesses)).
 
 ```sh
-cargo install --path crates/ants        # ~/.cargo/bin/ants
+cargo install --locked --git https://github.com/quanghle/ants ants   # ~/.cargo/bin/ants
 ants --help
 ```
+
+From a checkout: `cargo install --locked --path crates/ants`.
 
 ### Upgrade
 
@@ -858,4 +862,12 @@ Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANT
 | `scripts/` | `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |
 | `docs/transport.md` | Transport reference: hub, reverse proxy, leaf nodes, store-and-forward, HTTPS bridge, Dev Tunnels |
 
-Work items and specifications live in `bd` (`.bd/`): `bd ready`, `bd spec list`, `bd spec show <area>`.
+Work items and specifications live in `bd` (`.bd/`): `bd ready`, `bd spec list`, `bd spec show <area>`. The database stays local; `.bd/issues.jsonl` is a committed snapshot (`bd export -o .bd/issues.jsonl`), loaded into a fresh workspace with `bd init --prefix ants` and `bd import .bd/issues.jsonl`.
+
+## Security
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)
