@@ -29,7 +29,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, UserId, Uuid, chan_consumer, inbox_consumer, subject,
+    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, ThreadOrigin, UserId, Uuid, chan_consumer,
+    inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
@@ -40,8 +41,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::attempts::Notes;
 use crate::bus;
+use crate::channel::Threads;
+use crate::daemon::Claims;
 use crate::escalation::{Escalator, Stuck};
 use crate::humans::Registry;
+use crate::webhooks::Webhooks;
 
 /// Where a delivery stands among the `attempts` a message gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,10 +311,12 @@ impl MaxDeliveries {
 
 /// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message an ant's inbox or
 /// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
-/// Runs until the connection closes. Needs the human's credentials.
+/// Channel threads are read through the reader consumer of `reader`, the human. Runs until the connection closes.
+/// Needs the human's credentials.
 pub async fn watch(
     client: &async_nats::Client,
     js: &jetstream::Context,
+    reader: &UserId,
     mut buried: impl FnMut(u64, &DeadLetter),
 ) -> Result<()> {
     let mut advisories = client
@@ -320,6 +326,9 @@ pub async fn watch(
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let humans = Registry::default();
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
+    let webhooks = Webhooks::new(js.clone());
+    let threads = Threads::new(js.clone(), reader.clone(), bus::ensure_sessions(js).await?);
+    let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {
             Ok(advisory) => advisory,
@@ -328,7 +337,7 @@ pub async fn watch(
                 continue;
             }
         };
-        match bury_undelivered(js, &stream, &advisory, &humans).await {
+        match bury_undelivered(js, &stream, &advisory, &claims).await {
             Ok(Some((seq, dead))) => buried(seq, &dead),
             Ok(None) => {}
             Err(e) => tracing::warn!(stream_seq = advisory.stream_seq, error = format!("{e:#}"), "dead-lettering"),
@@ -339,12 +348,14 @@ pub async fn watch(
 
 /// Dead-letter the message `advisory` names, unless it is not an ant's inbox message or channel post, is gone, or
 /// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
-/// else the default human of `humans`, not up the ant's escalation chain.
+/// else the default human of `claims`, not up the ant's escalation chain. The owner and creator are checked as the
+/// ant's daemon checks them: an envelope's against `claims` ([`Claims::sender_claims`]), and a channel post's as the
+/// posts of its thread say ([`Threads::origin`]).
 pub async fn bury_undelivered(
     js: &jetstream::Context,
     stream: &stream::Stream,
     advisory: &MaxDeliveries,
-    humans: &Registry,
+    claims: &Claims<'_>,
 ) -> Result<Option<(u64, DeadLetter)>> {
     let Some((ant, consumer)) = advisory.ant() else {
         tracing::debug!(consumer = advisory.consumer, "ignoring an advisory of a consumer that is no ant's inbox");
@@ -374,17 +385,27 @@ pub async fn bury_undelivered(
                 bail!("message {seq} is on {}, not in the inbox of {ant}", msg.subject);
             }
             // As the daemon does: an envelope whose sender is forged is kept only as a payload.
-            let envelope =
+            let mut envelope =
                 serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.check_subject(&msg.subject).is_ok());
+            if let Some(envelope) = envelope.as_mut() {
+                claims.sender_claims(envelope, seq).await;
+            }
             (letter_of(&ant, seq, advisory.deliveries, &error, &msg.payload, envelope.as_ref()), None)
         }
         Consumer::Channels => {
             if subject::parse_chan(&msg.subject).is_none() {
                 bail!("message {seq} is on {}, not a channel post", msg.subject);
             }
-            let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
+            let mut post = serde_json::from_slice::<ChannelPost>(&msg.payload)
                 .ok()
                 .filter(|p| p.check_subject(&msg.subject).is_ok());
+            if let Some(post) = post.as_mut() {
+                let origin = claims.threads.origin(post, seq, &claims.humans.humans()).await.unwrap_or_else(|e| {
+                    tracing::warn!(thread = %post.thread_id, error = format!("{e:#}"), "reading the thread's origin");
+                    ThreadOrigin::default()
+                });
+                origin.apply(post);
+            }
             (DeadLetter::of_payload(ant.clone(), seq, advisory.deliveries, &error, &msg.payload), post)
         }
     };
@@ -396,7 +417,7 @@ pub async fn bury_undelivered(
         .context("publishing")?
         .await
         .context("waiting for JetStream to store the message")?;
-    tell(js, &dead, ack.sequence, post.as_ref(), humans, None).await?;
+    tell(js, &dead, ack.sequence, post.as_ref(), claims.humans, None).await?;
     if ack.duplicate {
         return Ok(None);
     }
