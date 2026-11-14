@@ -1159,6 +1159,40 @@ Stored entries written under the old naming are skipped as unreadable, never del
   human's credentials. Until then daemons treat that human's messages as an agent's.
 - Enrollment requests are not stored, but `ants add --enroll` and `ants enroll` need the same version on both ends.
 
+## Upgrading to tools, notes and unit durations
+
+The command and config grammar changed again without aliases, so every machine is upgraded together. What changed:
+
+- Config file: the top-level `provider` is now `harness`, the default harness of every ant without its own and of the
+  built-in messenger; `provider` fails to load. The built-in messenger is now served by default: a file with only
+  `[[ant]]` tables (a file `ants add` creates, too) serves it unless it sets `messenger = false` or lists an ant named
+  `messenger`. Set `messenger = false` on each machine that must not serve it. An empty file serves the messenger
+  alone; `messenger = false` with no `[[ant]]` fails.
+- Durations take a unit (`90s`, `10m`, `1h30m`, or `0`); a bare number fails. The keys `approval_timeout_secs`,
+  `idle_timeout_secs`, `prompt_timeout_secs` and `escalate_after_secs` are now `approval_timeout`, `idle_timeout`,
+  `prompt_timeout` and `escalate_after`, as strings such as `idle_timeout = "10m"`; the old keys fail to load. The
+  flags of `ants daemon` and `ants add` lose `-secs` the same way (`--idle-timeout 10m`), and `ants auth enroll
+  --ttl-secs` is now `--ttl`.
+- Tool requests: `ants approve` is now `ants tools list` (`--follow`, `--json`), `ants tools show ID`, `ants tools
+  approve ID` (`--always` for allow-always) and `ants tools reject ID`.
+- Thread notes: `ants plan` is now `ants notes`, the MCP tools `read_plan` and `post_plan` are `read_notes` and
+  `post_notes` (update `other:read_plan`/`other:post_plan` in `allow` lists and any agent instructions naming them),
+  the subjects `ants.plan.<thread>.<from>` are `ants.notes.<thread>.<from>` and the consumers `plan-<user>` are
+  `notes-<user>`.
+- Waiting: `ants post --wait` now ends at the first post by someone else; the old streaming is `ants post --follow`.
+  `--timeout` takes a duration and has no default (it was 600 s); `ants ask` gains `--follow` and `--timeout`. A
+  `--wait` that times out exits with status 1.
+- Channels: `ants channel set --no-messenger` is now `--default-messenger`.
+
+Because credentials carry the subjects they allow, after upgrading:
+
+1. Run `ants init` with a human's credentials. It adds `ants.notes.>` to the ANTS stream and keeps `ants.plan.>`, so
+   notes posted before stay stored until the stream's 30-day retention drops them; `ants notes` does not show them.
+2. Issue credentials again: `ants auth user` for every ant and human, `ants auth leaf` for every leaf node, then run
+   `ants leaf outbox` again on each machine so the hub admits `ants.out.notes.*`.
+
+An escalation an older daemon recorded with the reason `plan_room` reads as `unknown`.
+
 ## Development
 
 ```sh
