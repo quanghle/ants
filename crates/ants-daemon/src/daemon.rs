@@ -2945,7 +2945,7 @@ mod tests {
     async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over() {
         let Some((mut bus, mut to_human)) = Bus::start().await else { return };
         let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
-        bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None };
+        bus.chain = Chain { escalate_to: vec![lead.clone()], max_hops: 1, after: None, ..Chain::default() };
         bus.put_roster(&lead, &[boss]).await;
         let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
         let (launch, log, _) = fake::launch(true);

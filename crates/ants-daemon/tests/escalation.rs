@@ -206,3 +206,60 @@ async fn an_escalation_on_a_thread_spun_off_a_channel_thread_passes_the_link_on(
     };
     assert_eq!(linked(&notice), expected);
 }
+
+#[tokio::test]
+async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart_until_a_human_answers() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    client.flush().await.unwrap();
+    let escalator = || {
+        let chain = Chain { remind: Some(Duration::from_millis(300)), ..Chain::default() };
+        let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
+        let send = escalation::jetstream_sender(js.clone());
+        Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send)
+    };
+    let thread = ThreadId::generate();
+    let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");
+    let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
+
+    let first = escalator();
+    assert_eq!(first.escalate(stuck).await.unwrap(), Escalated::Owner(UserId::human()));
+    let told = next(&mut to_human).await;
+    let escalation = told.escalation.as_deref().expect("an escalation, for push sinks").clone();
+    assert_eq!((escalation.level, escalation.reason), (0, EscalationReason::TurnBudget));
+    drop(first);
+
+    // Restarted, the ant still reminds the human of it, on the thread, carrying it.
+    let escalator = escalator();
+    let check = async {
+        let reminded = next(&mut to_human).await;
+        assert_eq!((&reminded.thread_id, reminded.escalation.as_deref()), (&thread, Some(&escalation)));
+        let start =
+            format!("[ants] Reminder: the escalation of dev-a on thread {thread} (turn budget spent) has waited");
+        assert!(reminded.text.starts_with(&start), "{}", reminded.text);
+        assert!(reminded.text.contains(&format!("`ants ask --thread {thread} @dev-a TEXT`")), "{}", reminded.text);
+        assert!(reminded.text.ends_with("\n\nTurn budget spent."), "{}", reminded.text);
+        let reminder = loop {
+            match escalator.ledger().reminder(&thread).await.unwrap() {
+                Some(reminder) if reminder.sent == 0 => tokio::time::sleep(Duration::from_millis(20)).await,
+                reminder => break reminder.expect("the next reminder"),
+            }
+        };
+        let tomorrow = chrono::Utc::now().timestamp_millis() + 23 * 3_600_000;
+        assert!(reminder.sent == 1 && reminder.at > tomorrow, "daily after the first: {reminder:?}");
+        assert_eq!(escalator.ledger().deadlines().await.unwrap().get(&thread), Some(&reminder.at));
+
+        let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
+        assert!(!escalator.arrived(&mut human, true).await.unwrap());
+        assert_eq!(escalator.ledger().reminder(&thread).await.unwrap(), None, "a human ends it");
+        assert!(escalator.ledger().deadlines().await.unwrap().is_empty());
+    };
+    tokio::select! {
+        done = timeout(WAIT, check) => done.expect("checked in time"),
+        () = escalator.deadlines() => unreachable!(),
+    }
+    assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one reminder");
+}

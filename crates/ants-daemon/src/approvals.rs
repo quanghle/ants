@@ -4,8 +4,10 @@
 //! `ants.approvals.<ant>`, where the stream keeps it, so an `ants tools list` started later still finds it. Any human
 //! publishes the [`ApprovalDecision`] to the request's own subject, which only humans may write to; the first decision
 //! stored wins. No decision before `expires_at` rejects the request, and tells the thread's owner, else the default
-//! human, on the thread ([`NatsApprover::begin`]): the request vanishes from `ants tools list`, and the notice says
-//! how to retry, wait longer or allow such calls.
+//! human, on a thread of its own ([`NatsApprover::begin`]): the request vanishes from `ants tools list`, and the notice
+//! says how to retry, wait longer or allow such calls. The notice carries the request's approval escalation, so `ants
+//! webhook serve` pushes it to that human's sinks as it does any escalation reaching the human's inbox. The ants of the
+//! chain that were asked are told too, on the request's thread, but a human among them already got the notice.
 //!
 //! A decision heard on the subject is only a sign that one was published: core NATS delivers a publish the stream then
 //! refuses, as when `ants tools approve` loses to another human's decision, and the two may arrive in either order. So
@@ -126,20 +128,28 @@ impl NatsApprover {
         Turn { answering: self.answering.clone(), thread }
     }
 
-    /// Tell the thread's owner, else the default human, that `request` expired unanswered and was rejected. Stored
-    /// before the ant goes on, so before the message being answered is acked; failing to, it only warns.
-    async fn tell_expired(&self, request: &ApprovalRequest) {
+    /// Tell the thread's owner, else the default human, and the ants of the chain `asked` about it, that `request`
+    /// expired unanswered and was rejected. Stored before the ant goes on, so before the message being answered is
+    /// acked; failing to, it only warns.
+    async fn tell_expired(&self, request: &ApprovalRequest, asked: &[UserId]) {
         let answering = self.answering.lock().expect("answering").get(&request.thread_id).cloned();
         let notice = expired_notice(&self.ant, request, self.timeout, answering.as_ref(), &self.humans);
         let id = format!("approval-expired-{}-{}", self.ant, request.id);
-        match bus::store(&self.js, notice.subject(), &notice, &id).await {
-            Ok(_) => tracing::info!(request = %request.id, to = %notice.to, "told of the expired approval request"),
-            Err(e) => tracing::warn!(
-                request = %request.id,
-                to = %notice.to,
-                error = format!("{e:#}"),
-                "telling of the expired approval request"
-            ),
+        let members: Vec<_> = asked
+            .iter()
+            .filter(|member| **member != notice.to)
+            .map(|member| (expired_member_notice(&self.ant, request, self.timeout, member), format!("{id}-{member}")))
+            .collect();
+        for (told, id) in std::iter::once((notice, id)).chain(members) {
+            match bus::store(&self.js, told.subject(), &told, &id).await {
+                Ok(_) => tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request"),
+                Err(e) => tracing::warn!(
+                    request = %request.id,
+                    to = %told.to,
+                    error = format!("{e:#}"),
+                    "telling of the expired approval request"
+                ),
+            }
         }
     }
 
@@ -207,11 +217,18 @@ impl NatsApprover {
             .await
             .context("waiting for JetStream to store the approval request")?;
         tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
-        match self.ask_chain(&request).await {
-            Ok(to) if to.is_empty() => {}
-            Ok(to) => tracing::info!(request = %request.id, ?to, "asked the ant's chain too"),
-            Err(e) => tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain"),
-        }
+        let asked = match self.ask_chain(&request).await {
+            Ok(to) => {
+                if !to.is_empty() {
+                    tracing::info!(request = %request.id, ?to, "asked the ant's chain too");
+                }
+                to
+            }
+            Err(e) => {
+                tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain");
+                Vec::new()
+            }
+        };
         let waits = ants_proto::StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
@@ -281,7 +298,7 @@ impl NatsApprover {
             Ok(verdict) => verdict,
             Err(_) => {
                 tracing::info!(request = %request.id, "approval request expired; rejecting");
-                self.tell_expired(&request).await;
+                self.tell_expired(&request, &asked).await;
                 Verdict::Reject
             }
         };
@@ -340,7 +357,8 @@ impl Drop for Turn {
 /// The message on `request`'s thread that tells its owner, else the default human of `humans`, that the request
 /// expired unanswered after `timeout` and was rejected. `answering` is the message the ant was answering, naming the
 /// thread's owner and creator. On a thread of its own, naming the request's, so that `ants ask --wait` on the request's
-/// thread still waits for the ant's reply that follows.
+/// thread still waits for the ant's reply that follows. It carries the request's escalation, for `ants webhook serve`
+/// to push it.
 fn expired_notice(
     ant: &UserId,
     request: &ApprovalRequest,
@@ -371,6 +389,21 @@ fn expired_notice(
         .with_owner(owner)
         .with_creator(answering.and_then(|e| humans.ant_creator(e.creator.as_ref())))
         .with_origin_thread(answering.and_then(|e| e.origin_thread.clone()))
+        .with_escalation(Some(Escalation::of_request(request)))
+}
+
+/// The message on `request`'s thread that tells `member`, an ant of the chain asked to decide it, that it expired
+/// unanswered after `timeout` and was rejected. It carries no escalation: there is nothing left to decide.
+fn expired_member_notice(ant: &UserId, request: &ApprovalRequest, timeout: Duration, member: &UserId) -> Envelope {
+    let (id, thread, tool) = (request.id, &request.thread_id, &request.tool);
+    let text = format!(
+        "[ants] Approval request {id} on thread {thread} expired unanswered after {} and was rejected: {} ({}). \
+         {ant} goes on without it; decide_approval no longer applies to it, and no answer is needed.",
+        ants_proto::duration::format(timeout),
+        tool.title,
+        tool.kind,
+    );
+    Envelope::on_thread(thread.clone(), ant.clone(), member.clone(), text)
 }
 
 /// The next message of `subscriber`, if there is one; without one, never.
@@ -502,6 +535,8 @@ mod tests {
         assert_eq!((&told.from, &told.owner), (&ant, &Some(alice.clone())));
         assert_ne!(told.thread_id, thread, "on a thread of its own, for `ants ask --wait` to wait on");
         assert!(told.text.contains("expired unanswered") && told.text.contains("git push"), "{}", told.text);
+        let escalation = told.escalation.as_deref().map(|e| (e.reason, &e.thread_id));
+        assert_eq!(escalation, Some((EscalationReason::Approval, &thread)), "pushed as escalations are");
 
         // With the turn over, the default human is told.
         drop(turn);
@@ -654,6 +689,40 @@ mod tests {
         assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
         assert!(approver.waiting.lock().unwrap().is_empty(), "nothing waits once decided");
         approver.offer(&lead_says);
+    }
+
+    #[tokio::test]
+    async fn an_expired_request_is_told_to_the_chain_asked_and_pushed_to_the_human_once() {
+        let Some(server) = Server::start() else { return };
+        let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
+        let thread: ThreadId = "t1".parse().unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+        let mut stream = bus::ensure_stream(&js).await.unwrap();
+
+        // A human in the chain, as a misconfigured escalate_to may hold, is told once, as the default human.
+        let human = UserId::human();
+        let approver =
+            NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_chain(chain(&[&lead, &human]));
+        assert_eq!(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+
+        let stored = stream.direct_get_last_for_subject(subject::inbox(&lead, &ant)).await.unwrap();
+        let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
+        assert_eq!((&told.thread_id, &told.escalation), (&thread, &None), "on the request's thread, nothing to decide");
+        assert!(told.text.contains("expired unanswered") && told.text.contains("git push"), "{}", told.text);
+
+        let to_human = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &ant)).await.unwrap();
+        let told: Envelope = serde_json::from_slice(&to_human.payload).unwrap();
+        assert!(told.text.contains("expired unanswered"), "{}", told.text);
+        let escalation = told.escalation.as_deref().expect("an escalation, for push sinks");
+        assert_eq!((escalation.reason, &escalation.thread_id), (EscalationReason::Approval, &thread));
+        let info = stream.info().await.unwrap();
+        let (first, last) = (info.state.first_sequence, info.state.last_sequence);
+        let mut to_human = 0;
+        for seq in first..=last {
+            let msg = stream.get_raw_message(seq).await.unwrap();
+            to_human += usize::from(msg.subject.as_str() == subject::inbox(&human, &ant));
+        }
+        assert_eq!(to_human, 2, "the chain's request and the expiry notice, not one more");
     }
 
     #[tokio::test]

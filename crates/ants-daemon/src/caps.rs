@@ -13,8 +13,9 @@
 //! Spend first passing a share of a cap short of it gives a [`Warning`], once per thread allowance or UTC day: that it
 //! was given is kept with the spend, so restarts and later prompts do not give it again.
 //!
-//! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, and the threads
-//! whose escalation has a deadline under `<ant>.escalations.deadlines`.
+//! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, as is the
+//! reminder of one that reached a human ([`Reminder`]), and the threads whose escalation has a deadline or a reminder
+//! due, with the earlier of the two, under `<ant>.escalations.deadlines`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,9 @@ struct ThreadSpend {
     /// The thread's escalation, from when it first went anywhere until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     escalation: Option<Pending>,
+    /// The reminder of the thread's escalation that reached a human, until a human's message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reminder: Option<Reminder>,
     #[serde(default, skip_serializing_if = "Warned::none")]
     warned: Warned,
 }
@@ -179,6 +183,31 @@ impl Pending {
     }
 }
 
+/// When to remind a human of a thread's escalation that reached it, until a human's message on the thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reminder {
+    /// The escalation as it last reached the human.
+    pub escalation: Escalation,
+    /// The human it reached: the thread's owner, else the default human.
+    pub to: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<UserId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_thread: Option<ThreadId>,
+    /// What the escalation is about.
+    #[serde(default)]
+    pub summary: String,
+    /// When an escalation of the thread first reached a human, in Unix milliseconds.
+    pub since: i64,
+    /// When the next reminder is due, in Unix milliseconds.
+    pub at: i64,
+    /// Reminders sent so far.
+    #[serde(default)]
+    pub sent: u32,
+}
+
 /// Tokens and cost spent: by the ant in a UTC day, or by a thread since a human's last message on it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Spent {
@@ -287,12 +316,46 @@ impl Ledger {
         self.update(thread, |spent| (forget_spend(spent), ())).await
     }
 
-    /// A message from a human: the thread starts over from nothing spent, and its escalation is over. Returns whether
-    /// it had one.
+    /// A message from a human: the thread starts over from nothing spent, and its escalation is over, with its
+    /// reminder. Returns whether it had either.
     pub async fn reset(&self, thread: &ThreadId) -> Result<bool> {
         self.update(thread, |spent| {
-            let escalated = spent.escalation.take().is_some();
+            let escalated = spent.escalation.take().is_some() | spent.reminder.take().is_some();
             (forget_spend(spent) || escalated, escalated)
+        })
+        .await
+    }
+
+    /// The reminder of the thread's escalation, if it has one.
+    pub async fn reminder(&self, thread: &ThreadId) -> Result<Option<Reminder>> {
+        let spent: ThreadSpend = self.store.get(thread_spend_key(&self.ant, thread)).await?;
+        Ok(spent.reminder)
+    }
+
+    /// Remind of the thread's escalation as `reminder` says, keeping when one first reached a human and the reminders
+    /// sent from the reminder the thread has, if any.
+    pub async fn arm_reminder(&self, thread: &ThreadId, reminder: Reminder) -> Result<()> {
+        self.update(thread, |spent| {
+            let kept = spent.reminder.as_ref().map(|r| (r.since, r.sent));
+            let (since, sent) = kept.unwrap_or((reminder.since, reminder.sent));
+            spent.reminder = Some(Reminder { since, sent, ..reminder });
+            (true, ())
+        })
+        .await
+    }
+
+    /// A reminder of the thread's escalation was sent: the next one is due `next`, or none is for None. A thread whose
+    /// escalation a human ended meanwhile stays without one.
+    pub async fn reminded(&self, thread: &ThreadId, next: Option<i64>) -> Result<()> {
+        self.update(thread, |spent| match next {
+            Some(at) => match &mut spent.reminder {
+                Some(r) => {
+                    (r.sent, r.at) = (r.sent + 1, at);
+                    (true, ())
+                }
+                None => (false, ()),
+            },
+            None => (spent.reminder.take().is_some(), ()),
         })
         .await
     }
@@ -348,20 +411,21 @@ impl Ledger {
         .await
     }
 
-    /// The escalation deadlines by thread. One may be stale: [`Ledger::recheck`] drops it.
+    /// The escalation deadlines and reminders due by thread, the earlier of the two. One may be stale:
+    /// [`Ledger::recheck`] drops it.
     pub async fn deadlines(&self) -> Result<BTreeMap<ThreadId, i64>> {
         let mut index = self.threads.lock().await;
         Ok(self.load_index(&mut index).await?.clone())
     }
 
-    /// Bring the thread's deadline in [`Ledger::deadlines`] in line with its escalation.
+    /// Bring the thread's deadline in [`Ledger::deadlines`] in line with its escalation and reminder.
     pub async fn recheck(&self, thread: &ThreadId) -> Result<()> {
         self.update(thread, |_| (false, ())).await
     }
 
     /// Read, change with `change` and store the thread's spend, when `change` says it changed it, keeping the deadlines
-    /// in line. A deadline is listed before its escalation is stored, and unlisted after, so a crash in between leaves
-    /// a stale entry rather than a lost one.
+    /// in line: the earlier of the escalation's deadline and its reminder's. A deadline is listed before its escalation
+    /// is stored, and unlisted after, so a crash in between leaves a stale entry rather than a lost one.
     async fn update<R>(&self, thread: &ThreadId, change: impl FnOnce(&mut ThreadSpend) -> (bool, R)) -> Result<R> {
         let mut index = self.threads.lock().await;
         let index = self.load_index(&mut index).await?;
@@ -369,6 +433,7 @@ impl Ledger {
         let mut spent: ThreadSpend = self.store.get(key.clone()).await?;
         let (changed, result) = change(&mut spent);
         let deadline = spent.escalation.as_ref().and_then(|p| p.deadline);
+        let deadline = deadline.into_iter().chain(spent.reminder.as_ref().map(|r| r.at)).min();
         let listed = index.get(thread).copied();
         if let Some(deadline) = deadline.filter(|d| Some(*d) != listed) {
             index.insert(thread.clone(), deadline);
@@ -728,5 +793,39 @@ mod tests {
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t1.clone(), 7), (t2.clone(), 9)]));
         ledger.recheck(&t2).await.unwrap();
         assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t1, 7)]));
+    }
+
+    #[tokio::test]
+    async fn a_reminder_is_due_before_a_later_deadline_keeps_its_start_and_ends_with_the_escalation() {
+        let ledger = Ledger::memory(ant(), Caps::default());
+        let t = thread(1);
+        let pending = escalated(&["lead"], Some(9));
+        let reminder = |since, at| Reminder {
+            escalation: pending.escalation.clone(),
+            to: UserId::human(),
+            owner: None,
+            creator: None,
+            origin_thread: None,
+            summary: String::new(),
+            since,
+            at,
+            sent: 0,
+        };
+        ledger.set_pending(&t, Some(pending.clone())).await.unwrap();
+        ledger.arm_reminder(&t, reminder(1, 5)).await.unwrap();
+        assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t.clone(), 5)]), "the earlier one");
+        ledger.reminded(&t, Some(20)).await.unwrap();
+        assert_eq!(ledger.deadlines().await.unwrap(), BTreeMap::from([(t.clone(), 9)]));
+
+        // Reaching a human again postpones the reminder, still counting from the first time.
+        ledger.arm_reminder(&t, reminder(15, 30)).await.unwrap();
+        let armed = ledger.reminder(&t).await.unwrap().unwrap();
+        assert_eq!((armed.since, armed.at, armed.sent), (1, 30, 1));
+
+        assert!(ledger.reset(&t).await.unwrap(), "a human ends it");
+        assert_eq!(ledger.reminder(&t).await.unwrap(), None);
+        assert!(ledger.deadlines().await.unwrap().is_empty());
+        ledger.reminded(&t, Some(40)).await.unwrap();
+        assert_eq!(ledger.reminder(&t).await.unwrap(), None, "a reminder sent meanwhile does not bring it back");
     }
 }

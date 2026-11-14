@@ -516,6 +516,10 @@ enum ThreadCommand {
         /// under the thread.
         #[arg(long, value_name = "TEXT")]
         grep: Option<String>,
+        /// Only threads whose escalation reached a human with no human's message on the thread since, other than a
+        /// tool request's; the escalation is shown under the thread. One sent before --since is not seen.
+        #[arg(long)]
+        escalated: bool,
         /// How far back to read, such as 90m, 24h or 7d; 0 for everything the stream keeps. Each message in it is
         /// read, so a longer one takes longer.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
@@ -951,8 +955,8 @@ async fn main() -> Result<()> {
         }
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
-        Command::Thread(ThreadCommand::List { ant, owner, grep, since, limit, json }) => {
-            let select = thread::Select { ant, owner, grep, limit: Some(limit) };
+        Command::Thread(ThreadCommand::List { ant, owner, grep, escalated, since, limit, json }) => {
+            let select = thread::Select { ant, owner, grep, limit: Some(limit), escalated };
             thread::list(&nats()?, since, &select, json).await
         }
         Command::Thread(ThreadCommand::Show { thread, since, json }) => {

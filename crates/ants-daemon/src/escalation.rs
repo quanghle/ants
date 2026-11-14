@@ -21,6 +21,11 @@
 //! Without an answer from the leader within `escalate_after`, the stuck ant sends it one level higher
 //! ([`Escalator::deadlines`]). The thread's escalation lives with its spend in `ants_sessions` ([`Pending`]), so
 //! restarts keep its level and deadline.
+//!
+//! An escalation that reaches a human carries the escalation, so `ants webhook serve` pushes it, and without a
+//! human's message on the thread by `escalation_reminder` the same human gets a reminder on the thread, carrying it
+//! too, then daily for as long as the stream keeps the escalation ([`Reminder`]). The reminder is kept with the
+//! thread's spend and its due time in the deadlines, so the daemon serving the ant sends it, once, across restarts.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +39,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use crate::caps::{Ledger, Pending};
+use crate::caps::{Ledger, Pending, Reminder};
 use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
@@ -42,6 +47,13 @@ use crate::{bus, links};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
 pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
+/// Default of `escalation_reminder`: how long an escalation that reached a human waits for a human's message before
+/// the first reminder.
+pub const DEFAULT_ESCALATION_REMINDER: Duration = Duration::from_hours(4);
+/// Between reminders after the first.
+const REMIND_AGAIN: Duration = Duration::from_hours(24);
+/// How long reminders go on after an escalation first reached a human: as long as the stream keeps it.
+const REMIND_FOR: Duration = Duration::from_hours(30 * 24);
 /// Pause after a failed look at the deadlines.
 const RETRY: Duration = Duration::from_secs(30);
 /// Most of an escalation's text kept for the escalations that follow it up.
@@ -82,11 +94,18 @@ pub struct Chain {
     pub max_hops: u32,
     /// How long an escalation waits for its leader before going one level higher; None waits for good.
     pub after: Option<Duration>,
+    /// How long an escalation that reached a human waits for a human's message before a reminder; None never reminds.
+    pub remind: Option<Duration>,
 }
 
 impl Default for Chain {
     fn default() -> Self {
-        Self { escalate_to: Vec::new(), max_hops: DEFAULT_MAX_ESCALATION_HOPS, after: Some(DEFAULT_ESCALATE_AFTER) }
+        Self {
+            escalate_to: Vec::new(),
+            max_hops: DEFAULT_MAX_ESCALATION_HOPS,
+            after: Some(DEFAULT_ESCALATE_AFTER),
+            remind: Some(DEFAULT_ESCALATION_REMINDER),
+        }
     }
 }
 
@@ -266,8 +285,8 @@ impl Escalator {
         Ok(true)
     }
 
-    /// Send every escalation whose leader did not answer by its deadline one level higher, as deadlines pass. Runs
-    /// until dropped.
+    /// Send every escalation whose leader did not answer by its deadline one level higher, and every reminder due, as
+    /// deadlines pass. Runs until dropped.
     pub async fn deadlines(&self) {
         loop {
             let next = match self.ledger.deadlines().await {
@@ -296,7 +315,8 @@ impl Escalator {
         }
     }
 
-    /// Escalate one level higher every escalation past its deadline, dropping stale deadlines.
+    /// Send the reminders due and escalate one level higher every escalation past its deadline, dropping stale
+    /// deadlines.
     async fn overdue(&self) -> Result<()> {
         let now = now_ms();
         for (thread, at) in self.ledger.deadlines().await? {
@@ -304,6 +324,9 @@ impl Escalator {
                 continue;
             }
             let _busy = self.busy.lock().await;
+            if let Some(reminder) = self.ledger.reminder(&thread).await?.filter(|r| r.at <= now) {
+                self.remind(&thread, reminder, now).await?;
+            }
             let pending = self.ledger.pending(&thread).await?;
             let due =
                 pending.filter(|p| p.deadline.is_some_and(|d| d <= now) && p.renewed_by.is_none() && !p.at_owner());
@@ -398,6 +421,31 @@ impl Escalator {
         }
     }
 
+    /// Remind the human `reminder` names of the thread's escalation, on the thread, carrying it, under a message id
+    /// of its own, then schedule the next reminder, if any.
+    async fn remind(&self, thread: &ThreadId, reminder: Reminder, now: i64) -> Result<()> {
+        let Reminder { escalation, to, owner, creator, origin_thread, summary, since, sent, .. } = reminder;
+        let (ant, stuck) = (&self.ant, &escalation.stuck);
+        let waited = chrono::DateTime::from_timestamp_millis(since)
+            .map_or_else(String::new, |at| format!(" since {}", at.format("%Y-%m-%d %H:%M UTC")));
+        let text = format!(
+            "[ants] Reminder: the escalation of {stuck} on thread {thread} ({}) has waited for a human{waited}. A \
+             human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.\n\n{summary}",
+            reason_text(escalation.reason),
+        );
+        let notice = Envelope::on_thread(thread.clone(), ant.clone(), to, text)
+            .with_owner(owner)
+            .with_creator(creator)
+            .with_origin_thread(origin_thread)
+            .with_escalation(Some(escalation));
+        let human = notice.to.clone();
+        (self.send)(notice, format!("remind-{ant}-{thread}-{since}-{}", sent + 1)).await?;
+        let next = now + millis(REMIND_AGAIN);
+        self.ledger.reminded(thread, (next < since + millis(REMIND_FOR)).then_some(next)).await?;
+        tracing::info!(%thread, %human, sent = sent + 1, "reminded of the escalation");
+        Ok(())
+    }
+
     /// Send `escalation` to every ant of `to`, with `summary`. Another ant's escalation goes to it as well, first,
     /// so its daemon follows the level ([`Escalator::took_climb`]).
     async fn to_chain(&self, escalation: &Escalation, to: &[UserId], summary: &str, stuck: &Stuck) -> Result<()> {
@@ -430,8 +478,9 @@ impl Escalator {
         Ok(())
     }
 
-    /// Send the notice of `stuck` to the thread's owner, else the default human, with `escalation` when it went up a
-    /// chain first, and `because` it did not go up one, which it returns.
+    /// Send the notice of `stuck` to the thread's owner, else the default human, with `escalation`, and `because` it
+    /// did not go up a chain, which it returns. The human gets a reminder after [`Chain::remind`] without a human's
+    /// message on the thread.
     async fn to_owner(
         &self,
         escalation: &Escalation,
@@ -442,10 +491,24 @@ impl Escalator {
         if let Some(why) = because.as_ref().and_then(|because| owner_text(escalation, because)) {
             notice.text = format!("{}\n\n{why}", notice.text);
         }
-        if escalation.level > 0 {
-            notice = notice.with_escalation(Some(escalation.clone()));
-        }
+        let notice = notice.with_escalation(Some(escalation.clone()));
         let human = notice.to.clone();
+        if let Some(remind) = self.chain.remind.filter(|_| escalation.reason != EscalationReason::Approval) {
+            let now = now_ms();
+            let reminder = Reminder {
+                escalation: escalation.clone(),
+                to: human.clone(),
+                owner: notice.owner.clone(),
+                creator: notice.creator.clone(),
+                origin_thread: notice.origin_thread.clone(),
+                summary: notice.text.chars().take(SUMMARY_CHARS).collect(),
+                since: now,
+                at: now + millis(remind),
+                sent: 0,
+            };
+            self.ledger.arm_reminder(&notice.thread_id, reminder).await?;
+            self.deadline_set.notify_one();
+        }
         (self.send)(notice, stuck.id.clone()).await?;
         Ok((Escalated::Owner(human), because.map(|because| why_text(escalation, &because))))
     }
