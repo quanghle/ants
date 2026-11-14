@@ -379,6 +379,180 @@ fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     }
 }
 
+/// What adding a persona needs to know of a config file: its top-level `nats` and `js_domain`, and the personas it
+/// lists with their credentials, resolved as [`parse`] does. Nothing else is checked.
+#[derive(Debug, Default, PartialEq)]
+pub struct Summary {
+    pub nats: Option<String>,
+    pub js_domain: Option<JsDomain>,
+    pub personas: Vec<(PersonaId, Option<PathBuf>)>,
+}
+
+impl Summary {
+    /// Read the summary of the file at `path`; an empty one when there is no file.
+    pub fn load(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text, &std::path::absolute(path)?, &home_dir()?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading config {}", path.display())),
+        }
+    }
+
+    fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
+        let file: File = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        let personas = file.personas.into_iter().map(|p| (p.name, p.creds.map(|c| resolve(&c, base, home)))).collect();
+        Ok(Self { nats: file.nats, js_domain: file.js_domain, personas })
+    }
+
+    /// The credentials the file names for `persona`: `None` when it does not list the persona, `Some(None)` when its
+    /// entry names none.
+    pub fn creds_of(&self, persona: &PersonaId) -> Option<Option<&Path>> {
+        self.personas.iter().find(|(name, _)| name == persona).map(|(_, creds)| creds.as_deref())
+    }
+}
+
+/// Add `entry` ([`entry`]) at the end of the config file at `path`, creating the file (and its directory) when
+/// missing. The text already there stays as it is, comments included; the file must still parse ([`parse`]) with the
+/// entry, or nothing is written.
+pub fn append(path: &Path, entry: &str) -> Result<()> {
+    let old = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading config {}", path.display())),
+    };
+    let mut text = old.clone();
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    text.push_str(entry);
+    parse(&text, &std::path::absolute(path)?, &home_dir()?)?;
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    // Written beside the file and renamed over it, so a failure leaves the old file whole.
+    let mut new = path.as_os_str().to_owned();
+    new.push(".new");
+    let new = PathBuf::from(new);
+    std::fs::write(&new, text).with_context(|| format!("writing {}", new.display()))?;
+    std::fs::rename(&new, path).with_context(|| format!("writing config {}", path.display()))
+}
+
+/// The `[[persona]]` table of `p` for the config file: its name, workdir and the settings that differ from those of
+/// [`Persona::new`], paths as they are.
+pub fn entry(p: &Persona) -> Result<String> {
+    let default = Persona::new(p.name.clone(), p.workdir.clone());
+    let mut out = String::from("[[persona]]\n");
+    let mut set = |key: &str, value: String| out.push_str(&format!("{key} = {value}\n"));
+    let path = |path: &Path| {
+        path.to_str().map(toml_string).with_context(|| format!("persona {}: {} is no UTF-8", p.name, path.display()))
+    };
+    let strings =
+        |items: &mut dyn Iterator<Item = &str>| format!("[{}]", items.map(toml_string).collect::<Vec<_>>().join(", "));
+    set("name", toml_string(p.name.as_str()));
+    let texts = [("nats", &p.nats), ("model", &p.model), ("reasoning_effort", &p.reasoning_effort)];
+    for (key, value) in texts.into_iter().chain([("context", &p.context)]) {
+        if let Some(value) = value {
+            set(key, toml_string(value));
+        }
+    }
+    if let Some(creds) = &p.creds {
+        set("creds", path(creds)?);
+    }
+    if let Some(domain) = &p.js_domain {
+        set("js_domain", toml_string(domain.as_str()));
+    }
+    if let Some(human) = &p.human {
+        set("human", toml_string(human.as_str()));
+    }
+    set("workdir", path(&p.workdir)?);
+    if let Some(home) = &p.home {
+        set("home", path(home)?);
+    }
+    for (key, value) in [("whoami", &p.whoami), ("memory", &p.memory), ("tasks", &p.tasks)] {
+        if let Some(value) = value {
+            set(key, toml_string(value));
+        }
+    }
+    if !p.env.is_empty() {
+        let pairs: Vec<String> =
+            p.env.iter().map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v))).collect();
+        set("env", format!("{{ {} }}", pairs.join(", ")));
+    }
+    if let Some(harness) = p.harness {
+        set("harness", toml_string(harness.name()));
+    }
+    if p.allow_tools {
+        set("allow_tools", "true".to_owned());
+    }
+    if !p.allow.is_empty() {
+        set("allow", strings(&mut p.allow.iter().map(String::as_str)));
+    }
+    if !p.capabilities.is_empty() {
+        set("capabilities", strings(&mut p.capabilities.iter().map(String::as_str)));
+    }
+    if !p.escalate_to.is_empty() {
+        set("escalate_to", strings(&mut p.escalate_to.iter().map(PersonaId::as_str)));
+    }
+    let numbers = [
+        ("approval_timeout_secs", p.approval_timeout_secs, default.approval_timeout_secs),
+        ("max_harnesses", p.max_harnesses as u64, default.max_harnesses as u64),
+        ("idle_timeout_secs", p.idle_timeout_secs, default.idle_timeout_secs),
+        ("prompt_timeout_secs", p.prompt_timeout_secs, default.prompt_timeout_secs),
+        ("max_tool_calls", p.max_tool_calls as u64, default.max_tool_calls as u64),
+        ("max_escalation_hops", p.max_escalation_hops.into(), default.max_escalation_hops.into()),
+        ("escalate_after_secs", p.escalate_after_secs, default.escalate_after_secs),
+    ];
+    for (key, value, default) in numbers {
+        if value != default {
+            set(key, value.to_string());
+        }
+    }
+    for (key, value) in [("max_thread_tokens", p.max_thread_tokens), ("max_daily_tokens", p.max_daily_tokens)] {
+        if let Some(value) = value {
+            set(key, value.to_string());
+        }
+    }
+    for (key, value) in [("max_thread_cost", p.max_thread_cost), ("max_daily_cost", p.max_daily_cost)] {
+        if let Some(value) = value {
+            set(key, toml_float(value));
+        }
+    }
+    Ok(out)
+}
+
+/// `s` as a TOML basic string.
+fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push('\t'),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn toml_float(x: f64) -> String {
+    if x.is_nan() {
+        "nan".to_owned()
+    } else if x.is_infinite() {
+        if x > 0.0 { "inf" } else { "-inf" }.to_owned()
+    } else {
+        // Debug always shows a fraction or an exponent, as TOML floats need.
+        format!("{x:?}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +818,69 @@ Review changes for correctness."""
         assert!(chain("[\"dev-a\"]").contains("escalate_to names the persona itself"));
         assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
         assert!(chain("[\"Lead!\"]").contains("parsing config"));
+    }
+
+    #[test]
+    fn entries_read_back_as_written() {
+        let workdir = manifest_dir().canonicalize().unwrap();
+        let plain = Persona::new("dev-a".parse().unwrap(), workdir.clone());
+        let text = entry(&plain).unwrap();
+        assert_eq!(text, format!("[[persona]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
+        assert_eq!(parse_here(&text).unwrap(), [plain]);
+
+        let mut full = Persona::new("dev-b".parse().unwrap(), workdir);
+        full.nats = Some("wss://hub.example/nats".to_owned());
+        full.creds = Some(PathBuf::from("/keys/dev b.creds"));
+        full.js_domain = Some("hub".parse().unwrap());
+        full.human = Some("alice".parse().unwrap());
+        full.home = Some(PathBuf::from("/srv/ants/dev-b"));
+        full.whoami = Some("Say \"hi\".\nThen\ttab \\ back\u{7f}.".to_owned());
+        full.env.insert("A B".to_owned(), "x=\"y\"".to_owned());
+        full.harness = Some(HarnessKind::Claude);
+        full.model = Some("m".to_owned());
+        full.allow_tools = true;
+        full.allow = vec!["execute:cargo test*".to_owned()];
+        full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
+        full.escalate_to = vec!["lead".parse().unwrap()];
+        full.max_harnesses = 1;
+        full.prompt_timeout_secs = 0;
+        full.max_thread_cost = Some(2.5);
+        full.max_daily_tokens = Some(1000);
+        let text = entry(&full).unwrap();
+        assert_eq!(parse_here(&text).unwrap(), [full]);
+    }
+
+    #[test]
+    fn appending_keeps_the_file_as_it_was_and_checks_it() {
+        let dir = ants_test_support::scratch_dir("config-append").canonicalize().unwrap();
+        let path = dir.join("ants/config.toml");
+        let add = |name: &str| append(&path, &entry(&Persona::new(name.parse().unwrap(), dir.clone())).unwrap());
+        add("dev-a").unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.starts_with("[[persona]]\nname = \"dev-a\""), "{first}");
+
+        let old = "# the team\nprovider = \"copilot\"\nnats = \"nats://hub:4222\" # the hub\n\n[[persona]]\nname = \"dev-a\"\n\
+                   workdir = \".\"\ncreds = \"keys/dev-a.creds\"";
+        std::fs::write(&path, old).unwrap();
+        add("dev-b").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(&format!("{old}\n\n[[persona]]\nname = \"dev-b\"")), "{text}");
+        let names: Vec<_> = load(&path).unwrap().into_iter().map(|p| p.name.to_string()).collect();
+        assert_eq!(names, ["dev-a", "dev-b", "messenger"]);
+
+        let err = format!("{:#}", add("dev-a").unwrap_err());
+        assert!(err.contains("persona dev-a is listed twice"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "left as it was");
+
+        let summary = Summary::load(&path).unwrap();
+        assert_eq!(summary.nats.as_deref(), Some("nats://hub:4222"));
+        assert_eq!(
+            summary.creds_of(&"dev-a".parse().unwrap()),
+            Some(Some(dir.join("ants/keys/dev-a.creds").as_path()))
+        );
+        assert_eq!(summary.creds_of(&"dev-b".parse().unwrap()), Some(None));
+        assert_eq!(summary.creds_of(&"dev-c".parse().unwrap()), None);
+        assert_eq!(Summary::load(&dir.join("none.toml")).unwrap(), Summary::default());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

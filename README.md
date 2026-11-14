@@ -109,8 +109,10 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
 | `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects and direct gets an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
+| `ants persona add NAME` | Lists a persona in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding a persona](#adding-a-persona). |
+| `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants persona add --enroll`, signs one or refuses it. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME [--human]` / `leaf MACHINE` | Issues the team's operator and account, persona or human credentials, and leaf uplink credentials. |
+| `ants auth init` / `user NAME [--human] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` | Issues the team's operator and account, persona or human credentials (or with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, and leaf uplink credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
 | `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
 | `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
@@ -923,6 +925,50 @@ sets `max_control_line: 16384`; add that line to a `server.conf` written before 
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
 nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
 `server.conf` next to the server configuration (or include it by a relative path).
+
+### Adding a persona
+
+`ants persona add` sets up a persona on the machine that runs it, without copying any seed: it generates the persona's
+user NKey there, keeps the seed there and lists the persona in the config file (`--config`, `ANTS_CONFIG`, default
+`~/.ants/config.toml`, created when missing; the text already there stays as it is). The flags of `ants daemon`
+(`--workdir`, default the current directory, `--harness`, `--model`, `--whoami`, `--capability`, ...) set up the
+entry; `--nats` and `--js-domain` go into it when they differ from the file's. The credentials go to `--out`, default
+`~/.config/ants/auth/<persona>.creds`; until they are complete the seed waits beside them as `<persona>.nk` (mode
+0600), and running the command again reuses it. Only the machine holding the account key can sign the public key, out
+of band or over NATS:
+
+```sh
+# out of band
+ants persona add dev-c --workdir ~/src/app --model gpt-5   # on the persona's machine: lists dev-c, prints its public key
+ants auth user dev-c --public-key UABC... --js-domain hub  # where the account key is: prints the JWT
+ants persona add dev-c --jwt eyJ...                        # on the persona's machine: writes dev-c.creds (or --jwt FILE, --jwt -)
+
+# over NATS
+ants auth enroll dev-c                                     # where the account key is: enroll-dev-c.creds, valid an hour
+ants persona add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds   # on the persona's machine: asks, then waits
+ants enroll approve dev-c --js-domain hub                  # where the account key is: signs and answers
+```
+
+`ants persona add` checks the JWT it gets: issued to its public key under the persona's name, and signed by its
+issuer (over NATS, by the account that signed the enrollment credentials). A persona already listed takes no flags:
+the command then only completes its credentials, at the `creds` of its entry.
+
+Enrollment credentials (`ants auth enroll NAME`, `--ttl-secs`, default 3600) expire, and allow only publishing on
+`ants.enroll.<persona>` and subscribing to `ants.enroll.<persona>.reply` (`Permissions::for_enrollment`): they cannot
+ask for another name, hear another's answer, or read any message. An `EnrollRequest` carries the persona, the public
+key and the host name; requests are core NATS and stored nowhere, so `ants persona add --enroll` repeats its request
+every 5 s until an answer for its key comes, the enrollment credentials expire, or Ctrl-C. `ants enroll` on the
+machine holding the account key connects with credentials it issues itself for ten minutes, allowed only to hear
+`ants.enroll.*` and answer on `ants.enroll.*.reply` (`Permissions::for_enroll_approver`), and listens 6 s for
+requests: `list` prints those heard, `approve NAME` signs the one for NAME (`--public-key` picks among several machines
+asking) with the rights of `ants auth user` and the hub's `--js-domain`, and answers again while the machine keeps
+asking; `reject NAME [--reason TEXT]` refuses every machine asking for NAME, or the one of `--public-key`. Enrollment
+reaches the hub directly: a leaf uplink does not carry `ants.enroll.*`, so on a machine behind a leaf node give
+`ants persona add --hub URL` the hub's URL, and point `ants enroll --nats` at the hub.
+
+The running daemon does not read the config file again: restart it (or its service, see Services) to serve the new
+persona. Behind a leaf node, the persona also needs the leaf's uplink credentials and outbox issued again with it
+(`ants auth leaf`, `ants leaf outbox`).
 
 ### Leaf nodes
 

@@ -405,6 +405,23 @@ pub mod subject {
     /// Every approval decision, of all personas.
     pub const ALL_APPROVAL_DECISIONS: &str = "ants.approvals.*.*";
 
+    /// Where `ants persona add --enroll` asks for the credentials of `persona`
+    /// ([`EnrollRequest`](super::EnrollRequest); core NATS, not stored). Only the enrollment credentials of `persona`
+    /// publish here.
+    pub fn enroll(persona: &PersonaId) -> String {
+        format!("ants.enroll.{persona}")
+    }
+
+    /// Where the answer to an enrollment request of `persona` goes ([`EnrollReply`](super::EnrollReply); core NATS).
+    pub fn enroll_reply(persona: &PersonaId) -> String {
+        format!("ants.enroll.{persona}.reply")
+    }
+
+    /// Every enrollment request, of all personas.
+    pub const ALL_ENROLL_REQUESTS: &str = "ants.enroll.*";
+    /// Every answer to an enrollment request.
+    pub const ALL_ENROLL_REPLIES: &str = "ants.enroll.*.reply";
+
     /// Live progress of a persona on a thread ([`StatusEvent`](super::StatusEvent)s; core NATS, not stored).
     pub fn status(persona: &PersonaId, thread: &ThreadId) -> String {
         format!("ants.status.{persona}.{thread}")
@@ -730,7 +747,32 @@ impl Permissions {
         ]);
         leaf
     }
+
+    /// What the enrollment credentials of `persona` allow: asking for its credentials on [`subject::enroll`] and
+    /// hearing the answer on [`subject::enroll_reply`], nothing else, so they cannot ask for another name or hear
+    /// another's answer.
+    pub fn for_enrollment(persona: &PersonaId) -> Self {
+        Self { publish: vec![subject::enroll(persona)], subscribe: vec![subject::enroll_reply(persona)] }
+    }
+
+    /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment request and
+    /// answering it.
+    pub fn for_enroll_approver() -> Self {
+        Self {
+            publish: vec![subject::ALL_ENROLL_REPLIES.to_owned()],
+            subscribe: vec![subject::ALL_ENROLL_REQUESTS.to_owned()],
+        }
+    }
 }
+
+/// The `name` of the user JWT of `persona`'s enrollment credentials.
+pub fn enrollment_user(persona: &PersonaId) -> String {
+    format!("enroll-{persona}")
+}
+
+/// How often `ants persona add --enroll` repeats its [`EnrollRequest`] while it waits for an answer. Requests are core
+/// NATS and stored nowhere, so `ants enroll` sees those sent while it listens.
+pub const ENROLL_REPEAT: Duration = Duration::from_secs(5);
 
 /// A persona's entry in the [`ROSTER_BUCKET`], under the key of its persona id.
 ///
@@ -1698,6 +1740,72 @@ impl ApprovalDecision {
     }
 }
 
+/// A machine asking for the credentials of `persona` on [`subject::enroll`]: the public key of the user NKey it
+/// generated, whose seed stays there. The machine holding the account key signs a user JWT for that key, or refuses,
+/// and answers with an [`EnrollReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollRequest {
+    pub persona: PersonaId,
+    /// The user's public NKey, `U...`.
+    pub public_key: String,
+    /// Host name of the asking machine, as it reports it.
+    pub host: String,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl EnrollRequest {
+    pub fn new(persona: PersonaId, public_key: impl Into<String>, host: impl Into<String>) -> Self {
+        Self { persona, public_key: public_key.into(), host: host.into(), sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::enroll(&self.persona)
+    }
+
+    /// Check that the request arrived on its own [`EnrollRequest::subject`], which enrollment credentials pin.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignPersona { kind: "enrollment request", persona: self.persona.clone(), at: subject.to_owned() })
+    }
+}
+
+/// The answer to an [`EnrollRequest`], on [`subject::enroll_reply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EnrollReply {
+    /// The user JWT of `public_key`, which completes the persona's credentials with the seed kept on its machine.
+    Approved { persona: PersonaId, public_key: String, jwt: String },
+    /// No credentials for `public_key`, or for any key asking for `persona` when it is `None`.
+    Rejected {
+        persona: PersonaId,
+        public_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+impl EnrollReply {
+    pub fn persona(&self) -> &PersonaId {
+        match self {
+            Self::Approved { persona, .. } | Self::Rejected { persona, .. } => persona,
+        }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::enroll_reply(self.persona())
+    }
+
+    /// Whether the answer is meant for the request of `public_key`.
+    pub fn answers(&self, public_key: &str) -> bool {
+        match self {
+            Self::Approved { public_key: key, .. } => key == public_key,
+            Self::Rejected { public_key: key, .. } => key.as_deref().is_none_or(|key| key == public_key),
+        }
+    }
+}
+
 /// Where a persona stands on a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1822,6 +1930,26 @@ mod tests {
     fn generated_thread_ids_are_valid_tokens() {
         let t = ThreadId::generate();
         assert_eq!(t.as_str().parse::<ThreadId>().unwrap(), t);
+    }
+
+    #[test]
+    fn enrollment_answers_name_the_key_they_answer() {
+        let request = EnrollRequest::new(p("dev-a"), "UKEY", "macbook");
+        assert_eq!(request.check_subject("ants.enroll.dev-a"), Ok(()));
+        assert!(request.check_subject("ants.enroll.dev-b").is_err());
+
+        let approved = EnrollReply::Approved { persona: p("dev-a"), public_key: "UKEY".into(), jwt: "j".into() };
+        let json = serde_json::to_value(&approved).unwrap();
+        assert_eq!(json["outcome"], "approved");
+        assert_eq!(serde_json::from_value::<EnrollReply>(json).unwrap(), approved);
+        assert_eq!(approved.subject(), "ants.enroll.dev-a.reply");
+        assert!(approved.answers("UKEY") && !approved.answers("UOTHER"));
+
+        let all: EnrollReply =
+            serde_json::from_str(r#"{"outcome":"rejected","persona":"dev-a","public_key":null}"#).unwrap();
+        assert!(all.answers("UKEY") && all.answers("UOTHER"));
+        let one = EnrollReply::Rejected { persona: p("dev-a"), public_key: Some("UOTHER".into()), reason: None };
+        assert!(!one.answers("UKEY"));
     }
 
     #[test]

@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_proto::{JsDomain, Machine, Permissions, PersonaId, Role};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -73,7 +73,8 @@ pub fn issue(dir: &Path, persona: &PersonaId, role: Role, js_domain: Option<&JsD
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let permissions = Permissions::for_persona(persona, role).with_js_domain(js_domain);
-    write_secret(out, &creds(&user_jwt(&account, &user, persona.as_str(), permissions, json!({}))?, &seed(&user)?))
+    let jwt = user_jwt(&account, &user.public_key(), persona.as_str(), permissions, json!({}), None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
@@ -100,8 +101,121 @@ pub fn issue_leaf(
     let roles = members.iter().map(|(member, role)| (member, *role));
     let permissions = Permissions::for_leaf(machine, roles).with_js_domain(js_domain);
     let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
-    let jwt = user_jwt(&account, &user, &format!("leaf-{machine}"), permissions, only_leaf)?;
+    let jwt = user_jwt(&account, &user.public_key(), &format!("leaf-{machine}"), permissions, only_leaf, None)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))
+}
+
+/// Sign the user JWT of `persona` in `role` for `public_key`, a user NKey generated on another machine, with the
+/// permissions [`issue`] gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
+pub fn sign_user(
+    dir: &Path,
+    persona: &PersonaId,
+    role: Role,
+    js_domain: Option<&JsDomain>,
+    public_key: &str,
+) -> Result<String> {
+    check_user_key(public_key)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let permissions = Permissions::for_persona(persona, role).with_js_domain(js_domain);
+    user_jwt(&account, public_key, persona.as_str(), permissions, json!({}), None)
+}
+
+/// Fail unless `public_key` is a user's public NKey, `U...`.
+pub fn check_user_key(public_key: &str) -> Result<()> {
+    let key = KeyPair::from_public_key(public_key).map_err(|e| anyhow!("public key {public_key}: {e}"))?;
+    if key.key_pair_type() != nkeys::KeyPairType::User {
+        bail!("{public_key} is not the public key of a user (U...)");
+    }
+    Ok(())
+}
+
+/// Issue the enrollment credentials of `persona`, valid for `ttl`, and write their `.creds` file to `out`: they may
+/// only ask for the persona's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
+/// expire, in seconds since the epoch.
+pub fn issue_enrollment(dir: &Path, persona: &PersonaId, ttl: Duration, out: &Path) -> Result<u64> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let exp = now()? + ttl.as_secs().max(1);
+    let name = ants_proto::enrollment_user(persona);
+    let jwt =
+        user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(persona), json!({}), Some(exp))?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))?;
+    Ok(exp)
+}
+
+/// The text of short-lived credentials for `ants enroll`, which hear enrollment requests and answer them
+/// ([`Permissions::for_enroll_approver`]), issued afresh from the account key of each run.
+pub fn approver_creds(dir: &Path) -> Result<String> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let exp = now()? + APPROVER_TTL.as_secs();
+    let jwt =
+        user_jwt(&account, &user.public_key(), "enroll", Permissions::for_enroll_approver(), json!({}), Some(exp))?;
+    Ok(creds(&jwt, &seed(&user)?))
+}
+
+const APPROVER_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The claims of a user JWT that matter to enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claims {
+    /// The user's public key.
+    pub sub: String,
+    /// The account that signed it.
+    pub iss: String,
+    pub name: String,
+    /// Expiry, in seconds since the epoch.
+    pub exp: Option<u64>,
+}
+
+/// Decode a JWT and check that its issuer signed it.
+pub fn verified(jwt: &str) -> Result<Claims> {
+    let jwt = jwt.trim();
+    let (signed, signature) = jwt.rsplit_once('.').context("not a JWT")?;
+    let (_, body) = signed.split_once('.').context("not a JWT")?;
+    let decode = |part: &str| BASE64URL_NOPAD.decode(part.as_bytes()).context("not a JWT");
+    let claims: Value = serde_json::from_slice(&decode(body)?).context("not a JWT")?;
+    let text = |field: &str| claims[field].as_str().map(str::to_owned).with_context(|| format!("JWT without {field}"));
+    let iss = text("iss")?;
+    let issuer = KeyPair::from_public_key(&iss).map_err(|e| anyhow!("JWT issuer {iss}: {e}"))?;
+    issuer.verify(signed.as_bytes(), &decode(signature)?).map_err(|_| anyhow!("JWT not signed by its issuer {iss}"))?;
+    Ok(Claims { sub: text("sub")?, iss, name: text("name")?, exp: claims["exp"].as_u64() })
+}
+
+/// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.
+pub fn creds_jwt(creds: &str) -> Option<&str> {
+    creds_block(creds, "BEGIN NATS USER JWT")
+}
+
+/// The seed of a `.creds` file's text: the line after the `BEGIN USER NKEY SEED` marker.
+pub fn creds_seed(creds: &str) -> Option<&str> {
+    creds_block(creds, "BEGIN USER NKEY SEED")
+}
+
+fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
+    let mut lines = creds.lines().map(str::trim);
+    lines.find(|line| line.starts_with("---") && line.contains(marker))?;
+    lines.find(|line| !line.is_empty()).filter(|line| !line.starts_with("---"))
+}
+
+/// Write the `.creds` file of `jwt` and the seed of `user` to `out`, readable by its owner only.
+pub fn write_creds(out: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
+    write_secret(out, &creds(jwt, &seed(user)?))
+}
+
+/// Write `user`'s seed alone to `out`, readable by its owner only.
+pub fn write_seed(out: &Path, user: &KeyPair) -> Result<()> {
+    write_secret(out, &format!("{}\n", seed(user)?))
+}
+
+/// Read a seed written by [`write_seed`].
+pub fn read_seed(path: &Path) -> Result<KeyPair> {
+    let seed = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    KeyPair::from_seed(seed.trim()).map_err(|e| anyhow!("{}: {e}", path.display()))
+}
+
+fn now() -> Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Result<String> {
@@ -110,9 +224,10 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
         &operator.public_key(),
         TEAM,
         json!({ "system_account": system.public_key(), "type": "operator", "version": 2 }),
+        None,
     )?;
     // JetStream needs a system account in operator mode.
-    let system_jwt = jwt(operator, &system.public_key(), "SYS", json!({ "type": "account", "version": 2 }))?;
+    let system_jwt = jwt(operator, &system.public_key(), "SYS", json!({ "type": "account", "version": 2 }), None)?;
     let account_jwt = jwt(
         operator,
         &account.public_key(),
@@ -126,6 +241,7 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
             "type": "account",
             "version": 2,
         }),
+        None,
     )?;
     Ok(format!(
         "# Written by `ants auth init`. Include it from the server configuration: include \"{SERVER_CONF}\"\n\
@@ -140,8 +256,16 @@ fn server_conf(operator: &KeyPair, system: &KeyPair, account: &KeyPair) -> Resul
     ))
 }
 
-/// A user JWT with `permissions`, plus the `extra` claims.
-fn user_jwt(account: &KeyPair, user: &KeyPair, name: &str, permissions: Permissions, extra: Value) -> Result<String> {
+/// A user JWT for the public key `user` with `permissions`, plus the `extra` claims, expiring at `exp` (seconds since
+/// the epoch) if given.
+fn user_jwt(
+    account: &KeyPair,
+    user: &str,
+    name: &str,
+    permissions: Permissions,
+    extra: Value,
+    exp: Option<u64>,
+) -> Result<String> {
     let Permissions { publish, subscribe } = permissions;
     let mut nats = json!({
         "pub": { "allow": publish },
@@ -153,13 +277,15 @@ fn user_jwt(account: &KeyPair, user: &KeyPair, name: &str, permissions: Permissi
     if let (Value::Object(nats), Value::Object(extra)) = (&mut nats, extra) {
         nats.extend(extra);
     }
-    jwt(account, &user.public_key(), name, nats)
+    jwt(account, user, name, nats, exp)
 }
 
-/// A NATS v2 JWT for `subject`, signed by `issuer`.
-fn jwt(issuer: &KeyPair, subject: &str, name: &str, nats: Value) -> Result<String> {
-    let iat = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let mut claims = json!({ "iat": iat, "iss": issuer.public_key(), "name": name, "sub": subject, "nats": nats });
+/// A NATS v2 JWT for `subject`, signed by `issuer`, expiring at `exp` if given.
+fn jwt(issuer: &KeyPair, subject: &str, name: &str, nats: Value, exp: Option<u64>) -> Result<String> {
+    let mut claims = json!({ "iat": now()?, "iss": issuer.public_key(), "name": name, "sub": subject, "nats": nats });
+    if let Some(exp) = exp {
+        claims["exp"] = exp.into();
+    }
     // As in nats-io/jwt: the id is the hash of the claims without it.
     let id = ring::digest::digest(&ring::digest::SHA512_256, &serde_json::to_vec(&claims)?);
     claims["jti"] = BASE32_NOPAD.encode(id.as_ref()).into();
@@ -206,8 +332,6 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::time::Duration;
-
     use ants_daemon::bus;
     use ants_daemon::channel::{Channels, Threads};
     use ants_daemon::dead::{self, Attempt};

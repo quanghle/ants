@@ -445,7 +445,7 @@ async fn put(kv: &kv::Store, entry: &RosterEntry) -> Result<()> {
 }
 
 /// Host name of this machine, as `hostname` prints it.
-async fn machine() -> String {
+pub async fn machine() -> String {
     let output = tokio::process::Command::new("hostname").output().await;
     match output {
         Ok(out) if out.status.success() => {

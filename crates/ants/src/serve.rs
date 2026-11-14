@@ -16,6 +16,13 @@ pub struct DaemonArgs {
     /// Config file listing the personas to serve (default without --persona: ~/.ants/config.toml, if it exists).
     #[arg(long, env = "ANTS_CONFIG")]
     config: Option<PathBuf>,
+    #[command(flatten)]
+    options: PersonaOptions,
+}
+
+/// The settings of a persona on the command line, of `ants daemon` and `ants persona add`.
+#[derive(clap::Args, Debug, Default)]
+pub struct PersonaOptions {
     /// Directory the harness works in (default: the current directory).
     #[arg(long)]
     workdir: Option<PathBuf>,
@@ -91,8 +98,9 @@ pub struct DaemonArgs {
     capabilities: Vec<String>,
 }
 
-impl DaemonArgs {
-    fn sets_persona_options(&self) -> bool {
+impl PersonaOptions {
+    /// Whether any setting is given.
+    pub fn sets_any(&self) -> bool {
         self.workdir.is_some()
             || self.home.is_some()
             || self.whoami.is_some()
@@ -118,7 +126,7 @@ impl DaemonArgs {
     }
 
     /// The persona with the flags given on the command line in place of its own settings.
-    fn apply(&self, mut p: Persona) -> Persona {
+    pub fn apply(&self, mut p: Persona) -> Persona {
         if let Some(dir) = &self.workdir {
             p.workdir.clone_from(dir);
         }
@@ -203,7 +211,7 @@ fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
 /// The personas to serve.
 pub fn personas(args: &DaemonArgs, default_path: &Path) -> Result<Vec<Persona>> {
     match source(args, default_path)? {
-        Source::Flags(name) => Ok(vec![args.apply(Persona::new(name, std::env::current_dir()?))]),
+        Source::Flags(name) => Ok(vec![args.options.apply(Persona::new(name, std::env::current_dir()?))]),
         Source::File(path) => pick(config::load(&path)?, args, &path),
     }
 }
@@ -215,9 +223,9 @@ fn pick(all: Vec<Persona>, args: &DaemonArgs, path: &Path) -> Result<Vec<Persona
                 .into_iter()
                 .find(|p| &p.name == name)
                 .with_context(|| format!("persona {name} is not in {}", path.display()))?;
-            Ok(vec![args.apply(p)])
+            Ok(vec![args.options.apply(p)])
         }
-        None if args.sets_persona_options() => {
+        None if args.options.sets_any() => {
             bail!(
                 "persona flags such as --workdir apply to one persona; add --persona to pick it from {}",
                 path.display()
@@ -384,7 +392,7 @@ mod tests {
         assert_eq!(picked[0].model.as_deref(), Some("smart"));
         assert_eq!(picked[0].reasoning_effort.as_deref(), Some("high"));
         assert_eq!(picked[0].context.as_deref(), Some("long_context"));
-        let only_model = args("--model smart").apply(p);
+        let only_model = args("--model smart").options.apply(p);
         assert_eq!(only_model.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(only_model.context.as_deref(), Some("default"));
         for line in ["--model smart", "--reasoning-effort high", "--context long_context"] {
@@ -416,7 +424,7 @@ mod tests {
             Cmd::try_parse_from(["daemon", "--persona", "dev-a", "--whoami", "", "--tasks", "", "--env", "EMPTY="])
                 .unwrap()
                 .args;
-        let cleared = clear.apply(picked[0].clone());
+        let cleared = clear.options.apply(picked[0].clone());
         assert_eq!(cleared.whoami.as_deref(), Some(""));
         assert_eq!(cleared.tasks.as_deref(), Some(""));
         assert_eq!(cleared.env["EMPTY"], "");
