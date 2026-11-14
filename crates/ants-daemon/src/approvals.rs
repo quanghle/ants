@@ -337,7 +337,8 @@ impl Drop for Turn {
 
 /// The message on `request`'s thread that tells its owner, else the default human of `humans`, that the request
 /// expired unanswered after `timeout` and was rejected. `answering` is the message the ant was answering, naming the
-/// thread's owner and creator. No reply to it: the ant's reply follows, for `ants ask --wait` to wait for.
+/// thread's owner and creator. On a thread of its own, naming the request's, so that `ants ask --wait` on the request's
+/// thread still waits for the ant's reply that follows.
 fn expired_notice(
     ant: &UserId,
     request: &ApprovalRequest,
@@ -364,7 +365,7 @@ fn expired_notice(
          an allow rule matching them."
     );
     let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
-    Envelope::on_thread(thread.clone(), ant.clone(), to, text)
+    Envelope::new(ant.clone(), to, text)
         .with_owner(owner)
         .with_creator(answering.and_then(|e| humans.ant_creator(e.creator.as_ref())))
         .with_origin_thread(answering.and_then(|e| e.origin_thread.clone()))
@@ -491,7 +492,8 @@ mod tests {
         assert_eq!(impatient.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
         let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
         let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
-        assert_eq!((&told.from, &told.thread_id, &told.owner), (&ant, &thread, &Some(alice.clone())));
+        assert_eq!((&told.from, &told.owner), (&ant, &Some(alice.clone())));
+        assert_ne!(told.thread_id, thread, "on a thread of its own, for `ants ask --wait` to wait on");
         assert!(told.text.contains("expired unanswered") && told.text.contains("git push"), "{}", told.text);
 
         // With the turn over, the default human is told.
@@ -516,7 +518,8 @@ mod tests {
             .with_origin_thread(Some("t0".parse().unwrap()));
         let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, Some(&asked), &humans);
         assert_eq!((told.to.as_str(), &told.owner, &told.creator), ("alice", &asked.owner, &Some(lead)));
-        assert_eq!((&told.thread_id, &told.origin_thread, told.in_reply_to), (&thread, &asked.origin_thread, None));
+        assert_ne!(told.thread_id, thread);
+        assert_eq!((&told.origin_thread, told.in_reply_to), (&asked.origin_thread, None));
         for part in [
             format!("Tool request dev-a/{} on thread t1 expired unanswered after 5m", request.id),
             "git push (execute)".into(),
