@@ -69,7 +69,7 @@ human as read, including replies that human has not seen yet.
 
 ```sh
 ants watch dev-a <thread>   # live state, reply text and tool calls of dev-a on that thread
-ants plan <thread>          # the thread's notes: a shared board; posts there wake nobody
+ants notes <thread>         # the thread's notes: a passive shared board; posts there wake nobody
 ```
 
 `ants watch` never exits on its own: run it in the background and stop it when done.
@@ -100,7 +100,7 @@ An ant may name other ants to escalate to: the `escalate_to` key of its config, 
 `ants roster` shows it in the `ESCALATE_TO` column (`escalate_to` in `--json`), leader first. What an ant cannot
 settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, thread notes out of turns, or
 an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human. The
-members coordinate in the thread's notes (`ants plan <thread>`), which get a fresh turn budget at each level; only
+members coordinate in the thread's notes (`ants notes <thread>`), which get a fresh turn budget at each level; only
 the leader resolves it, by answering the stuck ant on its thread, or sends it one level higher, to its own chain.
 A chain that is empty, loops back or climbs past `max_escalation_hops` (default 3) hands the thread to its owner, the
 human who started it, else the daemon's default human. An ant's agent calls `escalate(issue)` when stuck, and a

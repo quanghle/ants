@@ -77,12 +77,12 @@ ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
 ants roster                                         # ants being served
 ants tools list                                     # tool requests waiting for an answer
-ants plan <thread>                                  # a thread's notes (see Thread notes)
+ants notes <thread>                                 # a thread's notes (see Thread notes)
 ants channel create ops --member dev-a,dev-b        # a channel (see Channels)
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a only; prints the thread
 ants channel read ops                               # the channel's posts, by thread
 ants watch                                          # live traffic
-ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, plan
+ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, execution plan
 ```
 
 The minimum config file is an empty `~/.ants/config.toml`, or one line choosing the harness, `harness = "claude"` (or
@@ -103,7 +103,7 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants ask [@ant] TEXT` | Sends a message as the CLI's human, the thread's owner (with an ant's credentials, a thread without owner); without `@ant` it goes to the messenger. `--thread` continues a thread, still prompting only the named recipient; `--wait` prints the first reply and exits, `-f`/`--follow` prints each reply until Ctrl-C, either marking what it prints read; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
-| `ants plan THREAD [TEXT]` | Shows a thread's notes, or posts to them as the CLI's human; a post wakes nobody (see [Thread notes](#thread-notes)). |
+| `ants notes THREAD [TEXT]` | Shows a thread's notes, or posts TEXT to them as the CLI's human, which gives them a fresh turn budget; a post wakes nobody (see [Thread notes](#thread-notes)). Distinct from the execution plan `ants watch <ant>` shows. |
 | `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
@@ -194,7 +194,7 @@ as the human creates it, and ant and leaf credentials issued before it existed m
 
 While prompting, the daemon streams progress to `ants.status.<ant>.<thread>` as JSON `StatusEvent`s: the thread's
 state (`working`, `waiting_approval`, `idle`, `failed`), the reply text and reasoning as the harness streams them,
-joined for up to 250 ms, tool calls as they start or change status, and the harness's plan. Status is core NATS only:
+joined for up to 250 ms, tool calls as they start or change status, and the harness's execution plan. Status is core NATS only:
 nothing keeps it, so `ants watch dev-a` shows only what happens while it runs, and an update the daemon cannot send at
 once is dropped rather than hold up the harness.
 
@@ -611,8 +611,8 @@ speak as the ant, on the thread the session serves:
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
 | `list_ants(capability?)` | Lists the other ants in the roster with `whoami`, capabilities, harness, machine and activity (idle or working); only those advertising `capability` when given. |
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first ant by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
-| `post_plan(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
-| `read_plan(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
+| `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
+| `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
 | `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the ant's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
@@ -635,7 +635,7 @@ calling thread; requests without a known token get 401. Harnesses whose ACP `mcp
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the ant's allowlist like
 any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_ants`, `other:route`,
-`other:post_plan`, `other:read_plan`, `other:decide_approval`, `other:escalate`, or `other`). Ant credentials
+`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:escalate`, or `other`). Ant credentials
 issued before the MCP tools existed lack the subscription to the ant's own inbox; issue them again with `ants auth
 user`.
 
@@ -693,14 +693,14 @@ and an owner. On a thread:
 - **Directed messages** go to one named recipient's inbox and prompt that recipient only: `ants ask @ant` (the
   messenger without `@ant`), `ants ask --thread <thread>` to continue the thread, and the `send_message`,
   `ask_agent` and `route` tools between ants. The thread's other ants neither see nor answer them.
-- **Thread notes** are one shared board per thread, where the ants on it plan together before the work starts.
-  A post there notifies and wakes nobody: an ant sees the notes only when it calls `read_plan` (or a human runs
-  `ants plan <thread>`). So one ant posts a plan with `post_plan`, asks the others with directed messages
-  (`ask_agent`, `send_message`) to read it with `read_plan` and post their part, and so on.
+- **Thread notes** are one passive shared board per thread, where the ants on it coordinate before the work starts.
+  A post there notifies and wakes nobody: an ant sees the notes only when it calls `read_notes` (or a human runs
+  `ants notes <thread>`). So one ant posts a proposal with `post_notes`, asks the others with directed messages
+  (`ask_agent`, `send_message`) to read it with `read_notes` and post their part, and so on.
 
 Thread notes are no group chat: for a named group of ants whose posts wake the members they concern, see
-[Channels](#channels). The command, the tools and the subjects keep the name *plan*: posts go on
-`ants.plan.<thread>.<from>` and are kept in the stream like messages.
+[Channels](#channels). Nor are they the execution plan an ant reports while it works, which `ants watch <ant>` shows.
+Posts go on `ants.notes.<thread>.<from>` and are kept in the stream like messages.
 
 Posts spend the thread's turn budget like messages between agents. Each post carries the turns the notes have left: one
 less than the lower of the budget of the message its ant is handling and what the last post left. The post
@@ -711,13 +711,13 @@ same turn cannot both succeed: a post states the notes' last message it saw (`Na
 nats-server 2.11 or later), and the loser reads the notes again.
 
 ```sh
-ants plan <thread>                      # the notes' posts: time, author, turns left, text
-ants plan <thread> "ship friday"        # post as the CLI's human, which gives the notes a fresh budget (8 turns)
-ants watch 'ants.plan.>'                # the notes of every thread, live
+ants notes <thread>                     # the notes' posts: time, author, turns left, text
+ants notes <thread> "ship friday"       # post as the CLI's human, which gives the notes a fresh budget (8 turns)
+ants watch 'ants.notes.>'               # the notes of every thread, live
 ```
 
-Ants and humans read the notes back through their own consumer, `plan-<name>`, created for the read and
-deleted after it; their credentials allow it to filter plan subjects only. Ant and human credentials issued before
+Ants and humans read the notes back through their own consumer, `notes-<name>`, created for the read and
+deleted after it; their credentials allow it to filter notes subjects only. Ant and human credentials issued before
 thread notes need `ants auth user` again.
 
 ## Channels
@@ -883,7 +883,7 @@ it. Messages left on the older `ants.inbox.<to>` subjects are no longer delivere
 their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
 
 Posts to thread notes work the same way: a post by `<from>` to the notes of thread `<thread>` goes on
-`ants.plan.<thread>.<from>`, every credential (a human's too) posts only on `ants.plan.*.<own name>`, and readers
+`ants.notes.<thread>.<from>`, every credential (a human's too) posts only on `ants.notes.*.<own name>`, and readers
 drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
 
 Channels work the same way too. A channel is a named group of ants; its id follows user id syntax. A post by
@@ -927,7 +927,7 @@ ant's chain in order, whose first ant leads. The KV bucket `ants_chains` keeps i
 skip an entry whose ant disagrees with its key. Credentials issued before `ants_chains` need `ants auth user` (and
 `ants auth leaf`) again, and `ants init` creates the bucket; until then daemons follow chains through the roster only.
 An envelope may carry `escalation`
-(`Escalation` in `ants-proto`): the stuck ant and its thread, the reason (`turn_budget`, `cap`, `plan_room`,
+(`Escalation` in `ants-proto`): the stuck ant and its thread, the reason (`turn_budget`, `cap`, `notes`,
 `dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck ant's own chain), the
 level's leader and the ants visited. One level up goes to every ant of the leader's chain not visited yet; an
 empty chain, a leader already visited, or a level past `max_escalation_hops` (default 3) hands it to the thread's owner
@@ -1042,7 +1042,7 @@ the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the crede
 run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
 (`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
 
-While the uplink is down, inbox messages, replies, plan and channel posts and the ants' dead letters wait in the
+While the uplink is down, inbox messages, replies, posts to thread notes and channels and the ants' dead letters wait in the
 machine's outbox, a stream on the leaf, and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
 the human sets it up once per machine, with the leaf connected:
 
@@ -1057,7 +1057,7 @@ the flag. Running it again checks again.
 
 The hub's stream takes from a machine's outbox only what the listed ants and humans may send themselves, so issue
 the leaf's uplink credentials for the same ants and humans. Whatever needs an answer from the hub at once still
-fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_plan` (its expected sequence
+fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_notes` (its expected sequence
 needs the hub's answer), approvals and replays. A dead letter kept in the outbox gets its notice, and its message
 terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
 Machines set up before dead letters were buffered need `ants leaf outbox` again, and ant credentials issued before

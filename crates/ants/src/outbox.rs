@@ -203,7 +203,7 @@ fn outbox_of(source: &Source, machine: &Machine) -> bool {
 
 /// The hub stream's sources for `machine`: one per member, so admitting or dropping one leaves the others as they
 /// are. The filters of one stream's sources may not overlap, so when humans run on the machine, the admission of the
-/// first of them by name takes every inbox subject and the others' only their plan and channel posts.
+/// first of them by name takes every inbox subject and the others' only their notes and channel posts.
 fn admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<Source> {
     let mut members: Vec<&(UserId, Role)> = members.iter().collect();
     members.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -234,8 +234,8 @@ fn from_machine(source: &Source, machine: &Machine) -> bool {
 mod tests {
     use std::process::Command;
 
-    use ants_daemon::{bus, plan};
-    use ants_proto::{ChannelPost, DeadLetter, Envelope, JsDomain, PlanPost, ThreadId};
+    use ants_daemon::{bus, notes};
+    use ants_proto::{ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
     use ants_test_support::NatsServer;
     use async_nats::jetstream::message::PublishMessage;
     use futures::StreamExt as _;
@@ -369,7 +369,7 @@ mod tests {
         let kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
         assert_eq!(bus::publish(&a_js, &kept).await.unwrap(), bus::Stored::Outbox);
         let thread: ThreadId = "t1".parse().unwrap();
-        assert!(plan::publish(&a_js, &PlanPost::new(thread.clone(), dev_a.clone(), "plan"), None).await.unwrap());
+        assert!(notes::publish(&a_js, &NotesPost::new(thread.clone(), dev_a.clone(), "notes"), None).await.unwrap());
         let chan = ChannelPost::new("ops".parse().unwrap(), dev_a.clone(), "@dev-b kept");
         let stored = bus::store(&a_js, chan.subject(), &chan, &chan.id.to_string()).await.unwrap();
         assert_eq!(stored, bus::Stored::Outbox);
@@ -377,8 +377,8 @@ mod tests {
         let stored = bus::store(&a_js, dead.subject(), &dead, &dead.msg_id()).await.unwrap();
         assert_eq!(stored, bus::Stored::Outbox);
         // dev-b may post these itself, but is not admitted from m1.
-        let stray = PlanPost::new(thread.clone(), dev_b.clone(), "stray");
-        assert!(plan::publish(&b_js, &stray, None).await.unwrap());
+        let stray = NotesPost::new(thread.clone(), dev_b.clone(), "stray");
+        assert!(notes::publish(&b_js, &stray, None).await.unwrap());
         let stray_dead = DeadLetter::of_envelope(dev_b.clone(), 2, 5, "stray", direct.clone());
         let stored = bus::store(&b_js, stray_dead.subject(), &stray_dead, &stray_dead.msg_id()).await.unwrap();
         assert_eq!(stored, bus::Stored::Outbox);
@@ -390,7 +390,7 @@ mod tests {
         let ants = h_js.get_stream(STREAM).await.unwrap();
         let last = ants.get_last_raw_message_by_subject(&kept.subject()).await.unwrap();
         assert_eq!(serde_json::from_slice::<Envelope>(&last.payload).unwrap(), kept);
-        ants.get_last_raw_message_by_subject(&subject::plan(&thread, &dev_a)).await.unwrap();
+        ants.get_last_raw_message_by_subject(&subject::notes(&thread, &dev_a)).await.unwrap();
         let last = ants.get_last_raw_message_by_subject(&chan.subject()).await.unwrap();
         assert_eq!(serde_json::from_slice::<ChannelPost>(&last.payload).unwrap(), chan);
         let last = ants.get_last_raw_message_by_subject(&dead.subject()).await.unwrap();
@@ -503,14 +503,14 @@ mod tests {
         assert_eq!(
             filters(&sources),
             [
-                "ants.in.m1.ants.out.plan.*.dev-a",
+                "ants.in.m1.ants.out.notes.*.dev-a",
                 "ants.in.m1.ants.out.chan.*.dev-a",
                 "ants.in.m1.ants.out.dead.dev-a",
-                "ants.in.m1.ants.out.plan.*.dev-b",
+                "ants.in.m1.ants.out.notes.*.dev-b",
                 "ants.in.m1.ants.out.chan.*.dev-b",
                 "ants.in.m1.ants.out.dead.dev-b",
                 "ants.in.m1.ants.out.inbox.>",
-                "ants.in.m1.ants.out.plan.*.human",
+                "ants.in.m1.ants.out.notes.*.human",
                 "ants.in.m1.ants.out.chan.*.human",
             ]
         );
@@ -524,15 +524,15 @@ mod tests {
             filters(&sources),
             [
                 "ants.in.m1.ants.out.inbox.>",
-                "ants.in.m1.ants.out.plan.*.alice",
+                "ants.in.m1.ants.out.notes.*.alice",
                 "ants.in.m1.ants.out.chan.*.alice",
-                "ants.in.m1.ants.out.plan.*.dev-a",
+                "ants.in.m1.ants.out.notes.*.dev-a",
                 "ants.in.m1.ants.out.chan.*.dev-a",
                 "ants.in.m1.ants.out.dead.dev-a",
-                "ants.in.m1.ants.out.plan.*.dev-b",
+                "ants.in.m1.ants.out.notes.*.dev-b",
                 "ants.in.m1.ants.out.chan.*.dev-b",
                 "ants.in.m1.ants.out.dead.dev-b",
-                "ants.in.m1.ants.out.plan.*.human",
+                "ants.in.m1.ants.out.notes.*.human",
                 "ants.in.m1.ants.out.chan.*.human",
             ]
         );
