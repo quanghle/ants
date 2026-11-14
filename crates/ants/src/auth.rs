@@ -1320,6 +1320,18 @@ pub(crate) mod tests {
         assert_eq!(attempts.get(attempt_key(&dev_a, 1)).await.unwrap(), None);
         assert!(attempts.put(attempt_key(&dev_b, 1), "started").await.is_err());
         assert!(attempts.get(attempt_key(&dev_b, 1)).await.is_err());
+        // A human withdraws a message waiting for dev-a, and reads what became of one, but no attempt marker; dev-a
+        // marks only its own messages.
+        let marks = DirectKv::new(&h_js, None, ants_proto::ATTEMPTS_BUCKET).await.unwrap();
+        let (queued, taken) = (ants_proto::Uuid::now_v7(), ants_proto::Uuid::now_v7());
+        let mark = |ant: &UserId, message| ants_proto::message_mark_key(ant, message);
+        assert!(marks.create(mark(&dev_a, &queued), "withdrawn").await.unwrap());
+        assert!(!attempts.create(mark(&dev_a, &queued), "started").await.unwrap(), "withdrawn first");
+        assert!(attempts.create(mark(&dev_a, &taken), "started").await.unwrap());
+        assert_eq!(marks.get(mark(&dev_a, &taken)).await.unwrap().as_deref(), Some(&b"started"[..]));
+        assert!(marks.put(attempt_key(&dev_a, 2), "started").await.is_err());
+        assert!(marks.get(attempt_key(&dev_a, 1)).await.is_err());
+        assert!(attempts.create(mark(&dev_b, &queued), "started").await.is_err());
 
         // Nor list their keys, which a stream info request with a subjects filter would, as of the owners bucket.
         let (a_raw, mut errors) = server.watched(&dev_a).await;
@@ -1401,6 +1413,23 @@ pub(crate) mod tests {
         let _sub = a_raw.subscribe(subject::cancel_of(&dev_b)).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains(&format!("Subscription to \"{}\"", subject::cancel_of(&dev_b))), "{v}");
+        // Likewise only a human asks for dev-a's queue, and dev-a answers as itself only.
+        let mut asks = a_raw.subscribe(subject::queue(&dev_a)).await.unwrap();
+        let mut listed = h_client.subscribe(subject::queued(&dev_a)).await.unwrap();
+        h_client.flush().await.unwrap();
+        a_raw.publish(subject::queue(&dev_a), "self".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{}\"", subject::queue(&dev_a))), "{v}");
+        h_client.publish(subject::queue(&dev_a), "queue".into()).await.unwrap();
+        assert_eq!(&timeout(WAIT, asks.next()).await.unwrap().unwrap().payload[..], b"queue");
+        a_raw.publish(subject::queued(&dev_a), "listed".into()).await.unwrap();
+        assert_eq!(&timeout(WAIT, listed.next()).await.unwrap().unwrap().payload[..], b"listed");
+        a_raw.publish(subject::queued(&dev_b), "spoof".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{}\"", subject::queued(&dev_b))), "{v}");
+        let _sub = a_raw.subscribe(subject::queue(&dev_b)).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Subscription to \"{}\"", subject::queue(&dev_b))), "{v}");
         // Its own inbox it may watch live; a denial would be the next violation below.
         let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
         let _own = a_raw.subscribe(subject::stored_inbox(&dev_a)).await.unwrap();
@@ -2127,6 +2156,8 @@ pub(crate) mod tests {
             subject::dead(&dev_a),
             subject::status(&audit, &thread),
             subject::cancel(&dev_a, &thread),
+            subject::queue(&dev_a),
+            format!("$KV.ants_attempts.{}", ants_proto::message_mark_key(&dev_a, &request)),
             subject::renew("dev-a"),
             "$KV.ants_roster.dev-a".to_owned(),
             "$KV.ants_humans.audit".to_owned(),

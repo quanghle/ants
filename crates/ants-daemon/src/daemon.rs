@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
-    Humans, JsDomain, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid, subject,
+    Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid,
+    subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -444,6 +445,8 @@ struct Thread {
     busy: bool,
     /// Stream sequence of the message in flight.
     in_flight: Option<u64>,
+    /// The message in flight, as `ants queue` lists it.
+    running: Option<QueuedMessage>,
     /// A failed message that is to be redelivered. Until it is back (or the deadline passes) the rest of the thread
     /// waits rather than overtake it.
     retry: Option<Retry>,
@@ -571,6 +574,14 @@ impl Inbox<'_> {
         let signing_in = futures::future::Fuse::terminated();
         let lifting = futures::future::Fuse::terminated();
         tokio::pin!(shutdown, finishing, signing_in, lifting);
+        let mut asks = match self.client.subscribe(subject::queue(self.ant)).await {
+            Ok(asks) => asks.left_stream(),
+            Err(e) => {
+                tracing::warn!(error = %e, "serving without ants queue");
+                futures::stream::pending().right_stream()
+            }
+        };
+        let mut answering = FuturesUnordered::new();
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             let mut ready = None;
@@ -600,6 +611,12 @@ impl Inbox<'_> {
                 }
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
+                Some(ask) = asks.next() => {
+                    if let Some(request) = queue_request(&ask) {
+                        answering.push(self.answer_queue(request, in_hand(&threads)));
+                    }
+                }
+                Some(()) = answering.next(), if !answering.is_empty() => {}
                 Some((thread, handled)) = running.next(), if !running.is_empty() => {
                     match handed_back(&mut threads, &thread, handled) {
                         Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
@@ -684,6 +701,27 @@ impl Inbox<'_> {
             let message = incoming.envelope.id;
             t.queued.insert(message);
             status::publish(self.client, self.ant, thread, StatusUpdate::Queued { message, ahead: before + 1 });
+        }
+    }
+
+    /// Answer a human's [`QueueRequest`] with `messages`, those in hand, and where the inbox consumer stands: the
+    /// messages it has not delivered yet wait in the stream.
+    async fn answer_queue(&self, request: QueueRequest, messages: Vec<QueuedMessage>) {
+        let info = async {
+            let stream = self.js.get_stream_no_info(ants_proto::STREAM).await?;
+            anyhow::Ok(stream.consumer_info(ants_proto::inbox_consumer(self.ant)).await?)
+        };
+        let (delivered, undelivered) = match info.await {
+            Ok(info) => (Some(info.delivered.stream_sequence), Some(info.num_pending)),
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "reading the inbox consumer for ants queue");
+                (None, None)
+            }
+        };
+        let answer = request.answer(messages, delivered, undelivered);
+        let payload = serde_json::to_vec(&answer).expect("a queue answer serializes");
+        if let Err(e) = self.client.publish(answer.subject(), payload.into()).await {
+            tracing::warn!(error = %e, "answering a queue request");
         }
     }
 
@@ -1085,6 +1123,7 @@ impl Inbox<'_> {
             match bus::double_ack(self.client, &msg).await {
                 Ok(()) => {
                     self.attempts.forget(seq).await;
+                    self.attempts.finish(envelope).await;
                     self.answered.forget(envelope).await;
                 }
                 Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
@@ -1095,27 +1134,19 @@ impl Inbox<'_> {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
             tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
             match self.bury_letter(&incoming, &msg, &kept.dead, true).await {
-                Ok(()) => self.attempts.forget(seq).await,
+                Ok(()) => {
+                    self.attempts.forget(seq).await;
+                    self.attempts.finish(envelope).await;
+                }
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
             return (thread, Handled::Done);
         }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
-        let marker = self.attempts.get(seq, envelope).await;
-        if attempt == Attempt::Overdue && !matches!(marker, Ok(Some(Marker::Replied(_)))) {
-            let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
-            match self.bury(&incoming, &msg, &error).await {
-                Ok(_) => self.attempts.forget(seq).await,
-                Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
-            }
-            return (thread, Handled::Done);
-        }
-        let result = match marker {
-            Ok(marker) => match self.arrived(&mut incoming).await {
-                Ok(true) => self.answer(&incoming, &msg, seq, marker).await,
-                Ok(false) => self.done(&msg, seq).await,
-                Err(e) => Err(e),
-            },
+        // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
+        let result = match self.attempts.take_up(envelope).await {
+            Ok(Some(by)) => self.withdrawn(&incoming, &msg, seq, &by).await,
+            Ok(None) => self.take(&mut incoming, &msg, seq, attempt).await,
             Err(e) => Err(e),
         };
         let Err(e) = result else {
@@ -1140,6 +1171,7 @@ impl Inbox<'_> {
             match self.bury(&incoming, &msg, &format!("{e:#}")).await {
                 Ok(_) => {
                     self.attempts.forget(seq).await;
+                    self.attempts.finish(&incoming.envelope).await;
                     return (thread, Handled::Done);
                 }
                 // The overdue delivery tries again.
@@ -1154,6 +1186,61 @@ impl Inbox<'_> {
             until: tokio::time::Instant::now() + self.retry_delay * 3,
         });
         (thread, retry.map_or(Handled::Done, Handled::Retry))
+    }
+
+    /// Handle the message at stream sequence `seq`, taken up: answer it, or bury it when overdue. Marks it finished
+    /// once it is acked or buried.
+    async fn take(&self, incoming: &mut Incoming, msg: &jetstream::Message, seq: u64, attempt: Attempt) -> Result<()> {
+        let marker = self.attempts.get(seq, &incoming.envelope).await?;
+        if attempt == Attempt::Overdue && !matches!(marker, Some(Marker::Replied(_))) {
+            let error = format!("no outcome after {MAX_ATTEMPTS} attempts: the daemon stopped or the ack wait ran out");
+            match self.bury(incoming, msg, &error).await {
+                Ok(_) => {
+                    self.attempts.forget(seq).await;
+                    self.attempts.finish(&incoming.envelope).await;
+                }
+                Err(e) => {
+                    let thread = &incoming.envelope.thread_id;
+                    tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering");
+                }
+            }
+            return Ok(());
+        }
+        if self.arrived(incoming).await? {
+            self.answer(incoming, msg, seq, marker).await?;
+        } else {
+            self.done(msg, seq).await?;
+        }
+        self.attempts.finish(&incoming.envelope).await;
+        Ok(())
+    }
+
+    /// Ack the message at stream sequence `seq`, which `by` withdrew before the ant was prompted with it, once a
+    /// notice of it is stored on its thread, so `ants thread show` tells what became of it. The notice answers the
+    /// sender, as a reply would, unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant
+    /// out of turns, or to a channel post, to the human who withdrew it.
+    async fn withdrawn(&self, incoming: &Incoming, msg: &jetstream::Message, seq: u64, by: &UserId) -> Result<()> {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        tracing::info!(%thread, %by, message = %envelope.id, "acking a withdrawn message unprompted");
+        let text = format!("[ants] Withdrawn by {by} before {} was prompted with it (ants withdraw).", self.ant);
+        let to_human = |to: UserId| {
+            let mut notice = envelope.follow_up(self.ant.clone(), to, text.clone());
+            notice.in_reply_to = Some(envelope.id);
+            notice
+        };
+        let notice = if incoming.post.is_some() {
+            to_human(by.clone())
+        } else if envelope.webhook {
+            to_human(self.humans.human_owner(envelope.owner.as_ref()).unwrap_or_else(|| by.clone()))
+        } else {
+            match envelope.reply(self.ant.clone(), text.clone(), self.humans.sender_role(envelope)) {
+                Ok(reply) => reply.with_escalation(envelope.escalation.as_deref().cloned()),
+                Err(_) => to_human(by.clone()),
+            }
+        };
+        bus::store(self.js, notice.subject(), &notice, &reply_id(self.ant, envelope)).await?;
+        self.done(msg, seq).await
     }
 
     /// Hold the messages, `incoming` having found the harness signed out, show that in the roster entry, and tell its
@@ -1493,15 +1580,18 @@ impl Inbox<'_> {
                 tracing::warn!(%thread, error = format!("{e:#}"), "cancelled prompt failed");
                 crate::harness::Reply { text: String::new(), cut: None }
             }
-            // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started.
+            // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started, and
+            // the message can be withdrawn while it waits.
             Err(e) if e.is::<SignedOut>() && !cut_off && !worked => {
                 self.attempts.forget(seq).await;
+                self.attempts.release(envelope).await;
                 return Err(e);
             }
             // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
             Err(e) if e.is::<Limited>() => {
                 if !cut_off && !worked {
                     self.attempts.forget(seq).await;
+                    self.attempts.release(envelope).await;
                 }
                 return Err(e);
             }
@@ -1757,6 +1847,7 @@ fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handl
     let t = threads.entry(thread.clone()).or_default();
     t.busy = false;
     t.in_flight = None;
+    t.running = None;
     t.retry = None;
     match handled {
         Handled::Done => None,
@@ -1783,15 +1874,63 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
     }
     let next = t.waiting.pop_front();
     match &next {
-        Some((_, msg)) => {
+        Some((incoming, msg)) => {
             t.busy = true;
             t.in_flight = stream_seq(msg);
+            t.running = queued_message(incoming, msg, true, 0);
         }
         None => {
             entry.remove();
         }
     }
     next
+}
+
+/// The messages in hand on every thread, as `ants queue` lists them, by stream sequence.
+fn in_hand(threads: &HashMap<ThreadId, Thread>) -> Vec<QueuedMessage> {
+    let mut messages: Vec<_> = threads
+        .values()
+        .flat_map(|t| {
+            let before = usize::from(t.busy) + usize::from(t.retry.is_some());
+            let waiting = t.waiting.iter().enumerate();
+            let waiting =
+                waiting.filter_map(move |(at, (incoming, msg))| queued_message(incoming, msg, false, before + at));
+            t.running.clone().into_iter().chain(waiting)
+        })
+        .collect();
+    messages.sort_by_key(|m| m.seq);
+    messages
+}
+
+fn queued_message(incoming: &Incoming, msg: &jetstream::Message, running: bool, ahead: usize) -> Option<QueuedMessage> {
+    let envelope = &incoming.envelope;
+    Some(QueuedMessage {
+        id: envelope.id,
+        thread_id: envelope.thread_id.clone(),
+        from: envelope.from.clone(),
+        channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()),
+        sent_at: envelope.sent_at,
+        seq: stream_seq(msg)?,
+        running,
+        ahead,
+    })
+}
+
+/// The queue request in `msg`, unless it is malformed or names another ant than its subject.
+fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
+    let request: QueueRequest = match serde_json::from_slice(&msg.payload) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::warn!(subject = %msg.subject, error = %e, "ignoring a malformed queue request");
+            return None;
+        }
+    };
+    if let Err(e) = request.check_subject(&msg.subject) {
+        tracing::warn!(error = %e, "ignoring a forged queue request");
+        return None;
+    }
+    tracing::info!(by = %request.by, "listing the messages in hand");
+    Some(request)
 }
 
 /// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to
@@ -2787,6 +2926,182 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().cancelled, 1);
         assert_eq!(log.lock().unwrap().prompted, 2, "not retried");
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
+    async fn queue(bus: &Bus) -> ants_proto::QueueReply {
+        let request = QueueRequest::new(bus.dev.clone(), UserId::human());
+        let mut answers = bus.client.subscribe(request.reply_subject()).await.unwrap();
+        timeout(WAIT, async {
+            loop {
+                let payload = serde_json::to_vec(&request).unwrap();
+                bus.client.publish(request.subject(), payload.into()).await.unwrap();
+                if let Ok(Some(msg)) = timeout(Duration::from_millis(200), answers.next()).await {
+                    let answer: ants_proto::QueueReply = serde_json::from_slice(&msg.payload).unwrap();
+                    assert_eq!(answer.check_subject(&msg.subject), Ok(()));
+                    assert_eq!(answer.request_id, request.id);
+                    return answer;
+                }
+            }
+        })
+        .await
+        .expect("no answer to the queue request")
+    }
+
+    /// Withdraw `message` as the human, returning the mark found instead if the withdrawal lost.
+    async fn withdraw(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
+        crate::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human()).await.unwrap()
+    }
+
+    async fn mark_of(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
+        let mark = bus.markers.get(ants_proto::message_mark_key(&bus.dev, &message.id)).await.unwrap();
+        mark.map(|mark| serde_json::from_slice(&mark).unwrap())
+    }
+
+    const WITHDRAWN: &str = "[ants] Withdrawn by human before dev-a was prompted with it (ants withdraw).";
+
+    #[tokio::test]
+    async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_on() {
+        use ants_proto::MessageMark;
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, gate) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let (a, a_seq) = bus.send(&t1, "hold a").await;
+        let (b, b_seq) = bus.send(&t1, "b").await;
+        let (c, c_seq) = bus.send(&t1, "c").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            until("the prompt to run", || log.lock().unwrap().prompted == 1).await;
+            let listed = timeout(WAIT, async {
+                loop {
+                    let answer = queue(&bus).await;
+                    if answer.messages.len() == 3 {
+                        return answer;
+                    }
+                }
+            })
+            .await
+            .expect("all three in hand");
+            let at = |m: &QueuedMessage| (m.id, m.seq, m.running, m.ahead, m.from.clone(), m.thread_id.clone());
+            let human = UserId::human();
+            assert_eq!(
+                listed.messages.iter().map(at).collect::<Vec<_>>(),
+                [
+                    (a.id, a_seq, true, 0, human.clone(), t1.clone()),
+                    (b.id, b_seq, false, 1, human.clone(), t1.clone()),
+                    (c.id, c_seq, false, 2, human.clone(), t1.clone()),
+                ]
+            );
+            assert_eq!((listed.delivered, listed.undelivered), (Some(c_seq), Some(0)));
+
+            assert_eq!(withdraw(&bus, &b).await, None, "b is withdrawn");
+            assert!(
+                matches!(withdraw(&bus, &b).await, Some(MessageMark::Withdrawn { by, .. }) if by == human),
+                "withdrawn once"
+            );
+            assert!(
+                matches!(withdraw(&bus, &a).await, Some(MessageMark::Started { .. })),
+                "a running prompt is cancelled, not withdrawn"
+            );
+            gate.add_permits(1);
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
+            let notice = next_envelope(&mut replies).await;
+            assert_eq!((notice.text.as_str(), notice.in_reply_to, &notice.thread_id), (WITHDRAWN, Some(b.id), &t1));
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "c".to_owned()), "the thread goes on");
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered, ["hold a", "c"], "b never reached the harness");
+        assert_eq!(bus.unacked().await, 0);
+        assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Finished { .. })));
+        assert!(matches!(withdraw(&bus, &c).await, Some(MessageMark::Finished { .. })), "c is answered already");
+    }
+
+    #[tokio::test]
+    async fn a_message_withdrawn_before_its_delivery_is_never_prompted() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let (a, a_seq) = bus.send(&t1, "a").await;
+        assert_eq!(withdraw(&bus, &a).await, None);
+        bus.send(&t2, "b").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut texts = HashMap::new();
+            for _ in 0..2 {
+                let reply = next_envelope(&mut replies).await;
+                texts.insert(reply.thread_id, reply.text);
+            }
+            assert_eq!(texts[&t1], WITHDRAWN);
+            assert!(texts[&t2].ends_with(": b"), "{}", texts[&t2]);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        bus.until_acked(a_seq).await;
+        assert_eq!(log.lock().unwrap().answered, ["b"]);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (progress_every, ack_wait) = (Duration::from_millis(100), ack_wait(Duration::from_millis(100)));
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "hold a").await;
+        let (b, _) = bus.send(&t1, "b").await;
+
+        // Withdrawn while it waits in hand behind a, then the daemon stops mid-prompt: both are redelivered.
+        let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let crash = async {
+            until("the prompt to reach the harness", || log.lock().unwrap().prompted == 1).await;
+            assert_eq!(withdraw(&bus, &b).await, None);
+            ctrl_c.add_permits(2);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);
+        drop(pool);
+
+        let pool = Pool::new(launch, store, 2, IDLE);
+        let check = async {
+            // b, handed back at once, may come back before a.
+            let mut texts = vec![next_envelope(&mut replies).await.text, next_envelope(&mut replies).await.text];
+            texts.sort();
+            assert_eq!(texts, [WITHDRAWN.to_owned(), format!("s1: {}", warned("hold a"))]);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+        assert_eq!(log.lock().unwrap().answered, [warned("hold a")], "b never reached the harness");
+        assert_eq!(bus.unacked().await, 0);
+        assert!(timeout(Duration::from_millis(200), replies.next()).await.is_err(), "one notice");
+    }
+
+    #[tokio::test]
+    async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        log.lock().unwrap().signed_out = true;
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let (a, _) = bus.send(&t1, "a").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let notice = next_envelope(&mut replies).await;
+            assert!(notice.text.contains("is not signed in"), "{}", notice.text);
+            assert_eq!(withdraw(&bus, &a).await, None, "turned away unprompted, a is not started");
+            log.lock().unwrap().signed_out = false;
+            assert_eq!(next_envelope(&mut replies).await.text, WITHDRAWN);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(log.lock().unwrap().answered.is_empty());
         assert_eq!(bus.unacked().await, 0);
     }
 

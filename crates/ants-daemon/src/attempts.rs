@@ -15,7 +15,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{ChannelPost, Envelope, NotesPost, ThreadId, UserId, Uuid, attempt_key};
+use ants_proto::{
+    ChannelPost, Envelope, MessageMark, NotesPost, ThreadId, UserId, Uuid, attempt_key, message_mark_key,
+};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
@@ -114,10 +116,59 @@ impl Attempts {
         }
     }
 
+    /// Mark `envelope` as started ([`MessageMark`]) unless it has a mark, right before handling it. Returns who
+    /// withdrew it, when a human's withdrawal came first; a message started already goes on as a redelivery does.
+    pub async fn take_up(&self, envelope: &Envelope) -> Result<Option<UserId>> {
+        let started = MessageMark::Started { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
+        Ok(match mark(&self.kv, &self.ant, &envelope.id, &started).await? {
+            Some(MessageMark::Withdrawn { by, .. }) => Some(by),
+            Some(MessageMark::Started { .. } | MessageMark::Finished { .. }) | None => None,
+        })
+    }
+
+    /// Mark `envelope`, acked or dead-lettered, as finished, so a withdrawal tells so. A failure only leaves it started.
+    pub async fn finish(&self, envelope: &Envelope) {
+        let mark = MessageMark::Finished { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
+        let put = async { self.kv.put(message_mark_key(&self.ant, &envelope.id), serde_json::to_vec(&mark)?).await };
+        if let Err(e) = put.await {
+            tracing::warn!(message = %envelope.id, error = format!("{e:#}"), "marking the message as finished");
+        }
+    }
+
+    /// Remove the mark of `envelope`, handed back unprompted to wait (for a sign-in or a provider limit), so it can be
+    /// withdrawn meanwhile. A failure only leaves it started.
+    pub async fn release(&self, envelope: &Envelope) {
+        if let Err(e) = self.kv.delete(message_mark_key(&self.ant, &envelope.id)).await {
+            tracing::warn!(message = %envelope.id, error = format!("{e:#}"), "removing the message's mark");
+        }
+    }
+
     async fn put(&self, seq: u64, record: &Record) -> Result<()> {
         self.kv.put(attempt_key(&self.ant, seq), serde_json::to_vec(record)?).await?;
         Ok(())
     }
+}
+
+/// Withdraw message `message` from the queue of `ant` for `by` (`ants withdraw`), in `kv`, the attempts bucket, unless
+/// it has a mark already. Returns the mark found instead: the daemon took the message up first, or it was withdrawn.
+pub async fn withdraw(kv: &DirectKv, ant: &UserId, message: &Uuid, by: &UserId) -> Result<Option<MessageMark>> {
+    mark(kv, ant, message, &MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now() }).await
+}
+
+/// Create the mark of `message` to `ant` as `mark` unless it has one. Returns the mark found instead.
+async fn mark(kv: &DirectKv, ant: &UserId, message: &Uuid, mark: &MessageMark) -> Result<Option<MessageMark>> {
+    let key = message_mark_key(ant, message);
+    let value = serde_json::to_vec(mark)?;
+    // A mark removed between the create and the read ([`Attempts::release`]) is created anew.
+    for _ in 0..3 {
+        if kv.create(&key, value.clone()).await.context("marking the message")? {
+            return Ok(None);
+        }
+        if let Some(found) = kv.get(&key).await.context("reading the message's mark")? {
+            return serde_json::from_slice(&found).map(Some).context("reading the message's mark");
+        }
+    }
+    anyhow::bail!("the mark of message {message} keeps changing")
 }
 
 /// Messages whose reply is stored, in the hub's stream or the machine's outbox, while their ack may not be: one file
