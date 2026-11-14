@@ -215,9 +215,9 @@ enum Command {
     #[command(subcommand)]
     Harness(HarnessCommand),
     /// Check the machine's ants setup end to end: the config file, credentials, the server and JetStream, the hub's
-    /// stream and buckets, each ant's harness, the leaf node and its outbox, and the installed services. Prints one
-    /// line per check (ok, warn, fail or skip) with the command fixing each warning or failure, and exits with status
-    /// 1 when one fails. Changes nothing.
+    /// stream and buckets, each ant's harness, whether the hub keeps pushed accounts across restarts (with the team
+    /// keys), the leaf node and its outbox, and the installed services. Prints one line per check (ok, warn, fail or
+    /// skip) with the command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
     Doctor {
         /// Config file of the machine's ants (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
@@ -231,6 +231,10 @@ enum Command {
         /// Print one JSON object per check.
         #[arg(long)]
         json: bool,
+        /// Team directory of `ants auth` (default: ~/.config/ants/auth); where it holds the team keys, the hub is asked
+        /// whether it keeps pushed accounts across restarts.
+        #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
+        team: Option<PathBuf>,
     },
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
@@ -962,7 +966,7 @@ async fn main() -> Result<()> {
             println!("{reply}");
             Ok(())
         }
-        Command::Doctor { config, leaf_config, no_harness, json } => {
+        Command::Doctor { config, leaf_config, no_harness, json, team } => {
             let setup = doctor::Setup {
                 nats: cli.nats.clone(),
                 creds: cli.creds.clone(),
@@ -976,6 +980,7 @@ async fn main() -> Result<()> {
                     None => auth::default_dir()?.with_file_name("leaf.conf"),
                 },
                 harnesses: !no_harness,
+                team: team_dir(team)?,
             };
             let checks = doctor::run(&setup).await;
             for check in &checks {
@@ -994,7 +999,9 @@ async fn main() -> Result<()> {
             let dir = team_dir(dir)?;
             auth::init(&dir)?;
             println!(
-                "team keys in {0}\ncopy {0}/{1} next to the nats-server configuration and include \"{1}\" from it (include paths are relative)",
+                "team keys in {0}\ncopy {0}/{1} next to the hub's nats-server configuration and include \"{1}\" from it \
+                 (include paths are relative), followed by `resolver {{ type: full, dir: \"/ABSOLUTE/DIR\" }}` so the \
+                 hub keeps the accounts `ants auth push` sends it across restarts",
                 dir.display(),
                 auth::SERVER_CONF
             );
@@ -1129,13 +1136,12 @@ async fn main() -> Result<()> {
                 let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
                 println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
             }
-            println!(
-                "{} carries the revocations: copy it to the hub and reload it (SIGHUP), so a restart keeps them; leaf \
-                 nodes with a system account uplink get them with the push and keep them",
-                dir.join(auth::SERVER_CONF).display()
-            );
+            println!("{} carries the revocations", dir.join(auth::SERVER_CONF).display());
             if no_push {
-                println!("push them to the hub with: ants auth push --nats URL");
+                println!(
+                    "push them to the hub with: ants auth push --nats URL (leaf nodes with a system account uplink get \
+                     them with the push and keep them)"
+                );
                 return Ok(());
             }
             push(&cli.nats, &dir).await
@@ -1384,9 +1390,33 @@ async fn push(url: &str, dir: &Path) -> Result<()> {
                     println!("not applied by {name}: {error}");
                 }
             }
+            let conf = dir.join(auth::SERVER_CONF);
+            match pushed.kept {
+                Some(true) => println!(
+                    "server {} keeps it across restarts (full resolver): copy {} to it only for changes besides the \
+                     account's (operator, system account, max_control_line)",
+                    pushed.server,
+                    conf.display()
+                ),
+                Some(false) => println!(
+                    "server {0} keeps it in memory only: a restart brings back the account of its server.conf, so \
+                     copy {1} to it and reload it (SIGHUP); for it to keep pushed accounts, add `resolver {{ type: \
+                     full, dir: \"/ABSOLUTE/DIR\" }}` after its `include \"{2}\"` and restart it",
+                    pushed.server,
+                    conf.display(),
+                    auth::SERVER_CONF
+                ),
+                None => println!(
+                    "server {} did not tell whether it keeps pushed accounts across restarts (`ants doctor` on this \
+                     machine checks it); without a full resolver, copy {} to it and reload it (SIGHUP)",
+                    pushed.server,
+                    conf.display()
+                ),
+            }
             println!(
                 "leaf nodes not listed (offline, or with no system account uplink) did not apply it: run `ants auth \
-                 push` again once they are connected"
+                 push` again once they are connected, unless the hub keeps it (they then catch up within 10 s of \
+                 reconnecting)"
             );
             Ok(())
         }

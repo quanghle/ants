@@ -74,6 +74,11 @@ pub fn write_server_conf(dir: &Path, revocations: &BTreeMap<String, u64>) -> Res
     Ok((account.public_key(), account_jwt(&operator, &account, revocations)?))
 }
 
+/// Whether `dir` holds the keys of a team, those of its system account included.
+pub fn holds_team(dir: &Path) -> bool {
+    dir.join(SYSTEM_SEED).is_file()
+}
+
 /// The public key of the team's account in `dir`.
 pub fn account_key(dir: &Path) -> Result<String> {
     Ok(load(&dir.join(ACCOUNT_SEED))?.public_key())
