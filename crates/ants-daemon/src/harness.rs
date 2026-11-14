@@ -1085,6 +1085,8 @@ async fn set_mode(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use agent_client_protocol::v1::schema::{
         AgentCapabilities, AuthMethodTerminal, ContentChunk, Implementation, InitializeResponse, LoadSessionResponse,
         NewSessionResponse, PermissionOption, PermissionOptionKind, SessionConfigSelectGroup,
@@ -1196,7 +1198,7 @@ mod tests {
         assert_eq!(ready.sign_in.as_deref(), Some("test --login"), "the terminal auth method it offers");
 
         let required = signing(Some(agent_client_protocol::Error::auth_required()));
-        assert!(matches!(handshake(&required).await.readiness, Readiness::SignedOut { .. }));
+        assert_matches!(handshake(&required).await.readiness, Readiness::SignedOut { .. });
         let err = Session::start(&required, None).await.err().expect("a signed-out session");
         let signed_out = err.downcast_ref::<SignedOut>().expect("a sign-in error");
         assert_eq!((signed_out.harness.as_str(), signed_out.sign_in.as_deref()), ("test", Some("test --login")));
@@ -1208,9 +1210,9 @@ mod tests {
             agent_client_protocol::Error::internal_error().data(format!("Process exited with exit status: 1: {stderr}"))
         };
         let stderr = signing(Some(exited("Error: No authentication information found.")));
-        assert!(matches!(handshake(&stderr).await.readiness, Readiness::SignedOut { .. }));
+        assert_matches!(handshake(&stderr).await.readiness, Readiness::SignedOut { .. });
         let proxy = signing(Some(exited("Proxy authentication required")));
-        assert!(matches!(handshake(&proxy).await.readiness, Readiness::Failed { .. }), "no sign-in of the harness");
+        assert_matches!(handshake(&proxy).await.readiness, Readiness::Failed { .. }, "no sign-in of the harness");
         let err = Session::start(&proxy, None).await.err().expect("a failing session");
         assert!(err.downcast_ref::<SignedOut>().is_none(), "{err:#}");
     }

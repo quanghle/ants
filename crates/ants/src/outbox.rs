@@ -389,6 +389,7 @@ fn from_machine(source: &Source, machine: &Machine) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::assert_matches;
     use std::process::Command;
 
     use ants_daemon::{bus, links, notes};
@@ -841,7 +842,7 @@ pub(crate) mod tests {
         assert_eq!(hearing(&failed, &m1), Hearing::Failed("boom".to_owned()));
         let other =
             info(serde_json::json!({ "name": OUTBOX_STREAM, "external": { "api": "$JS.m2.API" }, "active": 1 }));
-        assert!(matches!(hearing(&other, &m1), Hearing::Failed(_)));
+        assert_matches!(hearing(&other, &m1), Hearing::Failed(_));
     }
 
     async fn outbox_missing_fails(js: &Context) {

@@ -970,6 +970,8 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use ants_proto::{Escalation, ThreadId, ToolCall};
 
     use super::*;
@@ -1021,7 +1023,7 @@ mod tests {
             human(&format!("name = \"bob\"\napprovals = false\n{NTFY_SINK}url = \"http://ntfy.lan/\"\n")).unwrap();
         assert_eq!(quiet.subjects(), ["ants.inbox.bob.*"]);
         assert!(!quiet.wants_request_of(&p("dev-a")));
-        assert!(matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan"));
+        assert_matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan");
         let every = human(&format!("name = \"bob\"\nescalations = false\n{NTFY_SINK}")).unwrap();
         assert_eq!(every.subjects(), ["ants.approvals.*"]);
         assert!(every.wants_request_of(&p("dev-b")));

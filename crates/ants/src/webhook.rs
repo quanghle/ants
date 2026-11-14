@@ -171,6 +171,7 @@ enum Auth {
     Bearer(String),
 }
 
+#[derive(Debug)]
 enum IdSource {
     Header(HeaderName),
     Json(String),
@@ -982,6 +983,7 @@ fn reply(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::assert_matches;
     use std::net::SocketAddr;
 
     use ants_proto::{ChannelEntry, Permissions, STREAM};
@@ -1023,9 +1025,9 @@ pub(crate) mod tests {
         assert_eq!(github.destination, Destination::Ant(p("dev-a")));
         assert_eq!(github.creds.as_deref(), Some(Path::new("/home/q/github.creds")));
         assert_eq!(ci.creds.as_deref(), Some(Path::new("/etc/ants/ci.creds")));
-        assert!(matches!(github.id, IdSource::Header(ref h) if h == "x-github-delivery"));
-        assert!(matches!(ci.id, IdSource::BodySha256));
-        assert!(matches!(alerts.id, IdSource::Json(ref p) if p == "/alert/id"));
+        assert_matches!(github.id, IdSource::Header(ref h) if h == "x-github-delivery");
+        assert_matches!(ci.id, IdSource::BodySha256);
+        assert_matches!(alerts.id, IdSource::Json(ref p) if p == "/alert/id");
         assert_eq!((&github.mentions, &ci.mentions), (&Mentions::Nobody, &Mentions::Members));
         assert_eq!(alerts.mentions, Mentions::Listed(vec![p("dev-b")]));
 

@@ -67,7 +67,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Command {
     /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; the
     /// messenger gets it otherwise. With --wait or --follow, print the replies to the CLI's human on the thread and
@@ -315,7 +315,7 @@ impl Replies {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum ChannelCommand {
     /// Create a channel; fails when the channel exists.
     Create {
@@ -401,7 +401,7 @@ enum ChannelCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum WebhookCommand {
     /// On the hub, behind the TLS-terminating reverse proxy: take `POST <path>/<webhook>` for each webhook of the
     /// config file and deliver its events, each webhook as itself with its own credentials. Also push the tool
@@ -423,7 +423,7 @@ enum WebhookCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum BridgeCommand {
     /// On the hub, behind the TLS-terminating reverse proxy: open a connection to the upstream (the hub's leafnode
     /// port) for each session `ants bridge connect` starts.
@@ -479,7 +479,7 @@ enum BridgeCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum ThreadCommand {
     /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
     /// last time, messages, and the first line of the first message; the most recently active last.
@@ -518,7 +518,7 @@ enum ThreadCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum DeadCommand {
     /// List dead letters, oldest first.
     List,
@@ -531,7 +531,7 @@ enum DeadCommand {
     Watch,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum AuthCommand {
     /// Create the team operator and account, and the server.conf that makes nats-server trust them.
     Init {
@@ -691,7 +691,7 @@ enum AuthCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum ToolsCommand {
     /// List the pending tool requests: `<ant>/<id>`, thread, tool, files, options offered and time left.
     List {
@@ -725,7 +725,7 @@ enum ToolsCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum EnrollCommand {
     /// List the enrollment requests heard, the latest of each ant and key; machines repeat theirs every few
     /// seconds while they wait.
@@ -760,7 +760,7 @@ enum EnrollCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum LeafCommand {
     /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, with one uplink
     /// to the hub, and a JetStream of its own (domain: the machine name) for the outbox. Run it again to switch the
@@ -819,7 +819,7 @@ enum LeafCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum HarnessCommand {
     /// Start the harness and complete the ACP handshake.
     Check {
@@ -835,7 +835,7 @@ enum HarnessCommand {
     },
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct HarnessPick {
     /// Harness name: built in (`copilot`, `claude`, `antigravity`) or defined in the config file (default: the
     /// file's top-level `harness`, else `copilot`).
@@ -2021,6 +2021,8 @@ impl Printer {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn words(s: &str) -> Vec<String> {
@@ -2191,39 +2193,37 @@ mod tests {
         let Command::Notes { thread, text } = cli.command else { panic!("not notes") };
         assert_eq!((thread.as_str(), text), ("t1", vec!["split".to_owned(), "the".to_owned(), "work".to_owned()]));
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
-        assert!(matches!(cli.command, Command::Notes { text, .. } if text.is_empty()));
+        assert_matches!(cli.command, Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
     }
 
     #[test]
     fn add_is_a_top_level_command() {
         let cli = Cli::try_parse_from(["ants", "add", "dev-a", "--enroll", "enroll-dev-a.creds"]).unwrap();
-        assert!(matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a"));
+        assert_matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a");
         assert!(Cli::try_parse_from(["ants", "ant", "add", "dev-a"]).is_err());
     }
 
     #[test]
     fn tool_requests_are_listed_shown_approved_and_rejected() {
         let parse = |line: &str| Cli::try_parse_from(line.split(' ')).map(|cli| cli.command);
-        assert!(matches!(
+        assert_matches!(
             parse("ants tools approve dev-a/019a --always"),
             Ok(Command::Tools(ToolsCommand::Approve { id, always: true })) if id == "dev-a/019a"
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             parse("ants tools approve 019a"),
             Ok(Command::Tools(ToolsCommand::Approve { id, always: false })) if id == "019a"
-        ));
-        assert!(
-            matches!(parse("ants tools reject 019a"), Ok(Command::Tools(ToolsCommand::Reject { id })) if id == "019a")
         );
-        assert!(matches!(
+        assert_matches!(parse("ants tools reject 019a"), Ok(Command::Tools(ToolsCommand::Reject { id })) if id == "019a");
+        assert_matches!(
             parse("ants tools show 019a --json"),
             Ok(Command::Tools(ToolsCommand::Show { id, json: true })) if id == "019a"
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             parse("ants tools list -f"),
             Ok(Command::Tools(ToolsCommand::List { follow: true, json: false }))
-        ));
+        );
         for line in
             ["ants approve", "ants approve 019a allow-once", "ants tools approve", "ants tools reject 019a --always"]
         {

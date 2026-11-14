@@ -700,6 +700,8 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::assert_matches;
+
     use ants_daemon::bus;
     use ants_daemon::channel::{Channels, Reading, Threads};
     use ants_daemon::daemon::Claims;
@@ -1757,16 +1759,16 @@ pub(crate) mod tests {
         let human_messenger = vec![ChannelOp::SetMessenger { ant: human.clone() }];
         assert_eq!(refused(ask(&a_admin, &dev_a, human_messenger).await), Refusal::Human(human.clone()));
         let remove_human = vec![ChannelOp::RemoveMember { ant: human.clone() }];
-        assert!(matches!(ask(&a_admin, &dev_a, remove_human).await, ChannelAdminOutcome::Applied { .. }));
+        assert_matches!(ask(&a_admin, &dev_a, remove_human).await, ChannelAdminOutcome::Applied { .. });
         let (b_client, b_js) = server.connect(&dev_b).await;
         let b_admin = chanadm::nats_admin(b_client, b_js);
         let remove_b = vec![ChannelOp::RemoveMember { ant: dev_b.clone() }];
-        assert!(matches!(refused(ask(&b_admin, &dev_b, remove_b.clone()).await), Refusal::NotOwner { .. }));
+        assert_matches!(refused(ask(&b_admin, &dev_b, remove_b.clone()).await), Refusal::NotOwner { .. });
         entry = stored;
         entry.owner = Some(dev_b.clone());
         h_kv_put(&channels, &entry).await;
-        assert!(matches!(refused(ask(&a_admin, &dev_a, remove_b.clone()).await), Refusal::NotOwner { .. }));
-        assert!(matches!(ask(&b_admin, &dev_b, remove_b).await, ChannelAdminOutcome::Applied { .. }));
+        assert_matches!(refused(ask(&a_admin, &dev_a, remove_b.clone()).await), Refusal::NotOwner { .. });
+        assert_matches!(ask(&b_admin, &dev_b, remove_b).await, ChannelAdminOutcome::Applied { .. });
         // A request asked again gets its first answer, not a second change.
         assert_eq!(a_admin.request(first).await.unwrap(), Some(answer));
 
