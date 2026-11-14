@@ -10,7 +10,7 @@ use ants_daemon::escalation::{self, Chain, Escalated, Escalator, Stuck};
 use ants_daemon::humans::Registry;
 use ants_daemon::mcp::Roster;
 use ants_daemon::{bus, chains};
-use ants_proto::{Envelope, EscalationReason, RosterEntry, ThreadId, UserId, subject};
+use ants_proto::{Envelope, EscalationReason, RosterEntry, StatusEvent, StatusUpdate, ThreadId, UserId, subject};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream;
 use futures::StreamExt as _;
@@ -70,8 +70,9 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
     let mut to_lead = client.subscribe(subject::inbox_of(&ant("lead"))).await.unwrap();
     let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
     let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
-    client.flush().await.unwrap();
     let thread = ThreadId::generate();
+    let mut status = client.subscribe(subject::status(&ant("dev-a"), &thread)).await.unwrap();
+    client.flush().await.unwrap();
     let stuck = |text: &str, id: &str| {
         let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), text);
         Stuck::new(EscalationReason::TurnBudget, notice, id.to_owned(), None)
@@ -82,6 +83,11 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
     assert_eq!(escalated, Escalated::Chain { level: 1, leader: ant("lead"), to: vec![ant("lead")] });
     let one = next(&mut to_lead).await;
     assert_eq!(one.escalation.as_deref().map(|e| e.level), Some(1));
+    // Observers hear it on the ant's status, without the message's text.
+    let told = timeout(WAIT, status.next()).await.expect("no status").unwrap();
+    let told: StatusEvent = serde_json::from_slice(&told.payload).unwrap();
+    let StatusUpdate::Escalated { to, escalation } = told.update else { panic!("{told:?}") };
+    assert_eq!((to, escalation.level, escalation.reason), (ant("lead"), 1, EscalationReason::TurnBudget));
     drop(first);
 
     // Restarted, the ant still escalates past the deadline it stored.

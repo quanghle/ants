@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{State, StatusEvent, StatusUpdate, ThreadId, UserId};
+use ants_proto::{Envelope, State, StatusEvent, StatusUpdate, ThreadId, UserId};
 use futures::FutureExt as _;
 
 /// How long streamed text is joined before it goes out.
@@ -32,6 +32,15 @@ pub fn publish(client: &async_nats::Client, ant: &UserId, thread: &ThreadId, upd
 /// Publish the thread's state.
 pub fn state(client: &async_nats::Client, ant: &UserId, thread: &ThreadId, state: State) {
     publish(client, ant, thread, StatusUpdate::State { state });
+}
+
+/// Tell that `envelope`, stored, escalates what its sender could not settle, if it carries an escalation
+/// ([`StatusUpdate::Escalated`]), on the sender's status of the envelope's thread.
+pub fn escalated(client: &async_nats::Client, envelope: &Envelope) {
+    if let Some(escalation) = envelope.escalation.as_deref() {
+        let update = StatusUpdate::Escalated { to: envelope.to.clone(), escalation: escalation.clone() };
+        publish(client, &envelope.from, &envelope.thread_id, update);
+    }
 }
 
 /// The status of one prompt, joining streamed text so a reply goes out in a few updates rather than one per token.
