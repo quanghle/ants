@@ -66,6 +66,10 @@ cargo install --path crates/ants        # ~/.cargo/bin/ants
 ants --help
 ```
 
+### Upgrade
+
+Running `cargo install` again replaces `~/.cargo/bin/ants`; the services move onto the new executable by themselves. `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` check every 30s whether another file replaced their executable at the path they started from (or the file was rewritten in place). Once the new file is executable, non-empty and unchanged across two checks, the process exits with status 75 for the service manager to start the new one: `ants daemon` first stops its ants as on `SIGTERM` (prompts in flight finish, waiting messages go back for redelivery) and its schedules at once; the others exit at once, as on `SIGTERM`. The units of `scripts/install-units.sh` restart on status 75 (systemd `RestartForceExitStatus=75`; launchd `KeepAlive`, as on any failed exit); systemd units installed before also restart on it, as on a failure. A process started by hand logs the reason and exits: start it again. `--upgrade-check DURATION` (`ANTS_UPGRADE_CHECK`) on those commands sets the period; `0` turns the check off.
+
 ## Quick start
 
 Single machine without credentials:
@@ -157,6 +161,7 @@ A check that cannot run, such as one needing a file that does not exist or right
 | `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
 | `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
 | `ANTS_MCP_TOKEN` | `--token` (`ants mcp`) | Per-thread session token passed automatically by `ants daemon` |
+| `ANTS_UPGRADE_CHECK` | `--upgrade-check` (`daemon`, `channel serve`, `webhook serve`, `bridge serve`, `bridge connect`) | `30s`: how often to check for a replaced executable and exit with status 75 ([Upgrade](#upgrade)); `0` never checks |
 | `ANTS_LOG` | All commands | `tracing` stderr filter, default `info,rmcp=warn` |
 | `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by rustls for private CAs |
 | `ANTS_REQUIRE_TOOLS` | `cargo test` | When `1`, tests fail instead of skipping if `nats-server` is missing on `PATH` |
@@ -742,6 +747,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 - **Managed by `ants add`:** completed credentials reload `ants.daemon` / `ants-daemon` when its unit (`~/Library/LaunchAgents/ants.daemon.plist`, `~/.config/systemd/user/ants-daemon.service`) runs the config file of `ants add` and the service is running; an enrollment that renewed the leaf's uplink credentials then restarts `ants.nats` / `ants-nats` (`launchctl kickstart -k`, `systemctl --user restart`) when its unit runs that `leaf.conf`. `ants leaf config` reloads `ants.nats` / `ants-nats` (`launchctl kill SIGHUP`, `systemctl --user reload`) when its unit runs the `leaf.conf` written and the service is running, or restarts it for changes a reload does not take. A unit of another file, a stopped service or another system gets the commands printed instead.
 - **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
+- **Upgrade:** the ants services restart onto a new `ants` executable by themselves, exiting with status 75 ([Upgrade](#upgrade)); run `scripts/install-units.sh` again so systemd units installed before treat that exit as a restart rather than a failure.
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.
 

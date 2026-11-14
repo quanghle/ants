@@ -25,6 +25,8 @@ pub struct DaemonArgs {
     config: Option<PathBuf>,
     #[command(flatten)]
     options: AntOptions,
+    #[command(flatten)]
+    pub upgrade: crate::upgrade::UpgradeArgs,
 }
 
 /// The settings of an ant on the command line, of `ants daemon` and `ants add`.
@@ -298,11 +300,24 @@ pub struct Served {
     pub schedules: Vec<Schedule>,
 }
 
+/// How [`run`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    Stopped,
+    /// The executable was replaced and every ant stopped, for the new one to serve them.
+    Replaced,
+}
+
 /// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
 /// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
 /// left. On SIGHUP `reload` lists the ants and schedules again and the daemon serves those ([`reconcile`],
-/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is.
-pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<()> {
+/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is. Once `replaced` the ants
+/// stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
+pub async fn run(
+    served: Served,
+    reload: impl Fn() -> Result<Served>,
+    replaced: impl Future<Output = ()>,
+) -> Result<Ended> {
     let mut hangup = Hangup::new()?;
     let mut running = HashMap::new();
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
@@ -314,8 +329,8 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
             std::future::pending::<()>().await;
         }
     };
-    tokio::pin!(shutdown);
-    let (mut stopping, mut served, mut errors) = (false, 0, Vec::new());
+    tokio::pin!(shutdown, replaced);
+    let (mut stopping, mut served, mut errors, mut ended) = (false, 0, Vec::new(), Ended::Stopped);
     while !tasks.is_empty() {
         tokio::select! {
             Some((ant, result)) = tasks.next() => {
@@ -336,6 +351,15 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
                 stopping = true;
                 schedules.reconcile(Vec::new(), run_schedule);
             }
+            () = &mut replaced, if !stopping => {
+                tracing::info!("stopping every ant as on SIGTERM, finishing the prompts in flight");
+                (stopping, ended) = (true, Ended::Replaced);
+                schedules.reconcile(Vec::new(), run_schedule);
+                for r in running.values_mut() {
+                    r.next = None;
+                    r.ask_to_stop();
+                }
+            }
             () = hangup.recv(), if !stopping => match reload() {
                 Ok(served) => {
                     tracing::info!("config reloaded");
@@ -346,10 +370,11 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
             },
         }
     }
-    match (served, errors.len()) {
-        (0, 1) => Err(errors.remove(0)),
-        (0, n) if n > 0 => bail!("none of the {n} ants could be served"),
-        _ => Ok(()),
+    match (ended, served, errors.len()) {
+        (Ended::Replaced, _, _) => Ok(Ended::Replaced),
+        (_, 0, 1) => Err(errors.remove(0)),
+        (_, 0, n) if n > 0 => bail!("none of the {n} ants could be served"),
+        (ended, _, _) => Ok(ended),
     }
 }
 

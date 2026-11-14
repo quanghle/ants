@@ -8,7 +8,8 @@
      The bearer token is read from its file at each start, so a new token takes effect at the next restart:
      launchctl kickstart -k gui/$(id -u)/ants.bridge
      launchd has no start order: the leaf node (ants.nats) retries its uplink until the bridge listens. Each leaf
-     connection retries the hub for 60 s; KeepAlive restarts the bridge after a failure, throttled by ThrottleInterval. -->
+     connection retries the hub for 60 s; KeepAlive restarts the bridge after a failure, throttled by ThrottleInterval.
+     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

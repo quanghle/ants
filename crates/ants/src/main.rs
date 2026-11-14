@@ -21,6 +21,7 @@ mod service;
 mod spend;
 mod thread;
 mod tools;
+mod upgrade;
 mod webhook;
 
 use std::path::{Path, PathBuf};
@@ -387,7 +388,10 @@ enum ChannelCommand {
     /// Run the channel manager, where no ant runs (on the hub, say), with the credentials of
     /// `ants auth channel-manager` as --creds: it applies the changes owners ask for, refuses the others, and posts
     /// each change in its channel.
-    Serve,
+    Serve {
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -403,6 +407,8 @@ enum WebhookCommand {
         /// Address for the reverse proxy (default: the file's `listen`, else 127.0.0.1:8424).
         #[arg(long)]
         listen: Option<String>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
 }
 
@@ -425,6 +431,8 @@ enum BridgeCommand {
         /// command line and environment.
         #[arg(long, value_name = "FILE", conflicts_with = "token")]
         token_file: Option<PathBuf>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
     /// On a worker: listen locally and carry each connection to the hub's `ants bridge serve`. The machine's leaf
     /// node then uses the uplink nats-leaf://127.0.0.1:7422.
@@ -447,6 +455,8 @@ enum BridgeCommand {
         /// HTTP CONNECT forward proxy, http://[user:password@]host:port.
         #[arg(long, value_name = "URL")]
         proxy: Option<String>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
 }
 
@@ -864,7 +874,9 @@ async fn main() -> Result<()> {
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
         Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
-        Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
+        Command::Channel(ChannelCommand::Serve { upgrade }) => {
+            upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade).await
+        }
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
         Command::Thread(ThreadCommand::List { ant, owner, grep, since, limit, json }) => {
@@ -921,7 +933,10 @@ async fn main() -> Result<()> {
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
                 Ok(serve::Served { configs, schedules })
             };
-            serve::run(served()?, served).await
+            match serve::run(served()?, served, upgrade::replaced(args.upgrade.upgrade_check)).await? {
+                serve::Ended::Stopped => Ok(()),
+                serve::Ended::Replaced => upgrade::exit(),
+            }
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { pick }) => {
@@ -1179,14 +1194,14 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file }) => {
+        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file, upgrade }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let addr = bridge::listen_addr(&listen, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
-            bridge::Server::new(upstream, token).run(listener).await
+            upgrade::or_exit(bridge::Server::new(upstream, token).run(listener), &upgrade).await
         }
-        Command::Webhook(WebhookCommand::Serve { config, listen }) => {
+        Command::Webhook(WebhookCommand::Serve { config, listen, upgrade }) => {
             let path = match config {
                 Some(path) => path,
                 None => webhook::default_path()?,
@@ -1201,15 +1216,15 @@ async fn main() -> Result<()> {
             if config.links.is_some() {
                 tracing::info!("approval links on http://{addr}{}/_approval", config.path);
             }
-            webhook::serve(config, &nats, domain.as_ref(), listener).await
+            upgrade::or_exit(webhook::serve(config, &nats, domain.as_ref(), listener), &upgrade).await
         }
-        Command::Bridge(BridgeCommand::Connect { url, listen, token, token_file, headers, proxy }) => {
+        Command::Bridge(BridgeCommand::Connect { url, listen, token, token_file, headers, proxy, upgrade }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;
             let addr = bridge::listen_addr(&listen, true)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
-            remote.run(listener).await
+            upgrade::or_exit(remote.run(listener), &upgrade).await
         }
         Command::Leaf(LeafCommand::Outbox { machine, ants, humans, remove }) => {
             let nats = nats()?;
@@ -1563,7 +1578,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             channel::delete(&kv, &channel).await?;
             println!("deleted #{channel}; the posts to #{channel} stay in the stream");
         }
-        ChannelCommand::Serve => unreachable!("main runs the channel manager"),
+        ChannelCommand::Serve { .. } => unreachable!("main runs the channel manager"),
     }
     Ok(())
 }
