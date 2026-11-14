@@ -125,16 +125,16 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 
 ### Identity and human registration
 
-Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying a user and password or a token (`nats://user:pass@host`), on the command line or in a config file, is refused: credentials come only from `.creds` files. The CLI acts as the user named in the `--creds` JWT, or `human` without credentials. With human credentials (`ants auth user NAME --human`, or `human`), connecting ensures `ants_humans` exists and registers `<name>` (direct get first, put if absent; `human` needs no entry; warns and continues on failure, though daemons treat unregistered senders as agents until registered). With ant credentials, the CLI acts as that ant, skips `ants_humans`, warns, refuses `ants inbox` and leaves replies unread during `ants ask --wait` or `--follow`.
+Every command accepts `--nats`, `--creds` and `--js-domain`. Where neither the flag nor its environment variable sets one, it comes from the config file (`ANTS_CONFIG`, default `~/.ants/config.toml`, read only if it exists): `[cli]` `nats`, `creds` and `js_domain`, else the top-level `nats` and `js_domain`, else the built-in default; an unreadable file or a malformed `[cli]`, `nats` or `js_domain` fails the command. `ants daemon` and `ants add` take none of these, as their flags describe ants and they read the file's top-level keys themselves. A NATS URL carrying a user and password or a token (`nats://user:pass@host`), on the command line or in a config file, is refused: credentials come only from `.creds` files. The CLI acts as the user named in the `--creds` JWT, or `human` without credentials. With human credentials (`ants auth user NAME --human`, or `human`), connecting ensures `ants_humans` exists and registers `<name>` (direct get first, put if absent; `human` needs no entry; warns and continues on failure, though daemons treat unregistered senders as agents until registered). With ant credentials, the CLI acts as that ant, skips `ants_humans`, warns, refuses `ants inbox` and leaves replies unread during `ants ask --wait` or `--follow`.
 
 ### Environment variables
 
 | Variable | Flag / Scope | Default / Behavior |
 |---|---|---|
-| `ANTS_NATS_URL` | `--nats` (global) | `nats://127.0.0.1:4222` |
-| `ANTS_CREDS` | `--creds` (global) | Path to `.creds` file; omitted connects unauthenticated as `human` |
-| `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`) |
-| `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`, `spend`) | `~/.ants/config.toml` |
+| `ANTS_NATS_URL` | `--nats` (global) | Config file's `[cli]` or top-level `nats`, else `nats://127.0.0.1:4222` |
+| `ANTS_CREDS` | `--creds` (global) | Path to `.creds` file, else the config file's `[cli]` `creds`; omitted connects unauthenticated as `human` |
+| `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`), else the config file's `[cli]` or top-level `js_domain` |
+| `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`, `spend`); the global connection defaults | `~/.ants/config.toml` |
 | `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
 | `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
 | `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
@@ -181,6 +181,11 @@ messenger = true                           # default: serve built-in messenger u
 nats = "wss://hub.example/nats"            # default NATS URL for ants without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
+
+[cli]                                      # the CLI's connection where no flag or environment variable sets it
+creds = "~/.config/ants/auth/alice.creds"  # the human's credentials (an ant's never apply)
+nats = "nats://127.0.0.1:4222"             # default: the top-level nats
+js_domain = "hub"                          # default: the top-level js_domain
 
 [[schedule]]                               # see Schedules
 name = "nightly"
@@ -626,7 +631,7 @@ Once the credentials are complete, `ants add` reloads the daemon service serving
 
 ## Leaf nodes
 
-Running a local `nats-server` leaf per machine isolates local `ants` processes on `127.0.0.1:4222` and buffers outbound traffic while offline. Configure `jetstream { domain: hub }` and `feature_flags { js_api_reply_v2: true }` on the hub, pass `--js-domain hub` (`ANTS_JS_DOMAIN=hub`) everywhere, and issue leaf credentials scoping all ants, humans and webhooks on that machine:
+Running a local `nats-server` leaf per machine isolates local `ants` processes on `127.0.0.1:4222` and buffers outbound traffic while offline. Configure `jetstream { domain: hub }` and `feature_flags { js_api_reply_v2: true }` on the hub, pass `--js-domain hub` (`ANTS_JS_DOMAIN=hub`, or `js_domain = "hub"` in `~/.ants/config.toml` for the CLI and the ants it lists) everywhere, and issue leaf credentials scoping all ants, humans and webhooks on that machine:
 
 ```sh
 # Auth machine (issue user/webhook .creds first)

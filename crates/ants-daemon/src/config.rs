@@ -7,6 +7,11 @@
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
 //!
+//! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
+//! creds = "~/.config/ants/auth/alice.creds"
+//! nats = "wss://hub.example/nats"   # default: the top-level nats
+//! js_domain = "hub"                 # default: the top-level js_domain
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -82,6 +87,8 @@ struct File {
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
+    #[serde(default)]
+    cli: CliSection,
     #[serde(default, rename = "ant")]
     ants: Vec<Ant>,
     #[serde(default, rename = "schedule")]
@@ -377,6 +384,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if let Some(harness) = &file.harness {
         harnesses.get(harness).with_context(|| format!("config {}", path.display()))?;
     }
+    if let Some(url) = &file.cli.nats {
+        crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
+    }
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -503,6 +513,54 @@ impl Summary {
     /// entry names none.
     pub fn creds_of(&self, ant: &UserId) -> Option<Option<&Path>> {
         self.ants.iter().find(|(name, _)| name == ant).map(|(_, creds)| creds.as_deref())
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliSection {
+    nats: Option<String>,
+    creds: Option<PathBuf>,
+    js_domain: Option<JsDomain>,
+}
+
+/// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
+/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's.
+#[derive(Debug, Default, PartialEq)]
+pub struct CliDefaults {
+    pub nats: Option<String>,
+    pub creds: Option<PathBuf>,
+    pub js_domain: Option<JsDomain>,
+}
+
+impl CliDefaults {
+    /// Read the defaults of the file at `path`; none when there is no file.
+    pub fn load(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text, &std::path::absolute(path)?, &home_dir()?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading config {}", path.display())),
+        }
+    }
+
+    /// Only the keys the CLI uses are read and checked, so that a mistake in the ants' settings does not stop every
+    /// command; the daemon refuses it.
+    fn parse(text: &str, path: &Path, home: &Path) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct View {
+            nats: Option<String>,
+            js_domain: Option<JsDomain>,
+            #[serde(default)]
+            cli: CliSection,
+        }
+        let view: View = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        let nats = view.cli.nats.or(view.nats);
+        if let Some(url) = &nats {
+            crate::bus::check_url(url).with_context(|| format!("config {}", path.display()))?;
+        }
+        let creds = view.cli.creds.map(|c| resolve(&c, base, home));
+        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain) })
     }
 }
 
@@ -1089,6 +1147,34 @@ Review changes for correctness."""
         assert!(err(&ant).contains("schedule messenger has the name of an ant"));
         let bad = err(&one.replace("@daily", "0 25 * * *"));
         assert!(bad.contains("config.toml: schedule nightly: cron \"0 25 * * *\": hour"), "{bad}");
+    }
+
+    #[test]
+    fn the_cli_section_overrides_the_top_level_server() {
+        let (path, home) = (Path::new("/team/config.toml"), Path::new("/home/alice"));
+        let cli = |text: &str| CliDefaults::parse(text, path, home);
+        assert_eq!(cli("").unwrap(), CliDefaults::default());
+        let top = "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\
+                   [[ant]]\nname = \"dev-a\"\nworkdir = \"/nowhere\"\ncreds = \"dev-a.creds\"\nbogus = 1\n";
+        let defaults = cli(top).unwrap();
+        assert_eq!(defaults.nats.as_deref(), Some("wss://hub.example/nats"));
+        assert_eq!(defaults.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
+        assert_eq!(defaults.creds, None, "an ant's credentials are not the CLI's");
+
+        let own = cli(&format!("{top}[cli]\nnats = \"nats://127.0.0.1:4222\"\ncreds = \"~/alice.creds\"\n")).unwrap();
+        assert_eq!(own.nats.as_deref(), Some("nats://127.0.0.1:4222"));
+        assert_eq!(own.js_domain.as_ref().map(JsDomain::as_str), Some("hub"));
+        assert_eq!(own.creds.as_deref(), Some(Path::new("/home/alice/alice.creds")));
+        let relative = cli("[cli]\ncreds = \"auth/alice.creds\"\njs_domain = \"own\"").unwrap();
+        assert_eq!(relative.creds.as_deref(), Some(Path::new("/team/auth/alice.creds")));
+        assert_eq!(relative.js_domain.as_ref().map(JsDomain::as_str), Some("own"));
+
+        for bad in ["[cli]\ncred = \"a.creds\"", "nats = 4222", "nats = \"nats://u:secret@hub\"", "[cli"] {
+            let err = format!("{:#}", cli(bad).unwrap_err());
+            assert!(err.contains("/team/config.toml") && !err.contains("secret"), "{bad}: {err}");
+        }
+        assert!(parse_all("[cli]\nnats = \"nats://hub:4222\"\ncreds = \"alice.creds\"").is_ok(), "daemon accepts it");
+        assert!(parse_all("[cli]\nharness = \"claude\"").is_err());
     }
 
     #[test]

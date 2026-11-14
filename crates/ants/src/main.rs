@@ -4,6 +4,7 @@ mod add;
 mod auth;
 mod bridge;
 mod channel;
+mod defaults;
 mod enroll;
 mod humans;
 mod inbox;
@@ -38,16 +39,19 @@ use futures::StreamExt as _;
 #[command(name = "ants", version, about = "Agent teams messaging over NATS")]
 struct Cli {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
+    /// Unset, the config file's `[cli]` or top-level `nats` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
+    /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
 
     /// JetStream domain of the hub (its `jetstream { domain }`), needed to reach JetStream from a leaf node without
     /// JetStream. Set it for every ants process, and when issuing credentials with `ants auth`.
+    /// Unset, the config file's `[cli]` or top-level `js_domain` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     js_domain: Option<JsDomain>,
 
@@ -798,7 +802,7 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    let cli = defaults::parse()?;
     let domain = cli.js_domain.as_ref();
     let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
