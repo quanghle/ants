@@ -871,7 +871,7 @@ async fn main() -> Result<()> {
         Command::Ask { thread, replies, words } => ask(&nats()?, thread, &replies, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread, limit, peek };
-            show_inbox(&nats()?, &select, follow, json).await
+            Box::pin(show_inbox(&nats()?, &select, follow, json)).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Spend { ant, thread, days, json, config } => {
@@ -882,9 +882,11 @@ async fn main() -> Result<()> {
             let caps = ants_daemon::config::Summary::load(&path)?.caps;
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
-        Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
+        Command::Post { channel, thread, replies, words } => {
+            Box::pin(post(&nats()?, channel, thread, &replies, words)).await
+        }
         Command::Channel(ChannelCommand::Serve { upgrade }) => {
-            upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade).await
+            Box::pin(upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade)).await
         }
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
@@ -981,7 +983,7 @@ async fn main() -> Result<()> {
                 harnesses: !no_harness,
                 team: team_dir(team)?,
             };
-            let checks = doctor::run(&setup).await;
+            let checks = Box::pin(doctor::run(&setup)).await;
             for check in &checks {
                 match json {
                     true => println!("{}", serde_json::to_string(check)?),
@@ -1729,7 +1731,7 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
             match select.thread {
                 None => {
                     let device = nats.device.id;
-                    presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed).await
+                    Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed)).await
                 }
                 Some(_) => followed.await,
             }

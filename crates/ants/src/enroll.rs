@@ -488,7 +488,7 @@ mod tests {
             assert_eq!((&heard[0].ant, &heard[0].public_key), (&dev_a, &user.public_key()));
             approver.approve(&team, &dev_a, None).await.unwrap()
         };
-        let (jwt, approved) = timeout(WAIT * 2, async { tokio::join!(asking, approving) }).await.unwrap();
+        let (jwt, approved) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
         assert_eq!(approved.public_key, user.public_key());
         assert!(approved.leaf.is_none());
         let approval = jwt.unwrap();
@@ -569,13 +569,15 @@ mod tests {
             }
             heard
         };
-        let ((), heard) = timeout(WAIT * 4, async { tokio::join!(sending, listening) }).await.unwrap();
+        let ((), heard) = Box::pin(timeout(WAIT * 4, async { tokio::join!(sending, listening) })).await.unwrap();
         assert!(heard.contains(&good), "the proven request is heard");
         assert!(heard.iter().all(|r| *r == good), "{heard:#?}");
 
         let approving = approver.approve(&team, &dev_a, None);
         let ((), approved) =
-            timeout(WAIT * 2, async { tokio::join!(forge(&server, &creds, &good), approving) }).await.unwrap();
+            Box::pin(timeout(WAIT * 2, async { tokio::join!(forge(&server, &creds, &good), approving) }))
+                .await
+                .unwrap();
         let approved = approved.unwrap_or_else(|e| panic!("{e:#}"));
         let leaf = approved.leaf.unwrap();
         assert_eq!(leaf.machine, m1);
@@ -662,7 +664,8 @@ mod tests {
                 }
             }
         };
-        let (approval, approved) = timeout(WAIT * 6, async { tokio::join!(asking, approving) }).await.unwrap();
+        let (approval, approved) =
+            Box::pin(timeout(WAIT * 6, async { tokio::join!(asking, approving) })).await.unwrap();
         let approval = approval.unwrap();
         let leaf_approved = approved.leaf.unwrap();
         assert_eq!(leaf_approved.machine, m1);
@@ -721,7 +724,7 @@ mod tests {
             approver.reject(&dev_a, None, Some("unknown machine")).await.unwrap()
         };
         let ((first_err, second_err), rejected) =
-            timeout(WAIT * 2, async { tokio::join!(both, answering) }).await.unwrap();
+            Box::pin(timeout(WAIT * 2, async { tokio::join!(both, answering) })).await.unwrap();
         assert_eq!(rejected.len(), 2);
         for err in [first_err.unwrap_err(), second_err.unwrap_err()] {
             assert!(err.to_string().contains("rejected: unknown machine"), "{err:#}");
