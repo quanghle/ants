@@ -728,7 +728,8 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
             Readiness::Missing => {
                 let command = installed.command().display();
                 let detail = format!("{harness}: {command} is not installed (not found on PATH)");
-                let fix = format!("install {command}, or set the `command` of [harnesses.{harness}] in {config}");
+                let file = installed.file().map_or_else(|| config.to_string(), |file| file.display().to_string());
+                let fix = format!("install {command}, or set the `command` of [harnesses.{harness}] in {file}");
                 Check::fail(check, detail, vec![fix])
             }
             Readiness::SignedOut { detail } => {

@@ -1497,7 +1497,7 @@ pub(crate) mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (nats, path) = (nats.to_owned(), path.to_owned());
-        let triggers = crate::reload::Triggers::new(path.clone(), Duration::from_millis(50)).unwrap();
+        let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_millis(50)).unwrap();
         let reload = Reload { triggers, load: move || Config::load(&path) };
         (tokio::spawn(async move { serve(config, &nats, None, listener, reload).await }), addr)
     }

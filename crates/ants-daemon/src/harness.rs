@@ -38,6 +38,9 @@ pub const BUILTIN_HARNESSES: &str = include_str!("harnesses.toml");
 pub struct Harness {
     #[serde(skip)]
     name: String,
+    /// The drop-in file defining it ([`crate::config::dropin_files`]), if one does.
+    #[serde(skip)]
+    pub(crate) file: Option<PathBuf>,
     /// A path, or a bare name looked up on `PATH` when the harness starts.
     pub(crate) command: PathBuf,
     #[serde(default)]
@@ -93,6 +96,11 @@ impl Harness {
     /// Its executable: a path, or a name looked up on `PATH`.
     pub fn command(&self) -> &Path {
         &self.command
+    }
+
+    /// The drop-in file defining it, if one does rather than the config file or ants itself.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
     }
 
     /// The command a human runs to sign the harness in, if its definition names one.
@@ -284,7 +292,8 @@ impl Harnesses {
         self.0.get(name).cloned().ok_or_else(|| {
             let known: Vec<_> = self.0.keys().map(String::as_str).collect();
             anyhow!(
-                "unknown harness {name:?}, expected one of {} or a [harnesses.{name}] table in the config file",
+                "unknown harness {name:?}, expected one of {} or a [harnesses.{name}] table in the config file or in \
+                 a harnesses.d file beside it",
                 known.join(", ")
             )
         })
@@ -583,6 +592,7 @@ impl Launch {
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
         let harness = Harness {
             name: "test".to_owned(),
+            file: None,
             command: "test".into(),
             args: Vec::new(),
             env: BTreeMap::new(),
