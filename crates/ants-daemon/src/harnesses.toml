@@ -1,9 +1,11 @@
 # The built-in harness definitions. A config file's [harnesses.<name>] table of the same name replaces one whole.
+# `sign_in` is the command a human runs when the harness reports it is not signed in.
 
-# GitHub Copilot CLI. Sign-in: `copilot login`.
+# GitHub Copilot CLI.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp"]
+sign_in = "copilot login"
 
 [harnesses.copilot.context]
 default = { args = ["--context", "default"] }
@@ -14,6 +16,7 @@ long_context = { args = ["--context", "long_context"] }
 [harnesses.claude]
 command = "claude-agent-acp"
 mode = "default"
+sign_in = "claude login"
 
 [harnesses.claude.context]
 default = {}
@@ -26,3 +29,4 @@ default = {}
 command = "agy"
 args = ["acp", "--disable-telemetry"]
 mode = "default"
+sign_in = "agy"

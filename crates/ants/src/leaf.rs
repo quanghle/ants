@@ -9,6 +9,11 @@
 //! after the machine, only to keep the machine's outbox (`ants leaf outbox`) while the uplink is down; the hub sources
 //! it from there. It trusts the team's operator through the same `server.conf` as the hub, so it checks local clients
 //! against their own credentials, and its uplink carries the credentials of `ants auth leaf`.
+//!
+//! A second uplink, to the same hub URLs, joins the leaf's system account to the hub's with the system account
+//! credentials `ants auth leaf` writes beside the uplink's: allowed only to hear updates of the team's account and
+//! answer them, it brings the leaf every account `ants auth push` sends the hub, revocations included. The leaf keeps
+//! accounts in a `full` resolver of its own, so the last one pushed outlives restarts with an older `server.conf`.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -34,6 +39,8 @@ pub struct Leaf<'a> {
     pub uplinks: &'a [String],
     /// Uplink credentials from `ants auth leaf`.
     pub creds: &'a Path,
+    /// System account credentials from `ants auth leaf`, for a second uplink bringing the hub's account updates.
+    pub system_creds: Option<&'a Path>,
     /// The team's `server.conf` from `ants auth init`.
     pub server_conf: &'a Path,
     /// CA of a hub certificate the platform does not trust (`tls://` and `wss://` only).
@@ -104,28 +111,47 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
             creds.display()
         );
     }
+    let system = match leaf.system_creds {
+        Some(path) => {
+            let path = existing(path, "system account credentials (`ants auth leaf` writes them)")?;
+            let account = leaf_account(&path, first.scheme)?;
+            if !trust.lines().any(|line| line.trim().strip_prefix("system_account:").map(str::trim) == Some(&account)) {
+                bail!("{} are not for the system account of {}", path.display(), server_conf.display());
+            }
+            Some((path, account))
+        }
+        None => None,
+    };
     // nats-server joins an include to the including file's directory, even an absolute one.
     let include = relative(&dir, &server_conf)?;
 
     let urls: Vec<String> = uplinks.iter().map(|u| quote(&u.url())).collect();
-    let mut remote = format!(
-        "      urls: [{}]\n      account: {}\n      credentials: {}\n",
-        urls.join(", "),
-        quote(&account),
-        quote(&creds.to_string_lossy()),
-    );
+    let mut transport = String::new();
     if secure {
         // Explicit, so the uplink never falls back to plain text; nats-server also wants it with a proxy.
         match leaf.ca_file {
             Some(ca) => {
                 let ca = existing(ca, "CA file")?;
-                remote += &format!("      tls {{ ca_file: {} }}\n", quote(&ca.to_string_lossy()));
+                transport += &format!("      tls {{ ca_file: {} }}\n", quote(&ca.to_string_lossy()));
             }
-            None => remote += "      tls {}\n",
+            None => transport += "      tls {}\n",
         }
     }
     if let Some(proxy) = leaf.proxy {
-        remote += &format!("      proxy {{ url: {} }}\n", quote(proxy));
+        transport += &format!("      proxy {{ url: {} }}\n", quote(proxy));
+    }
+    let remote = |account: &str, creds: &Path| {
+        format!(
+            "    {{\n      urls: [{}]\n      account: {}\n      credentials: {}\n{transport}    }}\n",
+            urls.join(", "),
+            quote(account),
+            quote(&creds.to_string_lossy()),
+        )
+    };
+    // The uplink comes first: `read_uplink` takes the first credentials.
+    let mut remotes = remote(&account, &creds);
+    if let Some((creds, account)) = &system {
+        remotes += &remote(account, creds);
     }
     Ok(format!(
         "# Written by `ants leaf config {machine}`: the leaf node every ants process on {machine} connects to, and its\n\
@@ -135,15 +161,19 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
          # Notices a dead uplink in about a minute, and keeps proxies with idle timeouts from dropping it.\n\
          ping_interval: \"20s\"\n\
          include {include}\n\
+         # Keeps the team's account as last pushed (`ants auth push`, through the hub and the system account's uplink)\n\
+         # across restarts and reloads, even with an older server.conf.\n\
+         resolver {{ type: full, dir: {jwt} }}\n\
          # Only for the outbox, which keeps what the hub could not take while the uplink was down; clients reach the\n\
          # hub's JetStream through its domain.\n\
          jetstream {{\n  domain: {name}\n  store_dir: {store}\n  max_memory_store: 64MB\n  max_file_store: 1GB\n}}\n\
-         leafnodes {{\n  remotes: [\n    {{\n{remote}    }}\n  ]\n}}\n",
+         leafnodes {{\n  remotes: [\n{remotes}  ]\n}}\n",
         machine = leaf.machine,
         name = quote(leaf.machine.as_str()),
         listen = quote(&listen.to_string()),
         include = quote(&include.to_string_lossy()),
         store = quote(&dir.join("jetstream").to_string_lossy()),
+        jwt = quote(&dir.join("jwt").to_string_lossy()),
     ))
 }
 
@@ -314,6 +344,7 @@ mod tests {
     use ants_proto::{ChannelPost, Envelope, NotesPost, Role, UserId};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::auth;
@@ -361,6 +392,7 @@ mod tests {
             hub_domain: None,
             uplinks,
             creds,
+            system_creds: None,
             server_conf,
             ca_file: None,
             proxy: None,
@@ -400,9 +432,21 @@ mod tests {
         let proxy = Some("socks5://proxy:1080");
         assert!(err(Leaf { proxy, ..leaf(&tcp, &creds, &server_conf) }).contains("HTTP CONNECT"));
 
+        let system = auth::leaf_system_creds(&creds);
+        let text = render(&Leaf { system_creds: Some(&system), ..leaf(&tcp, &creds, &server_conf) }, &dir).unwrap();
+        assert_eq!(text.matches("urls: [\"nats-leaf://127.0.0.1:7422\"]").count(), 2, "{text}");
+        let jwt = normalize(&dir).unwrap().join("jwt");
+        assert!(text.contains(&format!("resolver {{ type: full, dir: {} }}", quote(&jwt.to_string_lossy()))), "{text}");
+        let conf = dir.join("leaf.conf");
+        fs::write(&conf, &text).unwrap();
+        assert_eq!(read_uplink(&conf).unwrap(), (M1.clone(), normalize(&creds).unwrap()), "the team's uplink first");
+        let wrong = |path: &Path| err(Leaf { system_creds: Some(path), ..leaf(&tcp, &creds, &server_conf) });
+        assert!(wrong(&creds).contains("not for the system account"));
+
         let ant = dir.join("dev-a.creds");
         auth::issue(&dir, &"dev-a".parse().unwrap(), Role::Ant, None, &ant).unwrap();
         assert!(err(leaf(&tcp, &ant, &server_conf)).contains("not leaf uplink credentials"));
+        assert!(wrong(&ant).contains("not leaf uplink credentials"));
         let other = scratch_dir("leaf-other-team");
         auth::init(&other).unwrap();
         assert!(err(leaf(&tcp, &creds, &other.join(auth::SERVER_CONF))).contains("does not trust"));
@@ -517,5 +561,99 @@ mod tests {
         assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over ws://");
         let stream = bus::open_stream(&a_js, &dev_a).await.unwrap();
         bus::inbox_consumer(&stream, &dev_a, Duration::from_secs(5), 5, 2).await.unwrap();
+    }
+
+    /// A connection with `creds` to `url` that reports when the server closes it.
+    async fn watched(
+        url: &str,
+        creds: &Path,
+    ) -> Result<(async_nats::Client, tokio::sync::mpsc::UnboundedReceiver<()>)> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = async_nats::ConnectOptions::with_credentials_file(creds)
+            .await?
+            .event_callback(move |event| {
+                let tx = tx.clone();
+                async move {
+                    if let async_nats::Event::Disconnected = event {
+                        let _ = tx.send(());
+                    }
+                }
+            })
+            .connect(url)
+            .await?;
+        client.flush().await?;
+        Ok((client, rx))
+    }
+
+    /// A revocation pushed to the hub reaches a leaf node through its system account uplink, with no server.conf
+    /// copied: the leaf closes the revoked ant's connection and refuses it, also once restarted on its older
+    /// server.conf.
+    #[tokio::test]
+    async fn a_revocation_pushed_to_the_hub_reaches_the_leaf_and_outlives_its_restart() {
+        let leaf_port = free_port();
+        let Some(hub) = NatsServer::spawn_with(|dir| {
+            auth::init(&dir.join("auth")).unwrap();
+            format!(
+                "include \"auth/{}\"\nleafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",
+                auth::SERVER_CONF
+            )
+        }) else {
+            return;
+        };
+        let team = hub.dir().join("auth");
+        let (dev_a, dev_b) = ("dev-a".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
+        let creds = |user: &UserId| {
+            let out = hub.dir().join(format!("{user}.creds"));
+            auth::issue(&team, user, Role::Ant, None, &out).unwrap();
+            out
+        };
+        let (a, b) = (creds(&dev_a), creds(&dev_b));
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        let members = [(dev_a.clone(), Role::Ant), (dev_b.clone(), Role::Ant)];
+        auth::issue_leaf(&team, &M1, &members, &[], false, None, &leaf_creds).unwrap();
+
+        // The leaf's files outlive its process, to restart it; it has its own copy of server.conf.
+        let files = scratch_dir("leaf-files");
+        let server_conf = files.join(auth::SERVER_CONF);
+        fs::copy(team.join(auth::SERVER_CONF), &server_conf).unwrap();
+        let (uplinks, listen) = ([format!("nats-leaf://127.0.0.1:{leaf_port}")], format!("127.0.0.1:{}", free_port()));
+        let system_creds = auth::leaf_system_creds(&leaf_creds);
+        let config =
+            Leaf { system_creds: Some(&system_creds), listen: &listen, ..leaf(&uplinks, &leaf_creds, &server_conf) };
+        write(&config, &files.join("leaf.conf")).unwrap();
+        let start = || {
+            NatsServer::spawn_with(|dir| {
+                let include = relative(&normalize(dir).unwrap(), &normalize(&files.join("leaf.conf")).unwrap());
+                format!("include {}\n", quote(&include.unwrap().to_string_lossy()))
+            })
+            .unwrap()
+        };
+        let leaf_node = start();
+        let pushed_to_leaf = async || {
+            for _ in 0..50 {
+                let pushed = crate::revoke::push(&hub.url, &team).await.unwrap();
+                if !pushed.others.is_empty() {
+                    return pushed.others;
+                }
+            }
+            panic!("the leaf never heard a push");
+        };
+        assert_eq!(pushed_to_leaf().await, [("m1".to_owned(), None)]);
+
+        let (_a_client, mut a_closed) = watched(&leaf_node.url, &a).await.unwrap();
+        let (b_client, mut b_closed) = watched(&leaf_node.url, &b).await.unwrap();
+        crate::revoke::revoke(&team, Some("dev-a"), &[]).unwrap();
+        let pushed = crate::revoke::push(&hub.url, &team).await.unwrap();
+        assert_eq!(pushed.others, [("m1".to_owned(), None)]);
+        timeout(Duration::from_secs(5), a_closed.recv()).await.expect("dev-a's connection to the leaf stays open");
+        assert!(watched(&leaf_node.url, &a).await.is_err(), "the leaf still takes dev-a's credentials");
+        b_client.flush().await.unwrap();
+        assert!(b_closed.try_recv().is_err(), "dev-b's connection was closed");
+
+        drop((b_client, leaf_node));
+        let leaf_node = start();
+        assert!(watched(&leaf_node.url, &b).await.is_ok(), "the restarted leaf refuses dev-b");
+        assert!(watched(&leaf_node.url, &a).await.is_err(), "the restarted leaf forgot dev-a's revocation");
+        let _ = fs::remove_dir_all(&files);
     }
 }

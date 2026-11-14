@@ -15,6 +15,7 @@ use ants_proto::{
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
+use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
@@ -23,12 +24,13 @@ use crate::caps::{Caps, Ledger};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
-use crate::harness::{Harness, Launch, ModelSettings, Prompt, PromptLimits, Spend};
+use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
 use crate::notes::{self, NotesStore};
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
+use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
 use crate::worktrees::Worktrees;
@@ -292,6 +294,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         humans: &humans,
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
+        sign_in: SignIn::default(),
+        sign_in_every: signin::CHECK_EVERY,
     };
     let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
@@ -369,6 +373,7 @@ type InHand = (Incoming, jetstream::Message);
 
 /// A message to answer: one in the inbox, or a channel post that wakes the ant, read as a message from its author
 /// ([`channel::as_envelope`]).
+#[derive(Clone)]
 struct Incoming {
     envelope: Envelope,
     post: Option<Box<Posted>>,
@@ -377,6 +382,7 @@ struct Incoming {
     resume: Option<ChannelId>,
 }
 
+#[derive(Clone)]
 struct Posted {
     post: ChannelPost,
     /// The channel's entry, when the ant is to triage the post as its messenger.
@@ -401,6 +407,16 @@ struct Thread {
 struct Retry {
     seq: u64,
     until: tokio::time::Instant,
+}
+
+/// How handling a message ended.
+enum Handled {
+    /// Answered, acked or buried.
+    Done,
+    /// Failed; its thread waits for the redelivery.
+    Retry(Retry),
+    /// The harness is signed out: the message, as it arrived, waits in hand for it to be signed in.
+    SignedOut(Box<InHand>),
 }
 
 /// The prompt running on each thread, and where to send the human who cancels it.
@@ -465,6 +481,10 @@ struct Inbox<'a> {
     humans: &'a Registry,
     retry_delay: Duration,
     progress_every: Duration,
+    /// Whether the harness is signed out, holding the messages.
+    sign_in: SignIn,
+    /// How often a signed-out harness is checked.
+    sign_in_every: Duration,
 }
 
 impl Inbox<'_> {
@@ -487,7 +507,8 @@ impl Inbox<'_> {
         let mut progress = self.progress();
         let shutdown = stop();
         let finishing = self.finish_buried();
-        tokio::pin!(shutdown, finishing);
+        let signing_in = futures::future::Fuse::terminated();
+        tokio::pin!(shutdown, finishing, signing_in);
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             let mut ready = None;
@@ -515,11 +536,10 @@ impl Inbox<'_> {
                     }
                     ready = Some(threads.keys().cloned().collect());
                 }
-                Some((thread, retry)) = running.next(), if !running.is_empty() => {
-                    if let Some(t) = threads.get_mut(&thread) {
-                        t.busy = false;
-                        t.in_flight = None;
-                        t.retry = retry;
+                () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
+                Some((thread, handled)) = running.next(), if !running.is_empty() => {
+                    if handed_back(&mut threads, &thread, handled) && signing_in.is_terminated() {
+                        signing_in.set(self.signed_in().fuse());
                     }
                     ready = Some(vec![thread]);
                 }
@@ -550,7 +570,8 @@ impl Inbox<'_> {
                     }
                 }
             }
-            for thread in ready.into_iter().flatten() {
+            // While the harness is signed out, messages wait in hand: the consumer's limit on them stops deliveries.
+            for thread in ready.into_iter().flatten().filter(|_| !self.sign_in.is_out()) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread) {
                     running.push(self.handle(incoming, msg));
                 }
@@ -945,17 +966,19 @@ impl Inbox<'_> {
         }
     }
 
-    /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter.
-    /// Returns its thread, and the redelivery to wait for when there is one.
-    async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Option<Retry>) {
+    /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter; one
+    /// the harness failed for want of signing in is no attempt, and is handed back to wait for it.
+    /// Returns its thread, and how handling ended.
+    async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
         let _working = self.workload.working();
+        let arrived = incoming.clone();
         let envelope = &incoming.envelope;
         let thread = envelope.thread_id.clone();
         let (delivered, seq) = match msg.info() {
             Ok(info) => (info.delivered, info.stream_sequence),
             Err(e) => {
                 self.bury_unanswerable(&msg, &format!("no delivery info: {e}")).await;
-                return (thread, None);
+                return (thread, Handled::Done);
             }
         };
         self.thread_origin(&mut incoming, seq).await;
@@ -972,7 +995,7 @@ impl Inbox<'_> {
                 }
                 Err(e) => tracing::warn!(%thread, error = %e, "acking a message whose reply is stored"),
             }
-            return (thread, None);
+            return (thread, Handled::Done);
         }
         if let Some(kept) = self.buried.get(envelope).await {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
@@ -981,7 +1004,7 @@ impl Inbox<'_> {
                 Ok(()) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
-            return (thread, None);
+            return (thread, Handled::Done);
         }
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         let marker = self.attempts.get(seq, envelope).await;
@@ -991,7 +1014,7 @@ impl Inbox<'_> {
                 Ok(_) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
-            return (thread, None);
+            return (thread, Handled::Done);
         }
         let result = match marker {
             Ok(marker) => match self.arrived(&mut incoming).await {
@@ -1001,7 +1024,15 @@ impl Inbox<'_> {
             },
             Err(e) => Err(e),
         };
-        let Err(e) = result else { return (thread, None) };
+        let Err(e) = result else {
+            self.sign_in.settled();
+            return (thread, Handled::Done);
+        };
+        if let Some(signed_out) = e.downcast_ref::<SignedOut>() {
+            self.wait_for_sign_in(&arrived, signed_out).await;
+            return (thread, Handled::SignedOut(Box::new((arrived, msg))));
+        }
+        self.sign_in.settled();
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
@@ -1009,7 +1040,7 @@ impl Inbox<'_> {
             match self.bury(&incoming, &msg, &format!("{e:#}")).await {
                 Ok(_) => {
                     self.attempts.forget(seq).await;
-                    return (thread, None);
+                    return (thread, Handled::Done);
                 }
                 // The overdue delivery tries again.
                 Err(bury) => tracing::warn!(error = format!("{bury:#}"), "dead-lettering"),
@@ -1021,7 +1052,51 @@ impl Inbox<'_> {
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
             until: tokio::time::Instant::now() + self.retry_delay * 3,
         });
-        (thread, retry)
+        (thread, retry.map_or(Handled::Done, Handled::Retry))
+    }
+
+    /// Hold the messages, `incoming` having found the harness signed out, and tell its thread's owner, else the
+    /// default human, how to sign it in, unless told already since the harness last worked. The notice goes to the
+    /// human directly: no ant up the chain can sign the harness in.
+    async fn wait_for_sign_in(&self, incoming: &Incoming, signed_out: &SignedOut) {
+        let thread = &incoming.envelope.thread_id;
+        status::state(self.client, self.ant, thread, State::Idle);
+        let Some(since) = self.sign_in.out() else {
+            tracing::info!(%thread, error = %signed_out, "harness signed out; the message waits");
+            return;
+        };
+        tracing::warn!(%thread, error = %signed_out, "harness signed out; messages wait until it is signed in");
+        let machine = roster::machine().await;
+        let post = incoming.post.is_some();
+        let notice =
+            signin::notice(self.ant, &incoming.envelope, post, signed_out, &machine, self.sign_in_every, self.humans);
+        let id = format!("sign-in-{}-{since}", self.ant);
+        if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "telling a human to sign the harness in");
+            self.sign_in.untold();
+        }
+    }
+
+    /// Check the harness every `sign_in_every` until a handshake with it succeeds, then let the messages go on.
+    async fn signed_in(&self) {
+        loop {
+            tokio::time::sleep(self.sign_in_every).await;
+            let checked = harness::handshake(self.pool.launch()).await;
+            match checked.readiness {
+                harness::Readiness::Ready { agent } => {
+                    tracing::info!(%agent, "harness signed in; answering the waiting messages");
+                    self.sign_in.back();
+                    return;
+                }
+                harness::Readiness::SignedOut { detail } => {
+                    tracing::debug!(%detail, "harness still signed out");
+                }
+                harness::Readiness::Missing => tracing::warn!("harness not installed; messages wait"),
+                harness::Readiness::Failed { detail } => {
+                    tracing::warn!(%detail, "checking the signed-out harness failed; messages wait");
+                }
+            }
+        }
     }
 
     /// Store `msg` as a dead letter, escalating it up the ant's chain (in the end to the thread's owner, else the
@@ -1208,10 +1283,14 @@ impl Inbox<'_> {
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
+        let mut worked = false;
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
-                Some(update) = streamed.recv() => status.push(update),
+                Some(update) = streamed.recv() => {
+                    worked = true;
+                    status.push(update);
+                }
                 _ = flush.tick() => status.flush(),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
                     tracing::info!(%thread, %by, "cancelling the prompt");
@@ -1237,6 +1316,7 @@ impl Inbox<'_> {
             }
         };
         while let Ok(update) = streamed.try_recv() {
+            worked = true;
             status.push(update);
         }
         status.flush();
@@ -1246,6 +1326,11 @@ impl Inbox<'_> {
             Err(e) if cancelled_by.is_some() => {
                 tracing::warn!(%thread, error = format!("{e:#}"), "cancelled prompt failed");
                 crate::harness::Reply { text: String::new(), cut: None }
+            }
+            // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started.
+            Err(e) if e.is::<SignedOut>() && !cut_off && !worked => {
+                self.attempts.forget(seq).await;
+                return Err(e);
             }
             reply => reply?,
         };
@@ -1457,6 +1542,26 @@ impl Thread {
 
 /// The thread's next message to prompt, unless one is in flight or it waits for a redelivery. Forgets a thread with
 /// nothing left in hand.
+/// Note how handling the message in flight on `thread` ended. Returns whether it waits for the harness to be signed
+/// in, first on its thread.
+fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handled: Handled) -> bool {
+    let t = threads.entry(thread.clone()).or_default();
+    t.busy = false;
+    t.in_flight = None;
+    t.retry = None;
+    match handled {
+        Handled::Done => false,
+        Handled::Retry(retry) => {
+            t.retry = Some(retry);
+            false
+        }
+        Handled::SignedOut(held) => {
+            t.waiting.push_front(*held);
+            true
+        }
+    }
+}
+
 fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Option<InHand> {
     let Entry::Occupied(mut entry) = threads.entry(thread) else { return None };
     let t = entry.get_mut();
@@ -1712,6 +1817,8 @@ mod tests {
                 humans: &self.humans,
                 retry_delay: Duration::from_millis(300),
                 progress_every,
+                sign_in: SignIn::default(),
+                sign_in_every: Duration::from_millis(300),
             };
             let stop = || {
                 let ctrl_c = ctrl_c.clone();
@@ -1919,6 +2026,58 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().answered, [warned("flaky a"), "b".to_owned()]);
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn messages_wait_unspent_while_the_harness_is_signed_out() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        log.lock().unwrap().signed_out = true;
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let (_, seq) = bus.send(&t1, "a").await;
+        bus.send(&t1, "b").await;
+        bus.send(&t2, "c").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let signed_out = |notice: &Envelope| {
+            assert_eq!(notice.from, bus.dev);
+            assert!(notice.text.contains("harness test on") && notice.text.contains("is not signed in"), "{notice:?}");
+            assert!(notice.text.contains("Sign test in on"), "{}", notice.text);
+        };
+        let check = async {
+            let notice = next_envelope(&mut replies).await;
+            signed_out(&notice);
+            assert!([&t1, &t2].contains(&&notice.thread_id));
+            // Several checks of the harness pass, telling nobody again and spending no attempt.
+            let starts = log.lock().unwrap().starts;
+            until("checks of the harness", || log.lock().unwrap().starts >= starts + 3).await;
+            assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
+            assert!(!bus.marked(seq).await, "no attempt is recorded");
+            assert_eq!(bus.consumer().await.num_redelivered, 0);
+            assert_eq!(log.lock().unwrap().prompted, 0);
+
+            log.lock().unwrap().signed_out = false;
+            let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
+            answered.push(next_reply(&mut replies).await);
+            answered.sort_by_key(|(_, text)| text.clone());
+            let expected = [(t1.clone(), "a"), (t1.clone(), "b"), (t2.clone(), "c")].map(|(t, s)| (t, s.to_owned()));
+            assert_eq!(answered, expected, "answered unwarned: no attempt started");
+
+            // Signed out again once it worked: a live harness turns the prompt away, and a human is told again.
+            log.lock().unwrap().signed_out = true;
+            bus.send(&t1, "d").await;
+            signed_out(&next_envelope(&mut replies).await);
+            log.lock().unwrap().signed_out = false;
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "d".to_owned()));
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let mut answered = log.lock().unwrap().answered.clone();
+        answered.sort();
+        assert_eq!(answered, ["a", "b", "c", "d"]);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty());
         assert_eq!(bus.unacked().await, 0);
     }
 

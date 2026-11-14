@@ -622,6 +622,7 @@ mod tests {
                 hub_domain: Some(&domain),
                 uplinks: &uplinks,
                 creds: &leaf_creds,
+                system_creds: None,
                 server_conf: &team.join(auth::SERVER_CONF),
                 ca_file: None,
                 proxy: None,

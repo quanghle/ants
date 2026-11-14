@@ -9,7 +9,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
+    AuthMethod, CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
     PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
@@ -49,6 +49,8 @@ pub struct Harness {
     /// The values an ant's `context` may take, and what each selects. Empty: the harness takes no `context`.
     #[serde(default)]
     pub(crate) context: BTreeMap<String, ContextValue>,
+    /// The command a human runs to sign the harness in, named when it reports it is signed out.
+    pub(crate) sign_in: Option<String>,
 }
 
 /// What one `context` value selects.
@@ -65,6 +67,11 @@ pub struct ContextValue {
 impl Harness {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The command a human runs to sign the harness in, if its definition names one.
+    pub fn sign_in(&self) -> Option<&str> {
+        self.sign_in.as_deref()
     }
 
     /// Whether `command` is a path rather than a name to look up on `PATH`.
@@ -90,6 +97,9 @@ impl Harness {
         if self.mode.as_ref().is_some_and(|mode| mode.trim().is_empty()) {
             bail!("harness {name}: mode must not be blank; omit it to keep the harness's own mode");
         }
+        if self.sign_in.as_ref().is_some_and(|command| command.trim().is_empty()) {
+            bail!("harness {name}: sign_in must not be blank; omit it when the harness names no sign-in command");
+        }
         for (value, selects) in &self.context {
             if value.trim().is_empty() {
                 bail!("harness {name}: context values must not be blank");
@@ -111,6 +121,42 @@ impl Harness {
 
     fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
         AcpAgent::new(self.process(env, settings))
+    }
+
+    /// Where the harness's executable is, with the ant's `env` over the definition's over the daemon's: the path its
+    /// command names, else the first match on `PATH`. None when it is not installed there; a relative path, which the
+    /// harness's working directory resolves, counts as found.
+    pub(crate) fn locate(&self, env: &[(String, String)]) -> Option<PathBuf> {
+        if self.command_is_path() {
+            let unsure = self.command.is_relative() || self.command.is_file();
+            return unsure.then(|| self.command.clone());
+        }
+        let path = env.iter().rev().find(|(name, _)| name == "PATH").map(|(_, path)| path.into());
+        let path = path.or_else(|| self.env.get("PATH").map(Into::into)).or_else(|| std::env::var_os("PATH"))?;
+        let names: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+        std::env::split_paths(&path).find_map(|dir| {
+            names.iter().map(|ext| dir.join(format!("{}{ext}", self.command.display()))).find(|p| p.is_file())
+        })
+    }
+
+    /// The command that signs the harness in: the definition's, else the one of a terminal auth method it offers, run
+    /// as the harness with that method's arguments.
+    fn sign_in_command(&self, methods: &[AuthMethod]) -> Option<String> {
+        if let Some(command) = &self.sign_in {
+            return Some(command.clone());
+        }
+        methods.iter().find_map(|method| match method {
+            AuthMethod::Terminal(terminal) => {
+                let args = self.args.iter().chain(&terminal.args);
+                Some(
+                    std::iter::once(self.command.display().to_string())
+                        .chain(args.cloned())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            }
+            _ => None,
+        })
     }
 }
 
@@ -249,17 +295,146 @@ fn one_of(values: &[&str]) -> String {
     }
 }
 
-/// Start the harness, complete the ACP handshake and describe the agent.
-pub async fn check(harness: &Harness) -> Result<String> {
-    Client
-        .v1()
-        .name("ants")
-        .connect_with(harness.agent(&[], &ModelSettings::default()), async |cx: ConnectionTo<Agent>| {
-            let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            Ok(format!("{:?}", init.agent_info))
+/// How long a [`handshake`] may take.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Phrases of a harness's error or stderr that mean it needs signing in, lowercase. Kept to those that cannot mean
+/// anything else, such as an MCP server's or a proxy's authentication.
+const SIGNED_OUT_TEXTS: &[&str] = &[
+    "no authentication information found",
+    "not logged in",
+    "not signed in",
+    "please log in",
+    "please login",
+    "please sign in",
+    "please run /login",
+    "login required",
+];
+
+/// A harness that cannot work until a human signs it in, as its ACP handshake or a prompt said: ACP's
+/// `auth_required` error, or an error or stderr that says so ([`SIGNED_OUT_TEXTS`]). Nothing ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedOut {
+    pub harness: String,
+    /// The command that signs it in, if known ([`Harness::sign_in`], else a terminal auth method it offers).
+    pub sign_in: Option<String>,
+    /// What the harness said.
+    pub detail: String,
+}
+
+impl fmt::Display for SignedOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is not signed in: {}", self.harness, self.detail)?;
+        match &self.sign_in {
+            Some(command) => write!(f, "; sign in with `{command}`"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for SignedOut {}
+
+/// Whether an ACP error from a harness means it needs signing in.
+fn needs_sign_in(e: &agent_client_protocol::Error) -> bool {
+    if e.code == agent_client_protocol::ErrorCode::AUTH_REQUIRED {
+        return true;
+    }
+    let text = e.to_string().to_lowercase();
+    SIGNED_OUT_TEXTS.iter().any(|phrase| text.contains(phrase))
+}
+
+/// `e`, from the harness of `launch` while doing `what`, as an error: a [`SignedOut`] one when it says the harness
+/// needs signing in, given the auth methods the harness offered.
+fn harness_error(
+    launch: &Launch,
+    what: &str,
+    e: &agent_client_protocol::Error,
+    methods: &[AuthMethod],
+) -> anyhow::Error {
+    if needs_sign_in(e) {
+        let harness = &launch.harness;
+        let signed_out = SignedOut {
+            harness: harness.name.clone(),
+            sign_in: harness.sign_in_command(methods),
+            detail: e.to_string(),
+        };
+        return signed_out.into();
+    }
+    anyhow!("{} {what}: {e}", launch.harness)
+}
+
+/// What an ACP handshake with a harness found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    /// It answered `initialize`, describing itself, and opened a session: installed and signed in.
+    Ready { agent: String },
+    /// Its executable is neither at the path its command names nor on `PATH`.
+    Missing,
+    /// It needs a human to sign it in ([`SignedOut`]).
+    SignedOut { detail: String },
+    /// It failed otherwise, or took longer than a minute.
+    Failed { detail: String },
+}
+
+/// The outcome of a [`handshake`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handshake {
+    pub harness: String,
+    /// The command that signs it in, if known: the definition's, else a terminal auth method it offered.
+    pub sign_in: Option<String>,
+    pub readiness: Readiness,
+}
+
+/// Check that the harness of `launch` is installed and signed in: start it, complete the ACP handshake and open a
+/// session in the launch's directory, with no MCP servers or settings, then stop it. Prompts nothing.
+pub async fn handshake(launch: &Launch) -> Handshake {
+    let harness = &launch.harness;
+    let mut checked =
+        Handshake { harness: harness.name.clone(), sign_in: harness.sign_in.clone(), readiness: Readiness::Missing };
+    if launch.process_env.as_ref().is_some_and(|env| harness.locate(env).is_none()) {
+        return checked;
+    }
+    let methods = Mutex::new(Vec::new());
+    let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+        let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+        methods.lock().expect("auth methods").clone_from(&init.auth_methods);
+        cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?;
+        Ok(match &init.agent_info {
+            Some(info) => format!("{} {}", info.name, info.version),
+            None => "an agent that does not name itself".to_owned(),
         })
-        .await
-        .map_err(|e| anyhow!("{harness} ACP handshake: {e}"))
+    });
+    let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect).await;
+    let methods = methods.into_inner().expect("auth methods");
+    checked.sign_in = harness.sign_in_command(&methods);
+    checked.readiness = match result {
+        Ok(Ok(agent)) => Readiness::Ready { agent },
+        Ok(Err(e)) if needs_sign_in(&e) => Readiness::SignedOut { detail: e.to_string() },
+        Ok(Err(e)) => Readiness::Failed { detail: e.to_string() },
+        Err(_) => Readiness::Failed { detail: format!("no handshake within {HANDSHAKE_TIMEOUT:?}") },
+    };
+    checked
+}
+
+/// Check `harness` as [`handshake`] does, in the current directory, and describe the agent.
+pub async fn check(harness: &Arc<Harness>) -> Result<String> {
+    let launch = Launch::new(
+        harness.clone(),
+        std::env::current_dir()?,
+        Vec::new(),
+        PermissionPolicy::reject_all(),
+        ModelSettings::default(),
+    );
+    let checked = handshake(&launch).await;
+    let harness = &launch.harness;
+    match checked.readiness {
+        Readiness::Ready { agent } => Ok(agent),
+        Readiness::Missing => bail!("{harness}: {} is not installed (not found on PATH)", harness.command.display()),
+        Readiness::SignedOut { detail } => {
+            Err(SignedOut { harness: checked.harness, sign_in: checked.sign_in, detail }.into())
+        }
+        Readiness::Failed { detail } => bail!("{harness} ACP handshake: {detail}"),
+    }
 }
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -280,6 +455,9 @@ pub struct Launch {
     thread: Option<ThreadId>,
     mcp: Option<McpServers>,
     instructions: String,
+    /// The environment the harness process gets over the daemon's, to find its executable; None for an in-process
+    /// agent.
+    process_env: Option<Vec<(String, String)>>,
 }
 
 impl Launch {
@@ -291,9 +469,20 @@ impl Launch {
         policy: PermissionPolicy,
         settings: ModelSettings,
     ) -> Self {
-        let (process, process_settings) = (harness.clone(), settings.clone());
-        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&env, &process_settings)));
-        Self { harness, settings, connect, cwd, policy, thread: None, mcp: None, instructions: String::new() }
+        let (process, process_settings, process_env) = (harness.clone(), settings.clone(), env.clone());
+        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&process_env, &process_settings)));
+        let process_env = Some(env);
+        Self {
+            harness,
+            settings,
+            connect,
+            cwd,
+            policy,
+            thread: None,
+            mcp: None,
+            instructions: String::new(),
+            process_env,
+        }
     }
 
     /// The same launch, for sessions serving `thread`.
@@ -332,6 +521,7 @@ impl Launch {
             env: BTreeMap::new(),
             mode: None,
             context: BTreeMap::new(),
+            sign_in: None,
         };
         Self {
             harness: Arc::new(harness),
@@ -342,6 +532,7 @@ impl Launch {
             thread: None,
             mcp: None,
             instructions: String::new(),
+            process_env: None,
         }
     }
 
@@ -622,6 +813,7 @@ async fn serve(
     let (cancelled, cancels) = watch::channel(0u64);
     let (policy, thread, workdir) = (launch.policy.clone(), launch.thread.clone(), launch.cwd.clone());
     let mut opened = Some(opened);
+    let methods = Mutex::new(Vec::new());
     let result = Client
         .v1()
         .name("ants")
@@ -652,6 +844,7 @@ async fn serve(
         )
         .connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
+            methods.lock().expect("auth methods").clone_from(&init.auth_methods);
             let caps = &init.agent_capabilities;
             let mcp = launch.mcp_servers(caps.mcp_capabilities.http);
             let id = open(&cx, &launch, resume, caps.load_session, mcp).await?;
@@ -692,7 +885,8 @@ async fn serve(
                         let _ = reply.send(Ok(Reply { text, cut }));
                     }
                     Some(Err(e)) if cut.is_none() => {
-                        let _ = reply.send(Err(anyhow!("{} prompt: {e}", launch.harness)));
+                        let error = harness_error(&launch, "prompt", &e, &methods.lock().expect("auth methods"));
+                        let _ = reply.send(Err(error));
                         return Err(e);
                     }
                     // Cancelled, but the harness failed or did not end the prompt: stop it, the prompt is over.
@@ -709,7 +903,7 @@ async fn serve(
     if let Err(e) = result {
         match opened {
             Some(tx) => {
-                let _ = tx.send(Err(anyhow!("{} session: {e}", launch.harness)));
+                let _ = tx.send(Err(harness_error(&launch, "session", &e, &methods.lock().expect("auth methods"))));
             }
             None => tracing::warn!(error = %e, "{} session ended", launch.harness),
         }
@@ -887,10 +1081,10 @@ async fn set_mode(
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, ContentChunk, InitializeResponse, LoadSessionResponse, NewSessionResponse, PermissionOption,
-        PermissionOptionKind, SessionConfigSelectGroup, SessionConfigSelectOption, SessionMode,
-        SetSessionConfigOptionResponse, SetSessionModeResponse, StopReason, ToolCallStatus, ToolCallUpdateFields,
-        ToolKind,
+        AgentCapabilities, AuthMethodTerminal, ContentChunk, Implementation, InitializeResponse, LoadSessionResponse,
+        NewSessionResponse, PermissionOption, PermissionOptionKind, SessionConfigSelectGroup,
+        SessionConfigSelectOption, SessionMode, SetSessionConfigOptionResponse, SetSessionModeResponse, StopReason,
+        ToolCallStatus, ToolCallUpdateFields, ToolKind,
     };
     use serde_json::json;
 
@@ -957,6 +1151,74 @@ mod tests {
         let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
         assert!(err.contains("does not offer session mode default"), "{err}");
         assert!(set.lock().unwrap().is_empty());
+    }
+
+    /// A fake harness offering to sign in on a terminal with `--login`, whose session/new fails with `refusal` when
+    /// there is one.
+    fn signing(refusal: Option<agent_client_protocol::Error>) -> Launch {
+        let connect: Connector = Arc::new(move || {
+            let refusal = refusal.clone();
+            DynConnectTo::new(
+                Agent
+                    .v1()
+                    .name("fake")
+                    .on_receive_request(
+                        async move |init: InitializeRequest, responder, _cx| {
+                            let login = AuthMethodTerminal::new("login", "Log in").args(vec!["--login".to_owned()]);
+                            let init = InitializeResponse::new(init.protocol_version)
+                                .auth_methods(vec![AuthMethod::Terminal(login)])
+                                .agent_info(Implementation::new("fake", "1.0"));
+                            responder.respond(init)
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |_: NewSessionRequest, responder, _cx| match refusal.clone() {
+                            Some(e) => responder.respond_with_error(e),
+                            None => responder.respond(NewSessionResponse::new("s1")),
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    ),
+            )
+        });
+        Launch::with_transport(connect, PathBuf::from("/"), Default::default())
+    }
+
+    #[tokio::test]
+    async fn a_signed_out_harness_is_told_apart_from_a_failing_one() {
+        let ready = handshake(&signing(None)).await;
+        assert_eq!(ready.readiness, Readiness::Ready { agent: "fake 1.0".to_owned() });
+        assert_eq!(ready.sign_in.as_deref(), Some("test --login"), "the terminal auth method it offers");
+
+        let required = signing(Some(agent_client_protocol::Error::auth_required()));
+        assert!(matches!(handshake(&required).await.readiness, Readiness::SignedOut { .. }));
+        let err = Session::start(&required, None).await.err().expect("a signed-out session");
+        let signed_out = err.downcast_ref::<SignedOut>().expect("a sign-in error");
+        assert_eq!((signed_out.harness.as_str(), signed_out.sign_in.as_deref()), ("test", Some("test --login")));
+        let named = required.with_harness(custom("command = \"custom-acp\"\nsign_in = \"custom-acp login\""));
+        assert_eq!(handshake(&named).await.sign_in.as_deref(), Some("custom-acp login"), "the definition's wins");
+
+        // An adapter that exits on start: its stderr comes with the error.
+        let exited = |stderr: &str| {
+            agent_client_protocol::Error::internal_error().data(format!("Process exited with exit status: 1: {stderr}"))
+        };
+        let stderr = signing(Some(exited("Error: No authentication information found.")));
+        assert!(matches!(handshake(&stderr).await.readiness, Readiness::SignedOut { .. }));
+        let proxy = signing(Some(exited("Proxy authentication required")));
+        assert!(matches!(handshake(&proxy).await.readiness, Readiness::Failed { .. }), "no sign-in of the harness");
+        let err = Session::start(&proxy, None).await.err().expect("a failing session");
+        assert!(err.downcast_ref::<SignedOut>().is_none(), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_harness_not_installed_is_missing() {
+        let on_path = |command: &str| {
+            let harness = custom(&format!("command = \"{command}\""));
+            let env = vec![("PATH".to_owned(), "/nonexistent-ants-bin".to_owned())];
+            Launch::new(harness, PathBuf::from("/"), env, Default::default(), ModelSettings::default())
+        };
+        assert_eq!(handshake(&on_path("no-such-acp")).await.readiness, Readiness::Missing);
+        assert_eq!(handshake(&on_path("/nonexistent-ants-bin/acp")).await.readiness, Readiness::Missing);
     }
 
     /// A fake harness asking permission as Codex does for an MCP tool: it reports the call, then asks by the call's
@@ -1105,6 +1367,8 @@ mod tests {
         assert!(err("[harnesses.custom]\ncommand = \"x\"\nshell = true").contains("unknown field `shell`"));
         assert!(err("[harnesses.custom]\ncommand = \"x\"\nargs = [\"a\\u0000\"]").contains("must not contain NUL"));
         assert!(err("[harnesses.custom]\ncommand = \"x\"\nmode = \" \"").contains("mode must not be blank"));
+        assert!(err("[harnesses.custom]\ncommand = \"x\"\nsign_in = \"\"").contains("sign_in must not be blank"));
+        assert_eq!(builtin("copilot").sign_in(), Some("copilot login"));
         let env = err("[harnesses.custom]\ncommand = \"x\"\nenv = { 'A=B' = \"secret\" }");
         assert!(env.contains("harness custom") && env.contains("invalid harness environment variable"), "{env}");
         assert!(!env.contains("secret"), "{env}");
