@@ -8,6 +8,7 @@ mod completions;
 mod defaults;
 mod doctor;
 mod enroll;
+mod hook;
 mod humans;
 mod inbox;
 mod keys;
@@ -306,6 +307,31 @@ enum Command {
     /// Take events from outside services over HTTP and deliver each to the ant or channel its webhook names.
     #[command(subcommand)]
     Webhook(WebhookCommand),
+    /// Run commands on bus events, with observer credentials (`ants auth user NAME --observer`).
+    #[command(subcommand)]
+    Hook(HookCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum HookCommand {
+    /// Run CMD once per event of one kind, with the event's JSON document on its stdin, until stopped. Stored
+    /// events (tool requests, verdicts, dead letters) are read through the credentials' own consumer, from where it
+    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, roster) from now on.
+    /// Failures and timeouts are logged.
+    Run {
+        /// The kind of event.
+        #[arg(long, value_enum)]
+        on: hook::Event,
+        /// Most runs of CMD at once.
+        #[arg(long, default_value_t = 4, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        concurrency: usize,
+        /// How long one run of CMD may take before it is killed (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "60s")]
+        timeout: Duration,
+        /// The command and its arguments.
+        #[arg(last = true, required = true, value_name = "CMD")]
+        command: Vec<String>,
+    },
 }
 
 /// What `ants ask` and `ants post` do once sent: return at once, wait for the first reply, or follow the thread.
@@ -631,16 +657,21 @@ enum AuthCommand {
         dir: Option<PathBuf>,
     },
     /// Issue credentials for an ant, allowing only the subjects of its role, with --human for a human, a CLI user,
-    /// or with --webhook for a webhook of `ants webhook serve`. `human` always gets a human's. Give the hub's
-    /// --js-domain, if it has one, so they work with it.
+    /// with --webhook for a webhook of `ants webhook serve`, or with --observer for a hook observing the team's
+    /// events. `human` always gets a human's. Give the hub's --js-domain, if it has one, so they work with it.
     #[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
     User {
-        /// The ant, with --human the human, or with --webhook the webhook.
+        /// The ant, with --human the human, with --webhook the webhook, or with --observer the observer.
         user: UserId,
         /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
         /// the team's humans, on its first CLI connection.
         #[arg(long, conflicts_with = "webhook")]
         human: bool,
+        /// Issue an observer's read-only credentials, for hooks (`ants hook run`, docs/hooks.md): it reads approval
+        /// requests and decisions, dead letters, every ant's status (escalations among it) and the roster, and
+        /// publishes nothing.
+        #[arg(long, conflicts_with_all = ["human", "webhook", "label"])]
+        observer: bool,
         /// Issue a webhook's credentials: it may only message the ants of --to and post to the channels of
         /// --channel, as itself, and record the events it delivered.
         #[arg(long, requires = "targets")]
@@ -719,7 +750,7 @@ enum AuthCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Revoke credentials before they expire: every key issued to NAME (an ant, human or webhook,
+    /// Revoke credentials before they expire: every key issued to NAME (an ant, human, webhook or observer,
     /// `leaf-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
     /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections,
     /// as do the leaf nodes connected to it through a system account uplink.
@@ -877,7 +908,7 @@ enum EnrollCommand {
     /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
     /// With --auto, renew every credentials asking, as they ask, until stopped.
     Renew {
-        /// The name the credentials carry: an ant, a human, a webhook, channel-manager or leaf-<machine>.
+        /// The name the credentials carry: an ant, a human, a webhook, an observer, channel-manager or leaf-<machine>.
         #[arg(required_unless_present = "auto")]
         name: Option<String>,
         /// The asking holder's new public key, needed when several ask for NAME.
@@ -1172,6 +1203,7 @@ async fn run() -> Result<()> {
         Command::Auth(AuthCommand::User {
             user,
             human,
+            observer,
             webhook,
             to,
             channels,
@@ -1181,12 +1213,19 @@ async fn run() -> Result<()> {
             label,
             store_key,
         }) => {
-            let kind = match webhook {
-                true => revoke::Kind::Webhook,
-                false => auth::role(&user, human).into(),
+            let kind = match (webhook, observer) {
+                (true, _) => revoke::Kind::Webhook,
+                (_, true) => revoke::Kind::Observer,
+                _ => auth::role(&user, human).into(),
             };
-            let permissions = match webhook {
-                true => {
+            let permissions = match (webhook, observer) {
+                (_, true) => {
+                    if user.is_human() {
+                        bail!("{user} is the default human, not an observer");
+                    }
+                    Permissions::for_observer(&user)
+                }
+                (true, _) => {
                     if user.is_human() {
                         bail!("{user} is the default human, not a webhook");
                     }
@@ -1195,7 +1234,7 @@ async fn run() -> Result<()> {
                         to.chain(channels.into_iter().map(Destination::Channel)).collect();
                     Permissions::for_webhook(&user, &destinations)
                 }
-                false => Permissions::for_user(&user, auth::role(&user, human)),
+                _ => Permissions::for_user(&user, auth::role(&user, human)),
             }
             .with_js_domain(domain);
             let dir = team_dir(dir)?;
@@ -1449,6 +1488,11 @@ async fn run() -> Result<()> {
             let _metrics = serve_metrics(metrics, server.traffic()).await?;
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
             upgrade::or_exit(server.run(listener), &upgrade).await
+        }
+        Command::Hook(HookCommand::Run { on, concurrency, timeout, command }) => {
+            let nats = nats()?;
+            let (_, js) = nats.connect_only("ants-hook").await?;
+            hook::Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
         }
         Command::Webhook(WebhookCommand::Add(args)) => webhook_add::add(*args, &cli.nats, domain).await,
         Command::Webhook(WebhookCommand::Serve { config, listen, metrics, upgrade }) => {
@@ -2378,6 +2422,11 @@ impl Printer {
             }
             StatusUpdate::Approval { request_id } => {
                 return self.line(&format!("[{thread}] {who}{forged} waits for approval {who}/{request_id}"));
+            }
+            StatusUpdate::Escalated { to, escalation } => {
+                let (stuck, level, reason) = (&escalation.stuck, escalation.level, escalation.reason.as_str());
+                return self
+                    .line(&format!("[{thread}] {who}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
             }
         };
         let key = (who.clone(), thread.clone(), verb);

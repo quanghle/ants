@@ -43,7 +43,7 @@ use crate::caps::{Ledger, Pending, Reminder};
 use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
-use crate::{bus, links};
+use crate::{bus, links, status};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
 pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_mins(30);
@@ -63,13 +63,15 @@ const SUMMARY_CHARS: usize = 4000;
 pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Stores through JetStream ([`bus::store`]), first recording the link to a channel thread the envelope passes on, if
-/// any ([`links::pass_on`]).
+/// any ([`links::pass_on`]), then tells of the escalation on the ant's status ([`status::escalated`]).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();
         Box::pin(async move {
             links::passing_on(&js, &envelope).await;
-            bus::store(&js, envelope.subject(), &envelope, &id).await.map(drop)
+            bus::store(&js, envelope.subject(), &envelope, &id).await?;
+            status::escalated(&js.client(), &envelope);
+            Ok(())
         })
     })
 }

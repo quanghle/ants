@@ -38,6 +38,7 @@ pub enum Kind {
     Leaf,
     ChannelManager,
     Enrollment,
+    Observer,
 }
 
 impl From<ants_proto::Role> for Kind {
@@ -54,7 +55,8 @@ impl From<ants_proto::Role> for Kind {
 pub struct Issued {
     /// The user's public NKey, `U...`.
     pub key: String,
-    /// The name its JWT carries: the ant, human or webhook, `leaf-<machine>`, `channel-manager` or `enroll-<ant>`.
+    /// The name its JWT carries: the ant, human, webhook or observer, `leaf-<machine>`, `channel-manager` or
+    /// `enroll-<ant>`.
     pub name: String,
     pub kind: Kind,
     /// Seconds since the epoch.
@@ -468,6 +470,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
             name.trim_prefix("leaf-")
         ),
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
+        Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
     }]
 }
