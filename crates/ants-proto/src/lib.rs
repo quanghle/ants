@@ -87,6 +87,16 @@ pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
 /// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
 pub const READ_BUCKET: &str = "ants_read";
+/// KV bucket of where each human is reading: one [`Presence`] per device of a human following its inbox or the tool
+/// requests, keyed by [`presence_key`], put when the following starts, renewed every [`PRESENCE_HEARTBEAT`] and
+/// deleted when it ends. Kept in memory with a max age of [`PRESENCE_TTL`], so the presence of a CLI that died expires
+/// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
+/// webhook serve` reads them so a notice skips the push targets of a device reading it already.
+pub const PRESENCE_BUCKET: &str = "ants_presence";
+/// How often a following CLI re-puts its device's [`Presence`].
+pub const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(10);
+/// Max age of [`PRESENCE_BUCKET`]: a presence not renewed for this long is gone.
+pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
@@ -565,6 +575,12 @@ pub mod subject {
         format!("$KV.{}.{human}", super::READ_BUCKET)
     }
 
+    /// Every [`super::Presence`] of a human's devices in [`super::PRESENCE_BUCKET`]: the subjects only that human puts
+    /// them on.
+    pub fn presence_of(human: &UserId) -> String {
+        format!("$KV.{}.{human}.>", super::PRESENCE_BUCKET)
+    }
+
     /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
     /// [`super::ChannelEntry`] on.
     pub fn channel_entry(channel: &ChannelId) -> String {
@@ -757,6 +773,15 @@ fn read_marker_rights(human: &UserId) -> [String; 5] {
     ]
 }
 
+/// What a human's credentials need to say where its devices read ([`PRESENCE_BUCKET`]): creating the bucket, and
+/// reading by direct gets and writing its own keys only. No stream info, which with a subjects filter lists every key,
+/// so no human sees, let alone moves, where another reads.
+fn presence_rights(human: &UserId) -> [String; 3] {
+    let presence = kv_stream(PRESENCE_BUCKET);
+    let own = subject::presence_of(human);
+    [format!("$JS.API.STREAM.CREATE.{presence}"), format!("$JS.API.DIRECT.GET.{presence}.{own}"), own]
+}
+
 /// Where a webhook delivers its events: an ant's inbox, or a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {
@@ -806,7 +831,8 @@ impl Permissions {
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), and reads and removes dead
     /// letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
-    /// of its devices ([`read_marker_rights`]). A human may send under
+    /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
+    /// ([`presence_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
@@ -936,6 +962,7 @@ impl Permissions {
                 publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
             }
             publish.extend(read_marker_rights(user));
+            publish.extend(presence_rights(user));
             subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
@@ -1417,6 +1444,52 @@ impl FromStr for DeviceId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.parse().map(Self)
+    }
+}
+
+/// What a device of a human follows as it comes, so it needs no push of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Following {
+    /// Every message to the human (`ants inbox --follow`), escalations among them.
+    Inbox,
+    /// The tool requests of every ant (`ants tools list --follow`).
+    Approvals,
+}
+
+impl Following {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Approvals => "approvals",
+        }
+    }
+}
+
+/// Key in [`PRESENCE_BUCKET`] of `device` of `human` following `what`. Keys start with the human, so its credentials
+/// can be confined to its own.
+pub fn presence_key(human: &UserId, device: &DeviceId, what: Following) -> String {
+    format!("{human}.{device}.{}", what.as_str())
+}
+
+/// That a device of a human follows something ([`Following`]) right now, kept in [`PRESENCE_BUCKET`] under
+/// [`presence_key`] while it does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presence {
+    pub human: UserId,
+    pub device: DeviceId,
+    pub following: Following,
+    /// When the device started following.
+    pub since: DateTime<Utc>,
+}
+
+impl Presence {
+    pub fn new(human: UserId, device: DeviceId, following: Following) -> Self {
+        Self { human, device, following, since: Utc::now() }
+    }
+
+    pub fn key(&self) -> String {
+        presence_key(&self.human, &self.device, self.following)
     }
 }
 
