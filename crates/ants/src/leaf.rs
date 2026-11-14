@@ -3,7 +3,7 @@
 //! Every ants process on a machine connects to its leaf node on localhost; the leaf alone reaches the hub, through one
 //! uplink: the hub's leafnode port over TCP (`nats-leaf://`, `tls://`, also through `devtunnel connect`) or its
 //! websocket listener (`ws://`, `wss://`, also behind a reverse proxy). Switching the uplink rewrites this file and
-//! reloads the leaf; nothing else on the machine changes.
+//! reloads the leaf, through its service when one runs the file ([`take`]); nothing else on the machine changes.
 //!
 //! Clients reach the hub's JetStream through the hub's domain. The leaf runs a JetStream of its own, in a domain named
 //! after the machine, only to keep the machine's outbox (`ants leaf outbox`) while the uplink is down; the hub sources
@@ -23,6 +23,8 @@ use ants_proto::{JsDomain, Machine};
 use anyhow::{Context as _, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
+
+use crate::service::{Action, Outcome, Service, failure, manual};
 
 /// Where every ants process connects by default.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4222";
@@ -81,6 +83,80 @@ fn value(text: &str, path: &Path, key: &str) -> Result<String> {
         .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
         .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
     serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
+}
+
+/// How a running leaf node takes the configuration `new` in place of `old`, both as [`write`] writes them. A reload
+/// (SIGHUP) adds and drops remotes, a remote being its URLs, account and credentials, and changes their TLS settings;
+/// nats-server refuses it for any other change, the proxy of a kept remote included, which needs a restart, as does a
+/// first configuration.
+pub fn switch(old: Option<&str>, new: &str) -> Action {
+    /// The lines naming a remote, and its proxy.
+    type Remote<'a> = (Vec<&'a str>, Option<&'a str>);
+    /// The settings outside `leafnodes`, and the remotes, comments left out.
+    fn parse(text: &str) -> (Vec<&str>, Vec<Remote<'_>>) {
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
+        let head = lines.by_ref().take_while(|l| *l != "leafnodes {").collect();
+        let mut remotes = Vec::new();
+        for line in lines {
+            match line {
+                "{" => remotes.push((Vec::new(), None)),
+                l if l.starts_with("proxy") => {
+                    if let Some(remote) = remotes.last_mut() {
+                        remote.1 = Some(l);
+                    }
+                }
+                l if ["urls:", "account:", "credentials:"].iter().any(|key| l.starts_with(key)) => {
+                    if let Some(remote) = remotes.last_mut() {
+                        remote.0.push(l);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (head, remotes)
+    }
+    let Some(old) = old else { return Action::Restart };
+    let ((old_head, old_remotes), (new_head, new_remotes)) = (parse(old), parse(new));
+    let proxy_changed = old_remotes
+        .iter()
+        .any(|(id, proxy)| new_remotes.iter().any(|(new_id, new_proxy)| id == new_id && proxy != new_proxy));
+    if old_head == new_head && !proxy_changed { Action::Reload } else { Action::Restart }
+}
+
+/// Has the leaf node of `out` take the configuration `new` just written there in place of `old` ([`switch`]), with
+/// `apply` doing it on its service ([`crate::service::Services::apply`]), and says what came of it or how to do it by
+/// hand.
+pub fn take(out: &Path, old: Option<&str>, new: &str, apply: impl FnOnce(Action) -> Outcome) -> String {
+    let action = switch(old, new);
+    let out = out.display();
+    match (apply(action), action) {
+        (Outcome::Done(command), Action::Reload) => {
+            format!("leaf node reloaded to take the uplinks of {out} ({command})")
+        }
+        (Outcome::Done(command), _) if old.is_none() => format!("leaf node restarted to read {out} ({command})"),
+        (Outcome::Done(command), _) => {
+            format!("leaf node restarted, as a reload takes uplink changes only ({command})")
+        }
+        (Outcome::NotRunning, _) => format!("the leaf node service is not running; it reads {out} once started"),
+        (outcome, _) if old.is_none() => {
+            format!(
+                "{}start: nats-server -c {out} (scripts/install-units.sh installs it as a service)",
+                failure(outcome)
+            )
+        }
+        (outcome, Action::Reload) => format!(
+            "{}switch the uplink: send the running leaf node SIGHUP (`nats-server --signal reload`), or reload its \
+             service ({})",
+            failure(outcome),
+            manual(Service::Nats, Action::Reload)
+        ),
+        (outcome, _) => format!(
+            "{}restart the running leaf node, as a reload takes uplink changes only (stop it and run \
+             `nats-server -c {out}`), or restart its service ({})",
+            failure(outcome),
+            manual(Service::Nats, Action::Restart)
+        ),
+    }
 }
 
 /// The configuration of `leaf`, for a file in `dir`.
@@ -164,7 +240,7 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     }
     Ok(format!(
         "# Written by `ants leaf config {machine}`: the leaf node every ants process on {machine} connects to, and its\n\
-         # uplink to the hub. To switch the uplink, run `ants leaf config` again and reload the leaf (SIGHUP).\n\
+         # uplink to the hub. To switch the uplink, run `ants leaf config` again: it reloads the leaf (SIGHUP).\n\
          server_name: {name}\n\
          listen: {listen}\n\
          # Notices a dead uplink in about a minute, and keeps proxies with idle timeouts from dropping it.\n\
@@ -464,6 +540,66 @@ mod tests {
     }
 
     #[test]
+    fn a_switched_uplink_takes_a_reload_and_anything_else_a_restart() {
+        let (dir, creds) = team();
+        let server_conf = dir.join(auth::SERVER_CONF);
+        let system = auth::leaf_system_creds(&creds);
+        let (tcp, ws) = (["nats-leaf://127.0.0.1:7422".to_owned()], ["ws://127.0.0.1:8080/nats".to_owned()]);
+        let render = |leaf: Leaf| render(&leaf, &dir).unwrap();
+        let first = render(leaf(&tcp, &creds, &server_conf));
+        let proxied =
+            |uplinks| render(Leaf { proxy: Some("http://proxy:3128"), ..leaf(uplinks, &creds, &server_conf) });
+        let switch = |new: &str| switch(Some(&first), new);
+
+        assert_eq!(super::switch(None, &first), Action::Restart, "a first configuration");
+        assert_eq!(switch(&first), Action::Reload);
+        assert_eq!(switch(&first.replace("# uplink to the hub.", "# the hub.")), Action::Reload, "comments");
+        assert_eq!(switch(&render(leaf(&ws, &creds, &server_conf))), Action::Reload);
+        assert_eq!(switch(&proxied(&ws)), Action::Reload, "the proxy of a new remote");
+        assert_eq!(
+            switch(&render(Leaf { system_creds: Some(&system), ..leaf(&tcp, &creds, &server_conf) })),
+            Action::Reload
+        );
+        assert_eq!(switch(&proxied(&tcp)), Action::Restart, "the proxy of a kept remote");
+        let listen = render(Leaf { listen: "127.0.0.1:4333", ..leaf(&tcp, &creds, &server_conf) });
+        assert_eq!(switch(&listen), Action::Restart);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn taking_a_configuration_says_what_its_service_did_or_how_to_do_it() {
+        let out = Path::new("/home/me/.config/ants/leaf.conf");
+        let new = "listen: \"127.0.0.1:4222\"\nleafnodes {\n  remotes: [\n    {\n      urls: [\"ws://hub:80\"]\n";
+        let old = new.replace("ws://hub:80", "nats-leaf://hub:7422");
+        let reloaded = take(out, Some(&old), new, |action| {
+            assert_eq!(action, Action::Reload);
+            Outcome::Done("systemctl --user reload ants-nats".to_owned())
+        });
+        assert_eq!(
+            reloaded,
+            "leaf node reloaded to take the uplinks of /home/me/.config/ants/leaf.conf (systemctl --user reload ants-nats)"
+        );
+        let by_hand = take(out, Some(&old), new, |_| Outcome::Unmanaged);
+        assert!(by_hand.starts_with("switch the uplink: send the running leaf node SIGHUP"), "{by_hand}");
+        assert!(by_hand.contains("launchctl kill SIGHUP gui/$(id -u)/ants.nats"), "{by_hand}");
+
+        let moved = new.replace("4222", "4333");
+        let failed = take(out, Some(new), &moved, |action| {
+            assert_eq!(action, Action::Restart);
+            Outcome::Failed("systemctl --user restart ants-nats".to_owned(), "Job failed.".to_owned())
+        });
+        assert!(failed.starts_with("`systemctl --user restart ants-nats` failed (Job failed.): restart"), "{failed}");
+        assert!(failed.contains("systemctl --user restart ants-nats)"), "{failed}");
+        let stopped = take(out, Some(new), &moved, |_| Outcome::NotRunning);
+        assert_eq!(
+            stopped,
+            "the leaf node service is not running; it reads /home/me/.config/ants/leaf.conf once started"
+        );
+        let first = take(out, None, new, |_| Outcome::Unmanaged);
+        assert!(first.starts_with("start: nats-server -c /home/me/.config/ants/leaf.conf"), "{first}");
+    }
+
+    #[test]
     fn includes_are_relative_to_the_configuration() {
         let rel = |dir: &str, target: &str| relative(Path::new(dir), Path::new(target)).unwrap();
         assert_eq!(
@@ -560,7 +696,10 @@ mod tests {
         assert_eq!(stored, 3, "only dev-a's message and posts");
 
         let reload = |uplink: String| {
+            let old = fs::read_to_string(leaf_node.dir().join("leaf.conf")).unwrap();
             configure(leaf_node.dir(), uplink);
+            let new = fs::read_to_string(leaf_node.dir().join("leaf.conf")).unwrap();
+            assert_eq!(switch(Some(&old), &new), Action::Reload);
             let status = Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap();
             assert!(status.success());
         };
