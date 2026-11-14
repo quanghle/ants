@@ -918,6 +918,8 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         };
         let context = Context { posts: vec![post("dev-b", "earlier")], ..Context::default() };

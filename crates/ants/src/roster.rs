@@ -81,7 +81,8 @@ pub fn signed_out(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
-/// The roster as a table: one row per ant under a header, columns padded to line up.
+/// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an older
+/// daemon does not publish.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
     let header = [
         "ANT",
@@ -90,6 +91,8 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
         "HARNESSES",
         "HARNESS",
         "MACHINE",
+        "VERSION",
+        "PERMS",
         "HEARTBEAT",
         "UP",
         "CAPABILITIES",
@@ -97,7 +100,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
         "WORKDIR",
     ]
     .map(str::to_owned);
-    let rows: Vec<[String; 11]> = std::iter::once(header)
+    let rows: Vec<[String; 13]> = std::iter::once(header)
         .chain(entries.iter().map(|e| {
             [
                 e.ant.to_string(),
@@ -106,6 +109,8 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
                 e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
                 e.harness.clone(),
                 e.machine.clone(),
+                e.version.clone().unwrap_or_else(|| "-".to_owned()),
+                e.perms.map_or_else(|| "-".to_owned(), |p| p.to_string()),
                 format!("{} ago", short(since(e.heartbeat_at, now))),
                 short(since(e.started_at, now)),
                 if e.capabilities.is_empty() { "-".to_owned() } else { e.capabilities.join(",") },
@@ -114,7 +119,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
             ]
         }))
         .collect();
-    let mut widths = [0; 11];
+    let mut widths = [0; 13];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -158,6 +163,9 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         println!("no ants registered");
     } else {
         println!("{}", table(&entries, now));
+        if let Some(note) = crate::versions::roster_note(&entries, now) {
+            println!("{note}");
+        }
         let signed_out = signed_out(&entries, now);
         if !signed_out.is_empty() {
             println!("\n{}", signed_out.join("\n"));
@@ -169,7 +177,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
-    use ants_proto::{Activity, ROSTER_HEARTBEAT};
+    use ants_proto::{Activity, PermissionsVersion, ROSTER_HEARTBEAT};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -189,6 +197,8 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         }
     }
@@ -202,6 +212,15 @@ mod tests {
         let mut busy = entry("dev-a", 190, 4, now);
         (busy.activity, busy.handling, busy.harnesses) = (Some(Activity::Working), Some(1), Some(2));
         busy.escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
+        (busy.version, busy.perms) = (Some("0.2.0".to_owned()), Some(PermissionsVersion(2)));
+        let older = entry("dev-c", 60, 4, now);
+        assert_eq!(
+            crate::versions::roster_note(&[busy.clone(), older, quiet.clone()], now).as_deref(),
+            Some(
+                "mixed ants versions: 0.2.0 (1), none published (1); `ants doctor` tells whether credentials may be renewed"
+            )
+        );
+        assert_eq!(crate::versions::roster_note(&[busy.clone(), quiet.clone()], now), None, "a stale one runs nothing");
         let table = table(&[busy, quiet], now);
         let rows: Vec<Vec<&str>> = table.lines().map(|l| l.split_whitespace().collect()).collect();
         assert_eq!(
@@ -213,6 +232,8 @@ mod tests {
                 "HARNESSES",
                 "HARNESS",
                 "MACHINE",
+                "VERSION",
+                "PERMS",
                 "HEARTBEAT",
                 "UP",
                 "CAPABILITIES",
@@ -229,6 +250,8 @@ mod tests {
                 "2",
                 "copilot",
                 "m1",
+                "0.2.0",
+                "2",
                 "4s",
                 "ago",
                 "3m",
@@ -237,7 +260,7 @@ mod tests {
                 "/src/app"
             ]
         );
-        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "25s", "ago", "2h", "-", "-", "-"]);
+        assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "-", "-", "25s", "ago", "2h", "-", "-", "-"]);
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
 

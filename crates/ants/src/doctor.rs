@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::humans::{Me, Rights};
 use crate::service::{Service, Services, State};
-use crate::{auth, leaf, outbox, revoke};
+use crate::{auth, leaf, outbox, revoke, versions};
 
 /// How long a network check may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,8 +98,8 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, each ant's credentials and harness, the hub's account resolver, the leaf node and outbox, and the installed
-/// services.
+/// buckets, the versions of ants running across the team, each ant's credentials and harness, the hub's account
+/// resolver, the leaf node and outbox, and the installed services.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -231,15 +231,16 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
         };
         return Check::ok(check, format!("{holder}: {version}, {expires}"));
     }
+    let when = if finding.version_status() == VersionStatus::Outdated { finding.renew_when() } else { "" };
     let status = if expiry == Expiry::Expired { Status::Fail } else { Status::Warn };
     if finding.renewable(now) {
         let detail = format!(
-            "{holder}: {}; renew them over NATS, approved on the machine holding the account key",
+            "{holder}: {}; renew them over NATS, approved on the machine holding the account key{when}",
             problems.join("; ")
         );
         return Check::new(check, status, detail, finding.renew_over_nats(path));
     }
-    let detail = format!("{holder}: {}; renew them on the machine holding the team keys", problems.join("; "));
+    let detail = format!("{holder}: {}; renew them on the machine holding the team keys{when}", problems.join("; "));
     Check::new(check, status, detail, finding.renew())
 }
 
@@ -270,9 +271,11 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.push(answered);
     if !reached {
         checks.push(Check::skip("hub", "JetStream does not answer"));
+        checks.push(Check::skip("versions", "JetStream does not answer"));
         return (checks, None);
     }
     checks.extend(check_hub(&js, identity).await);
+    checks.push(check_versions(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
 
@@ -453,6 +456,46 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
             }
         })
         .collect()
+}
+
+/// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
+/// credentials renewed with this ants suit them all.
+async fn check_versions(js: &jetstream::Context, identity: &Identity) -> Check {
+    let check = "versions";
+    if !identity.me.role.is_human() {
+        return Check::skip(check, "an ant's credentials read no versions: run `ants doctor` as a human");
+    }
+    let may = |subject: &str| identity.rights.may_publish(subject);
+    let now = chrono::Utc::now();
+    let running = match tokio::time::timeout(NETWORK_TIMEOUT * 2, versions::running(js, may, now)).await {
+        Ok(Ok(running)) => running,
+        Ok(Err(e)) => return Check::warn(check, format!("{e:#}"), Vec::new()),
+        Err(_) => return Check::warn(check, "no versions read within 10s", Vec::new()),
+    };
+    let mut notes: Vec<String> =
+        versions::mixed(&running.components).map(|v| format!("mixed: {v}")).into_iter().collect();
+    notes.extend(running.unseen);
+    let notes = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+    let renewing = "renewing ant, webhook, channel manager and leaf credentials";
+    match versions::renewal(&running.components) {
+        versions::Renewal::Allowed => Check::ok(
+            check,
+            format!(
+                "{} running components at permissions version {PERMISSIONS_VERSION} or newer: {renewing} is safe{notes}",
+                running.components.len()
+            ),
+        ),
+        versions::Renewal::Behind(behind) => Check::warn(
+            check,
+            format!("older than permissions version {PERMISSIONS_VERSION}: {}{notes}", behind.join(", ")),
+            vec![format!("upgrade ants where they run and restart them before {renewing}")],
+        ),
+        versions::Renewal::Ahead(ahead) => Check::warn(
+            check,
+            format!("newer than permissions version {PERMISSIONS_VERSION} of this ants: {}{notes}", ahead.join(", ")),
+            vec![format!("upgrade ants here and on the machine holding the team keys before {renewing}")],
+        ),
+    }
 }
 
 /// Whether the hub keeps the accounts `ants auth push` sends it across restarts, as only a `full` resolver does
@@ -916,6 +959,67 @@ mod tests {
         let hub = named(&checks, "hub");
         assert_eq!(hub.len(), 1, "{checks:#?}");
         assert!(hub[0].detail.contains("presence not checked"), "{}", hub[0]);
+    }
+
+    #[tokio::test]
+    async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
+        let Some(server) = Server::start() else { return };
+        let alice = "alice".parse::<UserId>().unwrap();
+        let setup = setup(&server, Some(server.creds_as(&alice, Role::Human)));
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        let rights = Rights::from_creds(setup.creds.as_deref()).unwrap();
+        hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+        let versions =
+            async || run(&setup).await.into_iter().find(|c| c.check == "versions").expect("a versions check");
+
+        let dev_a = "dev-a".parse::<UserId>().unwrap();
+        let (_, a_js) = server.connect_as(&dev_a, Role::Ant).await;
+        let roster = a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap();
+        let now = chrono::Utc::now();
+        let mut entry = serde_json::json!({
+            "ant": "dev-a", "machine": "m1", "harness": "copilot", "started_at": now, "heartbeat_at": now,
+        });
+        roster.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+
+        let manager = UserId::channel_manager();
+        let creds = server.dir().join("channel-manager.creds");
+        auth::issue_channel_manager(&server.dir().join("auth"), None, &creds).unwrap();
+        let (_, m_js) = bus::connect(&server.url, Some(&creds), None, &manager, "test").await.unwrap();
+        let published = ants_daemon::direct_kv::DirectKv::new(&m_js, None, ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+        let key = ants_proto::channel_manager_serving_key();
+        published.put(&key, versions::serving().await).await.expect("the channel manager publishes its version");
+
+        let hook = "github".parse::<UserId>().unwrap();
+        let creds = server.dir().join("github.creds");
+        let to = [ants_proto::Destination::Ant(dev_a.clone())];
+        let permissions = ants_proto::Permissions::for_webhook(&hook, &to);
+        auth::issue_with(&server.dir().join("auth"), &hook, crate::revoke::Kind::Webhook, permissions, &creds).unwrap();
+        let _bus = crate::webhook::Bus::connect(&hook, Some(&creds), &server.url, None, "test").await.unwrap();
+
+        let may = |s: &str| rights.may_publish(s);
+        for _ in 0..50 {
+            let running = versions::running(&js, may, chrono::Utc::now()).await.unwrap();
+            if running.components.iter().any(|c| c.what.starts_with("webhook github on")) {
+                assert_eq!(running.components.len(), 3, "{running:?}");
+                assert!(running.unseen.is_empty(), "{running:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let check = versions().await;
+        assert_eq!(check.status, Status::Warn, "{check}");
+        let old = "the daemon of dev-a on m1 (no version published";
+        assert!(check.detail.starts_with(&format!("older than permissions version {PERMISSIONS_VERSION}: {old}")));
+        assert!(check.detail.contains("mixed: "), "{check}");
+        assert!(!check.detail.contains("the channel manager on") && !check.detail.contains("webhook github on"));
+        assert!(check.fix[0].starts_with("upgrade ants where they run"), "{check}");
+
+        entry["version"] = ants_proto::ANTS_VERSION.into();
+        entry["perms"] = PERMISSIONS_VERSION.0.into();
+        roster.put("dev-a", serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let check = versions().await;
+        assert_eq!(check.status, Status::Ok, "{check}");
+        assert!(check.detail.starts_with("3 running components"), "{check}");
     }
 
     #[tokio::test]

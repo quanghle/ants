@@ -1604,6 +1604,8 @@ pub(crate) mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         };
         let registration =
@@ -1944,6 +1946,8 @@ pub(crate) mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         };
         let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();

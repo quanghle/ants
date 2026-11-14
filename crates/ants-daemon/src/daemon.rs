@@ -1766,6 +1766,8 @@ mod tests {
                 handling: None,
                 harnesses: None,
                 escalate_to: escalate_to.to_vec(),
+                version: None,
+                perms: None,
                 signed_out: None,
             };
             roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
@@ -3838,6 +3840,8 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();

@@ -78,9 +78,10 @@ pub const LINKS_BUCKET: &str = "ants_links";
 /// stream's retention.
 pub const OWNERS_BUCKET: &str = "ants_owners";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
-/// so a retried event is not delivered again, and of each webhook's marker ([`webhook_marker_key`]), which tells
-/// daemons the webhook is one. Each webhook writes and reads only its own keys, ants read only the markers; entries
-/// expire after [`WEBHOOK_RETENTION`].
+/// so a retried event is not delivered again, of each webhook's marker ([`webhook_marker_key`]), which tells
+/// daemons the webhook is one, and of the channel manager's [`Serving`] ([`channel_manager_serving_key`]). Each
+/// webhook writes and reads only its own keys, ants read only the markers, humans the markers and the channel
+/// manager's key; entries expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -766,15 +767,55 @@ pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
     format!("{webhook}.{hash}")
 }
 
-/// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` puts before it delivers and
-/// renews while it does. Only the webhook's credentials write it, so a daemon honours [`Envelope::webhook`] only
-/// from a sender whose marker is there.
+/// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` (or the daemon running the
+/// schedule of that name) puts on connecting, before it delivers, and every [`SERVING_EVERY`] while it runs. Only the
+/// webhook's credentials write it, so a daemon honours [`Envelope::webhook`] only from a sender whose marker is there.
+/// Its value is the [`Serving`] of the process that put it; that of older versions, the webhook's name.
 pub fn webhook_marker_key(webhook: &UserId) -> String {
     format!("{webhook}.{WEBHOOK_MARKER}")
 }
 
 /// Last token of [`webhook_marker_key`]; event keys end in hex digits.
 const WEBHOOK_MARKER: &str = "webhook";
+
+/// Key of the [`Serving`] of `ants channel serve` in [`WEBHOOKS_BUCKET`], put on connecting and every
+/// [`SERVING_EVERY`] while it runs. `channel-manager` is a reserved name, so no webhook writes it, and it ends in
+/// no [`WEBHOOK_MARKER`], so it makes no webhook of the channel manager.
+pub fn channel_manager_serving_key() -> String {
+    format!("{}.serve", UserId::channel_manager())
+}
+
+/// The subject of [`channel_manager_serving_key`] in the stream of [`WEBHOOKS_BUCKET`].
+pub fn channel_manager_serving_subject() -> String {
+    format!("$KV.{WEBHOOKS_BUCKET}.{}", channel_manager_serving_key())
+}
+
+/// The version of ants, the same for every crate of the workspace.
+pub const ANTS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How often `ants webhook serve`, each schedule and `ants channel serve` put their [`Serving`] again.
+pub const SERVING_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// What a process that is no daemon, yet uses credentials `ants auth` issues, publishes of the ants it runs: `ants
+/// webhook serve` and each schedule as the value of their marker ([`webhook_marker_key`]), `ants channel serve` under
+/// [`channel_manager_serving_key`]. Daemons publish the same in their [`RosterEntry`]. Readers should treat unknown
+/// fields as additions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Serving {
+    /// Host name of the machine the process runs on.
+    pub machine: String,
+    /// [`ANTS_VERSION`] of the process.
+    pub version: String,
+    /// [`PERMISSIONS_VERSION`] of the process.
+    pub perms: PermissionsVersion,
+}
+
+impl Serving {
+    /// That of this ants, on `machine`.
+    pub fn here(machine: impl Into<String>) -> Self {
+        Self { machine: machine.into(), version: ANTS_VERSION.to_owned(), perms: PERMISSIONS_VERSION }
+    }
+}
 
 /// The subject of the marker of `webhook` ([`webhook_marker_key`]) in the stream of [`WEBHOOKS_BUCKET`].
 pub fn webhook_marker_subject(webhook: &UserId) -> String {
@@ -857,7 +898,8 @@ impl Permissions {
     /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create and
     /// upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
-    /// (the owners also in its outbox form, [`owner_outbox`]), and reads and removes dead
+    /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
+    /// ([`channel_manager_serving_key`]), and reads and removes dead
     /// letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
     /// ([`presence_rights`]). A human may send under
@@ -968,6 +1010,8 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{owners}"),
                 format!("$JS.API.STREAM.INFO.{webhooks}"),
                 format!("$JS.API.STREAM.CREATE.{webhooks}"),
+                // The version the channel manager runs, for `ants doctor`.
+                format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
                 // Put and delete of every channel's and every human's entry.
                 format!("$KV.{CHANNELS_BUCKET}.>"),
                 format!("$KV.{HUMANS_BUCKET}.>"),
@@ -1151,10 +1195,10 @@ impl Permissions {
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
-    /// request, reading the roster and the humans, reading and writing the channels bucket, and posting in any channel
-    /// as [`UserId::channel_manager`]. Its JWT also lets it answer each request it hears once, on the request's reply
-    /// subject, so it needs no right to publish on any ant's reply inboxes. It asks for its own renewal
-    /// ([`subject::renew`]) and hears the answer.
+    /// request, reading the roster and the humans, reading and writing the channels bucket, posting in any channel
+    /// as [`UserId::channel_manager`], and putting the version it runs ([`channel_manager_serving_key`]). Its JWT also
+    /// lets it answer each request it hears once, on the request's reply subject, so it needs no right to publish on
+    /// any ant's reply inboxes. It asks for its own renewal ([`subject::renew`]) and hears the answer.
     pub fn for_channel_manager() -> Self {
         let user = UserId::channel_manager();
         let (roster, channels, humans) =
@@ -1162,6 +1206,7 @@ impl Permissions {
         let mut publish = vec![
             subject::chan_from(&user),
             format!("$KV.{CHANNELS_BUCKET}.>"),
+            channel_manager_serving_subject(),
             // Finding JetStream on connecting, as an ant does, without the stream's info.
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(&user)),
         ];
@@ -1313,6 +1358,13 @@ pub struct RosterEntry {
     /// leads. Published so any daemon can follow the chain while the ant is offline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<UserId>,
+    /// The version of ants the daemon runs ([`ANTS_VERSION`]). Missing from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The permissions version of the ants the daemon runs ([`PERMISSIONS_VERSION`]). Missing from entries of older
+    /// daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perms: Option<PermissionsVersion>,
     /// Set while the ant's harness is signed out: messages to the ant wait, unanswered, until a check finds the
     /// harness signed in again. Missing while it is signed in, and from entries of older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4210,8 +4262,25 @@ mod tests {
         }
         let writes: Vec<_> =
             manager.publish.iter().filter(|s| s.starts_with("$KV.") || s.starts_with("ants.")).collect();
-        assert_eq!(writes, ["ants.chan.*.channel-manager", "$KV.ants_channels.>", "ants.renew.channel-manager"]);
+        assert_eq!(
+            writes,
+            [
+                "ants.chan.*.channel-manager",
+                "$KV.ants_channels.>",
+                "$KV.ants_webhooks.channel-manager.serve",
+                "ants.renew.channel-manager"
+            ]
+        );
         assert!(!manager.publish.iter().any(|s| s.starts_with("_INBOX") || s.contains("STREAM.CREATE")));
+        // Humans read its version; ants, which read only markers (`*.webhook`), do not take it for a webhook.
+        let read = "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.channel-manager.serve";
+        assert!(Permissions::for_user(&UserId::human(), Role::Human).publish.iter().any(|s| s == read));
+        assert!(!channel_manager_serving_key().ends_with(&format!(".{WEBHOOK_MARKER}")));
+        let marker = Serving::here("m1");
+        let json = serde_json::to_string(&marker).unwrap();
+        assert_eq!(json, format!(r#"{{"machine":"m1","version":"{ANTS_VERSION}","perms":{PERMISSIONS_VERSION}}}"#));
+        assert_eq!(serde_json::from_str::<Serving>(&json).unwrap(), marker);
+        assert!(serde_json::from_slice::<Serving>(b"github").is_err(), "the marker of an older webhook holds its name");
 
         let a = Permissions::for_user(&p("dev-a"), Role::Ant);
         assert!(a.publish.iter().any(|s| s == "ants.chanadm.*.dev-a"));
@@ -4411,14 +4480,22 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            version: None,
+            perms: None,
             signed_out: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
+        assert!(!json.contains("version") && !json.contains("perms"), "{json}");
         assert!(!json.contains("signed_out"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
+        let versioned =
+            RosterEntry { version: Some("0.3.1".to_owned()), perms: Some(PermissionsVersion(2)), ..entry.clone() };
+        let json = serde_json::to_string(&versioned).unwrap();
+        assert!(json.contains(r#""version":"0.3.1","perms":2"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), versioned);
         let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
         let json = serde_json::to_string(&chained).unwrap();
         assert!(json.contains(r#""escalate_to":["lead","dev-b"]"#), "{json}");
@@ -4451,6 +4528,7 @@ mod tests {
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.capabilities.is_empty() && entry.escalate_to.is_empty());
         assert_eq!((entry.whoami, entry.instance), (None, None));
+        assert_eq!((entry.version, entry.perms), (None, None), "older daemons publish no version");
         assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
         assert_eq!(entry.signed_out, None, "an older daemon's entry");
 
