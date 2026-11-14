@@ -105,15 +105,26 @@ impl Object {
         }
     }
 
+    /// Whether a bucket is watched by every daemon, channel manager or standby daemon, each watch an ordered consumer of
+    /// its stream: the roster (each standby daemon's entry), the channels and the humans. Such a bucket needs room for
+    /// [`MAX_CONSUMERS`] too.
+    pub fn watched(self) -> bool {
+        matches!(self, Self::Roster | Self::Channels | Self::Humans)
+    }
+
     /// Bring `config`, the hub's configuration of the object, up to date in what `ants init` owns of it, and say what
     /// was out of date.
     fn upgrade(self, config: &mut stream::Config) -> Vec<Drift> {
-        match self {
-            Self::Stream => upgrade_stream(config),
+        let mut drift = match self {
+            Self::Stream => return upgrade_stream(config),
             Self::Owners if crate::owners::first_records_only(config) => vec![Drift::FirstRecordsOnly],
             Self::Roster if add_limit_markers(config) => vec![Drift::LimitMarkers],
             _ => Vec::new(),
+        };
+        if self.watched() {
+            drift.extend(raise_max_consumers(config));
         }
+        drift
     }
 
     async fn check(self, js: &jetstream::Context) -> Option<Problem> {
@@ -128,12 +139,20 @@ impl Object {
         }
     }
 
+    /// Create the object; a bucket's settings that a KV configuration cannot hold, such as room for more consumers,
+    /// follow by an update of its stream.
     async fn create(self, js: &jetstream::Context) -> Result<()> {
-        let created = match self.spec() {
-            Spec::Stream(config) => js.create_stream(*config).await.map(drop).map_err(anyhow::Error::from),
-            Spec::Bucket(config) => create_bucket(js, *config).await.map(drop).map_err(anyhow::Error::from),
+        let config = match self.spec() {
+            Spec::Stream(config) => {
+                return js.create_stream(*config).await.map(drop).with_context(|| format!("creating {self}"));
+            }
+            Spec::Bucket(config) => create_bucket(js, *config).await.with_context(|| format!("creating {self}"))?,
         };
-        created.with_context(|| format!("creating {self}"))
+        let mut config = config.stream.cached_info().config.clone();
+        if !self.upgrade(&mut config).is_empty() {
+            js.update_stream(&config).await.with_context(|| format!("upgrading {self}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -218,7 +237,11 @@ impl Finding {
             (Problem::Missing, Spec::Stream(_)) => vec![format!("$JS.API.STREAM.CREATE.{name}")],
             // Creating a bucket first looks up the account's JetStream limits.
             (Problem::Missing, Spec::Bucket(_)) => {
-                vec!["$JS.API.INFO".to_owned(), format!("$JS.API.STREAM.CREATE.{name}")]
+                let mut rights = vec!["$JS.API.INFO".to_owned(), format!("$JS.API.STREAM.CREATE.{name}")];
+                if self.object.watched() {
+                    rights.push(format!("$JS.API.STREAM.UPDATE.{name}"));
+                }
+                rights
             }
             (Problem::Outdated { .. }, _) => vec![format!("$JS.API.STREAM.UPDATE.{name}")],
             (Problem::Unchecked(_), _) => Vec::new(),
@@ -267,7 +290,7 @@ pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<F
 pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
     let object = finding.object;
     match &finding.problem {
-        Problem::Missing => object.create(js).await,
+        Problem::Missing => Box::pin(object.create(js)).await,
         Problem::Outdated { .. } => {
             let stream = js.get_stream(object.stream_name()).await.with_context(|| format!("looking up {object}"))?;
             let mut config = stream.cached_info().config.clone();
@@ -319,10 +342,19 @@ pub fn stream_config() -> stream::Config {
 }
 
 /// The consumers the `ANTS` stream takes. Each ant has two durable ones and up to about fifteen more while reading,
-/// each human one for its notifications: room for several hundred ants all reading at once. Set explicitly, as since
-/// nats-server 2.15 a stream without a limit of its own takes 1000 (its `default_max_consumers`), and -1 does not lift
-/// that default.
+/// each human one for its notifications: room for several hundred ants all reading at once. The buckets every daemon
+/// watches ([`Object::watched`]) take as many, room for thousands of daemons. Set explicitly, as since nats-server
+/// 2.15 a stream without a limit of its own takes 1000 (its `default_max_consumers`), and -1 does not lift that
+/// default.
 pub const MAX_CONSUMERS: i32 = 10_000;
+
+/// Give `config`, a stream's, room for [`MAX_CONSUMERS`] if it takes fewer, keeping a higher limit; the drift, if any.
+fn raise_max_consumers(config: &mut stream::Config) -> Option<Drift> {
+    (config.max_consumers < MAX_CONSUMERS).then(|| {
+        config.max_consumers = MAX_CONSUMERS;
+        Drift::MaxConsumers(MAX_CONSUMERS)
+    })
+}
 
 /// The duplicate window the `ANTS` stream configured as `config` should have: [`DUPLICATE_WINDOW`], or its retention
 /// if shorter, as JetStream allows no window longer than that.
@@ -367,10 +399,7 @@ pub fn upgrade_stream(config: &mut stream::Config) -> Vec<Drift> {
         config.duplicate_window = window;
         drift.push(Drift::DuplicateWindow(window));
     }
-    if config.max_consumers < MAX_CONSUMERS {
-        config.max_consumers = MAX_CONSUMERS;
-        drift.push(Drift::MaxConsumers(MAX_CONSUMERS));
-    }
+    drift.extend(raise_max_consumers(config));
     drift
 }
 
@@ -561,8 +590,10 @@ mod tests {
         assert_eq!(problems(&init(&js, human).await.unwrap()), [(Object::Read, None)]);
         assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there and up to date");
-        for bucket in Object::ALL.into_iter().filter_map(Object::bucket).filter(|b| *b != OWNERS_BUCKET) {
-            js.get_key_value(bucket).await.unwrap();
+        for object in Object::ALL.into_iter().filter(|o| *o != Object::Stream && *o != Object::Owners) {
+            let kv = js.get_key_value(object.bucket().unwrap()).await.unwrap();
+            let max = kv.stream.cached_info().config.max_consumers;
+            assert_eq!(max == MAX_CONSUMERS, object.watched(), "{object} created with room for {max} consumers");
         }
         assert!(init(&js, |_| true).await.unwrap().is_empty());
     }
@@ -611,7 +642,7 @@ mod tests {
             outdated,
             [
                 (Object::Stream, Some(stream_drift)),
-                (Object::Roster, Some(vec![Drift::LimitMarkers])),
+                (Object::Roster, Some(vec![Drift::LimitMarkers, Drift::MaxConsumers(MAX_CONSUMERS)])),
                 (Object::Owners, Some(vec![Drift::FirstRecordsOnly]))
             ]
         );
@@ -620,7 +651,10 @@ mod tests {
             "stream ANTS lacks subjects ants.dead.>; direct gets; the republishing of stored inbox messages; a \
              duplicate window of 1h; room for 10000 consumers"
         );
-        assert_eq!(findings[1].fixed(), "upgraded bucket ants_roster, adding markers of expired entries");
+        assert_eq!(
+            findings[1].fixed(),
+            "upgraded bucket ants_roster, adding markers of expired entries; room for 10000 consumers"
+        );
         for finding in &findings {
             apply(&js, finding).await.unwrap();
         }
@@ -637,6 +671,10 @@ mod tests {
         let roster = js.get_stream(Object::Roster.stream_name()).await.unwrap().cached_info().config.clone();
         assert!(has_limit_markers(&roster), "added to the existing bucket");
         assert_eq!((roster.max_age, roster.subject_delete_marker_ttl), (ROSTER_TTL, Some(ROSTER_TTL)));
+        assert_eq!(roster.max_consumers, MAX_CONSUMERS);
+        let mut more = roster;
+        more.max_consumers = MAX_CONSUMERS * 2;
+        js.update_stream(&more).await.unwrap();
         let mut more = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
         more.max_consumers = MAX_CONSUMERS * 2;
         js.update_stream(&more).await.unwrap();

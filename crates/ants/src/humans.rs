@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
+use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, PermissionsVersion, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv};
@@ -93,6 +93,14 @@ impl Rights {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         let claims = creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
         Ok(Self { claims: Some(claims) })
+    }
+
+    /// Whether they carry a permissions version older than `version`, or none (issued before versions were stamped);
+    /// false without credentials.
+    pub fn older_than(&self, version: PermissionsVersion) -> bool {
+        let Some(claims) = &self.claims else { return false };
+        let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
+        PermissionsVersion::from_tags(tags).is_none_or(|v| v < version)
     }
 
     /// Whether they allow publishing `subject`: listed as it is, or no publish allow list at all.
@@ -217,6 +225,16 @@ mod tests {
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn credentials_tell_the_permissions_version_they_predate() {
+        let rights = |tags: Value| Rights { claims: Some(json!({ "name": "alice", "nats": { "tags": tags } })) };
+        let v3 = PermissionsVersion(3);
+        assert!(rights(json!(["ants-perms:2"])).older_than(v3));
+        assert!(rights(json!([])).older_than(v3), "unstamped");
+        assert!(!rights(json!(["device:x", "ants-perms:3"])).older_than(v3));
+        assert!(!Rights { claims: None }.older_than(v3), "no credentials");
     }
 
     #[test]

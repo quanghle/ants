@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{Role, STREAM, Uuid, spare_readers};
+use ants_proto::{PermissionsVersion, Role, STREAM, Uuid, spare_readers};
 use anyhow::{Context as _, Result};
 use async_nats::StatusCode;
 use async_nats::jetstream::response::Response;
@@ -239,6 +239,17 @@ const NUM_PENDING: &str = "Nats-Num-Pending";
 /// Whether batched direct gets of the stream answered on each connection (its server's id and client id) a read tried
 /// them on, so a connection that cannot use them pays for finding out once.
 static DIRECT_GETS: Mutex<BTreeMap<(String, u64), bool>> = Mutex::new(BTreeMap::new());
+
+/// The permissions version that gave a human's credentials batched direct gets of the stream.
+pub const BATCHES_SINCE: PermissionsVersion = PermissionsVersion(3);
+
+/// Have reads on `client`'s current connection get the stream's messages one by one from the start, sparing the
+/// probe that finds out only by going unanswered: for credentials known to predate [`BATCHES_SINCE`]. Newer
+/// credentials still need the probe, as a leaf node's uplink may predate it. A reconnection probes again.
+pub fn without_batches(client: &async_nats::Client) {
+    let info = client.server_info();
+    DIRECT_GETS.lock().unwrap().insert((info.server_id, info.client_id), false);
+}
 
 /// A batched direct get (nats-server 2.11 or later): up to `batch` messages on `next_by_subj`, the first at or after
 /// `seq`, or stored at or after `start_time`, followed by an end of batch.
@@ -549,6 +560,28 @@ mod tests {
         let (direct, single) = requests();
         assert_eq!(direct, before.0, "a denied request never reaches the stream");
         assert!(single - before.1 >= sent.len() + 1000, "{single}");
+    }
+
+    #[tokio::test]
+    async fn a_connection_known_to_refuse_batches_reads_one_message_at_a_time_without_a_probe() {
+        let Some(server) = server() else { return };
+        let (watcher, js) = connect(&server, "new").await;
+        js.create_stream(crate::hub::stream_config()).await.unwrap();
+        let (human, dev_a): (UserId, UserId) = ("human".parse().unwrap(), "dev-a".parse().unwrap());
+        for i in 0..3 {
+            js.publish(subject::inbox(&human, &dev_a), format!("m{i}").into()).await.unwrap().await.unwrap();
+        }
+        let (client, old) = connect(&server, "old").await;
+        without_batches(&client);
+        let requests = count(&watcher).await;
+        let started = std::time::Instant::now();
+        let got = read(&old, &subject::inbox_of(&human), consumer::DeliverPolicy::All, |_| false).await;
+        assert!(started.elapsed() < PROBE, "no probe");
+        let payloads: Vec<_> = got.iter().map(|(_, msg)| msg.payload.clone()).collect();
+        assert_eq!(payloads, ["m0", "m1", "m2"]);
+        watcher.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(requests(), (0, 3), "no direct get asked for, one message get each");
     }
 
     #[tokio::test]
