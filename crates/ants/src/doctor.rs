@@ -99,8 +99,8 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, each ant's credentials and harness, the hub's account
-/// resolver, the leaf node and outbox, and the installed services.
+/// buckets, the versions of ants running across the team, each ant's credentials, harness and workdir, the hub's
+/// account resolver, the leaf node and outbox, and the installed services.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -121,6 +121,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
     checks.extend(reached);
     checks.extend(ants_checked);
+    checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.push(resolver);
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
@@ -662,6 +663,26 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     check_creds(&check, path, &finding, now)
 }
 
+/// A warning for each ant whose threads run at once in one git work tree, where they may clobber each other's edits.
+fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
+    ants.iter()
+        .filter(|ant| ants_daemon::worktrees::shares_git_workdir(&ant.workdir, ant.max_harnesses, ant.worktrees))
+        .map(|ant| {
+            let detail = format!(
+                "up to {} threads at once edit the git work tree of {}",
+                ant.max_harnesses,
+                ant.workdir.display()
+            );
+            let fix = format!(
+                "worktrees = true in the [[ant]] named {} of {}, giving each thread its own git worktree",
+                ant.name,
+                config.display()
+            );
+            Check::warn(format!("ant {} workdir", ant.name), detail, vec![fix])
+        })
+        .collect()
+}
+
 /// The machine's leaf node, as `ants leaf config` wrote its configuration.
 struct Leaf {
     path: PathBuf,
@@ -1063,6 +1084,30 @@ mod tests {
         );
         assert_eq!(harness.fix, [fix]);
         assert_eq!(named(&checks, "ant dev-a credentials")[0].status, Status::Skip);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ants_sharing_a_git_workdir_without_worktrees_are_warned() {
+        let dir = ants_test_support::scratch_dir("doctor-shared-workdir").canonicalize().unwrap();
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "messenger = false\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
+             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\n",
+        )
+        .unwrap();
+        let loaded = config::load(&config).unwrap();
+        let checks = check_shared_workdirs(&loaded.ants, &config);
+        assert_eq!(
+            checks.iter().map(|c| (c.check.as_str(), c.status)).collect::<Vec<_>>(),
+            [("ant dev-a workdir", Status::Warn)]
+        );
+        let fix = format!("worktrees = true in the [[ant]] named dev-a of {}", config.display());
+        assert!(checks[0].fix[0].starts_with(&fix), "{}", checks[0]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

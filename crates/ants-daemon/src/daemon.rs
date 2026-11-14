@@ -138,6 +138,15 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
+    if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
+        tracing::warn!(
+            ant = %config.ant,
+            workdir = %config.workdir.display(),
+            max_harnesses = config.max_harnesses,
+            "threads running at once share one git work tree and may clobber each other's edits; \
+             worktrees = true gives each thread its own"
+        );
+    }
     while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
