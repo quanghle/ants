@@ -107,7 +107,7 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 | `ants watch [PERSONA [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and personas visited; with a persona, its streamed harness progress. |
 | `ants approve [ID [VERDICT]]` | Lists pending tool requests, shows one, or answers it (`allow-once`, `allow-always`, `reject`); every human sees every request, and the first decision wins, a human's or that of an agent of the persona's chain. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
-| `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects and direct gets an older version lacks. Needs a human's credentials. |
+| `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects, direct gets and republishing of inbox messages an older version lacks. Needs a human's credentials. |
 | `ants daemon` | Serves the personas of the config file, or one persona described by flags. |
 | `ants persona add NAME` | Lists a persona in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding a persona](#adding-a-persona). |
 | `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants persona add --enroll`, signs one or refuses it. |
@@ -600,8 +600,9 @@ from a human or to one, one turn after a message from an agent, refused when non
 same budget and owner). `ask_agent` also needs a turn left for the reply, and a session may not message its own persona.
 The tools work only while a message is in progress on the thread.
 
-A reply to `ask_agent` reaches the waiting call through a live subscription to the persona's inbox, while the inbox
-consumer still holds it back behind the prompt that asked. When the consumer delivers it later, the daemon acks it
+A reply to `ask_agent` reaches the waiting call through a live subscription to the persona's inbox (and to what the
+hub's stream republishes of it, see [Leaf nodes](#leaf-nodes)), while the inbox consumer still holds it back behind the
+prompt that asked. When the consumer delivers it later, the daemon acks it
 without prompting, or keeps it for `check_inbox` when the call gave up (also across restarts: asks waiting for a reply
 and late replies are kept in `<home>/mcp.json`). Until `check_inbox` takes them, each later prompt on the thread starts
 with a line counting its late replies. Only a reply from the persona asked counts; any other message is a prompt as
@@ -1036,7 +1037,10 @@ needs the hub's answer), approvals and replays. A dead letter kept in the outbox
 terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
 Machines set up before dead letters were buffered need `ants leaf outbox` again, and persona credentials issued before
 need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
-whose request could not be acked may come twice. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
+whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on
+its subject, so the hub's stream republishes every inbox message it stores to `_INBOX.<recipient>.stored.<sender>`,
+which only the recipient may read: `ants ask --wait`, a waiting `ask_agent` and a persona waiting on its escalation
+chain get it from there too, once each. A stream set up before needs `ants init` again; a daemon warns until then. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
 ## Transport options
 

@@ -1,17 +1,21 @@
 //! NATS connection and the JetStream objects ants relies on.
 
+use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash as _, Hasher as _};
 use std::path::Path;
+use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, PersonaId, ROSTER_BUCKET, SESSIONS_BUCKET,
-    STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
+    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::context::{GetStreamErrorKind, PublishErrorKind, RequestErrorKind};
 use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
+use futures::{Stream, StreamExt as _};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
@@ -181,7 +185,16 @@ fn stream_config() -> stream::Config {
         max_age: RETENTION,
         // A persona reads the decision stored on its approval requests with a direct get (`approvals`).
         allow_direct: true,
+        republish: Some(stored_inbox()),
         ..Default::default()
+    }
+}
+
+fn stored_inbox() -> stream::Republish {
+    stream::Republish {
+        source: STORED_INBOX_SOURCE.to_owned(),
+        destination: STORED_INBOX_DESTINATION.to_owned(),
+        headers_only: false,
     }
 }
 
@@ -205,8 +218,8 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
 }
 
 /// Create the `ANTS` stream, or return it as it is. Only the human's credentials may create it. A stream from an older
-/// version that lacks some of [`STREAM_SUBJECTS`] or direct gets is returned with a warning: [`init_stream`] upgrades
-/// it.
+/// version that lacks some of [`STREAM_SUBJECTS`], direct gets or the republishing of inbox messages is returned with a
+/// warning: [`init_stream`] upgrades it.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = js
         .get_or_create_stream(stream_config())
@@ -219,20 +232,27 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     if !stream.cached_info().config.allow_direct {
         tracing::warn!("stream {STREAM} lacks direct gets; `ants init` as the human allows them");
     }
+    if stream.cached_info().config.republish.as_ref() != Some(&stored_inbox()) {
+        tracing::warn!(
+            "stream {STREAM} does not republish inbox messages, so replies kept in a leaf's outbox reach only inbox \
+             consumers; `ants init` as the human sets it up"
+        );
+    }
     Ok(stream)
 }
 
-/// Create the `ANTS` stream, or add the subjects an older version did not capture and allow direct gets. Needs the
-/// human's credentials.
+/// Create the `ANTS` stream, or add the subjects an older version did not capture, allow direct gets and republish
+/// inbox messages. Needs the human's credentials.
 pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = ensure_stream(js).await?;
     let mut config = stream.cached_info().config.clone();
     let missing = missing_subjects(&config.subjects);
-    if missing.is_empty() && config.allow_direct {
+    if missing.is_empty() && config.allow_direct && config.republish.as_ref() == Some(&stored_inbox()) {
         return Ok(stream);
     }
     config.subjects.extend(missing);
     config.allow_direct = true;
+    config.republish = Some(stored_inbox());
     js.update_stream(&config).await.context("upgrading the ANTS stream")?;
     Ok(js.get_stream(STREAM).await?)
 }
@@ -450,6 +470,65 @@ pub async fn store_acked<T: serde::Serialize>(
     Ok(None)
 }
 
+/// Messages to a persona as they come, from [`live_inbox`].
+pub type LiveInbox = Pin<Box<dyn Stream<Item = async_nats::Message> + Send>>;
+
+/// How many messages [`live_inbox`] remembers to take each once.
+const SEEN: usize = 1024;
+
+/// Messages to `persona` as they come, each once, on their inbox subject: published there, and as the hub's stream
+/// stored them ([`subject::stored_inbox`]). A message sourced from a leaf's outbox comes only the second way, and so
+/// does any message while the stream lacks the republishing `ants init` sets up. Subscribed before it returns, so
+/// nothing published after that is missed.
+pub async fn live_inbox(client: &async_nats::Client, persona: &PersonaId) -> Result<LiveInbox> {
+    let live = client.subscribe(subject::inbox_of(persona)).await?;
+    let stored = client.subscribe(subject::stored_inbox(persona)).await?;
+    let persona = persona.clone();
+    let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &persona)));
+    let mut seen = Seen::default();
+    Ok(Box::pin(futures::stream::select(live, stored).filter(move |msg| std::future::ready(seen.first(msg)))))
+}
+
+/// A stored message republished to `persona`, back on the inbox subject it was stored under.
+fn as_published(mut msg: async_nats::Message, persona: &PersonaId) -> Option<async_nats::Message> {
+    let subject = msg.headers.as_ref()?.get(async_nats::header::NATS_SUBJECT)?.as_str().to_owned();
+    let (to, _) = subject::parse_inbox(&subject)?;
+    if to != *persona {
+        return None;
+    }
+    msg.subject = subject.into();
+    Some(msg)
+}
+
+/// The latest messages taken, by message id, or payload for one without.
+#[derive(Default)]
+struct Seen {
+    order: VecDeque<u64>,
+    keys: HashSet<u64>,
+}
+
+impl Seen {
+    /// Whether `msg` is new, then remembered.
+    fn first(&mut self, msg: &async_nats::Message) -> bool {
+        let mut hasher = std::hash::DefaultHasher::new();
+        match msg.headers.as_ref().and_then(|h| h.get(async_nats::header::NATS_MESSAGE_ID)) {
+            Some(id) => (0u8, id.as_str()).hash(&mut hasher),
+            None => (1u8, &msg.payload[..]).hash(&mut hasher),
+        }
+        let key = hasher.finish();
+        if !self.keys.insert(key) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > SEEN
+            && let Some(old) = self.order.pop_front()
+        {
+            self.keys.remove(&old);
+        }
+        true
+    }
+}
+
 /// Ack `msg` and wait until the server confirms it. [`jetstream::Message::double_ack`] takes the "no responders"
 /// status the client gets while a leaf node's uplink is down for a confirmation; this does not.
 pub async fn double_ack(client: &async_nats::Client, msg: &jetstream::Message) -> Result<()> {
@@ -596,5 +675,42 @@ mod tests {
         assert_eq!(redacted("nats://127.0.0.1:4222"), "nats://127.0.0.1:4222");
         assert_eq!(redacted("wss://dev:secret@hub.example.com/nats?x=a@b"), "wss://***@hub.example.com/nats?x=a@b");
         assert_eq!(redacted("nats://t0ken@a:4222,tls://u:p@b"), "nats://***@a:4222,tls://***@b");
+    }
+
+    /// A waiter takes each message once, live, as the stream stored it, or both in either order, and nothing the
+    /// stream stored for another persona.
+    #[test]
+    fn a_live_inbox_takes_each_message_once() {
+        let msg = |subject: &str, headers: &[(&str, &str)], payload: &'static str| async_nats::Message {
+            subject: subject.into(),
+            reply: None,
+            payload: payload.into(),
+            headers: (!headers.is_empty()).then(|| {
+                let mut map = async_nats::HeaderMap::new();
+                headers.iter().for_each(|(k, v)| map.insert(*k, *v));
+                map
+            }),
+            status: None,
+            description: None,
+            length: 0,
+        };
+        let stored = |of: &str, id: &str| {
+            let headers = [("Nats-Stream", STREAM), ("Nats-Subject", of), ("Nats-Msg-Id", id)];
+            as_published(msg("_INBOX.dev-a.stored.human", &headers, "{}"), &dev())
+        };
+        let mut seen = Seen::default();
+        assert!(seen.first(&msg("ants.inbox.dev-a.human", &[("Nats-Msg-Id", "1")], "{}")));
+        let again = stored("ants.inbox.dev-a.human", "1").unwrap();
+        assert_eq!(again.subject.as_str(), "ants.inbox.dev-a.human");
+        assert!(!seen.first(&again));
+        assert!(seen.first(&stored("ants.inbox.dev-a.human", "2").unwrap()));
+        assert!(!seen.first(&msg("ants.inbox.dev-a.human", &[("Nats-Msg-Id", "2")], "{}")));
+        // Without an id, by payload.
+        assert!(seen.first(&msg("ants.inbox.dev-a.human", &[], "3")));
+        assert!(!seen.first(&msg("ants.inbox.dev-a.human", &[("Nats-Stream", STREAM)], "3")));
+        assert!(seen.first(&msg("ants.inbox.dev-a.human", &[], "4")));
+
+        assert!(stored("ants.inbox.dev-b.human", "5").is_none(), "another persona's");
+        assert!(as_published(msg("_INBOX.dev-a.stored.human", &[], "{}"), &dev()).is_none(), "without its subject");
     }
 }
