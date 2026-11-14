@@ -12,14 +12,15 @@ mod outbox;
 mod roster;
 mod serve;
 mod tools;
+mod webhook;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::{HarnessKind, Launch, PermissionPolicy, bus, dead, harness, notes};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, Escalation, JsDomain, Machine,
-    NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
+    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, Escalation, JsDomain,
+    Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -168,6 +169,9 @@ enum Command {
     /// Carry a leaf node's uplink over plain HTTPS requests, for networks whose proxies block WebSocket.
     #[command(subcommand)]
     Bridge(BridgeCommand),
+    /// Take events from outside services over HTTP and deliver each to the ant or channel its webhook names.
+    #[command(subcommand)]
+    Webhook(WebhookCommand),
 }
 
 /// What `ants ask` and `ants post` do once sent: return at once, wait for the first reply, or follow the thread.
@@ -320,6 +324,20 @@ enum ChannelCommand {
 }
 
 #[derive(Subcommand)]
+enum WebhookCommand {
+    /// On the hub, behind the TLS-terminating reverse proxy: take `POST <path>/<webhook>` for each webhook of the
+    /// config file and deliver its events, each webhook as itself with its own credentials.
+    Serve {
+        /// The webhooks' config file (default: ~/.ants/webhooks.toml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Address for the reverse proxy (default: the file's `listen`, else 127.0.0.1:8424).
+        #[arg(long)]
+        listen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum BridgeCommand {
     /// On the hub, behind the TLS-terminating reverse proxy: open a connection to the upstream (the hub's leafnode
     /// port) for each session `ants bridge connect` starts.
@@ -376,15 +394,27 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Issue credentials for an ant, allowing only the subjects of its role, or with --human for a human, a CLI
-    /// user. `human` always gets a human's. Give the hub's --js-domain, if it has one, so they work with it.
+    /// Issue credentials for an ant, allowing only the subjects of its role, with --human for a human, a CLI user,
+    /// or with --webhook for a webhook of `ants webhook serve`. `human` always gets a human's. Give the hub's
+    /// --js-domain, if it has one, so they work with it.
+    #[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
     User {
-        /// The ant, or with --human the human.
+        /// The ant, with --human the human, or with --webhook the webhook.
         user: UserId,
         /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
         /// the team's humans, on its first CLI connection.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "webhook")]
         human: bool,
+        /// Issue a webhook's credentials: it may only message the ants of --to and post to the channels of
+        /// --channel, as itself, and record the events it delivered.
+        #[arg(long, requires = "targets")]
+        webhook: bool,
+        /// With --webhook: an ant the webhook may message (repeatable).
+        #[arg(long, value_name = "ANT", requires = "webhook")]
+        to: Vec<UserId>,
+        /// With --webhook: a channel the webhook may post to (repeatable).
+        #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
+        channels: Vec<ChannelId>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -618,16 +648,18 @@ async fn main() -> Result<()> {
             bus::ensure_channels(&js).await?;
             bus::ensure_chains(&js).await?;
             humans::ensure(&js).await?;
+            webhook::ensure_bucket(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
                 ants_proto::ATTEMPTS_BUCKET,
                 ants_proto::CHANNELS_BUCKET,
                 ants_proto::HUMANS_BUCKET,
-                ants_proto::CHAINS_BUCKET
+                ants_proto::CHAINS_BUCKET,
+                ants_proto::WEBHOOKS_BUCKET
             );
             Ok(())
         }
@@ -670,8 +702,28 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { user, human, dir, out, public_key: Some(key) }) => {
-            let jwt = auth::sign_user(&team_dir(dir)?, &user, auth::role(&user, human), domain, &key)?;
+        Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key }) => {
+            let permissions = match webhook {
+                true => {
+                    if user.is_human() {
+                        bail!("{user} is the default human, not a webhook");
+                    }
+                    let to = to.into_iter().map(Destination::Ant);
+                    let destinations: Vec<Destination> =
+                        to.chain(channels.into_iter().map(Destination::Channel)).collect();
+                    Permissions::for_webhook(&user, &destinations)
+                }
+                false => Permissions::for_user(&user, auth::role(&user, human)),
+            }
+            .with_js_domain(domain);
+            let dir = team_dir(dir)?;
+            let Some(key) = public_key else {
+                let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
+                auth::issue_with(&dir, &user, permissions, &out)?;
+                println!("{}", out.display());
+                return Ok(());
+            };
+            let jwt = auth::sign_with(&dir, &user, permissions, &key)?;
             match out {
                 Some(out) => {
                     std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
@@ -679,13 +731,6 @@ async fn main() -> Result<()> {
                 }
                 None => println!("{jwt}"),
             }
-            Ok(())
-        }
-        Command::Auth(AuthCommand::User { user, human, dir, out, public_key: None }) => {
-            let dir = team_dir(dir)?;
-            let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-            auth::issue(&dir, &user, auth::role(&user, human), domain, &out)?;
-            println!("{}", out.display());
             Ok(())
         }
         Command::Auth(AuthCommand::Enroll { ant, ttl, dir, out }) => {
@@ -783,6 +828,20 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
             bridge::Server::new(upstream, token).run(listener).await
+        }
+        Command::Webhook(WebhookCommand::Serve { config, listen }) => {
+            let path = match config {
+                Some(path) => path,
+                None => webhook::default_path()?,
+            };
+            let config = webhook::Config::load(&path)?;
+            let listen = listen.or_else(|| config.listen.clone()).unwrap_or_else(|| webhook::DEFAULT_LISTEN.to_owned());
+            let addr = bridge::listen_addr(&listen, false)?;
+            let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let nats = config.nats.clone().unwrap_or_else(|| cli.nats.clone());
+            let domain = config.js_domain.clone().or_else(|| domain.cloned());
+            tracing::info!("webhooks on http://{addr}{}/<webhook>", config.path);
+            webhook::serve(config, &nats, domain.as_ref(), listener).await
         }
         Command::Bridge(BridgeCommand::Connect { url, listen, token, headers, proxy }) => {
             let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;

@@ -77,11 +77,16 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
 
 /// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
+#[cfg(test)]
 pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    issue_with(dir, user, Permissions::for_user(user, role).with_js_domain(js_domain), out)
+}
+
+/// Issue a new NATS user for `user` with `permissions`, and write its `.creds` file to `out`.
+pub fn issue_with(dir: &Path, user: &UserId, permissions: Permissions, out: &Path) -> Result<()> {
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
-    let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, json!({}), None)?;
     write_secret(out, &creds(&jwt, &seed(&key)?))
 }
@@ -139,10 +144,14 @@ pub fn sign_user(
     js_domain: Option<&JsDomain>,
     public_key: &str,
 ) -> Result<String> {
+    sign_with(dir, user, Permissions::for_user(user, role).with_js_domain(js_domain), public_key)
+}
+
+/// Sign the user JWT of `user` with `permissions` for `public_key`, a user NKey generated on another machine.
+pub fn sign_with(dir: &Path, user: &UserId, permissions: Permissions, public_key: &str) -> Result<String> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
     user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)
 }
 
@@ -364,8 +373,9 @@ pub(crate) mod tests {
     use ants_daemon::notes;
     use ants_daemon::roster::Registration;
     use ants_proto::{
-        ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, NotesPost, RosterEntry, STREAM, STREAM_SUBJECTS,
-        ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, notes_consumer, session_key, subject,
+        ChannelEntry, ChannelId, ChannelPost, DeadLetter, Destination, Envelope, NotesPost, RosterEntry, STREAM,
+        STREAM_SUBJECTS, ThreadId, attempt_key, chan_consumer, chan_reader, inbox_prefix, notes_consumer, session_key,
+        subject,
     };
     use ants_test_support::NatsServer;
     use async_nats::jetstream::AckKind;
@@ -439,11 +449,11 @@ pub(crate) mod tests {
 
         /// A connection that reports the server errors it gets, such as permission violations.
         async fn watched(&self, user: &UserId) -> (Client, mpsc::UnboundedReceiver<String>) {
-            self.watched_with(&self.creds(user), user).await
+            self.watched_with(user, &self.creds(user)).await
         }
 
-        /// Like [`Server::watched`], with the credentials in `creds`.
-        async fn watched_with(&self, creds: &Path, user: &UserId) -> (Client, mpsc::UnboundedReceiver<String>) {
+        /// A connection with `creds` that reports the server errors it gets.
+        async fn watched_with(&self, user: &UserId, creds: &Path) -> (Client, mpsc::UnboundedReceiver<String>) {
             let (tx, rx) = mpsc::unbounded_channel();
             let client = async_nats::ConnectOptions::with_credentials_file(creds)
                 .await
@@ -782,6 +792,44 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message() {
+        let Some(server) = Server::start() else { return };
+        let (hook, dev_a, ops) = (p("github"), p("dev-a"), "ops".parse::<ChannelId>().unwrap());
+        let creds = server.dir().join("github.creds");
+        let destinations = [Destination::Ant(dev_a.clone()), Destination::Channel(ops.clone())];
+        issue_with(&server.dir().join("auth"), &hook, Permissions::for_webhook(&hook, &destinations), &creds).unwrap();
+        let (_, h_js) = server.connect(&UserId::human()).await;
+        bus::init_stream(&h_js).await.unwrap();
+        crate::webhook::ensure_bucket(&h_js).await.unwrap();
+
+        let (raw, mut errors) = server.watched_with(&hook, &creds).await;
+        for allowed in
+            [subject::inbox(&dev_a, &hook), subject::chan(&ops, &hook), "$KV.ants_webhooks.github.x".to_owned()]
+        {
+            raw.publish(allowed, "ok".into()).await.unwrap();
+        }
+        for denied in [
+            subject::inbox(&p("dev-b"), &hook),
+            subject::inbox(&dev_a, &p("dev-b")),
+            subject::chan(&"dev".parse().unwrap(), &hook),
+            "ants.out.inbox.dev-a.github".to_owned(),
+            "$KV.ants_channels.ops".to_owned(),
+            "$KV.ants_humans.github".to_owned(),
+            "$KV.ants_webhooks.gitlab.x".to_owned(),
+            subject::notes(&"t1".parse().unwrap(), &hook),
+        ] {
+            raw.publish(denied.clone(), "spoof".into()).await.unwrap();
+            let v = next_violation(&raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        }
+        for denied in [subject::ALL, "_INBOX.dev-a.>"] {
+            let _sub = raw.subscribe(denied).await.unwrap();
+            let v = next_violation(&raw, &mut errors).await;
+            assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
+        }
+    }
+
+    #[tokio::test]
     async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
@@ -975,7 +1023,7 @@ pub(crate) mod tests {
         assert!(timeout(Duration::from_millis(500), b_inbox.next()).await.is_err(), "no answer to dev-b's inbox");
 
         // The channel manager writes the channels bucket only, and posts as itself only.
-        let (m_raw, mut errors) = server.watched_with(&creds, &manager).await;
+        let (m_raw, mut errors) = server.watched_with(&manager, &creds).await;
         for denied in [subject::chan(&ops, &dev_a), "$KV.ants_roster.dev-a".to_owned(), subject::inbox_of(&dev_a)] {
             m_raw.publish(denied.clone(), "x".into()).await.unwrap();
             let v = next_violation(&m_raw, &mut errors).await;

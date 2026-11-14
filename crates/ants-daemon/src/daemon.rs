@@ -551,7 +551,7 @@ impl Inbox<'_> {
         };
         let humans = self.humans.humans();
         let mut wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
-        let unseen = channels.get(&post.channel).is_none() && post.mentions.is_empty() && humans.contains(&post.from);
+        let unseen = channels.get(&post.channel).is_none() && post.to_triage(&humans);
         if wake == Wake::Skip && (post.mentions(self.ant) && post.from != *self.ant || unseen) {
             // The post may have overtaken the change that made the ant a member, or created the channel.
             channels.refresh(&post.channel).await;

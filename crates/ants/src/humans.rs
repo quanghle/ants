@@ -47,21 +47,29 @@ impl Me {
     }
 
     fn from_creds_text(text: &str) -> Result<Self> {
-        let jwt = crate::auth::creds_jwt(text).context("no user JWT")?;
-        let payload = jwt.split('.').nth(1).context("a malformed user JWT")?;
-        let payload = BASE64URL_NOPAD
-            .decode(payload.trim_end_matches('=').as_bytes())
-            .map_err(|e| anyhow!("a malformed user JWT: {e}"))?;
-        let claims: Value = serde_json::from_slice(&payload).context("a malformed user JWT")?;
+        let claims = creds_claims(text)?;
         let name = claims["name"].as_str().context("a user JWT without a name")?;
         let id: UserId = name.parse().with_context(|| format!("a user JWT naming {name:?}, not a user id"))?;
         // Writing the humans bucket is the right only humans have.
-        let humans = format!("$KV.{HUMANS_BUCKET}.>");
-        let writes_humans =
-            claims["nats"]["pub"]["allow"].as_array().is_some_and(|allow| allow.iter().any(|s| *s == *humans));
+        let writes_humans = may_publish(&claims, &format!("$KV.{HUMANS_BUCKET}.>"));
         let role = if writes_humans { Role::Human } else { Role::by_default(&id) };
         Ok(Self { id, role })
     }
+}
+
+/// The claims of the user JWT in a `.creds` file's text.
+pub fn creds_claims(text: &str) -> Result<Value> {
+    let jwt = crate::auth::creds_jwt(text).context("no user JWT")?;
+    let payload = jwt.split('.').nth(1).context("a malformed user JWT")?;
+    let payload = BASE64URL_NOPAD
+        .decode(payload.trim_end_matches('=').as_bytes())
+        .map_err(|e| anyhow!("a malformed user JWT: {e}"))?;
+    serde_json::from_slice(&payload).context("a malformed user JWT")
+}
+
+/// Whether user JWT `claims` allow publishing `subject`, as listed.
+pub fn may_publish(claims: &Value, subject: &str) -> bool {
+    claims["nats"]["pub"]["allow"].as_array().is_some_and(|allow| allow.iter().any(|s| s == subject))
 }
 
 /// Register `me` in the humans bucket, creating the bucket when missing, unless its entry is there already: one

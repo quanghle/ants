@@ -61,6 +61,12 @@ pub const HUMANS_BUCKET: &str = "ants_humans";
 /// start. Unlike the roster's, entries never expire, so a chain can be followed past an ant that is offline. Each
 /// ant writes only its own; every ant and human reads them.
 pub const CHAINS_BUCKET: &str = "ants_chains";
+/// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
+/// so a retried event is not delivered again. Each webhook writes and reads only its own keys; entries expire after
+/// [`WEBHOOK_RETENTION`].
+pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
+/// How long [`WEBHOOKS_BUCKET`] remembers an event.
+pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
@@ -567,9 +573,32 @@ pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
 }
 
+/// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
+/// credentials can be confined to its own.
+pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
+    format!("{webhook}.{hash}")
+}
+
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
+}
+
+/// Where a webhook delivers its events: an ant's inbox, or a channel.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Destination {
+    Ant(UserId),
+    Channel(ChannelId),
+}
+
+impl Destination {
+    /// The subject `webhook` publishes on to reach the destination.
+    pub fn subject(&self, webhook: &UserId) -> String {
+        match self {
+            Self::Ant(ant) => subject::inbox(ant, webhook),
+            Self::Channel(channel) => subject::chan(channel, webhook),
+        }
+    }
 }
 
 /// Subjects a set of credentials may publish and subscribe to. Everything else is denied.
@@ -611,6 +640,7 @@ impl Permissions {
         let channels = kv_stream(CHANNELS_BUCKET);
         let humans = kv_stream(HUMANS_BUCKET);
         let chains = kv_stream(CHAINS_BUCKET);
+        let webhooks = kv_stream(WEBHOOKS_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         let sendable = subject::sendable(user, role);
@@ -668,6 +698,8 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{channels}"),
                 format!("$JS.API.STREAM.CREATE.{humans}"),
                 format!("$JS.API.STREAM.CREATE.{chains}"),
+                format!("$JS.API.STREAM.INFO.{webhooks}"),
+                format!("$JS.API.STREAM.CREATE.{webhooks}"),
                 // Put and delete of every channel's and every human's entry.
                 format!("$KV.{CHANNELS_BUCKET}.>"),
                 format!("$KV.{HUMANS_BUCKET}.>"),
@@ -822,6 +854,37 @@ impl Permissions {
     /// another's answer.
     pub fn for_enrollment(ant: &UserId) -> Self {
         Self { publish: vec![subject::enroll(ant)], subscribe: vec![subject::enroll_reply(ant)] }
+    }
+
+    /// What the credentials of `webhook` allow: delivering its events to `destinations` only, as itself, on
+    /// [`Destination::subject`], and remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
+    /// only. It reads the entry of each channel among `destinations`, for the members a broadcast mentions, and hears
+    /// its own reply inboxes, for the stream's acks. Nothing else: it neither writes `ants_channels` nor `ants_humans`,
+    /// so it can neither change a channel nor become a human, nor reads any message.
+    pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
+        let seen = kv_stream(WEBHOOKS_BUCKET);
+        let channels = kv_stream(CHANNELS_BUCKET);
+        let own = format!("$KV.{WEBHOOKS_BUCKET}.{webhook}.>");
+        let mut publish: Vec<String> = Vec::new();
+        for destination in destinations {
+            let subject = destination.subject(webhook);
+            if !publish.contains(&subject) {
+                publish.push(subject);
+            }
+            if let Destination::Channel(channel) = destination {
+                publish.push(format!("$JS.API.DIRECT.GET.{channels}.{}", subject::channel_entry(channel)));
+            }
+        }
+        publish.extend([
+            // Finding JetStream on connecting, and the bucket.
+            format!("$JS.API.STREAM.INFO.{STREAM}"),
+            format!("$JS.API.STREAM.INFO.{seen}"),
+            // Get and create of its own events.
+            format!("$JS.API.DIRECT.GET.{seen}.{own}"),
+            own,
+        ]);
+        publish.dedup();
+        Self { publish, subscribe: vec![format!("{}.>", inbox_prefix(webhook))] }
     }
 
     /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment request and
@@ -1492,15 +1555,15 @@ impl ChannelEntry {
     }
 
     /// The ants `post` wakes: the members it @mentions, except its author and the `humans`; mentions of anyone
-    /// else wake nobody. A post of a human that mentions nobody wakes the channel's [`ChannelEntry::messenger`]
-    /// instead, to triage it; an agent's post that mentions nobody wakes nobody. A post to another channel wakes nobody
-    /// here.
+    /// else wake nobody. A post of a human or a webhook that mentions nobody wakes the channel's
+    /// [`ChannelEntry::messenger`] instead, to triage it ([`ChannelPost::to_triage`]); an agent's post that mentions
+    /// nobody wakes nobody. A post to another channel wakes nobody here.
     pub fn woken(&self, post: &ChannelPost, humans: &Humans) -> Vec<UserId> {
         if post.channel != self.channel {
             return Vec::new();
         }
         if post.mentions.is_empty() {
-            return if humans.contains(&post.from) { vec![self.messenger()] } else { Vec::new() };
+            return if post.to_triage(humans) { vec![self.messenger()] } else { Vec::new() };
         }
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !humans.contains(m)).cloned().collect()
     }
@@ -1718,6 +1781,11 @@ pub struct ChannelPost {
     /// reader takes it from a top-level post's author only ([`ChannelPost::thread_creator`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
+    /// A webhook's post, as `ants webhook serve` marks it: one that mentions nobody goes to the channel's messenger, as
+    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim, granting nothing an ant could not get by
+    /// messaging the messenger itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webhook: bool,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -1745,6 +1813,7 @@ impl ChannelPost {
             in_reply_to: None,
             owner: None,
             creator: None,
+            webhook: false,
             sent_at: Utc::now(),
         }
     }
@@ -1759,12 +1828,24 @@ impl ChannelPost {
         Self { creator, ..self }
     }
 
-    /// The ant that created the post's thread, none of the `humans`: of a top-level post its author, whatever the
-    /// post says, so only the author's credentials make an ant a thread's creator; of a later post the one it
-    /// carries. Trust it only once the post passed [`ChannelPost::check_subject`].
+    /// The ant that created the post's thread, none of the `humans`, no webhook and not the channel manager: of a
+    /// top-level post its author, whatever the post says, so only the author's credentials make an ant a thread's
+    /// creator; of a later post the one it carries. Trust it only once the post passed
+    /// [`ChannelPost::check_subject`].
     pub fn thread_creator(&self, humans: &Humans) -> Option<UserId> {
-        let creator = if self.starts_thread() { Some(&self.from) } else { self.creator.as_ref() };
-        creator.filter(|c| !humans.contains(c)).cloned()
+        let creator = if self.starts_thread() { (!self.webhook).then_some(&self.from) } else { self.creator.as_ref() };
+        creator.filter(|c| !humans.contains(c) && **c != UserId::channel_manager()).cloned()
+    }
+
+    /// The post as a webhook's, mentioning exactly `mentions`, whatever its text says.
+    pub fn from_webhook(self, mentions: Vec<UserId>) -> Self {
+        Self { mentions, webhook: true, ..self }
+    }
+
+    /// Whether the post goes to the channel's messenger to triage: it mentions nobody and is a post of one of the
+    /// `humans` or a webhook's.
+    pub fn to_triage(&self, humans: &Humans) -> bool {
+        self.mentions.is_empty() && (self.webhook || humans.contains(&self.from))
     }
 
     /// The owner of the post's thread, one of the `humans`: the one it carries, else its author, as for a post stored
@@ -2672,6 +2753,55 @@ mod tests {
     }
 
     #[test]
+    fn a_webhook_s_post_that_mentions_nobody_is_triaged_and_its_mentions_come_from_the_ingress() {
+        let humans = Humans::default();
+        let c: ChannelId = "ops".parse().unwrap();
+        let mut entry = ChannelEntry::new(c.clone());
+        entry.add_member(p("dev-a"));
+        let hook = p("github");
+        let untagged = ChannelPost::new(c.clone(), hook.clone(), "@dev-a push to main").from_webhook(Vec::new());
+        assert!(untagged.mentions.is_empty(), "never parsed from the text");
+        assert!(untagged.to_triage(&humans));
+        assert_eq!(entry.woken(&untagged, &humans), [UserId::messenger()]);
+        let tagged = ChannelPost::new(c, hook, "push").from_webhook(vec![p("dev-a"), p("dev-b")]);
+        assert_eq!(entry.woken(&tagged, &humans), [p("dev-a")], "members only");
+
+        let json = serde_json::to_string(&untagged).unwrap();
+        assert!(json.contains(r#""webhook":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap(), untagged);
+        let reply = untagged.reply(p("dev-a"), "on it", &[], &humans).unwrap();
+        assert!(
+            !reply.webhook && !serde_json::to_string(&reply).unwrap().contains("webhook"),
+            "replies are no webhook's"
+        );
+    }
+
+    #[test]
+    fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
+        let hook = p("github");
+        let ops: ChannelId = "ops".parse().unwrap();
+        let perms = Permissions::for_webhook(&hook, &[Destination::Ant(p("dev-a")), Destination::Channel(ops)]);
+        assert_eq!(
+            perms.publish,
+            [
+                "ants.inbox.dev-a.github",
+                "ants.chan.ops.github",
+                "$JS.API.DIRECT.GET.KV_ants_channels.$KV.ants_channels.ops",
+                "$JS.API.STREAM.INFO.ANTS",
+                "$JS.API.STREAM.INFO.KV_ants_webhooks",
+                "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
+                "$KV.ants_webhooks.github.>",
+            ]
+        );
+        assert_eq!(perms.subscribe, ["_INBOX.github.>"]);
+        let domain: JsDomain = "hub".parse().unwrap();
+        let in_domain = perms.with_js_domain(Some(&domain));
+        assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_webhooks.github.>"));
+        let human = Permissions::for_user(&UserId::human(), Role::Human);
+        assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_webhooks"), "ants init creates it");
+    }
+
+    #[test]
     fn channels_are_readable_by_ants_and_written_by_humans_only() {
         let a = Permissions::for_user(&p("dev-a"), Role::Ant);
         for s in [
@@ -3095,6 +3225,10 @@ mod tests {
         let top = ChannelPost::new(c.clone(), p("lead"), "@dev-a fix it").with_creator(Some(p("boss")));
         assert_eq!(top.thread_creator(&humans), Some(p("lead")));
         assert_eq!(ChannelPost::new(c.clone(), alice.clone(), "hi").thread_creator(&humans), None, "humans own");
+        let hook = ChannelPost::new(c.clone(), p("ci"), "red").from_webhook(vec![p("dev-a")]);
+        assert_eq!(hook.thread_creator(&humans), None, "a webhook is no ant");
+        let manager = ChannelPost::new(c.clone(), UserId::channel_manager(), "dev-b joined");
+        assert_eq!(manager.thread_creator(&humans), None, "nor is the channel manager");
         let answer = top.reply(p("dev-a"), "@dev-b help", &[], &humans).unwrap();
         assert_eq!((answer.creator.as_ref(), answer.owner.as_ref()), (Some(&p("lead")), None));
         let by_alice = answer.reply(alice.clone(), "@dev-a go on", &[], &humans).unwrap();
