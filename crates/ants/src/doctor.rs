@@ -943,7 +943,7 @@ mod tests {
         let alice = "alice".parse::<UserId>().unwrap();
         let setup = setup(&server, Some(server.creds_as(&alice, Role::Human)));
 
-        let checks = run(&setup).await;
+        let checks = Box::pin(run(&setup)).await;
         assert_eq!(named(&checks, "server")[0].status, Status::Ok, "{checks:#?}");
         assert_eq!(named(&checks, "jetstream")[0].status, Status::Ok, "{checks:#?}");
         let hub = named(&checks, "hub");
@@ -955,7 +955,7 @@ mod tests {
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         let rights = Rights::from_creds(setup.creds.as_deref()).unwrap();
         hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
-        let checks = run(&setup).await;
+        let checks = Box::pin(run(&setup)).await;
         assert!(checks.iter().all(|c| matches!(c.status, Status::Ok | Status::Skip)), "{checks:#?}");
         let hub = named(&checks, "hub");
         assert_eq!(hub.len(), 1, "{checks:#?}");
@@ -1027,7 +1027,7 @@ mod tests {
     async fn an_ants_credentials_skip_the_hub_check() {
         let Some(server) = Server::start() else { return };
         let ant = "dev-a".parse::<UserId>().unwrap();
-        let checks = run(&setup(&server, Some(server.creds_as(&ant, Role::Ant)))).await;
+        let checks = Box::pin(run(&setup(&server, Some(server.creds_as(&ant, Role::Ant))))).await;
         assert_eq!(named(&checks, "jetstream")[0].status, Status::Ok, "{checks:#?}");
         assert_eq!(named(&checks, "hub")[0].status, Status::Skip, "{checks:#?}");
     }

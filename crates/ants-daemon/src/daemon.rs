@@ -136,7 +136,7 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
-    while serve(&config, stop).await? == Served::HandedOver {
+    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
     Ok(())
@@ -1805,7 +1805,7 @@ mod tests {
 
         /// Serve the inbox until a permit is added to `ctrl_c` (twice to stop mid-prompt).
         async fn serve(&self, pool: &Pool, ctrl_c: &Arc<Semaphore>) {
-            self.serve_timed(pool, ctrl_c, PROGRESS_EVERY, ACK_WAIT).await;
+            Box::pin(self.serve_timed(pool, ctrl_c, PROGRESS_EVERY, ACK_WAIT)).await;
         }
 
         async fn serve_timed(
@@ -3005,14 +3005,14 @@ mod tests {
     /// human and terminates the message, without another prompt.
     #[tokio::test]
     async fn a_dead_letter_kept_in_the_outbox_is_buried_once_the_uplink_is_back() {
-        dead_letter_kept_in_the_outbox(false).await;
+        Box::pin(dead_letter_kept_in_the_outbox(false)).await;
     }
 
     /// As above, with the outbox copy landing long before the redelivery, past the hub's duplicate window: the
     /// redelivery finds it and stores no other.
     #[tokio::test]
     async fn a_dead_letter_kept_in_the_outbox_lands_once_past_the_duplicate_window() {
-        dead_letter_kept_in_the_outbox(true).await;
+        Box::pin(dead_letter_kept_in_the_outbox(true)).await;
     }
 
     async fn dead_letter_kept_in_the_outbox(past_window: bool) {
@@ -3083,7 +3083,7 @@ mod tests {
     /// message, before JetStream gives up on it.
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_buried_once_the_uplink_is_back() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Live).await;
+        Box::pin(dead_letter_kept_on_the_extra_delivery(UplinkBack::Live)).await;
     }
 
     /// As above, to a daemon restarted after JetStream gave up on the message, so a watcher buried it from the
@@ -3091,25 +3091,40 @@ mod tests {
     /// The human gets one notice either way.
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_outbox_copy() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: false })
-            .await;
+        Box::pin(dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted {
+            watcher_first: false,
+            past_window: false,
+        }))
+        .await;
     }
 
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_watcher_s() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: false }).await;
+        Box::pin(dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted {
+            watcher_first: true,
+            past_window: false,
+        }))
+        .await;
     }
 
     /// As above, with the daemon restarted past the hub's duplicate window: it finds the letter there and stores no
     /// other, and tells only when the watcher did not.
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_outbox_copy() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false, past_window: true }).await;
+        Box::pin(dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted {
+            watcher_first: false,
+            past_window: true,
+        }))
+        .await;
     }
 
     #[tokio::test]
     async fn a_dead_letter_kept_on_the_extra_delivery_lands_once_past_the_duplicate_window_after_the_watcher_s() {
-        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true, past_window: true }).await;
+        Box::pin(dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted {
+            watcher_first: true,
+            past_window: true,
+        }))
+        .await;
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
