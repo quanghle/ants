@@ -178,14 +178,19 @@ fn channels_are_managed_posted_to_and_read() {
         "#ops: members dev-b,dev-c; messenger messenger (default)\n"
     );
     assert!(!run(ants(&["channel", "add", "qa", "dev-a"])).status.success(), "no such channel");
+    assert_eq!(
+        ok(&["channel", "set", "ops", "--owner", "lead"]).0,
+        "#ops: members dev-b,dev-c; messenger messenger (default); owner lead\n"
+    );
+    assert!(!run(ants(&["channel", "set", "ops", "--owner", "human"])).status.success(), "no human owner");
     let rows: Vec<Vec<String>> =
         ok(&["channel", "list"]).0.lines().map(|l| l.split_whitespace().map(str::to_owned).collect()).collect();
     assert_eq!(
         rows,
         [
-            vec!["CHANNEL", "MEMBERS", "MESSENGER"],
-            vec!["#dev", "-", "messenger", "(default)"],
-            vec!["#ops", "dev-b,dev-c", "messenger", "(default)"]
+            vec!["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"],
+            vec!["#dev", "-", "messenger", "(default)", "-"],
+            vec!["#ops", "dev-b,dev-c", "messenger", "(default)", "lead"]
         ]
     );
 

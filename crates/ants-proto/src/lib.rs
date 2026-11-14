@@ -43,9 +43,17 @@ pub const SESSIONS_BUCKET: &str = "ants_sessions";
 /// KV bucket where a daemon marks each attempt at an inbox message it started, and the reply it stored, so a
 /// redelivery knows what an earlier attempt may already have done.
 pub const ATTEMPTS_BUCKET: &str = "ants_attempts";
-/// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Only humans write it; ants
-/// read it.
+/// KV bucket of the channels: one [`ChannelEntry`] per channel, keyed by the channel id. Humans write it, and the
+/// channel manager on the requests of a channel's owner ([`ChannelAdminRequest`]); ants read it.
 pub const CHANNELS_BUCKET: &str = "ants_channels";
+/// How long a [`ChannelAdminRequest`] stays valid after it is made.
+pub const CHANADM_TTL: Duration = Duration::from_secs(60);
+/// How often an ant repeats a [`ChannelAdminRequest`] while no answer arrives, and for how long in all. Requests are
+/// core NATS, so one sent while no channel manager listens is lost.
+pub const CHANADM_REPEAT: Duration = Duration::from_secs(2);
+pub const CHANADM_WAIT: Duration = Duration::from_secs(10);
+/// Most operations one [`ChannelAdminRequest`] may carry.
+pub const MAX_CHANNEL_OPS: usize = 32;
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its user id. Only humans write it; ants read
 /// it. [`UserId::human`] is a human without an entry.
 pub const HUMANS_BUCKET: &str = "ants_humans";
@@ -150,6 +158,12 @@ impl UserId {
     /// The router ant that takes requests without an explicit recipient.
     pub fn messenger() -> Self {
         Self("messenger".to_owned())
+    }
+
+    /// The channel manager (`ants channel serve`), which posts in a channel what it changed there. A reserved name:
+    /// no ant may take it.
+    pub fn channel_manager() -> Self {
+        Self("channel-manager".to_owned())
     }
 
     /// Whether this is the default human, [`UserId::human`]. Other humans are known only from [`HUMANS_BUCKET`]
@@ -364,6 +378,26 @@ pub mod subject {
     /// Every channel.
     pub const ALL_CHANNELS: &str = "ants.chan.>";
 
+    /// Where `ant` asks the channel manager for changes to `channel` ([`ChannelAdminRequest`](super::ChannelAdminRequest);
+    /// core NATS, not stored). Like an inbox subject it names the sender, so credentials can pin it there.
+    pub fn chanadm(channel: &ChannelId, ant: &UserId) -> String {
+        format!("ants.chanadm.{channel}.{ant}")
+    }
+
+    /// Every channel management subject `ant` may ask on.
+    pub fn chanadm_from(ant: &UserId) -> String {
+        format!("ants.chanadm.*.{ant}")
+    }
+
+    /// The channel and the ant a channel management subject names, or `None` when it is none.
+    pub fn parse_chanadm(subject: &str) -> Option<(ChannelId, UserId)> {
+        let (channel, ant) = subject.strip_prefix("ants.chanadm.")?.split_once('.')?;
+        Some((channel.parse().ok()?, ant.parse().ok()?))
+    }
+
+    /// Every channel management request.
+    pub const ALL_CHANADM: &str = "ants.chanadm.*.*";
+
     /// Permission requests an ant escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
     pub fn approvals(ant: &UserId) -> String {
         format!("ants.approvals.{ant}")
@@ -460,7 +494,8 @@ pub mod subject {
         format!("$KV.{}.{human}", super::HUMANS_BUCKET)
     }
 
-    /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject the human puts [`super::ChannelEntry`] on.
+    /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
+    /// [`super::ChannelEntry`] on.
     pub fn channel_entry(channel: &ChannelId) -> String {
         format!("$KV.{}.{channel}", super::CHANNELS_BUCKET)
     }
@@ -553,8 +588,8 @@ impl Permissions {
     /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
     /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
-    /// its own, reads the channels and humans buckets but never writes them, and
-    /// reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
+    /// its own, reads the channels and humans buckets but never writes them, asks the channel manager for changes to
+    /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
@@ -670,6 +705,7 @@ impl Permissions {
                 subject::dead(user),
                 subject::outbox(&subject::dead(user)).expect("an outbox subject"),
                 subject::status_of(user),
+                subject::chanadm_from(user),
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(user),
                 subject::chain(user),
@@ -733,7 +769,8 @@ impl Permissions {
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
-            let found = subject::sendable(user, role).map(|s| s.replace('*', user.as_str()));
+            let chanadm = (!role.is_human()).then(|| subject::chanadm_from(user));
+            let found = subject::sendable(user, role).into_iter().chain(chanadm).map(|s| s.replace('*', user.as_str()));
             for (all, new) in
                 [(&mut leaf.publish, publish.into_iter().chain(found).collect()), (&mut leaf.subscribe, subscribe)]
             {
@@ -758,6 +795,26 @@ impl Permissions {
             format!("$JS.FC.{OUTBOX_STREAM}.>"),
         ]);
         leaf
+    }
+
+    /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
+    /// request, reading the roster and the humans, reading and writing the channels bucket, and posting in any channel
+    /// as [`UserId::channel_manager`]. Its JWT also lets it answer each request it hears once, on the request's reply
+    /// subject, so it needs no right to publish on any ant's reply inboxes.
+    pub fn for_channel_manager() -> Self {
+        let user = UserId::channel_manager();
+        let (roster, channels, humans) =
+            (kv_stream(ROSTER_BUCKET), kv_stream(CHANNELS_BUCKET), kv_stream(HUMANS_BUCKET));
+        let mut publish = vec![subject::chan_from(&user), format!("$KV.{CHANNELS_BUCKET}.>")];
+        for stream in [&roster, &channels, &humans] {
+            publish.extend([
+                format!("$JS.API.STREAM.INFO.{stream}"),
+                format!("$JS.API.DIRECT.GET.{stream}.>"),
+                format!("$JS.API.CONSUMER.CREATE.{stream}"),
+                format!("$JS.FC.{stream}.>"),
+            ]);
+        }
+        Self { publish, subscribe: vec![subject::ALL_CHANADM.to_owned(), format!("{}.>", inbox_prefix(&user))] }
     }
 
     /// What the enrollment credentials of `ant` allow: asking for its credentials on [`subject::enroll`] and
@@ -1370,7 +1427,8 @@ pub fn parse_mentions(text: &str) -> Vec<UserId> {
     found
 }
 
-/// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Only humans write it.
+/// A channel's entry in the [`CHANNELS_BUCKET`], under the key of its channel id. Humans write it, and the channel
+/// manager on its owner's requests ([`ChannelEntry::apply`]).
 ///
 /// Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1383,12 +1441,15 @@ pub struct ChannelEntry {
     /// ([`ChannelEntry::messenger`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messenger: Option<UserId>,
+    /// The ant that may change the members and the messenger through the channel manager. Only a human sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<UserId>,
 }
 
 impl ChannelEntry {
-    /// A channel without members or messenger.
+    /// A channel without members, messenger or owner.
     pub fn new(channel: ChannelId) -> Self {
-        Self { channel, members: Vec::new(), messenger: None }
+        Self { channel, members: Vec::new(), messenger: None, owner: None }
     }
 
     /// The KV key of the entry.
@@ -1443,6 +1504,187 @@ impl ChannelEntry {
         }
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !humans.contains(m)).cloned().collect()
     }
+
+    /// Apply the `ops` of `requester`, which must be the channel's owner, leaving the owner as it is. None may make one
+    /// of the `humans` a member or the messenger: those are ants. Returns what changed, in order, empty when nothing did; on a
+    /// refusal the entry is unchanged.
+    pub fn apply(&mut self, requester: &UserId, ops: &[ChannelOp], humans: &Humans) -> Result<Vec<String>, Refusal> {
+        if self.owner.as_ref() != Some(requester) {
+            return Err(Refusal::NotOwner { owner: self.owner.clone() });
+        }
+        if let Some(human) =
+            ops.iter().filter(|op| op.adds()).filter_map(ChannelOp::ant).find(|ant| humans.contains(ant))
+        {
+            return Err(Refusal::Human(human.clone()));
+        }
+        let mut changed = Vec::new();
+        for op in ops {
+            match op {
+                ChannelOp::AddMember { ant } => {
+                    if self.add_member(ant.clone()) {
+                        changed.push(format!("added {ant}"));
+                    }
+                }
+                ChannelOp::RemoveMember { ant } => {
+                    if self.remove_member(ant) {
+                        changed.push(format!("removed {ant}"));
+                    }
+                }
+                ChannelOp::SetMessenger { ant } => {
+                    if self.messenger() != *ant {
+                        changed.push(format!("messenger {ant}"));
+                    }
+                    self.messenger = (*ant != UserId::messenger()).then(|| ant.clone());
+                }
+                ChannelOp::ClearMessenger => {
+                    if self.messenger.take().is_some() {
+                        changed.push(format!("messenger back to the default {}", UserId::messenger()));
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+}
+
+/// One change an owner asks for in a [`ChannelAdminRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ChannelOp {
+    AddMember {
+        ant: UserId,
+    },
+    RemoveMember {
+        ant: UserId,
+    },
+    /// Make `ant` the channel's messenger; the default `messenger` clears it.
+    SetMessenger {
+        ant: UserId,
+    },
+    /// Give the channel the default messenger again.
+    ClearMessenger,
+}
+
+impl ChannelOp {
+    /// The ant the operation names, if any.
+    pub fn ant(&self) -> Option<&UserId> {
+        match self {
+            Self::AddMember { ant } | Self::RemoveMember { ant } | Self::SetMessenger { ant } => Some(ant),
+            Self::ClearMessenger => None,
+        }
+    }
+
+    /// Whether the operation makes [`ChannelOp::ant`] a member or the messenger, so the ant must be in the roster.
+    pub fn adds(&self) -> bool {
+        matches!(self, Self::AddMember { .. } | Self::SetMessenger { .. })
+    }
+}
+
+/// An ant's request to the channel manager for changes to a channel it owns, on [`subject::chanadm`]: core NATS, not
+/// stored. The ant repeats it with the same id while no answer arrives ([`CHANADM_REPEAT`]); the manager answers a
+/// repeat with its first answer. Only the requester's reply inboxes get the answer ([`ChannelAdminRequest::answers_on`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAdminRequest {
+    pub id: Uuid,
+    pub channel: ChannelId,
+    /// The ant asking, which must own the channel.
+    pub ant: UserId,
+    /// The thread the ant was handling when it asked, for the record.
+    pub thread_id: ThreadId,
+    /// What to change, in order: 1 to [`MAX_CHANNEL_OPS`] operations.
+    pub ops: Vec<ChannelOp>,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl ChannelAdminRequest {
+    /// A request expiring [`CHANADM_TTL`] from now.
+    pub fn new(channel: ChannelId, ant: UserId, thread_id: ThreadId, ops: Vec<ChannelOp>) -> Self {
+        let requested_at = Utc::now();
+        let expires_at = requested_at + chrono::TimeDelta::from_std(CHANADM_TTL).expect("a short duration");
+        Self { id: Uuid::now_v7(), channel, ant, thread_id, ops, requested_at, expires_at }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::chanadm(&self.channel, &self.ant)
+    }
+
+    /// Check that the request arrived on its own [`ChannelAdminRequest::subject`]. Credentials pin each ant to its own
+    /// subjects, while the body is whatever the publisher wrote, so a request naming another ant or channel is forged.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "channel management request", user: self.ant.clone(), at: subject.to_owned() })
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        now >= self.expires_at
+    }
+
+    /// Whether `reply`, the reply subject the request came with, is one of the requester's own reply inboxes, where
+    /// only its credentials (and its leaf's uplink) listen. Not the inbox messages its stream republishes there.
+    pub fn answers_on(&self, reply: &str) -> bool {
+        let prefix = format!("{}.", inbox_prefix(&self.ant));
+        reply.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.starts_with("stored."))
+    }
+
+    /// Why the request is malformed, if it is: no operation, or more than [`MAX_CHANNEL_OPS`].
+    pub fn check_ops(&self) -> Result<(), Refusal> {
+        match self.ops.len() {
+            0 => Err(Refusal::Invalid("no change asked for".to_owned())),
+            n if n > MAX_CHANNEL_OPS => Err(Refusal::Invalid(format!("{n} changes; at most {MAX_CHANNEL_OPS}"))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The channel manager's answer to a [`ChannelAdminRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAdminReply {
+    pub request_id: Uuid,
+    pub outcome: ChannelAdminOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ChannelAdminOutcome {
+    /// The entry as stored at KV `revision` after the request, and what it changed; nothing changed and nothing was
+    /// written when `changed` is empty.
+    Applied {
+        entry: ChannelEntry,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<String>,
+    },
+    Refused {
+        refusal: Refusal,
+    },
+}
+
+/// Why the channel manager did not apply a [`ChannelAdminRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "refusal", content = "detail", rename_all = "snake_case")]
+pub enum Refusal {
+    #[error("only the channel's owner may change it; {}", match owner {
+        Some(owner) => format!("its owner is {owner}"),
+        None => "it has no owner".to_owned(),
+    })]
+    NotOwner { owner: Option<UserId> },
+    #[error("no such channel")]
+    NoSuchChannel,
+    #[error("the channel's entry is unreadable; a human has to set it again")]
+    Unreadable,
+    #[error("{0} is a human; members and messengers are ants")]
+    Human(UserId),
+    #[error("{0} is not in the roster; only ants in the roster may be added")]
+    NotInRoster(UserId),
+    #[error("the request expired")]
+    Expired,
+    #[error("the channel kept changing meanwhile; try again")]
+    Busy,
+    #[error("invalid request: {0}")]
+    Invalid(String),
 }
 
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
@@ -2050,10 +2292,12 @@ mod tests {
         assert_eq!(
             extra,
             [
-                // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a` and `ants.chan.*.dev-a`.
+                // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a`, `ants.chan.*.dev-a` and
+                // `ants.chanadm.*.dev-a`.
                 "ants.inbox.dev-a.dev-a",
                 "ants.notes.dev-a.dev-a",
                 "ants.chan.dev-a.dev-a",
+                "ants.chanadm.dev-a.dev-a",
                 "$JS.S.m1.>",
                 "$JSC.R.m1.*.ANTS_OUT.>",
                 "_INBOX.human.leaf.m1.>"
@@ -2456,6 +2700,102 @@ mod tests {
         for s in ["ants.chan.*.alice", "$KV.ants_channels.>"] {
             assert!(alice.publish.iter().any(|have| have == s), "any human: {s} missing from {:?}", alice.publish);
         }
+    }
+
+    #[test]
+    fn only_the_owner_changes_members_and_messenger_and_never_the_owner() {
+        let mut humans = Humans::default();
+        humans.add("alice", HumanEntry::new(p("alice"))).unwrap();
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member(p("dev-a"));
+        let ops = [
+            ChannelOp::AddMember { ant: p("dev-b") },
+            ChannelOp::AddMember { ant: p("dev-a") },
+            ChannelOp::RemoveMember { ant: p("dev-a") },
+            ChannelOp::SetMessenger { ant: p("dev-c") },
+        ];
+        let before = entry.clone();
+        assert_eq!(entry.apply(&p("lead"), &ops, &humans), Err(Refusal::NotOwner { owner: None }));
+        entry.owner = Some(p("lead"));
+        let refused = entry.apply(&p("dev-a"), &ops, &humans).unwrap_err();
+        assert_eq!(refused.to_string(), "only the channel's owner may change it; its owner is lead");
+        let human = [ChannelOp::AddMember { ant: p("dev-d") }, ChannelOp::SetMessenger { ant: p("alice") }];
+        assert_eq!(entry.apply(&p("lead"), &human, &humans), Err(Refusal::Human(p("alice"))));
+        assert_eq!(entry, ChannelEntry { owner: Some(p("lead")), ..before }, "a refusal changes nothing");
+
+        let changed = entry.apply(&p("lead"), &ops, &humans).unwrap();
+        assert_eq!(changed, ["added dev-b", "removed dev-a", "messenger dev-c"]);
+        assert_eq!((entry.members.as_slice(), entry.messenger.as_ref()), ([p("dev-b")].as_slice(), Some(&p("dev-c"))));
+        assert_eq!(entry.owner, Some(p("lead")));
+        assert!(entry.apply(&p("lead"), &ops[..1], &humans).unwrap().is_empty(), "nothing to change");
+        let cleared = entry.apply(&p("lead"), &[ChannelOp::ClearMessenger], &humans).unwrap();
+        assert_eq!(
+            (cleared, entry.messenger.as_ref()),
+            (vec!["messenger back to the default messenger".to_owned()], None)
+        );
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""owner":"lead""#), "{json}");
+        assert!(!serde_json::to_string(&ChannelEntry::new(entry.channel.clone())).unwrap().contains("owner"));
+    }
+
+    #[test]
+    fn channel_admin_requests_match_their_subject_and_answer_the_requester_only() {
+        let ops = vec![ChannelOp::AddMember { ant: p("dev-b") }, ChannelOp::ClearMessenger];
+        let request = ChannelAdminRequest::new("ops".parse().unwrap(), p("lead"), "t1".parse().unwrap(), ops);
+        assert_eq!(request.subject(), "ants.chanadm.ops.lead");
+        assert_eq!(subject::parse_chanadm("ants.chanadm.ops.lead"), Some(("ops".parse().unwrap(), p("lead"))));
+        assert_eq!(request.check_subject("ants.chanadm.ops.lead"), Ok(()));
+        assert!(request.check_subject("ants.chanadm.ops.dev-a").is_err());
+        assert!(request.check_subject("ants.chanadm.dev.lead").is_err());
+        assert!(!request.is_expired(request.requested_at) && request.is_expired(request.requested_at + CHANADM_TTL));
+        assert!(request.answers_on("_INBOX.lead.abc.1"));
+        for forged in ["_INBOX.dev-a.abc", "_INBOX.lead.stored.dev-a", "_INBOX.lead.", "_INBOX.leader.x", "ants.x"] {
+            assert!(!request.answers_on(forged), "{forged}");
+        }
+        assert_eq!(request.check_ops(), Ok(()));
+        let none = ChannelAdminRequest { ops: Vec::new(), ..request.clone() };
+        assert!(none.check_ops().is_err());
+        let many = ChannelAdminRequest { ops: vec![ChannelOp::ClearMessenger; MAX_CHANNEL_OPS + 1], ..request.clone() };
+        assert!(many.check_ops().is_err());
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["ops"][0], serde_json::json!({"op": "add_member", "ant": "dev-b"}));
+        assert_eq!(json["ops"][1], serde_json::json!({"op": "clear_messenger"}));
+        assert_eq!(serde_json::from_value::<ChannelAdminRequest>(json).unwrap(), request);
+        let refused = ChannelAdminReply {
+            request_id: request.id,
+            outcome: ChannelAdminOutcome::Refused { refusal: Refusal::NotInRoster(p("dev-z")) },
+        };
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            json["outcome"],
+            serde_json::json!({"outcome": "refused", "refusal": {"refusal": "not_in_roster", "detail": "dev-z"}})
+        );
+        assert_eq!(serde_json::from_value::<ChannelAdminReply>(json).unwrap(), refused);
+    }
+
+    #[test]
+    fn the_channel_manager_hears_requests_and_writes_channels_only() {
+        let manager = Permissions::for_channel_manager();
+        assert_eq!(manager.subscribe, ["ants.chanadm.*.*", "_INBOX.channel-manager.>"]);
+        for s in [
+            "ants.chan.*.channel-manager",
+            "$KV.ants_channels.>",
+            "$JS.API.DIRECT.GET.KV_ants_channels.>",
+            "$JS.API.DIRECT.GET.KV_ants_roster.>",
+            "$JS.API.CONSUMER.CREATE.KV_ants_humans",
+        ] {
+            assert!(manager.publish.iter().any(|have| have == s), "{s} missing from {:?}", manager.publish);
+        }
+        let writes: Vec<_> =
+            manager.publish.iter().filter(|s| s.starts_with("$KV.") || s.starts_with("ants.")).collect();
+        assert_eq!(writes, ["ants.chan.*.channel-manager", "$KV.ants_channels.>"]);
+        assert!(!manager.publish.iter().any(|s| s.starts_with("_INBOX") || s.contains("STREAM.CREATE")));
+
+        let a = Permissions::for_user(&p("dev-a"), Role::Ant);
+        assert!(a.publish.iter().any(|s| s == "ants.chanadm.*.dev-a"));
+        assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.chanadm")), "no outbox form");
+        assert!(!a.subscribe.iter().any(|s| s.starts_with("ants.chanadm")));
     }
 
     #[test]

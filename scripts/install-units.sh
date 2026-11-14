@@ -1,17 +1,19 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
-# machine), the ant daemon (`ants daemon --config`) and, for an uplink through a private Dev Tunnel,
-# `devtunnel connect`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
+# machine), the ant daemon (`ants daemon --config`), on the hub the channel manager (`ants channel serve`) and, for an
+# uplink through a private Dev Tunnel, `devtunnel connect`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
 #
 #   scripts/install-units.sh                         # install nats-server and the daemon and (re)start them
 #   scripts/install-units.sh --devtunnel ants-hub    # and `devtunnel connect ants-hub` for nats-leaf://127.0.0.1:7422
+#   scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # on the hub
 #   scripts/install-units.sh --out DIR               # only write the filled-in units into DIR, for review
 #
 # Options:  --ants PATH              ants binary (default: ants on PATH)
 #           --nats-server PATH       nats-server binary (default: nats-server on PATH)
 #           --nats-conf FILE         nats-server configuration (default: ~/.config/ants/leaf.conf)
 #           --config FILE            daemon config file (default: ~/.ants/config.toml)
-#           --no-daemon              only the nats-server service, on a machine without ants
+#           --no-daemon              no daemon service, on a machine without ants
+#           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
 #           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
 #           --devtunnel-token FILE   connect with the access token in FILE, read at each start, instead of the CLI
@@ -44,6 +46,7 @@ daemon=1
 devtunnel=
 tunnel=
 token_file=
+channel_creds=
 out=
 
 while [ $# -gt 0 ]; do
@@ -53,11 +56,12 @@ while [ $# -gt 0 ]; do
     --nats-conf) nats_conf=$2; shift 2 ;;
     --config) config=$2; shift 2 ;;
     --no-daemon) daemon=; shift ;;
+    --channel-manager) channel_creds=$2; shift 2 ;;
     --devtunnel) tunnel=$2; shift 2 ;;
     --devtunnel-bin) devtunnel=$2; shift 2 ;;
     --devtunnel-token) token_file=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -66,12 +70,13 @@ done
 nats_server=$(absolute "$nats_server")
 [ -x "$nats_server" ] || die "no nats-server binary at $nats_server"
 nats_conf=$(absolute "$nats_conf")
-if [ -n "$daemon" ]; then
+if [ -n "$daemon$channel_creds" ]; then
     [ -n "$ants" ] || ants=$(command -v ants) || die "ants not found (give --ants, or cargo install --path crates/ants)"
     ants=$(absolute "$ants")
     [ -x "$ants" ] || die "no ants binary at $ants"
     config=$(absolute "$config")
 fi
+[ -z "$channel_creds" ] || channel_creds=$(absolute "$channel_creds")
 if [ -n "$tunnel" ]; then
     [ -n "$devtunnel" ] || devtunnel=$(command -v devtunnel) || die "devtunnel not found (give --devtunnel-bin)"
     devtunnel=$(absolute "$devtunnel")
@@ -84,6 +89,7 @@ if [ -z "$out" ]; then
     [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
     [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see README.md, Config file)"
     [ -z "$token_file" ] || [ -r "$token_file" ] || die "no devtunnel token file at $token_file"
+    [ -z "$channel_creds" ] || [ -r "$channel_creds" ] || die "no channel manager credentials at $channel_creds"
 fi
 if [ -z "$tunnel" ] && [ -f "$nats_conf" ] && grep -Eq 'nats-leaf://(127\.0\.0\.1|localhost|\[::1\]):' "$nats_conf"; then
     printf 'install-units: the uplink in %s is on this machine; for one through a Dev Tunnel, add %s\n' \
@@ -93,13 +99,13 @@ fi
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="${tunnel:+ants.devtunnel.plist }ants.nats.plist${daemon:+ ants.daemon.plist}"
+    units="${tunnel:+ants.devtunnel.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
 Linux)
     kind=systemd
-    units="${tunnel:+ants-devtunnel.service }ants-nats.service${daemon:+ ants-daemon.service}"
+    units="${tunnel:+ants-devtunnel.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}"
     dest=${out:-$HOME/.config/systemd/user}
     logs=
     ;;
@@ -132,6 +138,7 @@ for unit in $units; do
         -e "s|@DEVTUNNEL@|$(escape "$devtunnel")|g" \
         -e "s|@TUNNEL@|$(escape "$tunnel")|g" \
         -e "s|@TOKEN_FILE@|$(escape "$token_file")|g" \
+        -e "s|@CHANNEL_CREDS@|$(escape "$channel_creds")|g" \
         -e "s|@PATH@|$(escape "$PATH")|g" \
         -e "s|@LOGS@|$(escape "$logs")|g" \
         "$root/contrib/$kind/$unit" >"$dest/$unit"
@@ -164,7 +171,8 @@ else
     systemctl --user enable $names
     # shellcheck disable=SC2086
     systemctl --user restart $names
-    printf 'started; logs: journalctl --user%s -u ants-nats -u ants-daemon\n' "${tunnel:+ -u ants-devtunnel}"
+    printf 'started; logs: journalctl --user%s -u ants-nats%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
+        "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}"
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         printf 'to keep them running without a login session: loginctl enable-linger %s\n' "$(id -un)"
     fi

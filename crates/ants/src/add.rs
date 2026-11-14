@@ -50,6 +50,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     if name.is_human() {
         bail!("{name} is the default human, not an ant");
     }
+    crate::auth::check_not_reserved(name)?;
     let path = match &args.config {
         Some(path) => path.clone(),
         None => config::default_path()?,

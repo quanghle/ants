@@ -117,6 +117,60 @@ impl Channels {
     }
 }
 
+/// What is stored under a channel's key.
+pub enum Stored {
+    Missing,
+    /// An entry for the key's channel, at a revision.
+    Entry(ChannelEntry, u64),
+    /// A malformed entry, or one naming another channel, at a revision: readers skip it.
+    Unreadable(u64),
+}
+
+/// Read the entry of `channel` from the channels bucket `kv`, with its revision.
+pub async fn load(kv: &kv::Store, channel: &ChannelId) -> Result<Stored> {
+    let key = channel.as_str();
+    let Some(found) = kv.entry(key).await.with_context(|| format!("reading channel {channel}"))? else {
+        return Ok(Stored::Missing);
+    };
+    if found.operation != kv::Operation::Put {
+        return Ok(Stored::Missing);
+    }
+    let entry = serde_json::from_slice::<ChannelEntry>(&found.value)
+        .map_err(|e| e.to_string())
+        .and_then(|entry| entry.check_key(key).map(|()| entry).map_err(|e| e.to_string()));
+    match entry {
+        Ok(entry) => Ok(Stored::Entry(entry, found.revision)),
+        Err(error) => {
+            tracing::warn!(key, error, "skipping a channel entry that is malformed or names another channel");
+            Ok(Stored::Unreadable(found.revision))
+        }
+    }
+}
+
+/// Every channel in the channels bucket `kv`, by id. Entries readers skip are left out with a warning.
+pub async fn list(kv: &kv::Store) -> Result<Vec<ChannelEntry>> {
+    let mut keys: Vec<String> = kv.keys().await.context("listing the channels")?.try_collect().await?;
+    keys.sort();
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Ok(channel) = key.parse::<ChannelId>() else {
+            tracing::warn!(key, "skipping a channel entry under a key that is no channel id");
+            continue;
+        };
+        if let Stored::Entry(entry, _) = load(kv, &channel).await? {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+/// What the prompt of a post in `channel` adds when the ant owns the channel.
+pub fn owner_note(channel: &ChannelId) -> String {
+    format!(
+        "[ants] This ant owns #{channel}: the manage_channel tool adds and removes its members and sets its messenger."
+    )
+}
+
 /// What a channel post asks of an ant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {

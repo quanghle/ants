@@ -84,7 +84,7 @@ ant as its creator and no owner: its escalations go up the creator's chain. Repl
 channel on the post's thread, not in the inbox.
 
 ```sh
-ants channel list                                   # channels, members and messenger
+ants channel list                                   # channels, members, messenger and owner
 ants post '#ops' "@dev-b the deploy failed"         # prints the new thread
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
 ants post --wait '#ops' "who owns billing?"         # then print the first answer on the thread and exit
@@ -93,7 +93,7 @@ ants channel read ops --thread <thread>             # the thread's posts
 ```
 
 Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creating channels and changing their members
-(`ants channel create/set/add/remove`) changes the team for everyone; do it only when the user asks.
+or owner (`ants channel create/set/add/remove`) changes the team for everyone; do it only when the user asks.
 
 ## Escalations
 

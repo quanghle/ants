@@ -7,6 +7,7 @@
 //!
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
+//! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
@@ -18,13 +19,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
-    ApprovalDecision, CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, EscalationReason, NotesPost,
-    ROSTER_BUCKET, Role, RosterEntry, ThreadId, UserId, Uuid, Verdict,
+    ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
+    ChannelOp, ChannelPost, Envelope, EscalationReason, NotesPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, UserId,
+    Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -46,6 +48,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::chanadm::Admin;
 use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
@@ -169,6 +172,7 @@ impl Mcp {
             humans,
             escalator,
             channels: std::sync::OnceLock::new(),
+            admin: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -240,6 +244,11 @@ impl Mcp {
     /// reply, or kept for `check_inbox` when the call gave up. True means it is handled and may be acked.
     pub async fn claim(&self, envelope: &Envelope) -> Result<bool> {
         self.hub.claim(envelope).await
+    }
+
+    /// Let `manage_channel` reach the channels through `admin`; without it the tool is refused.
+    pub fn manage_channels(&self, admin: Arc<dyn Admin>) {
+        let _ = self.hub.admin.set(admin);
     }
 
     /// How many late replies on `thread` wait for `check_inbox`.
@@ -335,6 +344,7 @@ struct Hub {
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
     channels: std::sync::OnceLock<ChannelAccess>,
+    admin: OnceLock<Arc<dyn Admin>>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -576,6 +586,62 @@ impl Hub {
     }
 
     /// The roster without this ant, by id.
+    /// What `manage_channel` does: list the channels the ant owns, show one, or ask the channel manager to change one.
+    async fn manage_channel(&self, thread: &ThreadId, args: ManageChannel) -> Result<String, String> {
+        let admin = self.admin.get().ok_or("channels cannot be managed from this daemon")?;
+        let channels = async || admin.channels().await.map_err(|e| format!("cannot read the channels: {e:#}"));
+        let Some(channel) = args.channel.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+            let owned: Vec<String> = channels()
+                .await?
+                .iter()
+                .filter(|e| e.owner.as_ref() == Some(&self.ant))
+                .map(describe_channel)
+                .collect();
+            if owned.is_empty() {
+                return Ok(format!("{} owns no channel; a human makes an ant a channel's owner.", self.ant));
+            }
+            return Ok(format!("{} owns:\n{}", self.ant, owned.join("\n")));
+        };
+        let channel: ChannelId = channel.trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
+        let ant = |s: &String| s.trim().trim_start_matches('@').parse::<UserId>().map_err(|e| format!("{e}"));
+        let mut ops = Vec::new();
+        for added in &args.add {
+            ops.push(ChannelOp::AddMember { ant: ant(added)? });
+        }
+        for removed in &args.remove {
+            ops.push(ChannelOp::RemoveMember { ant: ant(removed)? });
+        }
+        match (&args.messenger, args.clear_messenger) {
+            (Some(_), true) => return Err("give either messenger or clear_messenger, not both".to_owned()),
+            (Some(messenger), false) => ops.push(ChannelOp::SetMessenger { ant: ant(messenger)? }),
+            (None, true) => ops.push(ChannelOp::ClearMessenger),
+            (None, false) => {}
+        }
+        if ops.is_empty() {
+            let entries = channels().await?;
+            let entry = entries.iter().find(|e| e.channel == channel).ok_or(format!("no channel #{channel}"))?;
+            return Ok(describe_channel(entry));
+        }
+        let request = ChannelAdminRequest::new(channel.clone(), self.ant.clone(), thread.clone(), ops);
+        let reply = admin.request(request).await.map_err(|e| format!("cannot ask the channel manager: {e:#}"))?;
+        let Some(reply) = reply else {
+            return Err(format!(
+                "no channel manager answered in {}s, so the change may not have been made; a human can make it with \
+                 `ants channel add`, `remove` or `set`",
+                CHANADM_WAIT.as_secs()
+            ));
+        };
+        match reply.outcome {
+            ChannelAdminOutcome::Applied { entry, changed, .. } if changed.is_empty() => {
+                Ok(format!("Nothing to change. {}", describe_channel(&entry)))
+            }
+            ChannelAdminOutcome::Applied { entry, changed, .. } => {
+                Ok(format!("Changed #{channel}: {}. {}", changed.join("; "), describe_channel(&entry)))
+            }
+            ChannelAdminOutcome::Refused { refusal } => Err(format!("#{channel} was not changed: {refusal}")),
+        }
+    }
+
     async fn others(&self) -> Result<Vec<RosterEntry>, String> {
         let mut entries = (self.roster)().await.map_err(|e| {
             format!("cannot read the roster: {e:#} (credentials issued before ants could read it need `ants auth user` again)")
@@ -878,6 +944,25 @@ fn default_wait() -> bool {
     true
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ManageChannel {
+    /// The channel, such as `ops`; omitted to list the channels this ant owns.
+    #[serde(default)]
+    channel: Option<String>,
+    /// Ants to make members; each must be in the roster.
+    #[serde(default)]
+    add: Vec<String>,
+    /// Members to remove.
+    #[serde(default)]
+    remove: Vec<String>,
+    /// The ant to triage humans' posts that mention nobody; it must be in the roster.
+    #[serde(default)]
+    messenger: Option<String>,
+    /// Give the channel the default messenger again.
+    #[serde(default)]
+    clear_messenger: bool,
+}
+
 /// The tools, served to one MCP connection. Over HTTP the caller's thread comes with each request instead.
 #[derive(Clone)]
 struct Tools {
@@ -947,6 +1032,21 @@ fn describe(entries: &[&RosterEntry]) -> String {
         })
         .collect();
     lines.join("\n")
+}
+
+/// A channel's members, messenger and owner.
+fn describe_channel(entry: &ChannelEntry) -> String {
+    let members = if entry.members.is_empty() {
+        "none".to_owned()
+    } else {
+        entry.members.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ")
+    };
+    let messenger = match &entry.messenger {
+        Some(m) => m.to_string(),
+        None => format!("{} (default)", UserId::messenger()),
+    };
+    let owner = entry.owner.as_ref().map_or_else(|| "none".to_owned(), UserId::to_string);
+    format!("#{}: members {members}; messenger {messenger}; owner {owner}.", entry.channel)
 }
 
 /// Why nobody matches `capability`, and what there is instead.
@@ -1157,6 +1257,20 @@ impl Tools {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.escalate(&thread, args.issue).await))
     }
+
+    #[tool(description = "Manage a channel this ant owns (a human makes an ant a channel's owner): `add` and \
+        `remove` change its members, `messenger` sets the ant that triages humans' posts that mention nobody, and \
+        `clear_messenger` gives it the default messenger again. Members and messengers must be ants in the roster. \
+        The channel manager applies the change, refuses it unless this ant owns the channel, and announces it in \
+        the channel. With only `channel` it shows the channel; with nothing it lists the channels this ant owns.")]
+    async fn manage_channel(
+        &self,
+        Parameters(args): Parameters<ManageChannel>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.manage_channel(&thread, args).await))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1178,7 +1292,8 @@ fn instructions(ant: &UserId) -> String {
          proposal, ask them with send_message or ask_agent to read it with read_notes and answer, and settle it \
          before the work starts. \
          post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain. \
-         escalate sends the thread up its origin chain when stuck on it. Memory and task \
+         escalate sends the thread up its origin chain when stuck on it. manage_channel lists the \
+         channels a human made this ant the owner of, and changes their members and messenger. Memory and task \
          tools follow the ant's configured instructions."
     );
     if *ant == UserId::messenger() {
@@ -1208,6 +1323,8 @@ mod tests {
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
     use tokio::sync::mpsc;
+
+    use ants_proto::ChannelAdminReply;
 
     use super::*;
     use crate::harness::Launch;
@@ -1327,7 +1444,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 10, "{tools:?}");
+        assert_eq!(tools.len(), 11, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1349,6 +1466,87 @@ mod tests {
         drop(turn);
         let (ok, _) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "late"})).await;
         assert!(!ok, "nothing goes out once the message is handled");
+    }
+
+    /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,
+    /// and records them; with `silent` it answers nothing.
+    struct MemoryAdmin {
+        channels: StdMutex<Vec<ChannelEntry>>,
+        requests: StdMutex<Vec<ChannelAdminRequest>>,
+        silent: bool,
+    }
+
+    impl Admin for MemoryAdmin {
+        fn channels(&self) -> BoxFuture<'_, Result<Vec<ChannelEntry>>> {
+            let channels = self.channels.lock().unwrap().clone();
+            Box::pin(async move { Ok(channels) })
+        }
+
+        fn request(&self, request: ChannelAdminRequest) -> BoxFuture<'_, Result<Option<ChannelAdminReply>>> {
+            self.requests.lock().unwrap().push(request.clone());
+            let reply = (!self.silent).then(|| {
+                let mut channels = self.channels.lock().unwrap();
+                let outcome = match channels.iter_mut().find(|e| e.channel == request.channel) {
+                    None => ChannelAdminOutcome::Refused { refusal: ants_proto::Refusal::NoSuchChannel },
+                    Some(entry) => match entry.apply(&request.ant, &request.ops, &ants_proto::Humans::default()) {
+                        Ok(changed) => ChannelAdminOutcome::Applied { entry: entry.clone(), revision: 2, changed },
+                        Err(refusal) => ChannelAdminOutcome::Refused { refusal },
+                    },
+                };
+                ChannelAdminReply { request_id: request.id, outcome }
+            });
+            Box::pin(async move { Ok(reply) })
+        }
+    }
+
+    #[tokio::test]
+    async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
+        let (mcp, _sent) = start(&home("chanadm")).await;
+        let current = from_human();
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+        let (ok, text) = call(&client, "manage_channel", serde_json::json!({})).await;
+        assert!(!ok && text.contains("cannot be managed"), "{text}");
+
+        let mut ops = ChannelEntry::new("ops".parse().unwrap());
+        ops.owner = Some(user("dev-a"));
+        let mut dev = ChannelEntry::new("dev".parse().unwrap());
+        dev.owner = Some(user("lead"));
+        let admin = Arc::new(MemoryAdmin {
+            channels: StdMutex::new(vec![ops, dev]),
+            requests: StdMutex::default(),
+            silent: false,
+        });
+        mcp.manage_channels(admin.clone());
+        let (ok, text) = call(&client, "manage_channel", serde_json::json!({})).await;
+        assert!(ok && text.contains("#ops") && !text.contains("#dev"), "{text}");
+        let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "#dev"})).await;
+        assert_eq!((ok, text.as_str()), (true, "#dev: members none; messenger messenger (default); owner lead."));
+        assert!(admin.requests.lock().unwrap().is_empty(), "showing asks nothing");
+
+        let args = serde_json::json!({"channel": "#ops", "add": ["@dev-b", "dev-c"], "messenger": "dev-b"});
+        let (ok, text) = call(&client, "manage_channel", args).await;
+        assert!(ok && text.starts_with("Changed #ops: added dev-b; added dev-c; messenger dev-b."), "{text}");
+        let request = admin.requests.lock().unwrap()[0].clone();
+        assert_eq!((&request.ant, &request.thread_id), (&user("dev-a"), &current.thread_id));
+        let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "ops", "add": ["dev-b"]})).await;
+        assert!(ok && text.starts_with("Nothing to change."), "{text}");
+
+        let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "dev", "remove": ["x"]})).await;
+        assert!(!ok && text.contains("#dev was not changed") && text.contains("lead"), "{text}");
+        let both = serde_json::json!({"channel": "ops", "messenger": "dev-b", "clear_messenger": true});
+        let (ok, text) = call(&client, "manage_channel", both).await;
+        assert!(!ok && text.contains("not both"), "{text}");
+
+        let silent =
+            Arc::new(MemoryAdmin { channels: StdMutex::default(), requests: StdMutex::default(), silent: true });
+        let (mcp, _sent) = start(&home("chanadm-silent")).await;
+        mcp.manage_channels(silent);
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        let client = http_client(&url, &token).await;
+        let (ok, text) =
+            call(&client, "manage_channel", serde_json::json!({"channel": "ops", "clear_messenger": true})).await;
+        assert!(!ok && text.contains("no channel manager answered") && text.contains("ants channel"), "{text}");
     }
 
     #[tokio::test]
