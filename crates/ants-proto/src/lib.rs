@@ -725,7 +725,7 @@ pub fn parse_link_key(key: &str, thread: &ThreadId) -> Option<(UserId, UserId)> 
 
 /// JetStream consumer an ant's daemon reads thread notes through, one thread at a time. Its name is fixed, so its
 /// credentials need not let it pull from other consumers. The CLI with the ant's credentials reads through one of its
-/// [`spare_readers`] instead, and a human gets the posts one by one (`STREAM.MSG.GET`), with no consumer.
+/// [`spare_readers`] instead, and a human gets the posts by message gets, with no consumer.
 pub fn notes_consumer(user: &UserId) -> String {
     format!("notes-{user}")
 }
@@ -749,7 +749,7 @@ pub fn chan_consumer(ant: &UserId) -> String {
 
 /// JetStream consumer an ant's daemon reads a channel (or a thread of it) back through, one read at a time, like
 /// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too. The CLI with the ant's credentials
-/// reads through one of its [`spare_readers`], and a human gets the posts one by one (`STREAM.MSG.GET`), so no read
+/// reads through one of its [`spare_readers`], and a human gets the posts by message gets, so no read
 /// gets in another's way.
 pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
@@ -899,8 +899,8 @@ impl Permissions {
     /// upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
-    /// ([`channel_manager_serving_key`]), and reads and removes dead
-    /// letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
+    /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
+    /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
     /// ([`presence_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
@@ -1020,6 +1020,9 @@ impl Permissions {
                 "ants.out.owners.*.*".to_owned(),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
+                // Reading the stream back in batches; it reads nothing more than STREAM.MSG.GET, which takes any
+                // sequence.
+                format!("$JS.API.DIRECT.GET.{STREAM}"),
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
                 subject::ALL_APPROVAL_DECISIONS.to_owned(),
                 subject::ALL_CANCELS.to_owned(),
@@ -1583,7 +1586,7 @@ impl FromStr for DeviceId {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(3);
 
 /// The first permissions version whose credentials ask for their own renewal over NATS ([`subject::renew`],
 /// [`RenewRequest`]); older ones are renewed on the machine holding the team keys.
@@ -4383,6 +4386,7 @@ mod tests {
             "ants.inbox.>",
             "$JS.API.STREAM.CREATE.ANTS",
             "$JS.API.STREAM.MSG.GET.ANTS",
+            "$JS.API.DIRECT.GET.ANTS",
             "ants.approvals.*.*",
             "ants.dead.>",
             "$JS.API.STREAM.CREATE.KV_ants_humans",
@@ -4410,7 +4414,8 @@ mod tests {
                     .iter()
                     .any(|s| s.contains("$KV.ants_humans") || s.contains("STREAM.CREATE.KV_ants_humans"))
             );
-            assert!(!ant.publish.iter().any(|s| s == "ants.inbox.>" || s == "ants.dead.>"), "no human rights");
+            let human_only = ["ants.inbox.>", "ants.dead.>", "$JS.API.DIRECT.GET.ANTS"];
+            assert!(!ant.publish.iter().any(|s| human_only.contains(&s.as_str())), "no human rights");
         }
 
         let m1: Machine = "m1".parse().unwrap();
