@@ -624,6 +624,20 @@ pub mod subject {
         format!("ants.cancelled.{ant}.*")
     }
 
+    /// Where a human asks the daemons of `ant` which messages they hold ([`QueueRequest`](super::QueueRequest); core
+    /// NATS, not stored). Only humans publish here, and only that ant's daemons listen.
+    pub fn queue(ant: &UserId) -> String {
+        format!("ants.queue.{ant}")
+    }
+
+    /// Every queue request, of all ants.
+    pub const ALL_QUEUE_REQUESTS: &str = "ants.queue.*";
+
+    /// Where a daemon of `ant` answers a queue request ([`QueueReply`](super::QueueReply); core NATS).
+    pub fn queued(ant: &UserId) -> String {
+        format!("ants.queued.{ant}")
+    }
+
     /// The roster entry of an ant: the subject its daemon puts [`super::RosterEntry`] on.
     pub fn roster(ant: &UserId) -> String {
         format!("$KV.{}.{ant}", super::ROSTER_BUCKET)
@@ -717,6 +731,13 @@ pub fn daily_spend_key(ant: &UserId, day: &str) -> String {
 /// ant, so its credentials can be confined to its own.
 pub fn attempt_key(ant: &UserId, seq: u64) -> String {
     format!("{ant}.{seq}")
+}
+
+/// Key in [`ATTEMPTS_BUCKET`] of the [`MessageMark`] of message `message` ([`Envelope::id`]) to `ant`: the daemon
+/// creates it as it starts the message, a human as it withdraws it, so exactly one of them does. Keys start with the
+/// ant, so its credentials can be confined to its own; a human writes and reads only these keys of the bucket.
+pub fn message_mark_key(ant: &UserId, message: &Uuid) -> String {
+    format!("{ant}.msg.{message}")
 }
 
 /// Key in [`LINKS_BUCKET`] of the record that `from` passed the link to channel thread `thread` on to `to`. Keys start
@@ -1035,7 +1056,9 @@ impl Permissions {
     /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
-    /// name) also watches all ants traffic, decides approval requests, reads every ant's thread and daily spend in the
+    /// name) also watches all ants traffic, decides approval requests, asks for and withdraws the messages waiting in
+    /// an ant's queue ([`QueueRequest`], [`message_mark_key`], the only keys of the attempts bucket it writes or reads),
+    /// reads every ant's thread and daily spend in the
     /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create and
     /// upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
@@ -1188,6 +1211,10 @@ impl Permissions {
                 format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
                 subject::ALL_APPROVAL_DECISIONS.to_owned(),
                 subject::ALL_CANCELS.to_owned(),
+                subject::ALL_QUEUE_REQUESTS.to_owned(),
+                // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
+                format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
                 subject::DEAD_ALL.to_owned(),
                 // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
                 // leaf's own domain (the plain form is what a leaf maps its own domain to).
@@ -1236,6 +1263,7 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
                 subject::status_of(user),
                 subject::cancelled_of(user),
+                subject::queued(user),
                 subject::chanadm_from(user),
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(user),
@@ -1266,6 +1294,7 @@ impl Permissions {
                 subject::ALL_CHANNELS.to_owned(),
                 format!("{}.*", subject::approvals(user)),
                 subject::cancel_of(user),
+                subject::queue(user),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(user),
                 subject::renew_reply(user.as_str()),
@@ -3743,6 +3772,106 @@ impl CancelReply {
             at: format!("{subject} (thread {})", self.thread_id),
         })
     }
+}
+
+/// A human asking the daemons of `ant` which messages they hold, on [`subject::queue`] with core NATS. Each one answers
+/// with a [`QueueReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRequest {
+    pub id: Uuid,
+    pub ant: UserId,
+    /// The human asking, as the request names it: only human credentials publish queue requests.
+    pub by: UserId,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl QueueRequest {
+    pub fn new(ant: UserId, by: UserId) -> Self {
+        Self { id: Uuid::now_v7(), ant, by, sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::queue(&self.ant)
+    }
+
+    pub fn reply_subject(&self) -> String {
+        subject::queued(&self.ant)
+    }
+
+    /// Check that the request arrived on its own [`QueueRequest::subject`].
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "queue request", user: self.ant.clone(), at: subject.to_owned() })
+    }
+
+    /// A daemon's answer: the messages it holds, and where the ant's inbox consumer stands.
+    pub fn answer(&self, messages: Vec<QueuedMessage>, delivered: Option<u64>, undelivered: Option<u64>) -> QueueReply {
+        QueueReply { request_id: self.id, ant: self.ant.clone(), messages, delivered, undelivered }
+    }
+}
+
+/// The answer of one daemon of `ant` to a [`QueueRequest`], on [`subject::queued`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReply {
+    pub request_id: Uuid,
+    pub ant: UserId,
+    /// The messages the daemon holds, in flight or waiting their turn on their thread, by stream sequence.
+    pub messages: Vec<QueuedMessage>,
+    /// The stream sequence of the last message the ant's inbox consumer delivered: later inbox messages wait in the
+    /// stream. None when the consumer's info could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<u64>,
+    /// How many inbox messages wait in the stream, not delivered yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<u64>,
+}
+
+impl QueueReply {
+    pub fn subject(&self) -> String {
+        subject::queued(&self.ant)
+    }
+
+    /// Check that the answer arrived on its own [`QueueReply::subject`], which credentials pin to the ant's own.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "queue answer", user: self.ant.clone(), at: subject.to_owned() })
+    }
+}
+
+/// A message to an ant waiting to be answered, as [`QueueReply`] lists it and `ants queue` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// The message's [`Envelope::id`], or a channel post's id.
+    pub id: Uuid,
+    pub thread_id: ThreadId,
+    pub from: UserId,
+    /// The channel, for a channel post.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChannelId>,
+    pub sent_at: DateTime<Utc>,
+    /// Its stream sequence.
+    pub seq: u64,
+    /// Whether the daemon is handling it now.
+    pub running: bool,
+    /// How many messages of its thread go before it: 0 for the one running, or next.
+    pub ahead: usize,
+}
+
+/// What became of a message to an ant, in [`ATTEMPTS_BUCKET`] under its [`message_mark_key`]. The daemon creates the
+/// mark [`MessageMark::Started`] right before handling the message, and a human creates it
+/// [`MessageMark::Withdrawn`] (`ants withdraw`): both create the key only if it has no value, so the first wins and the
+/// other sees what it found. A daemon acks a withdrawn message without prompting with it, and puts
+/// [`MessageMark::Finished`] once it acked a message it started. Marks expire with the stream's messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MessageMark {
+    Started { thread_id: ThreadId, at: DateTime<Utc> },
+    Finished { thread_id: ThreadId, at: DateTime<Utc> },
+    Withdrawn { by: UserId, at: DateTime<Utc> },
 }
 
 #[cfg(test)]

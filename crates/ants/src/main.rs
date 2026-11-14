@@ -19,6 +19,7 @@ mod notify;
 mod outbox;
 mod presence;
 mod progress;
+mod queue;
 mod reload;
 mod renew;
 mod retire;
@@ -222,6 +223,25 @@ enum Command {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
+    },
+    /// List the messages waiting for ANT, oldest first: those its daemon holds, running or waiting their turn on their
+    /// thread, then those still in the stream, with id, thread, sender, age and place in the thread's queue. Needs a
+    /// human's credentials, and a daemon of the ant to answer.
+    Queue {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object per message instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Withdraw MESSAGE (an id `ants queue` lists) from the queue of ANT before ANT is prompted with it: its daemon
+    /// acks it unprompted when its turn comes, and tells the thread it was withdrawn. The prompt running and the other
+    /// messages go on. A message ANT started on is not withdrawn: `ants cancel` stops its prompt. Needs a human's
+    /// credentials.
+    Withdraw {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        message: Uuid,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// reactions, read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
@@ -1124,6 +1144,8 @@ async fn run() -> Result<()> {
         }
         Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
+        Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
+        Command::Withdraw { ant, message } => queue::withdraw(&nats()?, ant, message).await,
         Command::Init => {
             for line in init_hub(&nats()?).await? {
                 println!("{line}");
@@ -2452,6 +2474,13 @@ async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::Pick>) -> R
             let forged = forged(r.check_subject(&msg.subject).is_ok());
             let outcome = if r.cancelled { "prompt cancelled" } else { "no prompt to cancel" };
             printer.line(&format!("[{}] {}{forged}: {outcome}", r.thread_id, r.ant))
+        } else if let Ok(r) = serde_json::from_slice::<ants_proto::QueueRequest>(&msg.payload) {
+            // After cancel requests: a cancel request has every field of one.
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("{} asks for the queue of {}{forged}", r.by, r.ant))
+        } else if let Ok(r) = serde_json::from_slice::<ants_proto::QueueReply>(&msg.payload) {
+            let forged = forged(r.check_subject(&msg.subject).is_ok());
+            printer.line(&format!("{}{forged}: {} messages in hand", r.ant, r.messages.len()))
         } else {
             printer.line(&format!("{} {}", msg.subject, String::from_utf8_lossy(&msg.payload)))
         };

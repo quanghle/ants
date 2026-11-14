@@ -34,7 +34,7 @@ fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
 }
 
 /// `duration` in its largest whole unit: `7s`, `3m`, `2h`, `5d`.
-fn short(duration: Duration) -> String {
+pub(crate) fn short(duration: Duration) -> String {
     let secs = duration.as_secs();
     match secs {
         0..60 => format!("{secs}s"),
