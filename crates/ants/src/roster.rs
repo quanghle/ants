@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ants_daemon::{bus, chains, roster};
-use ants_proto::{CHAINS_BUCKET, ROSTER_BUCKET, ROSTER_TTL, RosterEntry, UserId};
+use ants_proto::{CHAINS_BUCKET, LimitKind, ROSTER_BUCKET, ROSTER_TTL, RosterEntry, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -52,17 +52,42 @@ fn chain(entry: &RosterEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// What the ant is doing: `signed-out` while its harness is, else its activity, or `-` when its daemon does not say.
+/// What the ant is doing: `signed-out` while its harness is, `rate-limited` or `out-of-quota` while a provider limit
+/// holds its messages, else its activity, or `-` when its daemon does not say.
 fn activity(entry: &RosterEntry) -> &'static str {
-    match (&entry.signed_out, entry.activity) {
-        (Some(_), _) => "signed-out",
-        (None, activity) => activity.map_or("-", |a| a.as_str()),
+    match (&entry.signed_out, &entry.limited, entry.activity) {
+        (Some(_), _, _) => "signed-out",
+        (None, Some(limited), _) => limited.kind.as_str(),
+        (None, None, activity) => activity.map_or("-", |a| a.as_str()),
     }
 }
 
-/// One line per ant whose harness is signed out: since when, and how to sign it in.
-pub fn signed_out(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
-    entries.iter().filter_map(|e| signed_out_line(e, now)).collect()
+/// One line per ant whose harness is signed out (since when, and how to sign it in) or held back by a provider limit
+/// (until when).
+pub fn held(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+    entries.iter().filter_map(|e| held_line(e, now)).collect()
+}
+
+fn held_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    signed_out_line(e, now).or_else(|| limited_line(e, now))
+}
+
+fn limited_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    let limited = e.limited.as_ref()?;
+    let what = match limited.kind {
+        LimitKind::Quota => "out of quota",
+        LimitKind::RateLimit => "rate limited",
+        LimitKind::Unknown => "held back by a provider limit",
+    };
+    Some(format!(
+        "{}: harness {} {what} for {}; messages to {} wait, spending no attempts, until {} (in {}).",
+        e.ant,
+        e.harness,
+        short(since(limited.since, now)),
+        e.ant,
+        limited.until.format("%H:%M:%SZ"),
+        short(since(now, limited.until))
+    ))
 }
 
 fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
@@ -81,7 +106,8 @@ fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
-/// kept for it either, the name may be wrong), a stale entry, or a harness signed out.
+/// kept for it either, the name may be wrong), a stale entry, or a harness signed out or held back by a provider
+/// limit.
 pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
         let hint = if chain_kept { "" } else { " (`ants roster` lists the ants served: check the name)" };
@@ -94,7 +120,7 @@ pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now
             short(since(entry.heartbeat_at, now))
         ));
     }
-    signed_out_line(entry, now)
+    held_line(entry, now)
 }
 
 /// How long [`unserved_warnings`] reads before giving up, so that an unreachable hub does not hold up a command.
@@ -228,9 +254,9 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         if let Some(note) = crate::versions::roster_note(&entries, now) {
             println!("{note}");
         }
-        let signed_out = signed_out(&entries, now);
-        if !signed_out.is_empty() {
-            println!("\n{}", signed_out.join("\n"));
+        let held = held(&entries, now);
+        if !held.is_empty() {
+            println!("\n{}", held.join("\n"));
         }
     }
     Ok(())
@@ -239,7 +265,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use ants_daemon::roster::Registration;
-    use ants_proto::{Activity, PermissionsVersion, ROSTER_HEARTBEAT};
+    use ants_proto::{Activity, HarnessLimit, PermissionsVersion, ROSTER_HEARTBEAT};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -262,6 +288,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         }
     }
 
@@ -332,17 +359,34 @@ mod tests {
         out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
         let mut unnamed = entry("dev-d", 600, 2, now);
         unnamed.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
-        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now)];
+        let mut limited = entry("dev-f", 600, 2, now);
+        limited.activity = Some(Activity::Idle);
+        let until = now + chrono::Duration::seconds(120);
+        limited.limited = Some(HarnessLimit { kind: LimitKind::RateLimit, since: now, until });
+        let mut quota = entry("dev-g", 600, 2, now);
+        quota.limited = Some(HarnessLimit { kind: LimitKind::Quota, since, until });
+        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now), limited, quota];
         let table = super::table(&entries, now);
         let activities: Vec<&str> = table.lines().map(|l| l.split_whitespace().nth(2).unwrap()).collect();
-        assert_eq!(activities, ["ACTIVITY", "signed-out", "signed-out", "-"]);
+        assert_eq!(activities, ["ACTIVITY", "signed-out", "signed-out", "-", "rate-limited", "out-of-quota"]);
+        let at = until.format("%H:%M:%SZ");
         assert_eq!(
-            signed_out(&entries, now),
+            held(&entries, now),
             [
                 "dev-c: harness copilot signed out for 5m; messages to dev-c wait. Run `copilot login` on m1 as the \
-                 user the daemon runs as.",
+                 user the daemon runs as."
+                    .to_owned(),
                 "dev-d: harness copilot signed out for 5m; messages to dev-d wait. Sign copilot in on m1 as the user \
                  the daemon runs as."
+                    .to_owned(),
+                format!(
+                    "dev-f: harness copilot rate limited for 0s; messages to dev-f wait, spending no attempts, until \
+                     {at} (in 2m)."
+                ),
+                format!(
+                    "dev-g: harness copilot out of quota for 5m; messages to dev-g wait, spending no attempts, until \
+                     {at} (in 2m)."
+                ),
             ]
         );
         let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();
@@ -376,6 +420,11 @@ mod tests {
         let mut out = entry("dev-a", 600, 2, now);
         out.signed_out = Some(ants_proto::SignInNeeded { since: now, sign_in: None });
         assert!(unserved(&dev_a, Some(&out), true, now).unwrap().starts_with("dev-a: harness copilot signed out"));
+        let mut limited = entry("dev-a", 600, 2, now);
+        limited.limited = Some(HarnessLimit { kind: LimitKind::Quota, since: now, until: now });
+        assert!(
+            unserved(&dev_a, Some(&limited), true, now).unwrap().starts_with("dev-a: harness copilot out of quota")
+        );
     }
 
     /// Read with the human's credentials: an ant registered, one with only its escalation chain kept, one unknown.

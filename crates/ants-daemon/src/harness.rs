@@ -51,6 +51,13 @@ pub struct Harness {
     pub(crate) context: BTreeMap<String, ContextValue>,
     /// The command a human runs to sign the harness in, named when it reports it is signed out.
     pub(crate) sign_in: Option<String>,
+    /// Phrases of its errors that mean a provider rate limit or overload, besides the common ones
+    /// ([`crate::ratelimit`]).
+    #[serde(default)]
+    pub(crate) rate_limited: Vec<String>,
+    /// Phrases of its errors that mean an exhausted provider quota, besides the common ones.
+    #[serde(default)]
+    pub(crate) quota_exhausted: Vec<String>,
 }
 
 /// What one `context` value selects.
@@ -104,6 +111,9 @@ impl Harness {
         }
         if self.sign_in.as_ref().is_some_and(|command| command.trim().is_empty()) {
             bail!("harness {name}: sign_in must not be blank; omit it when the harness names no sign-in command");
+        }
+        if self.rate_limited.iter().chain(&self.quota_exhausted).any(|phrase| phrase.trim().is_empty()) {
+            bail!("harness {name}: rate_limited and quota_exhausted phrases must not be blank");
         }
         for (value, selects) in &self.context {
             if value.trim().is_empty() {
@@ -349,7 +359,8 @@ fn needs_sign_in(e: &agent_client_protocol::Error) -> bool {
 }
 
 /// `e`, from the harness of `launch` while doing `what`, as an error: a [`SignedOut`] one when it says the harness
-/// needs signing in, given the auth methods the harness offered.
+/// needs signing in, given the auth methods the harness offered, else a [`crate::ratelimit::Limited`] one when it
+/// reports a provider limit.
 fn harness_error(
     launch: &Launch,
     what: &str,
@@ -364,6 +375,9 @@ fn harness_error(
             detail: e.to_string(),
         };
         return signed_out.into();
+    }
+    if let Some(limited) = crate::ratelimit::classify(&launch.harness, &e.to_string()) {
+        return limited.into();
     }
     anyhow!("{} {what}: {e}", launch.harness)
 }
@@ -527,6 +541,8 @@ impl Launch {
             mode: None,
             context: BTreeMap::new(),
             sign_in: None,
+            rate_limited: Vec::new(),
+            quota_exhausted: Vec::new(),
         };
         Self {
             harness: Arc::new(harness),

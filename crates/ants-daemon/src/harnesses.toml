@@ -1,11 +1,14 @@
 # The built-in harness definitions. A config file's [harnesses.<name>] table of the same name replaces one whole.
-# `sign_in` is the command a human runs when the harness reports it is not signed in.
+# `sign_in` is the command a human runs when the harness reports it is not signed in. `rate_limited` and
+# `quota_exhausted` add phrases of the harness's errors that mean a provider rate limit or an exhausted quota to the
+# common ones (HTTP 429/529, "rate limit", "overloaded", "quota exceeded", "usage limit" and the like).
 
 # GitHub Copilot CLI.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp"]
 sign_in = "copilot login"
+quota_exhausted = ["premium request", "ai credits"]
 
 [harnesses.copilot.context]
 default = { args = ["--context", "default"] }
@@ -17,6 +20,7 @@ long_context = { args = ["--context", "long_context"] }
 command = "claude-agent-acp"
 mode = "default"
 sign_in = "claude login"
+quota_exhausted = ["hit your session limit", "hit your weekly limit", "hit your opus limit", "limit reached - resets"]
 
 [harnesses.claude.context]
 default = {}
@@ -30,3 +34,4 @@ command = "agy"
 args = ["acp", "--disable-telemetry"]
 mode = "default"
 sign_in = "agy"
+quota_exhausted = ["daily quota"]

@@ -1116,9 +1116,10 @@ fn describe(entries: &[&RosterEntry]) -> String {
         .map(|e| {
             let capabilities =
                 if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
-            let activity = match (&e.signed_out, e.activity) {
-                (Some(_), _) => ", signed out".to_owned(),
-                (None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
+            let activity = match (&e.signed_out, &e.limited, e.activity) {
+                (Some(_), _, _) => ", signed out".to_owned(),
+                (None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
+                (None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
             };
             let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
@@ -1128,6 +1129,14 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",
                     out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     e.ant
+                );
+            } else if let Some(limited) = &e.limited {
+                let _ = write!(
+                    text,
+                    "\n  harness held back by a provider limit ({}): messages to {} wait until about {}",
+                    limited.kind.as_str(),
+                    e.ant,
+                    limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 );
             }
             if let Some(whoami) = &e.whoami
@@ -1612,6 +1621,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         }
     }
 
@@ -1869,7 +1879,10 @@ mod tests {
         out.activity = Some(ants_proto::Activity::Idle);
         let since = "2026-01-01T00:00:00Z".parse().unwrap();
         out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
-        let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs];
+        let mut limited = listed("dev-q", &[]);
+        let until = "2026-01-01T00:10:00Z".parse().unwrap();
+        limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
+        let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
         let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
         let current = from_human();
         let _turn = mcp.begin(&current);
@@ -1886,6 +1899,13 @@ mod tests {
             text.contains(
                 "ops: billing (copilot on m1, signed out)\n  harness signed out since 2026-01-01T00:00:00Z: messages \
                  to ops wait unanswered until a human signs it in (`copilot login` on m1)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "dev-q: no capabilities (copilot on m1, out-of-quota)\n  harness held back by a provider limit \
+                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z"
             ),
             "{text}"
         );
