@@ -1195,7 +1195,8 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     /// The channel post that @mentioned `to`, a human member of the channel, when the message tells it so
-    /// ([`ChannelPost::mention_notice`]): `from` is the post's author, the thread and text are the post's.
+    /// ([`ChannelPost::mention_notice`]): `from` is the post's author, or the channel's messenger relaying a webhook's
+    /// post ([`ChannelPost::relayed_notice`]), the thread and text are the post's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention: Option<Mention>,
     pub sent_at: DateTime<Utc>,
@@ -1207,6 +1208,10 @@ pub struct Mention {
     pub channel: ChannelId,
     /// The post's id.
     pub post: Uuid,
+    /// The post's author, when the notice is relayed by another ([`ChannelPost::relayed_notice`]): the envelope's
+    /// `from` sent it. It is the sender's word only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<UserId>,
 }
 
 impl Envelope {
@@ -1661,6 +1666,13 @@ impl ChannelEntry {
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !humans.contains(m)).cloned().collect()
     }
 
+    /// Who sends the mention notices of `post` ([`ChannelEntry::notified`]): its author, or for a webhook's post the
+    /// channel's [`ChannelEntry::messenger`], since a webhook's credentials publish only to its destination
+    /// ([`ChannelPost::relayed_notice`]). A reader checks [`ChannelPost::webhook`] against the webhook's marker first.
+    pub fn notifier(&self, post: &ChannelPost) -> UserId {
+        if post.webhook { self.messenger() } else { post.from.clone() }
+    }
+
     /// The `humans` `post` notifies ([`ChannelPost::mention_notice`]): the members among them it @mentions, except its
     /// author. They are never woken: a mention of a human wakes no agent, and keeps the post from triage. A post to
     /// another channel notifies nobody here.
@@ -2017,10 +2029,18 @@ impl ChannelPost {
             in_reply_to: None,
             turn_budget: self.turn_budget,
             webhook: self.webhook,
-            mention: Some(Mention { channel: self.channel.clone(), post: self.id }),
+            mention: Some(Mention { channel: self.channel.clone(), post: self.id, author: None }),
             sent_at: self.sent_at,
             ..Envelope::on_thread(self.thread_id.clone(), self.from.clone(), human.clone(), self.text.clone())
         }
+    }
+
+    /// The [`ChannelPost::mention_notice`] to `human` as `relay` sends it for the post's author, a webhook
+    /// ([`ChannelEntry::notifier`]): from `relay`, no webhook's, naming the author in [`Mention::author`].
+    pub fn relayed_notice(&self, human: &UserId, relay: &UserId) -> Envelope {
+        let notice = self.mention_notice(human);
+        let mention = notice.mention.map(|mention| Mention { author: Some(self.from.clone()), ..mention });
+        Envelope { from: relay.clone(), webhook: false, mention, ..notice }
     }
 
     /// The JetStream msg id of the [`ChannelPost::mention_notice`] to `human`, so a notice sent again is stored once.
@@ -2941,7 +2961,7 @@ mod tests {
         assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&p("dev-a"), &alice, &mixed.thread_id));
         assert_eq!((notice.text.as_str(), notice.turn_budget), (mixed.text.as_str(), mixed.turn_budget));
         assert_eq!((&notice.owner, &notice.creator), (&None, &None), "a notice claims no thread");
-        assert_eq!(notice.mention, Some(Mention { channel: c, post: mixed.id }));
+        assert_eq!(notice.mention, Some(Mention { channel: c.clone(), post: mixed.id, author: None }));
         assert_eq!(notice.subject(), subject::inbox(&alice, &p("dev-a")));
         assert_eq!(mixed.mention_msg_id(&alice), format!("mention.{}.alice", mixed.id));
         assert_eq!(mention_key(&p("dev-a"), 7, &alice), "dev-a.mention.7.alice");
@@ -2954,6 +2974,31 @@ mod tests {
         assert_eq!(read, Envelope { mention: None, ..notice }, "an envelope from before mentions reads as a message");
         let plain = serde_json::to_string(&Envelope::new(p("dev-a"), alice, "hi")).unwrap();
         assert!(!plain.contains("mention"), "{plain}");
+    }
+
+    #[test]
+    fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post() {
+        let (c, alice) = ("ops".parse::<ChannelId>().unwrap(), p("alice"));
+        let mut humans = Humans::default();
+        humans.add("alice", HumanEntry::new(alice.clone())).unwrap();
+        let mut entry = ChannelEntry::new(c.clone());
+        entry.add_member(alice.clone());
+        let hook = ChannelPost::new(c.clone(), p("github"), "deploy failed").from_webhook(vec![alice.clone()]);
+        assert_eq!(entry.notified(&hook, &humans), std::slice::from_ref(&alice));
+        assert_eq!(entry.notifier(&hook), UserId::messenger());
+        entry.messenger = Some(p("dev-a"));
+        assert_eq!(entry.notifier(&hook), p("dev-a"));
+        let own = ChannelPost::new(c.clone(), p("dev-b"), "@alice look");
+        assert_eq!(entry.notifier(&own), p("dev-b"), "an ant's or a human's post: its author");
+
+        let notice = hook.relayed_notice(&alice, &p("dev-a"));
+        assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&p("dev-a"), &alice, &hook.thread_id));
+        assert_eq!((notice.text.as_str(), notice.webhook), (hook.text.as_str(), false));
+        assert_eq!(notice.mention, Some(Mention { channel: c, post: hook.id, author: Some(p("github")) }));
+        assert_eq!(notice.subject(), subject::inbox(&alice, &p("dev-a")));
+        let json = serde_json::to_value(&notice).unwrap();
+        assert_eq!(json["mention"]["author"], "github");
+        assert!(serde_json::to_value(hook.mention_notice(&alice)).unwrap()["mention"].get("author").is_none());
     }
 
     #[test]

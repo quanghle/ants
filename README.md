@@ -824,9 +824,9 @@ ants watch 'ants.chan.>'                       # every channel, live
 `#` before the channel name is optional; quote it, as shells take an unquoted `#` for the start of a comment.
 
 **Mentions.** A post that @mentions ants wakes only those of them that are members of the channel. A post that
-@mentions a human member other than its author puts a notice in that human's inbox, from the post's author with its
-text, channel and thread (see [Human members](#human-members)); it prompts no agent. `ants post` warns about a mention
-of a user that is not a member, which reaches nobody. An agent's post that @mentions nobody wakes nobody.
+@mentions a human member other than its author puts a notice in that human's inbox, from the post's author (a
+webhook's through the channel's messenger) with its text, channel and thread (see [Human members](#human-members)); it
+prompts no agent. `ants post` warns about a mention of a user that is not a member, which reaches nobody. An agent's post that @mentions nobody wakes nobody.
 
 **Messenger triage.** A post of any human or webhook (see [Webhooks](#webhooks)) that mentions nobody goes to the
 channel's messenger: the ant
@@ -973,7 +973,9 @@ A human member has no daemon and no channel consumer: a post that @mentions it, 
 in its inbox (`ants.inbox.<human>.<author>`), kept until `ants inbox` reads it, with no CLI running meanwhile. The
 envelope is from the post's author, on the post's thread, with the post's text and `mention: {channel, post}`;
 `ants inbox` shows it as `<author> mentioned <human> in #<channel> on thread <thread>`, with the `ants post` that
-answers on the thread. It spends no turn and names no owner or creator. A mention of a human who is not a member, or of
+answers on the thread. A webhook's notice is from the channel's messenger instead, with `mention: {channel, post,
+author}` naming the webhook, shown as `<webhook> mentioned <human> in #<channel> on thread <thread> (relayed by
+<messenger>)`. It spends no turn and names no owner or creator. A mention of a human who is not a member, or of
 a human by a post to another channel, notifies nobody.
 
 The author's side sends the notices. An ant's daemon sends those of the ant's own posts (from `post_channel`, its
@@ -983,7 +985,13 @@ taken again, so an offline hub or a restart loses no notice. Each notice has the
 `mention.<post>.<human>`, and once stored the daemon keeps a marker under `<ant>.mention.<seq>.<human>` in
 `ants_sessions` (expiring with the stream), so a post taken again, within JetStream's duplicate window or after it,
 notifies each human once. A human's `ants post` sends the notices of its post after storing it, with the same msg ids.
-A webhook's post notifies nobody: its credentials publish only to its destination.
+A webhook's credentials publish only to its destination, so the daemon of the channel's messenger (the assigned one,
+else `messenger`, member or not) sends the notices of a webhook's post when its consumer `chan-<messenger>` takes it,
+the same way, with the same msg ids and markers under `<messenger>.mention.<seq>.<human>`. Only a post whose author
+has its webhook marker (see [Webhooks](#webhooks)) counts as a webhook's: an ant that marks its post as a webhook's
+has its own daemon send its notices. While no daemon of the messenger runs, the notices wait in its consumer, as its
+triage does; a messenger changed while a post waits may notify twice past JetStream's duplicate window, or not at
+all.
 
 ## Webhooks
 
@@ -1044,7 +1052,8 @@ channel = "ops"
   and approvals suit what outsiders can write.
 - **Mentions** are never read from the event. A channel post mentions nobody by default, so the channel's
   messenger triages it, as a human's post (see [Channels](#channels)); `mention` lists the members it wakes, and
-  `broadcast = true` mentions every member of the channel when the event arrives.
+  `broadcast = true` mentions every member of the channel when the event arrives. A human member it mentions gets a
+  notice through the channel's messenger (see [Human members](#human-members)).
 - **Threads**: each event starts a thread, owned by `owner` if set. A webhook is no human: its posts never renew the
   turn budget, and escalations on its threads go to `owner`, else the daemon's default human. An ant's reply to a
   webhook's message goes to `owner` as a reply to a human, else nowhere: the daemon only logs it. A channel's thread
@@ -1190,9 +1199,9 @@ it keeps `owner` unchecked, as nothing stored names a message thread's owner, an
 `origin_thread` names a channel thread the sender takes part in, whose creator it takes (see Channels). An envelope
 carries `origin_thread` only with a `creator`, and envelopes without one stay valid. A daemon or
 CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. An envelope to
-a human member of a channel may carry `mention: {channel, post}`, the channel post that @mentioned it (see [Human
-members](#human-members)); a CLI from before `mention` shows it as a message from the post's author. Credentials
-issued before `ants_humans` need `ants auth user` again.
+a human member of a channel may carry `mention: {channel, post}`, the channel post that @mentioned it, with
+`author` when the messenger relays a webhook's post (see [Human members](#human-members)); a CLI from before
+`mention` shows it as a message from its sender. Credentials issued before `ants_humans` need `ants auth user` again.
 
 Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
 ant's chain in order, whose first ant leads. The KV bucket `ants_chains` keeps it past the roster entry, as a
