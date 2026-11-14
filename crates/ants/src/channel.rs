@@ -18,9 +18,7 @@ use ants_daemon::bus;
 pub use ants_daemon::channel::list;
 use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Reading, Stored, load, read_back};
 use ants_daemon::webhooks::Webhooks;
-use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, ThreadId, ThreadOrigin, UserId, Uuid, subject,
-};
+use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadOrigin, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
@@ -113,15 +111,6 @@ pub fn table(entries: &[ChannelEntry]) -> String {
         })
         .collect();
     lines.join("\n")
-}
-
-/// Those of `users` that are not `humans` and that no entry of the roster serves now.
-pub fn unserved<'a>(
-    users: impl IntoIterator<Item = &'a UserId>,
-    roster: &[RosterEntry],
-    humans: &Humans,
-) -> Vec<&'a UserId> {
-    users.into_iter().filter(|p| !humans.contains(p) && !roster.iter().any(|e| e.ant == **p)).collect()
 }
 
 /// The users `post` @mentions, other than its author, that it neither wakes nor notifies, not being members of the
@@ -592,13 +581,10 @@ mod tests {
         let mut entry = ChannelEntry::new(ops());
         entry.add_member(p("dev-a"));
         let post = ChannelPost::new(ops(), UserId::human(), "@dev-a @dev-b @human @alice look");
-        let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
         assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b"), &p("alice")], "a human is no member either");
         entry.add_member(p("alice"));
         assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b")], "a human member is notified");
         assert_eq!(idle_mentions(&post, None), [&p("dev-a"), &p("dev-b"), &p("alice")]);
-        let roster: Vec<RosterEntry> = Vec::new();
-        assert_eq!(unserved([&p("dev-a"), &p("alice")], &roster, &humans), [&p("dev-a")], "a human needs no daemon");
     }
 
     #[test]

@@ -1513,6 +1513,17 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words
         true => bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.role).await?,
         false => bus::live_inbox(&client, &nats.me.id).await?,
     };
+    // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
+    let unserved = roster::unserved_warnings(&js, &[&envelope.to]).await;
+    if !unserved.is_empty() && !humans::load(&js, &nats.me).await.contains(&envelope.to) {
+        for warning in unserved {
+            tracing::warn!("{warning}");
+        }
+        if replies.wait || replies.follow {
+            let flag = if replies.wait { "--wait" } else { "--follow" };
+            tracing::warn!("a reply waits for a daemon to serve {}: {flag} may not end until one does", envelope.to);
+        }
+    }
     if let Some(owner) = &envelope.owner {
         owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
     }
@@ -1721,24 +1732,16 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     Ok(())
 }
 
-/// Warn about members, messengers and owners no daemon serves now, rather than refuse them: one may start later.
-/// `humans` need none.
+/// Warn about members, messengers and owners no daemon serves now ([`roster::unserved`]), rather than refuse them:
+/// one may start later. `humans` need none.
 async fn warn_unserved<'a>(
     js: &async_nats::jetstream::Context,
     users: impl IntoIterator<Item = &'a UserId>,
     humans: &ants_proto::Humans,
 ) {
     let users: Vec<&UserId> = users.into_iter().filter(|u| !humans.contains(u)).collect();
-    if users.is_empty() {
-        return;
-    }
-    match roster::list(js).await {
-        Ok(roster) => {
-            for ant in channel::unserved(users, &roster, humans) {
-                tracing::warn!("{ant} is not in the roster: no daemon serves {ant} now");
-            }
-        }
-        Err(e) => tracing::debug!("not checking the roster: {e:#}"),
+    for warning in roster::unserved_warnings(js, &users).await {
+        tracing::warn!("{warning}");
     }
 }
 

@@ -264,6 +264,8 @@ fn channels_are_managed_posted_to_and_read() {
     let thread = stdout.strip_prefix("thread ").and_then(|t| t.strip_suffix('\n')).expect(&stdout);
     assert_eq!(asked.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains(&format!("no reply on thread {thread} within 1s")), "{stderr}");
+    assert!(stderr.contains("messenger is not in the roster: no daemon serves messenger now"), "{stderr}");
+    assert!(stderr.contains("--wait may not end until one does"), "{stderr}");
 
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
     assert!(!ok(&["channel", "list"]).0.contains("#dev"));
