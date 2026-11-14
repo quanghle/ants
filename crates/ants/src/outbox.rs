@@ -374,11 +374,15 @@ mod tests {
         // delivers what the hub never got.
         let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
         let mut waiters = [
-            bus::caught_up_inbox(&h_leaf, &h_leaf_js, &human).await.unwrap(),
-            bus::caught_up_inbox(&h, &h_js, &human).await.unwrap(),
+            bus::caught_up_inbox(&h_leaf, &h_leaf_js, &human, Role::Human).await.unwrap(),
+            bus::caught_up_inbox(&h, &h_js, &human, Role::Human).await.unwrap(),
         ];
         h.flush().await.unwrap();
         h_leaf.flush().await.unwrap();
+        // So does dev-a's CLI on the machine, with dev-a's credentials.
+        let (a_cli, a_cli_js) = connect(&leaf_node.url, &dev_a).await;
+        let mut ant_waiter = bus::caught_up_inbox(&a_cli, &a_cli_js, &dev_a, Role::Ant).await.unwrap();
+        a_cli.flush().await.unwrap();
 
         // Before the outbox exists, a publish that cannot reach the hub fails outright.
         outbox_missing_fails(&b_js).await;
@@ -467,14 +471,20 @@ mod tests {
         let (_b_hub, b_hub_js) = connect(&hub.url, &dev_b).await;
         let away = Envelope::new(dev_b.clone(), human.clone(), "away");
         assert_eq!(bus::publish(&b_hub_js, &away).await.unwrap(), bus::Stored::Hub);
+        let away_from_a = Envelope::new(dev_b.clone(), dev_a.clone(), "away");
+        assert_eq!(bus::publish(&b_hub_js, &away_from_a).await.unwrap(), bus::Stored::Hub);
         assert_eq!(next(&mut waiters[1]).await, away);
         reload(leaf_port);
         assert_eq!(next(&mut waiters[0]).await, away, "the waiter on the leaf gets it once the uplink is back");
+        assert_eq!(next(&mut ant_waiter).await, away_from_a, "and so does an ant's");
         let [on_leaf, on_hub] = &mut waiters;
         let wait = bus::CATCH_UP * 2;
-        let (on_leaf, on_hub) =
-            tokio::join!(tokio::time::timeout(wait, on_leaf.next()), tokio::time::timeout(wait, on_hub.next()));
-        assert!(on_leaf.is_err() && on_hub.is_err(), "each once, live or read back");
+        let (on_leaf, on_hub, ant) = tokio::join!(
+            tokio::time::timeout(wait, on_leaf.next()),
+            tokio::time::timeout(wait, on_hub.next()),
+            tokio::time::timeout(wait, ant_waiter.next())
+        );
+        assert!(on_leaf.is_err() && on_hub.is_err() && ant.is_err(), "each once, live or read back");
 
         remove(&h_js, &m1).await.unwrap();
         for name in [STREAM.to_owned(), format!("KV_{LINKS_BUCKET}")] {

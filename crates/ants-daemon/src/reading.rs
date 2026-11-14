@@ -53,7 +53,22 @@ pub async fn read_back(
     reading: Reading,
     filter: &str,
     start: consumer::DeliverPolicy,
-    take: impl FnMut(u64, SystemTime, &str, &[u8]) -> ControlFlow<()>,
+    mut take: impl FnMut(u64, SystemTime, &str, &[u8]) -> ControlFlow<()>,
+) -> Result<()> {
+    read_back_messages(js, reader, reading, filter, start, |seq, stored, msg| {
+        take(seq, stored, &msg.subject, &msg.payload)
+    })
+    .await
+}
+
+/// [`read_back`], handing `take` each whole message, headers included, as it was published (with no reply subject).
+pub async fn read_back_messages(
+    js: &jetstream::Context,
+    reader: &str,
+    reading: Reading,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
 ) -> Result<()> {
     let config = consumer::pull::Config {
         filter_subject: filter.to_owned(),
@@ -111,7 +126,7 @@ async fn take_spare(
 
 async fn read_through(
     consumer: &consumer::PullConsumer,
-    mut take: impl FnMut(u64, SystemTime, &str, &[u8]) -> ControlFlow<()>,
+    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
 ) -> Result<()> {
     let mut left = consumer.cached_info().num_pending;
     while left > 0 {
@@ -122,7 +137,8 @@ async fn read_through(
             got += 1;
             let Ok(info) = msg.info() else { continue };
             let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
-            if take(seq, stored, &msg.subject, &msg.payload).is_break() {
+            let msg = async_nats::Message { reply: None, ..msg.message };
+            if take(seq, stored, msg).is_break() {
                 return Ok(());
             }
         }
@@ -154,7 +170,7 @@ async fn read_by_gets(
     js: &jetstream::Context,
     filter: &str,
     start: consumer::DeliverPolicy,
-    mut take: impl FnMut(u64, SystemTime, &str, &[u8]) -> ControlFlow<()>,
+    mut take: impl FnMut(u64, SystemTime, async_nats::Message) -> ControlFlow<()>,
 ) -> Result<()> {
     let (mut seq, mut since) = match start {
         consumer::DeliverPolicy::All => (1, None),
@@ -179,10 +195,20 @@ async fn read_by_gets(
         if msg.sequence > last {
             break;
         }
-        if take(msg.sequence, msg.time.into(), &msg.subject, &msg.payload).is_break() {
+        let (sequence, stored) = (msg.sequence, msg.time.into());
+        let msg = async_nats::Message {
+            subject: msg.subject,
+            reply: None,
+            payload: msg.payload,
+            headers: Some(msg.headers),
+            status: None,
+            description: None,
+            length: 0,
+        };
+        if take(sequence, stored, msg).is_break() {
             break;
         }
-        seq = msg.sequence + 1;
+        seq = sequence + 1;
     }
     Ok(())
 }

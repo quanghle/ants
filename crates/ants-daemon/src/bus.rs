@@ -2,13 +2,15 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash as _, Hasher as _};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, SESSIONS_BUCKET,
-    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, Role,
+    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId, inbox_prefix,
+    subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -16,6 +18,8 @@ use async_nats::jetstream::context::{GetStreamErrorKind, PublishErrorKind, Reque
 use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
+
+use crate::reading::{self, Reading};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
@@ -521,10 +525,18 @@ const CATCH_UP_BATCH: usize = 100;
 
 /// [`live_inbox`], which also reads back from the hub's stream, every [`CATCH_UP`], the messages stored for `user`
 /// since it was called (or since the hub first answered, when out of its reach then): what the hub stored while this
-/// connection, or the uplink of the leaf node it goes through, was down never comes live. It reads with
-/// `STREAM.MSG.GET`, which only a human's credentials allow.
-pub async fn caught_up_inbox(client: &async_nats::Client, js: &jetstream::Context, user: &UserId) -> Result<LiveInbox> {
-    inbox(client, user, Some(read_back(js.clone(), subject::inbox_of(user)))).await
+/// connection, or the uplink of the leaf node it goes through, was down never comes live. It reads as the CLI with
+/// credentials in `role` does ([`Reading::cli`]): a human with `STREAM.MSG.GET`, an ant through a spare of its inbox
+/// consumer, which filters only its own inbox, so the read never touches the consumer its daemon takes the inbox from.
+pub async fn caught_up_inbox(
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    user: &UserId,
+    role: Role,
+) -> Result<LiveInbox> {
+    let read_back =
+        read_back(js.clone(), ants_proto::inbox_consumer(user), Reading::cli(role), subject::inbox_of(user));
+    inbox(client, user, Some(read_back)).await
 }
 
 async fn inbox(client: &async_nats::Client, user: &UserId, read_back: Option<LiveInbox>) -> Result<LiveInbox> {
@@ -538,13 +550,14 @@ async fn inbox(client: &async_nats::Client, user: &UserId, read_back: Option<Liv
     Ok(Box::pin(futures::stream::select_all(all).filter(move |msg| std::future::ready(seen.first(msg)))))
 }
 
-/// The messages on `filter` the hub's stream stores from now on, read back every [`CATCH_UP`] until dropped.
-fn read_back(js: jetstream::Context, filter: String) -> LiveInbox {
+/// The messages on `filter` the hub's stream stores from now on, read back every [`CATCH_UP`] as `reading` says,
+/// through spares of `reader` for an ant, until dropped.
+fn read_back(js: jetstream::Context, reader: String, reading: Reading, filter: String) -> LiveInbox {
     let (found, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut after = None;
         loop {
-            for msg in stored_after(&js, &filter, &mut after).await {
+            for msg in stored_after(&js, &reader, reading, &filter, &mut after).await {
                 if found.send(msg).is_err() {
                     return;
                 }
@@ -560,38 +573,34 @@ fn read_back(js: jetstream::Context, filter: String) -> LiveInbox {
 
 /// The messages on `filter` the hub's stream stored after sequence `after`, which moves past them. Without `after`, it
 /// becomes the stream's last sequence. Out of the hub's reach, none.
-async fn stored_after(js: &jetstream::Context, filter: &str, after: &mut Option<u64>) -> Vec<async_nats::Message> {
-    let Ok(stream) = js.get_stream_no_info(STREAM).await else { return Vec::new() };
-    let Some(mut last) = *after else {
-        match stream.get_info().await {
-            Ok(info) => *after = Some(info.state.last_sequence),
+async fn stored_after(
+    js: &jetstream::Context,
+    reader: &str,
+    reading: Reading,
+    filter: &str,
+    after: &mut Option<u64>,
+) -> Vec<async_nats::Message> {
+    let Some(last) = *after else {
+        match js.get_stream_no_info(STREAM).await {
+            Ok(stream) => match stream.get_info().await {
+                Ok(info) => *after = Some(info.state.last_sequence),
+                Err(e) => tracing::debug!(error = %e, "cannot read back the inbox yet"),
+            },
             Err(e) => tracing::debug!(error = %e, "cannot read back the inbox yet"),
         }
         return Vec::new();
     };
     let mut found = Vec::new();
-    while found.len() < CATCH_UP_BATCH {
-        match stream.get_first_raw_message_by_subject(filter, last + 1).await {
-            Ok(msg) => {
-                last = msg.sequence;
-                found.push(async_nats::Message {
-                    subject: msg.subject,
-                    reply: None,
-                    payload: msg.payload,
-                    headers: Some(msg.headers),
-                    status: None,
-                    description: None,
-                    length: 0,
-                });
-            }
-            Err(e) if e.kind() == stream::RawMessageErrorKind::NoMessageFound => break,
-            Err(e) => {
-                tracing::debug!(error = %e, "reading back the inbox");
-                break;
-            }
-        }
+    let start = consumer::DeliverPolicy::ByStartSequence { start_sequence: last + 1 };
+    let read = reading::read_back_messages(js, reader, reading, filter, start, |seq, _, msg| {
+        *after = Some(seq);
+        found.push(msg);
+        if found.len() < CATCH_UP_BATCH { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
+    })
+    .await;
+    if let Err(e) = read {
+        tracing::debug!(error = format!("{e:#}"), "reading back the inbox");
     }
-    *after = Some(last);
     found
 }
 

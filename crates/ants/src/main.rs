@@ -949,10 +949,10 @@ fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
 async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words: Vec<String>) -> Result<()> {
     let envelope = ask_envelope(&nats.me, thread, words)?;
     let (client, js) = nats.connect("ants-cli").await?;
-    // Subscribe first so a fast reply is not missed. A human's waiter also reads back what the hub stored while out of
-    // its reach; an ant's credentials cannot read its inbox from the stream.
-    let inbox = match nats.me.role.is_human() && (replies.wait || replies.follow) {
-        true => bus::caught_up_inbox(&client, &js, &nats.me.id).await?,
+    // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
+    // reach.
+    let inbox = match replies.wait || replies.follow {
+        true => bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.role).await?,
         false => bus::live_inbox(&client, &nats.me.id).await?,
     };
     if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {

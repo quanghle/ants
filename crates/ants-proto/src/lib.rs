@@ -524,7 +524,8 @@ pub mod subject {
     pub const ALL: &str = "ants.>";
 }
 
-/// Durable JetStream consumer name of a user's inbox.
+/// Durable JetStream consumer name of a user's inbox. The CLI with an ant's credentials reads the ant's inbox back
+/// through one of its [`spare_readers`], with no ack, while the ant's daemon takes the inbox from it.
 pub fn inbox_consumer(user: &UserId) -> String {
     format!("inbox-{user}")
 }
@@ -610,10 +611,10 @@ pub fn notes_consumer(user: &UserId) -> String {
 /// How many [`spare_readers`] each of an ant's reader consumers has.
 pub const SPARE_READERS: usize = 3;
 
-/// The spares of an ant's reader consumer `reader` ([`notes_consumer`], [`chan_reader`]), `<reader>_<n>`, with the
-/// same filter pinned: the CLI with the ant's credentials takes a free one for each read, so it never deletes the
-/// consumer its daemon, or another CLI read, is reading through. A user id has no `_`, so no spare is named like any
-/// user's own consumer.
+/// The spares of an ant's reader consumer `reader` ([`inbox_consumer`], [`notes_consumer`], [`chan_reader`]),
+/// `<reader>_<n>`, with the same filter pinned: the CLI with the ant's credentials takes a free one for each read, so it
+/// never deletes the consumer its daemon, or another CLI read, is reading through. A user id has no `_`, so no spare is
+/// named like any user's own consumer.
 pub fn spare_readers(reader: &str) -> impl Iterator<Item = String> + '_ {
     (1..=SPARE_READERS).map(move |n| format!("{reader}_{n}"))
 }
@@ -694,7 +695,7 @@ impl Permissions {
     /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
     /// letters, reads back only its own dead letters (through its own [`dead_reader`]), reads only its own inbox
-    /// (consumer and live), the notes of every thread (live, and from the stream
+    /// (consumer and its spares, and live), the notes of every thread (live, and from the stream
     /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
     /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
@@ -844,8 +845,12 @@ impl Permissions {
                 format!("$KV.{LINKS_BUCKET}.{user}.>"),
                 format!("ants.out.links.{user}.>"),
             ]);
-            // The spares of its notes and channel readers, for the CLI, each with the same filter pinned.
-            for (reader, filter) in [(&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)] {
+            // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
+            // filter pinned; no ack, so the spares of the inbox consumer only read it.
+            let own_inbox = subject::inbox_of(user);
+            for (reader, filter) in
+                [(&consumer, own_inbox.as_str()), (&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)]
+            {
                 for spare in spare_readers(reader) {
                     publish.extend([
                         format!("$JS.API.CONSUMER.CREATE.{STREAM}.{spare}.{filter}"),
@@ -3280,7 +3285,9 @@ mod tests {
             spare_readers("chanread-dev-a").collect::<Vec<_>>(),
             ["chanread-dev-a_1", "chanread-dev-a_2", "chanread-dev-a_3"]
         );
-        for (reader, filter) in [("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")] {
+        for (reader, filter) in
+            [("inbox-dev-a", "ants.inbox.dev-a.*"), ("notes-dev-a", "ants.notes.>"), ("chanread-dev-a", "ants.chan.>")]
+        {
             for spare in spare_readers(reader) {
                 for s in [
                     format!("$JS.API.CONSUMER.CREATE.ANTS.{spare}.{filter}"),
@@ -3292,9 +3299,9 @@ mod tests {
             }
         }
         let spares = a.publish.iter().filter(|s| s.contains("-dev-a_")).count();
-        assert_eq!(spares, 2 * 3 * SPARE_READERS, "no spare with any other filter");
+        assert_eq!(spares, 3 * 3 * SPARE_READERS, "no spare with any other filter, and none acks");
         let human = Permissions::for_user(&UserId::human(), Role::Human);
-        assert!(!human.publish.iter().any(|s| s.contains("notes-human_") || s.contains("chanread-human_")));
+        assert!(!human.publish.iter().any(|s| s.contains("-human_")));
         let named_like =
             |spare: String| spare.strip_prefix("chanread-").is_some_and(|user| user.parse::<UserId>().is_ok());
         assert!(!spare_readers("chanread-dev-a").any(named_like), "no spare is another user's reader");
