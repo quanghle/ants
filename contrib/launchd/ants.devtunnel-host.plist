@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: `devtunnel host` of the hub's private Dev Tunnel, on the hub machine, forwarding the tunnel's ports to the
+     hub nats-server (docs/transport.md, "Dev Tunnels"). scripts/install-units.sh --devtunnel-host TUNNEL fills in the
+     @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.devtunnel-host.plist.
+     The CLI login of the user authorizes hosting (devtunnel user login); after it expires, a new login takes effect
+     at the next restart, at most ThrottleInterval later.
+     launchd has no start order: connections that arrive before ants.nats listens fail and the leaves retry them.
+     KeepAlive restarts devtunnel whenever it exits, also after an expired login, throttled by ThrottleInterval. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.devtunnel-host</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@DEVTUNNEL@</string>
+		<string>host</string>
+		<string>@HOST_TUNNEL@</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/devtunnel-host.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/devtunnel-host.log</string>
+</dict>
+</plist>

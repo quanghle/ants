@@ -197,7 +197,7 @@ devtunnel create ants-hub
 devtunnel port create ants-hub -p 7422                   # TCP leafnode port for worker leaves
 devtunnel port create ants-hub -p 4222                   # optional: TCP client port for leaf-free workers
 devtunnel port create ants-hub -p 8080 --protocol http   # optional: WebSocket listener (https/wss URL)
-devtunnel host ants-hub
+devtunnel host ants-hub                                  # or as a service: install-units.sh --devtunnel-host ants-hub
 ```
 
 Connect from a worker:
@@ -209,6 +209,17 @@ devtunnel connect ants-hub.<region>                      # or -t "$(cat connect.
 `devtunnel connect` binds forwarded ports on loopback (`127.0.0.1` and IPv6 loopback) with identical port numbers, requiring NATS clients or the leaf in the same network namespace. Point a worker leaf at `nats-leaf://127.0.0.1:7422`; when running a local leaf on `127.0.0.1:4222`, omit port `4222` from the tunnel or move `--listen` to avoid port collision.
 
 Direct `wss://` to `https://<tunnel-id>-8080.<region>.devtunnels.ms` requires anonymous port access (`devtunnel access create ants-hub -p 8080 --anonymous`) with NATS `.creds` enforcing auth; never expose the NATS monitoring port. Private HTTPS ports require a cookie or `X-Tunnel-Authorization: tunnel <token>`, which only `ants bridge connect --header` can send.
+
+### `devtunnel host` as a service
+
+On the hub, `scripts/install-units.sh --devtunnel-host ants-hub` (`--devtunnel-bin PATH`) installs `contrib/launchd/ants.devtunnel-host.plist` or `contrib/systemd/ants-devtunnel-host.service`, restarting `devtunnel host` at most every 30 s whenever it exits (`~/Library/Logs/ants/devtunnel-host.log` or `journalctl --user -u ants-devtunnel-host`). systemd starts `ants-devtunnel-host` after `ants-nats` (and pulls it in); under launchd, connections arriving before `ants.nats` listens fail and the leaves retry them. Combine with the hub's own units, e.g. `scripts/install-units.sh --nats-conf ~/.config/ants/hub.conf --no-daemon --channel-manager CREDS --devtunnel-host ants-hub`.
+
+`devtunnel host` requires the CLI login of the tunnel owner (or an account with host access):
+
+- **Sign in** as the service user before installing: `devtunnel user login -g -d` (GitHub, device code; `-e` for Microsoft Entra). Check the login with `devtunnel user show`.
+- **Renew the login** before it expires (keychain credentials last several days): re-run `devtunnel user login -g -d` as the same user. An expired login makes `devtunnel host` exit or fail to start; after a new login the next 30 s restart recovers, without reinstalling. Restart immediately with `launchctl kickstart -k gui/$(id -u)/ants.devtunnel-host` or `systemctl --user restart ants-devtunnel-host`.
+- **Headless hubs**: sign in with an Entra service principal (`devtunnel user login --sp-tenant-id ID --sp-client-id ID --sp-certificate-file FILE`) or managed identity (`--mi-client-id ID`) that owns or may host the tunnel, avoiding interactive renewal.
+- **While the host is down**: worker `devtunnel connect` and leaf uplinks fail and retry; leaves queue outbound traffic in `ANTS_OUT` (see "Store and forward").
 
 ### `devtunnel connect` as a service
 
