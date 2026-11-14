@@ -819,7 +819,8 @@ enum ToolsCommand {
         #[arg(long)]
         always: bool,
         /// Also add the allow rule fitting the request exactly to the ant's allow list in the config file, then
-        /// reload the daemon serving it.
+        /// reload the daemon serving it. An ant added from a template takes its allow rules from the template:
+        /// nothing is added to its entry.
         #[arg(long)]
         rule: bool,
         /// Config file listing the ant, for --rule (default: ~/.ants/config.toml).
