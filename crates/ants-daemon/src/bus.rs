@@ -678,7 +678,7 @@ const CATCH_UP_BATCH: usize = 100;
 /// [`live_inbox`], which also reads back from the hub's stream, every [`CATCH_UP`], the messages stored for `user`
 /// since it was called (or since the hub first answered, when out of its reach then): what the hub stored while this
 /// connection, or the uplink of the leaf node it goes through, was down never comes live. It reads as the CLI with
-/// credentials in `role` does ([`Reading::cli`]): a human with `STREAM.MSG.GET`, an ant through a spare of its inbox
+/// credentials in `role` does ([`Reading::cli`]): a human by message gets, an ant through a spare of its inbox
 /// consumer, which filters only its own inbox, so the read never touches the consumer its daemon takes the inbox from.
 pub async fn caught_up_inbox(
     client: &async_nats::Client,

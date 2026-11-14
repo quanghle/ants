@@ -1452,10 +1452,10 @@ pub(crate) mod tests {
     async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
-        let (_h, h_js) = server.connect(&human).await;
+        let (h, h_js) = server.connect(&human).await;
         bus::ensure_stream(&h_js).await.unwrap();
         let (_a, a_js) = server.connect(&dev_a).await;
-        let (_b, b_js) = server.connect(&dev_b).await;
+        let (b, b_js) = server.connect(&dev_b).await;
         let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
 
         let first = NotesPost::spend(thread.clone(), dev_a.clone(), "draft", 8, None).unwrap();
@@ -1496,6 +1496,12 @@ pub(crate) mod tests {
             assert_eq!((&read.posts[..], read.last_seq), (&[first.clone(), answer.clone()][..], seen.last_seq + 2));
         }
         assert_eq!(next().await, forged, "the daemon's read carries on where it was");
+        // The human's reads go by batched direct gets, which no ant's credentials allow.
+        let batch = format!(r#"{{"batch":2,"next_by_subj":"{}"}}"#, subject::notes_of(&thread));
+        let got = h.request(format!("$JS.API.DIRECT.GET.{STREAM}"), batch.clone().into()).await.unwrap();
+        assert!(got.headers.unwrap().get("Nats-Num-Pending").is_some(), "a batch");
+        let denied = b.request(format!("$JS.API.DIRECT.GET.{STREAM}"), batch.into());
+        assert!(!matches!(timeout(Duration::from_secs(1), denied).await, Ok(Ok(_))), "an ant gets no batch");
 
         // dev-a's notes consumer filters thread notes only, and dev-b's is not dev-a's to use.
         let consumer = |name: String, filter: String| jetstream::consumer::pull::Config {

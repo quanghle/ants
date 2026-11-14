@@ -1,7 +1,7 @@
 //! `ants thread`: the threads in the ANTS stream, across inboxes (both ways), channel posts, notes, escalations, tool
 //! requests and their decisions, and dead letters.
 //!
-//! Read back by a human one message at a time (`STREAM.MSG.GET`, [`Reading::Gets`]), so nothing is consumed or acked
+//! Read back by a human by message gets (batched direct gets, [`Reading::Gets`]), so nothing is consumed or acked
 //! and no consumer is left behind. Only notes subjects name their thread, so a read goes through every message stored
 //! in its time window: `--since` bounds it, and `ants thread show` of a thread with a time-ordered id starts at the
 //! thread's start.
