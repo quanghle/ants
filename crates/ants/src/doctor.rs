@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
-use ants_daemon::creds::{self, Expiry, Kind, VersionStatus};
+use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
 use ants_daemon::harness::{self, DEFAULT_HARNESS, Harnesses, Readiness};
+use ants_daemon::keystore::{self, Store};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;
@@ -178,7 +179,9 @@ fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<I
     });
     match read {
         Ok(identity) => {
-            checks.push(check_creds(check, path, identity.finding.as_ref()?, now));
+            let finding = identity.finding.as_ref()?;
+            checks.push(check_creds(check, path, finding, now));
+            checks.extend(check_key("credentials key", path, finding.renew(), keystore::os()));
             Some(identity)
         }
         Err(e) => {
@@ -246,6 +249,25 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
     Check::new(check, status, detail, finding.renew())
 }
 
+/// The check of the seed that the credentials at `path` keep in `store` in their place, when they name a stored key:
+/// that the store answers, holds it, and that it is the key of their user JWT. `issue` has them issued again. Never
+/// shows the seed.
+fn check_key(check: &str, path: &Path, issue: Vec<String>, store: &dyn Store) -> Option<Check> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let Some(Seed::Stored(key)) = creds::seed_of(&text) else { return None };
+    Some(match creds::load(path, store) {
+        Ok(_) => Check::ok(check, format!("{key} ({}): its seed is in the OS credential store", path.display())),
+        Err(e) if keystore::is_unavailable(&e) => {
+            let fix = "unlock the OS credential store (log in), then check again; services started before then wait                        for it";
+            Check::fail(check, format!("{e:#}"), vec![fix.to_owned()])
+        }
+        Err(e) => {
+            let restore = "restore the seed from a backup of the OS credential store, or issue the credentials again:";
+            Check::fail(check, format!("{e:#}"), std::iter::once(restore.to_owned()).chain(issue).collect())
+        }
+    })
+}
+
 /// Connect, then check JetStream and the hub's stream and buckets.
 async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) -> (Vec<Check>, Option<Connected>) {
     let Some(identity) = identity else {
@@ -292,8 +314,7 @@ async fn connect(url: &str, creds: Option<&Path>, user: &UserId) -> Result<async
         .custom_inbox_prefix(ants_proto::inbox_prefix(user))
         .event_callback(|_| async {});
     if let Some(path) = creds {
-        options = bus::authenticate(options, path, ants_daemon::keystore::os())
-            .map_err(|e| Unreached::Other(format!("{e:#}")))?;
+        options = bus::authenticate(options, path, keystore::os()).map_err(|e| Unreached::NoKey(format!("{e:#}")))?;
     }
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, options.connect(url)).await {
         Ok(Ok(client)) => Ok(client),
@@ -315,6 +336,8 @@ enum Unreached {
     Refused(String),
     /// No server answered.
     Unreachable(String),
+    /// The credentials' seed could not be read.
+    NoKey(String),
     Other(String),
 }
 
@@ -347,6 +370,7 @@ fn unreached(setup: &Setup, identity: &Identity, through_leaf: Option<&Leaf>, e:
             }
             None => Check::fail(check, format!("{url} does not answer: {e}"), vec![set_nats]),
         },
+        Unreached::NoKey(e) => Check::skip(check, format!("no seed to connect with: {e}")),
         Unreached::Other(e) => Check::fail(check, format!("connecting to {url}: {e}"), vec![set_nats]),
     }
 }
@@ -652,6 +676,9 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
     let mut checks = Vec::new();
     for (ant, index) in ants.iter().zip(picked) {
         checks.push(check_ant_creds(ant, now));
+        if let Some(path) = &ant.creds {
+            checks.extend(check_key(&format!("ant {} key", ant.name), path, vec![issue(ant)], keystore::os()));
+        }
         let check = format!("ant {} harness", ant.name);
         let (handshake, installed) = match index {
             _ if !setup.harnesses => {
@@ -686,12 +713,18 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
     checks
 }
 
+/// The commands issuing the credentials of `ant` again.
+fn issue(ant: &Ant) -> String {
+    let name = &ant.name;
+    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
+    format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
+}
+
 /// An ant's credentials: an ant's of its name, issued for the JetStream domain it uses.
 fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     let check = format!("ant {} credentials", ant.name);
     let name = &ant.name;
-    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
-    let issue = format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}");
+    let issue = issue(ant);
     let Some(path) = &ant.creds else {
         return Check::skip(check, "none in the config file: the ant connects as no one");
     };
@@ -1274,6 +1307,41 @@ mod tests {
             let none = Setup { team: hub.dir().join("no-team"), ..other };
             assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
         }
+    }
+
+    #[test]
+    fn the_key_check_finds_a_stored_seed_locked_missing_or_of_another_key() {
+        let dir = ants_test_support::scratch_dir("doctor-key");
+        let team = dir.join("team");
+        auth::init(&team).unwrap();
+        let user = nkeys::KeyPair::new_user();
+        let (key, seed) = (user.public_key(), user.seed().unwrap());
+        let jwt = auth::sign_user(&team, &"dev-a".parse().unwrap(), Role::Ant, None, &key).unwrap();
+        let path = dir.join("dev-a.creds");
+        let store = keystore::Memory::default();
+        let check = |store: &keystore::Memory| {
+            let check = check_key("ant dev-a key", &path, vec!["ants add dev-a".to_owned()], store).unwrap();
+            let shown = check.to_string();
+            assert!(!shown.contains(&seed), "{shown}");
+            (check.status, shown)
+        };
+
+        auth::write_creds(&path, &jwt, &user).unwrap();
+        assert!(check_key("ant dev-a key", &path, Vec::new(), &store).is_none(), "the seed is in the file");
+        std::fs::write(&path, creds::stored_text(&jwt, &key)).unwrap();
+        store.set(&key, &seed).unwrap();
+        assert_eq!(check(&store).0, Status::Ok);
+        store.lock(true);
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("locked") && shown.contains("unlock"), "{shown}");
+        store.lock(false);
+        store.set(&key, &auth::seed(&nkeys::KeyPair::new_user()).unwrap()).unwrap();
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("another key") && shown.contains("ants add"), "{shown}");
+        store.delete(&key).unwrap();
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("holds no seed") && shown.contains("backup"), "{shown}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

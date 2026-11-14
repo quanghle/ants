@@ -1,11 +1,14 @@
 //! `ants add`: list an ant in the machine's config file and give it credentials, its user NKey generated
-//! here and its seed kept here. The account key signs the public key elsewhere: out of band with
-//! `ants auth user NAME --public-key` and `--jwt`, or over NATS with `--enroll` and `ants enroll approve`.
+//! here and its seed kept here, in a file or, with `--store-key`, in the OS credential store only ([`keys`]). The
+//! account key signs the public key elsewhere: out of band with `ants auth user NAME --public-key` and `--jwt`, or
+//! over NATS with `--enroll` and `ants enroll approve`.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::{self, Ant, Summary};
+use ants_daemon::creds::{self, Seed};
+use ants_daemon::keystore::{self, Store};
 use ants_proto::{ENROLL_REPEAT, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
@@ -31,6 +34,12 @@ pub struct AddArgs {
     /// ~/.config/ants/auth/<ant>.creds). The seed waits beside them, as <name>.nk, until they are complete.
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// Keep the ant's NKey seed in the OS credential store (macOS keychain, Linux Secret Service), never in a file:
+    /// while it waits for its JWT, <name>.nk holds only its public key, and the credentials, once complete, name the
+    /// stored key. They are written only once the seed reads back and authenticates at the server, unless none
+    /// answers. A seed already waiting in <name>.nk moves into the store.
+    #[arg(long)]
+    pub store_key: bool,
     /// Complete the credentials with the user JWT `ants auth user NAME --public-key ...` printed: the JWT, a file
     /// holding it, or `-` to read it from stdin.
     #[arg(long, value_name = "JWT", conflicts_with = "enroll")]
@@ -52,6 +61,11 @@ pub struct AddArgs {
 
 /// Run `ants add` with the global `--nats` and `--js-domain`.
 pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Result<()> {
+    add_with(args, nats, js_domain, keystore::os()).await
+}
+
+/// [`add`], keeping a seed of the OS credential store in `store`.
+async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store: &dyn Store) -> Result<()> {
     let name = &args.name;
     if name.is_human() {
         bail!("{name} is the default human, not an ant");
@@ -79,9 +93,10 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         None => Some(entry(&args, &summary, &out, nats, js_domain)?),
     };
 
-    let user = user_key(&out)?;
+    let (user, stored) = user_key(&out, store, args.store_key)?;
     let public_key = user.public_key();
     let mut uplink = None;
+    let mut url = nats;
     let jwt = match (&args.jwt, &args.enroll) {
         (Some(jwt), _) => {
             let jwt = read_jwt(jwt)?;
@@ -89,7 +104,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
             Some(jwt)
         }
         (None, Some(enrollment)) => {
-            let url = args.hub.as_deref().unwrap_or(nats);
+            url = args.hub.as_deref().unwrap_or(nats);
             let leaf = leaf_node(args.leaf_config.as_deref())?;
             let through =
                 leaf.as_ref().map(|(_, l)| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
@@ -110,7 +125,25 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         (None, None) => None,
     };
     if let Some(jwt) = &jwt {
-        keys::write(&out, jwt, &user)?;
+        if stored {
+            match keys::write_new_stored(&out, jwt, &user, store, url).await {
+                Ok(keys::Proven::Authenticated) => {}
+                Ok(keys::Proven::Unreached) => eprintln!(
+                    "warning: no server answered at {url}, so the stored key of {name} has not authenticated yet"
+                ),
+                Err(e) => {
+                    if args.enroll.is_some() {
+                        eprintln!(
+                            "the approved user JWT of {name}, to complete the credentials with `ants add {name} --jwt \
+                             JWT` once the failure below is fixed: {jwt}"
+                        );
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            auth::write_creds(&out, jwt, &user)?;
+        }
         let seed = seed_path(&out);
         if seed.exists() {
             std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
@@ -238,22 +271,71 @@ fn seed_path(creds: &Path) -> PathBuf {
     creds.with_extension("nk")
 }
 
-/// The ant's user key: the one of its credentials at `out`, or the one waiting beside them, or a new one, written
-/// there.
-fn user_key(out: &Path) -> Result<KeyPair> {
+/// The ant's user key: the one of its credentials at `out`, or the one waiting beside them, or a new one, waiting
+/// there. With `store_key`, a new or waiting seed goes into `store`, the file beside keeping only its public key.
+/// Returns whether its seed is in `store`, or is to be once the credentials are complete.
+fn user_key(out: &Path, store: &dyn Store, store_key: bool) -> Result<(KeyPair, bool)> {
     if out.exists() {
-        return auth::read_creds(out).map(|(_, user)| user);
+        let text = std::fs::read_to_string(out).with_context(|| format!("reading {}", out.display()))?;
+        let stored = matches!(creds::seed_of(&text), Some(Seed::Stored(_)));
+        return creds::load(out, store).map(|(_, user)| (user, stored || store_key));
     }
     let seed = seed_path(out);
     if seed.exists() {
-        return auth::read_seed(&seed);
+        let (user, stored) = read_waiting(&seed, store)?;
+        if store_key && !stored {
+            wait_stored(&seed, &user, store, auth::replace_secret)?;
+        }
+        return Ok((user, stored || store_key));
     }
     if let Some(dir) = seed.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let user = KeyPair::new_user();
-    auth::write_seed(&seed, &user)?;
-    Ok(user)
+    match store_key {
+        true => wait_stored(&seed, &user, store, auth::write_secret)?,
+        false => auth::write_seed(&seed, &user)?,
+    }
+    Ok((user, store_key))
+}
+
+/// Store the seed of `user` in `store`, then `write` its public key alone to `path`, where it waits for its JWT;
+/// a failure to write deletes what was stored.
+fn wait_stored(path: &Path, user: &KeyPair, store: &dyn Store, write: fn(&Path, &str) -> Result<()>) -> Result<()> {
+    let key = user.public_key();
+    let created = keys::store_new(user, store)?;
+    write(path, &format!("{key}\n")).inspect_err(|_| {
+        if created && let Err(e) = store.delete(&key) {
+            eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
+        }
+    })
+}
+
+/// The key waiting at `path`: its seed, or, from `ants add --store-key`, the public key of a seed in `store`. Returns
+/// whether its seed is in `store`.
+fn read_waiting(path: &Path, store: &dyn Store) -> Result<(KeyPair, bool)> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let key = text.trim();
+    if !key.starts_with('U') {
+        return auth::read_seed(path).map(|user| (user, false));
+    }
+    let seed = store
+        .get(key)
+        .with_context(|| {
+            format!("reading the seed of {key}, which {} names, from the OS credential store", path.display())
+        })?
+        .with_context(|| {
+            format!(
+                "the OS credential store holds no seed for {key}, which {} names: delete that file and run `ants add` \
+                 again for a new key",
+                path.display()
+            )
+        })?;
+    let user = KeyPair::from_seed(seed.trim()).map_err(|e| anyhow::anyhow!("the seed stored for {key}: {e}"))?;
+    if user.public_key() != key {
+        bail!("the OS credential store holds the seed of another key under {key} ({})", path.display());
+    }
+    Ok((user, true))
 }
 
 /// The JWT given to `--jwt`: itself, `-` for stdin, or a file holding it alone or in a `.creds` file.
@@ -290,8 +372,13 @@ mod tests {
     fn the_seed_stays_until_the_jwt_completes_the_credentials() {
         let dir = ants_test_support::scratch_dir("ant-key").canonicalize().unwrap();
         let out = dir.join("auth/dev-a.creds");
-        let user = user_key(&out).unwrap();
-        assert_eq!(user_key(&out).unwrap().public_key(), user.public_key(), "the waiting seed is reused");
+        let store = keystore::Memory::default();
+        let (user, _) = user_key(&out, &store, false).unwrap();
+        assert_eq!(
+            user_key(&out, &store, false).unwrap().0.public_key(),
+            user.public_key(),
+            "the waiting seed is reused"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -317,7 +404,11 @@ mod tests {
         auth::write_creds(&out, &jwt, &user).unwrap();
         assert_eq!(read_jwt(out.to_str().unwrap()).unwrap(), jwt, "a .creds file will do");
         assert_eq!(read_jwt(&jwt).unwrap(), jwt);
-        assert_eq!(user_key(&out).unwrap().public_key(), user.public_key(), "the credentials keep the key");
+        assert_eq!(
+            user_key(&out, &store, false).unwrap().0.public_key(),
+            user.public_key(),
+            "the credentials keep the key"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -328,8 +419,59 @@ mod tests {
     }
 
     async fn run(args: &[&str]) -> Result<()> {
+        run_with(args, DEFAULT_NATS, keystore::os()).await
+    }
+
+    async fn run_with(args: &[&str], nats: &str, store: &dyn Store) -> Result<()> {
         let args = <Cmd as clap::Parser>::try_parse_from(std::iter::once("add").chain(args.iter().copied()))?.args;
-        add(args, DEFAULT_NATS, None).await
+        add_with(args, nats, None, store).await
+    }
+
+    #[tokio::test]
+    async fn a_stored_key_never_touches_a_file() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let dir = ants_test_support::scratch_dir("ant-add-stored").canonicalize().unwrap();
+        let config = dir.join("config.toml");
+        let (config_arg, workdir) = (config.to_str().unwrap(), dir.to_str().unwrap());
+        let out = dir.join("keys/dev-a.creds");
+        let out_arg = out.to_str().unwrap();
+        let add = ["dev-a", "--config", config_arg, "--out", out_arg, "--workdir", workdir, "--store-key"];
+        let store = keystore::Memory::default();
+
+        store.lock(true);
+        let err = format!("{:#}", run_with(&add, &server.url, &store).await.unwrap_err());
+        assert!(err.contains("locked"), "{err}");
+        assert!(!seed_path(&out).exists() && !config.exists(), "nothing half-done");
+        store.lock(false);
+
+        run_with(&add, &server.url, &store).await.unwrap();
+        let key = std::fs::read_to_string(seed_path(&out)).unwrap().trim().to_owned();
+        assert_eq!(store.keys(), std::slice::from_ref(&key), "only the public key waits in the file");
+        let team = server.dir().join("auth");
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let jwt = auth::sign_user(&team, &dev_a, ants_proto::Role::Ant, None, &key).unwrap();
+        let complete = ["dev-a", "--config", config_arg, "--jwt", &jwt];
+        run_with(&complete, &server.url, &store).await.unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!((auth::creds_jwt(&text), creds::seed_of(&text)), (Some(jwt.as_str()), Some(Seed::Stored(&key))));
+        assert!(!seed_path(&out).exists());
+        ants_daemon::bus::connect_with(&server.url, Some(&out), &store, None, &dev_a, "test").await.unwrap();
+
+        // A seed already waiting in its file moves into the store.
+        let out = dir.join("keys/dev-b.creds");
+        let out_arg = out.to_str().unwrap();
+        run_with(&["dev-b", "--config", config_arg, "--out", out_arg, "--workdir", workdir], &server.url, &store)
+            .await
+            .unwrap();
+        let user = auth::read_seed(&seed_path(&out)).unwrap();
+        let dev_b: UserId = "dev-b".parse().unwrap();
+        let jwt = auth::sign_user(&team, &dev_b, ants_proto::Role::Ant, None, &user.public_key()).unwrap();
+        run_with(&["dev-b", "--config", config_arg, "--jwt", &jwt, "--store-key"], &server.url, &store).await.unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&user.public_key())));
+        assert!(!seed_path(&out).exists());
+        assert_eq!(store.keys().len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

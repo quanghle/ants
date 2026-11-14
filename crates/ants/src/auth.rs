@@ -409,15 +409,23 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
 /// and the humans, writes the channels bucket and posts in channels as [`UserId::channel_manager`]
 /// ([`Permissions::for_channel_manager`]).
 pub fn issue_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
-    let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
+    let jwt = sign_channel_manager(dir, js_domain, &key.public_key())?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
+}
+
+/// Sign the user JWT of the channel manager for `public_key`, with the permissions [`issue_channel_manager`] gives,
+/// and record its key.
+pub fn sign_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, public_key: &str) -> Result<String> {
+    check_user_key(public_key)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
     let permissions = Permissions::for_channel_manager().with_js_domain(js_domain);
     let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
     let answer_once = json!({ "resp": { "max": 1, "ttl": ttl } });
     let name = UserId::channel_manager();
-    let jwt = user_jwt(&account, &key.public_key(), name.as_str(), permissions, answer_once, None)?;
-    write_secret(out, &creds(&jwt, &seed(&key)?))?;
-    revoke::record(dir, &Issued::new(&key.public_key(), name.as_str(), Kind::ChannelManager, None)?)
+    let jwt = user_jwt(&account, public_key, name.as_str(), permissions, answer_once, None)?;
+    revoke::record(dir, &Issued::new(public_key, name.as_str(), Kind::ChannelManager, None)?)?;
+    Ok(jwt)
 }
 
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the

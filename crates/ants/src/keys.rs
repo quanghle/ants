@@ -5,7 +5,9 @@
 //! ([`creds::stored_text`]); every ants process reads the seed from the store when it connects with the file
 //! ([`creds::load`]). A seed leaves a file only once stored, read back, and proven by authenticating at the server
 //! with the file as it is to be; the file is then replaced at once, and a failure on the way deletes what was stored
-//! and leaves the file as it was. Renewal ([`replace`]) keeps the new seed where the earlier one was.
+//! and leaves the file as it was. Renewal ([`replace`]) keeps the new seed where the earlier one was. New credentials
+//! of `ants add --store-key` and `ants auth user|channel-manager --store-key` put their seed in the store at once
+//! ([`write_new_stored`]), never in a file.
 //!
 //! Leaf node uplink credentials stay in their file, which nats-server reads; so do the team keys of `ants auth`.
 
@@ -111,7 +113,7 @@ pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Mov
     if key != finding.key {
         bail!("the seed in {} is not that of the key {} of their user JWT", path.display(), finding.key);
     }
-    write_stored(path, jwt, &key, seed, store, url)
+    write_stored(path, jwt, &key, seed, store, url, true)
         .await
         .with_context(|| format!("the seed stays in {}", path.display()))?;
     Ok(Moved::Now(key))
@@ -161,7 +163,7 @@ pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, 
         return auth::replace_creds(path, jwt, user);
     };
     let key = user.public_key();
-    write_stored(path, jwt, &key, &auth::seed(user)?, store, url)
+    write_stored(path, jwt, &key, &auth::seed(user)?, store, url, true)
         .await
         .with_context(|| format!("{} stay as they were", path.display()))?;
     if earlier != key
@@ -172,41 +174,81 @@ pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, 
     Ok(())
 }
 
-/// Write the credentials of `jwt` for `user` to `path` (as `ants add` completes them), keeping the seed in the OS
-/// credential store when the file there already names it there.
-pub fn write(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
-    let key = user.public_key();
-    match fs::read_to_string(path).ok().as_deref().and_then(creds::seed_of) {
-        Some(Seed::Stored(stored)) if stored == key => auth::replace_secret(path, &creds::stored_text(jwt, &key)),
-        _ => auth::write_creds(path, jwt, user),
-    }
+/// Write new credentials of `jwt` for `user` to `path` with the seed in `store`, never in a file, as `ants add` and
+/// `ants auth --store-key` do: stored (unless there already), read back, and the file written naming it once it
+/// authenticates at `url`, or unproven when no server answers there ([`Proven::Unreached`]). A failure deletes the seed
+/// when it was not stored before and leaves `path` as it was.
+pub async fn write_new_stored(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, url: &str) -> Result<Proven> {
+    write_stored(path, jwt, &user.public_key(), &auth::seed(user)?, store, url, false)
+        .await
+        .with_context(|| format!("{} not written", path.display()))
 }
 
-/// Store `seed` for `key` in `store` and check it reads back, then write `path` naming it, once it authenticates at
-/// `url`. A failure deletes the seed when it was not stored before, and leaves `path` as it was.
-async fn write_stored(path: &Path, jwt: &str, key: &str, seed: &str, store: &dyn Store, url: &str) -> Result<()> {
-    let created = match store.get(key).context("reading the OS credential store")? {
+/// Write the new credentials of `jwt` for `user` that `ants auth --store-key` issued to `path`, with the seed in the
+/// OS credential store ([`write_new_stored`]), warning when no server answered at `url` to prove them.
+pub async fn issue_stored(path: &Path, jwt: &str, user: &KeyPair, url: &str) -> Result<()> {
+    if write_new_stored(path, jwt, user, keystore::os(), url).await? == Proven::Unreached {
+        eprintln!(
+            "warning: no server answered at {url}, so the stored key {} has not authenticated yet",
+            user.public_key()
+        );
+    }
+    Ok(())
+}
+
+/// Store a new key's seed in `store`, never in a file, and check it reads back. Returns whether it was stored now
+/// rather than there already.
+pub fn store_new(user: &KeyPair, store: &dyn Store) -> Result<bool> {
+    let (key, seed) = (user.public_key(), auth::seed(user)?);
+    let created = match store.get(&key).context("reading the OS credential store")? {
         Some(stored) if stored.trim() == seed => false,
         Some(_) => bail!("the OS credential store holds another seed for {key}; left as it is"),
         None => {
-            store.set(key, seed).context("storing the seed in the OS credential store")?;
+            store.set(&key, &seed).context("storing the seed in the OS credential store")?;
             true
         }
     };
+    if !matches!(store.get(&key), Ok(Some(stored)) if stored.trim() == seed) {
+        if created && let Err(e) = store.delete(&key) {
+            eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
+        }
+        bail!("the OS credential store gave back no seed, or another one, for {key}");
+    }
+    Ok(created)
+}
+
+/// Whether credentials whose seed is stored authenticated at the server before being written, or no server answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proven {
+    Authenticated,
+    Unreached,
+}
+
+/// Store `seed` for `key` in `store` and check it reads back, then write `path` naming it, once it authenticates at
+/// `url`, or, unless `required`, also when no server answers there. A failure deletes the seed when it was not stored
+/// before, and leaves `path` as it was.
+async fn write_stored(
+    path: &Path,
+    jwt: &str,
+    key: &str,
+    seed: &str,
+    store: &dyn Store,
+    url: &str,
+    required: bool,
+) -> Result<Proven> {
+    let user = KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("the seed of {key}: {e}"))?;
+    let created = store_new(&user, store)?;
     let undo = || {
         if created && let Err(e) = store.delete(key) {
             eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
         }
     };
-    if !matches!(store.get(key), Ok(Some(stored)) if stored.trim() == seed) {
-        undo();
-        bail!("the OS credential store gave back no seed, or another one, for {key}");
-    }
     let temporary = beside(path)?;
     let written = async {
         auth::write_secret(&temporary, &creds::stored_text(jwt, key))?;
-        authenticate(url, &temporary, store).await?;
-        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+        let proven = authenticate(url, &temporary, store, required).await?;
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+        Ok(proven)
     }
     .await;
     if written.is_err() {
@@ -216,16 +258,18 @@ async fn write_stored(path: &Path, jwt: &str, key: &str, seed: &str, store: &dyn
     written
 }
 
-/// Connect to `url` with the credentials at `path`, reading their seed from `store`, to check the server takes them.
-async fn authenticate(url: &str, path: &Path, store: &dyn Store) -> Result<()> {
+/// Connect to `url` with the credentials at `path`, reading their seed from `store`, to check the server takes them;
+/// unless `required`, a server that does not answer is [`Proven::Unreached`] rather than a failure.
+async fn authenticate(url: &str, path: &Path, store: &dyn Store, required: bool) -> Result<Proven> {
     bus::check_url(url)?;
     let options = async_nats::ConnectOptions::new().name("ants-keys").event_callback(|_| async {});
-    let client = bus::authenticate(options, path, store)?
-        .connect(url)
-        .await
-        .with_context(|| format!("authenticating at {url} with the stored key"))?;
+    let client = match bus::authenticate(options, path, store)?.connect(url).await {
+        Ok(client) => client,
+        Err(e) if !required && bus::worth_retrying(&e) => return Ok(Proven::Unreached),
+        Err(e) => return Err(e).with_context(|| format!("authenticating at {url} with the stored key")),
+    };
     client.flush().await.with_context(|| format!("authenticating at {url} with the stored key"))?;
-    Ok(())
+    Ok(Proven::Authenticated)
 }
 
 fn beside(path: &Path) -> Result<PathBuf> {
@@ -322,6 +366,31 @@ mod tests {
         let err = store_seed(&uplink, &store, &server.url).await.unwrap_err().to_string();
         assert!(err.contains("nats-server reads"), "{err}");
         assert!(creds::seed_of(&fs::read_to_string(&uplink).unwrap()).is_some_and(|s| matches!(s, Seed::File(_))));
+    }
+
+    #[tokio::test]
+    async fn new_credentials_go_with_a_stored_seed_unless_a_server_refuses_them() {
+        let Some(server) = Server::start() else { return };
+        let Some(other) = Server::start() else { return };
+        let store = Memory::default();
+        let user = KeyPair::new_user();
+        let key = user.public_key();
+        let jwt = auth::sign_user(&server.dir().join("auth"), &p("dev-a"), Role::Ant, None, &key).unwrap();
+        let path = server.dir().join("dev-a.creds");
+
+        let err = format!("{:#}", write_new_stored(&path, &jwt, &user, &store, &other.url).await.unwrap_err());
+        assert!(err.contains("not written") && err.contains("authenticating"), "{err}");
+        assert!(!path.exists() && store.keys().is_empty(), "nothing half-done");
+
+        let nowhere = "nats://127.0.0.1:1";
+        assert_eq!(write_new_stored(&path, &jwt, &user, &store, nowhere).await.unwrap(), Proven::Unreached);
+        fs::remove_file(&path).unwrap();
+        store.delete(&key).unwrap();
+
+        assert_eq!(write_new_stored(&path, &jwt, &user, &store, &server.url).await.unwrap(), Proven::Authenticated);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&key)));
+        assert!(!text.contains(&auth::seed(&user).unwrap()) && store.keys() == [key]);
     }
 
     #[tokio::test]
