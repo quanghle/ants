@@ -817,10 +817,12 @@ Measured with `ants` 0.1.0 (release) and `nats-server` 2.15.3:
 ```sh
 cargo build --release
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
+CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets
 cargo test
 cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 ```
+
+CI sets `CARGO_BUILD_WARNINGS=deny`, so any lint warning (rustc or clippy) fails `cargo clippy`, `cargo test` and `cargo build` there. `.cargo/config.toml` sets a 7-day dependency cooldown (`registry.global-min-publish-age`): `cargo update` and `cargo add` resolve only to crate versions published at least 7 days ago, unless `Cargo.lock` already holds them; builds and `cargo install --path` from the committed `Cargo.lock` are unaffected. `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION` takes a newer release, such as a security fix.
 
 Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANTS_REQUIRE_TOOLS=1` is set (as in `.github/workflows/ci.yml`). `crates/ants/tests/e2e.rs` exercises `ants ask --wait` against `ants daemon` using the test binary as a stub ACP harness.
 
