@@ -15,8 +15,10 @@
 //! While a leaf node's uplink is down, the daemon's dead letter goes to the machine's outbox, which the hub's stream
 //! takes it from once the uplink is back ([`Burial::Outbox`]). Its notice, which may climb the escalation chain kept in
 //! `ants_sessions`, and the message's termination need the hub: they wait for the message's redelivery, which buries the
-//! same dead letter, noted on the machine ([`Buried`]), again. The human's side writes dead letters only from what the
-//! hub holds, so straight into its stream.
+//! same dead letter, noted on the machine ([`Buried`]), again. On the consumer's extra delivery no redelivery is left:
+//! the daemon notes that delivery's ack subject too, and once the hub is in reach, stores the letter there, tells the
+//! thread's owner directly and terminates the message itself ([`finish`]). The human's side writes dead letters only
+//! from what the hub holds, so straight into its stream.
 //!
 //! When storing the dead letter fails on that extra delivery too, JetStream delivers the message no more and only
 //! publishes a max-deliveries advisory. As a backstop, the human's side ([`watch`]) turns those advisories into dead
@@ -27,14 +29,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, UserId, chan_consumer, inbox_consumer, subject,
+    ChannelPost, DeadLetter, Envelope, EscalationReason, STREAM, UserId, Uuid, chan_consumer, inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::stream::{self, RawMessageErrorKind};
 use async_nats::jetstream::{self, AckKind};
 use futures::StreamExt as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::attempts::Notes;
 use crate::bus;
@@ -73,10 +75,25 @@ pub enum Burial {
     Outbox,
 }
 
+/// A dead letter kept in the machine's outbox, as [`Buried`] notes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    #[serde(flatten)]
+    pub dead: DeadLetter,
+    /// The channel post it is of, as answered, with its thread's owner: the notice goes there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<ChannelPost>,
+    /// The ack subject of the delivery that kept it, when the consumer delivers the message no more after that one:
+    /// [`finish`] then ends the burial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery: Option<String>,
+}
+
 /// Dead letters a daemon kept in the machine's outbox ([`Burial::Outbox`]) for messages it could not terminate: one
-/// file per message, named after its envelope id, holding the dead letter, in `<home>/buried` of the ant. The
-/// redelivery after the uplink is back, even to a restarted daemon, buries that same dead letter again, with the error
-/// of the attempt that failed, without another prompt.
+/// file per message, named after its envelope id, holding the dead letter ([`Kept`]), in `<home>/buried` of the ant.
+/// The redelivery after the uplink is back, even to a restarted daemon, buries that same dead letter again, with the
+/// error of the attempt that failed, without another prompt. One kept on the message's last delivery has no redelivery
+/// to wait for: the daemon finishes its burial itself once the hub is in reach ([`finish`]).
 pub struct Buried(Notes);
 
 impl Buried {
@@ -85,18 +102,30 @@ impl Buried {
     }
 
     /// The dead letter kept for `message`, if any.
-    pub async fn get(&self, message: &Envelope) -> Option<DeadLetter> {
+    pub async fn get(&self, message: &Envelope) -> Option<Kept> {
         self.0.get(message).await
     }
 
-    /// Note that `dead`, the dead letter of `message`, waits in the machine's outbox.
-    pub async fn add(&self, message: &Envelope, dead: &DeadLetter) -> Result<()> {
-        self.0.add(message, dead).await.context("noting the dead letter kept in the outbox")
+    /// Note that `kept`, the dead letter of `message`, waits in the machine's outbox.
+    pub async fn add(&self, message: &Envelope, kept: &Kept) -> Result<()> {
+        self.0.add(message, kept).await.context("noting the dead letter kept in the outbox")
+    }
+
+    /// The dead letters kept on their message's last delivery, with the envelope id of the message.
+    pub async fn undelivered(&self) -> Vec<(Uuid, Kept)> {
+        let mut kept: Vec<(Uuid, Kept)> = self.0.all().await;
+        kept.retain(|(_, kept)| kept.last_delivery.is_some());
+        kept
     }
 
     /// Forget `message` once its dead letter is in the hub's stream and the message terminated.
     pub async fn forget(&self, message: &Envelope) {
         self.0.forget(message).await
+    }
+
+    /// [`Buried::forget`], by the message's envelope id.
+    pub async fn forget_id(&self, message: Uuid) {
+        self.0.forget_id(message).await
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
@@ -172,6 +201,29 @@ pub async fn bury_letter(
         "dead-lettered"
     );
     Ok(Burial::Hub(ack.sequence))
+}
+
+/// Finish the burial of `kept`, a dead letter kept in the machine's outbox on its message's last delivery, once the hub
+/// is in reach: store it in the hub's stream (never the outbox again), tell the thread's owner, else the default human
+/// of `humans`, then terminate the message. The notice goes there directly, as [`watch`] sends it, under the same
+/// message id: the consumer gives up on the message, so a running watcher may bury it too, and whichever notice comes
+/// first is the only one. Returns the dead letter's stream sequence, or `None` while the hub is out of reach.
+pub async fn finish(js: &jetstream::Context, kept: &Kept, humans: &Registry) -> Result<Option<u64>> {
+    let Kept { dead, post, last_delivery } = kept;
+    let Some(ack) = bus::store_in_hub(js, dead.subject(), dead, &dead.msg_id()).await? else { return Ok(None) };
+    tell(js, dead, ack.sequence, post.as_ref(), humans, None).await?;
+    if let Some(reply) = last_delivery {
+        let client = js.client();
+        client.publish(reply.clone(), AckKind::Term.into()).await.context("terminating the message")?;
+        client.flush().await.context("terminating the message")?;
+    }
+    tracing::warn!(
+        stream_seq = dead.stream_seq,
+        dead_seq = ack.sequence,
+        error = dead.error,
+        "dead-lettered from this machine's outbox"
+    );
+    Ok(Some(ack.sequence))
 }
 
 fn letter_of(

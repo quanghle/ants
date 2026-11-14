@@ -504,7 +504,7 @@ Escalations: up the thread's origin chain, else to the thread's owner), and only
 out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
 reply, sends the reply). A payload that is not an envelope becomes a dead letter at once. While a leaf node's uplink
 is down the dead letter waits in the machine's outbox, and the notice and termination wait for the message's next
-delivery (see [Leaf nodes](#leaf-nodes)).
+delivery, or, on the extra delivery, for the uplink (see [Leaf nodes](#leaf-nodes)).
 
 ```sh
 ants dead list          # seq, ant, thread, from, deliveries, time, error, text
@@ -1227,6 +1227,9 @@ the leaf's uplink credentials for the same ants and humans. Whatever needs an an
 fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_notes` (its expected sequence
 needs the hub's answer), approvals and replays. A dead letter kept in the outbox gets its notice, and its message
 terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
+Kept on the consumer's extra delivery, with no delivery left, the letter is stored in the hub, its notice sent to the
+thread's owner, else the default human, and its message terminated by the running daemon within 30 seconds of the
+uplink coming back; the notice shares its message id with the one `ants dead watch` sends, so the human gets one.
 Machines set up before dead letters were buffered need `ants leaf outbox` again, and ant credentials issued before
 need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
 whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on

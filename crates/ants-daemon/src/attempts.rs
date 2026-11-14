@@ -200,9 +200,32 @@ impl Notes {
         write.await.with_context(|| format!("writing {}", path.display()))
     }
 
+    /// Every readable note, with the envelope id of its message.
+    pub async fn all<T: serde::de::DeserializeOwned>(&self) -> Vec<(Uuid, T)> {
+        let mut notes = Vec::new();
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else { return notes };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let id =
+                path.extension().filter(|ext| *ext == "json").and_then(|_| path.file_stem()?.to_str()?.parse().ok());
+            let Some(id) = id else { continue };
+            let read = async { anyhow::Ok(serde_json::from_slice(&tokio::fs::read(&path).await?)?) };
+            match read.await {
+                Ok(note) => notes.push((id, note)),
+                Err(e) => tracing::warn!(path = %path.display(), error = format!("{e:#}"), "reading a note"),
+            }
+        }
+        notes
+    }
+
     /// Remove the note of `message`. A failure only leaves it until [`prune`](Self::prune).
     pub async fn forget(&self, message: &Envelope) {
-        let path = self.path(message);
+        self.forget_id(message.id).await
+    }
+
+    /// Remove the note of the message with envelope id `id`, as [`forget`](Self::forget) does.
+    pub async fn forget_id(&self, id: Uuid) {
+        let path = self.path_of(id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -225,6 +248,10 @@ impl Notes {
     }
 
     fn path(&self, message: &Envelope) -> PathBuf {
-        self.dir.join(format!("{}.json", message.id))
+        self.path_of(message.id)
+    }
+
+    fn path_of(&self, id: Uuid) -> PathBuf {
+        self.dir.join(format!("{id}.json"))
     }
 }

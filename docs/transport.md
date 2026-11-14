@@ -291,7 +291,17 @@ A dead letter in the outbox leaves its message unfinished: the notice on the thr
 restarted daemon, buries the noted letter again without another prompt. The hub's stream drops the copy by its
 `Nats-Msg-Id` (`dead-<stream sequence>`) and the daemon sends the notice and terminates the message, once. A daemon
 buries a message on its last attempt, and the consumer allows one more delivery after that one, which then carries the
-noted letter to the hub (see Limits for a letter kept on that extra delivery).
+noted letter to the hub.
+
+A letter kept on that extra delivery (the last attempt never finished) has no delivery left. The daemon notes it with
+that delivery's ack subject, and every 30 seconds (its retry delay) tries to finish it: store it in the hub's stream
+only (never the outbox again, so the copies stay within the duplicate window), send the notice to the thread's owner,
+else the default human, directly under `dead-notice-<stream sequence>`, then publish `+TERM` on the ack subject and
+forget the note (`dead::finish`). JetStream may give up on the message first, once the uplink is back and the ack wait
+has run out, and a running `ants dead watch` buries it from the advisory under the same message ids, so whichever
+letter and notice land first are the only ones; a notice up the escalation chain would go out under other ids and
+could reach the human twice. Verified by `a_dead_letter_kept_on_the_extra_delivery_*` in
+`crates/ants-daemon/src/daemon.rs`.
 
 A message `ANTS` sources is stored without being published on its subject, so live waiters (`ants ask --wait`, an
 ant's waiting `ask_agent`, an ant waiting for its escalation chain's decision) would miss it; only the inbox
@@ -380,11 +390,10 @@ Limits:
 - Messages an ant put in the outbox before `ants leaf outbox` admitted it stay in the intake. A machine set up
   before dead letters were buffered needs `ants leaf outbox` again for `ANTS` to take its dead letters, and ant
   credentials issued before need `ants auth user` again to publish on `ants.out.dead.<ant>`.
-- A dead letter stored in the outbox on the message's extra delivery (the last attempt never finished) has no
-  delivery left to send its notice and terminate the message. JetStream gives up on the message and publishes a
-  max-deliveries advisory: a running `ants dead watch` dead-letters it from the hub, with the same `Nats-Msg-Id`, and
-  tells the human, unless the outbox copy has landed first; then no notice goes out. An outbox copy landing more than
-  two minutes after the watcher's letter is stored twice.
+- A dead letter kept in the outbox on the message's extra delivery gets its notice from the daemon straight to the
+  thread's owner, not up the escalation chain. A daemon that stays down for more than two minutes after the outbox
+  copy or the watcher's letter landed stores the letter again once it runs; the notice, under the same id, may come
+  twice too.
 - The outbox copy of a daemon's dead letter and the one the redelivery stores usually land within two minutes of each
   other (the source's retry backoff, the consumer's 60 second ack wait); further apart, the hub's stream keeps both.
 

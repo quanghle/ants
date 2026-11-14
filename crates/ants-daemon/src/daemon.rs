@@ -409,12 +409,14 @@ impl Inbox<'_> {
         let mut evict = tokio::time::interval(EVICT_EVERY.min(idle_timeout).max(Duration::from_secs(1)));
         let mut progress = self.progress();
         let shutdown = stop();
-        tokio::pin!(shutdown);
+        let finishing = self.finish_buried();
+        tokio::pin!(shutdown, finishing);
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             let mut ready = None;
             tokio::select! {
                 () = &mut shutdown => break,
+                () = &mut finishing => {}
                 () = channels.changed() => {}
                 _ = evict.tick() => {
                     self.pool.evict_idle(Instant::now());
@@ -647,10 +649,10 @@ impl Inbox<'_> {
             }
             return (thread, None);
         }
-        if let Some(dead) = self.buried.get(envelope).await {
+        if let Some(kept) = self.buried.get(envelope).await {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
             tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
-            match self.bury_letter(&incoming, &msg, &dead).await {
+            match self.bury_letter(&incoming, &msg, &kept.dead).await {
                 Ok(()) => self.attempts.forget(seq).await,
                 Err(e) => tracing::error!(%thread, error = format!("{e:#}"), "dead-lettering"),
             }
@@ -707,20 +709,48 @@ impl Inbox<'_> {
     }
 
     /// Bury `msg` as `dead` ([`dead::bury_letter`]). A dead letter kept in the machine's outbox is noted in `buried`,
-    /// so the redelivery buries it again, even in a restarted daemon.
+    /// so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its ack subject, for
+    /// [`Inbox::finish_buried`].
     async fn bury_letter(&self, incoming: &Incoming, msg: &jetstream::Message, dead: &DeadLetter) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
         let escalator = Some(self.escalator);
         match dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await? {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => {
-                if let Err(e) = self.buried.add(&incoming.envelope, dead).await {
+                let last = msg.info().is_ok_and(|info| info.delivered >= MAX_DELIVER);
+                let kept = dead::Kept {
+                    dead: dead.clone(),
+                    post: post.cloned(),
+                    last_delivery: msg.reply.as_ref().filter(|_| last).map(|reply| reply.to_string()),
+                };
+                if let Err(e) = self.buried.add(&incoming.envelope, &kept).await {
                     // The redelivery buries it with an error of its own, under the same message id.
                     tracing::warn!(error = format!("{e:#}"), "noting the dead letter");
                 }
             }
         }
         Ok(())
+    }
+
+    /// Every `retry_delay`, finish the burial of each dead letter kept in the machine's outbox on its message's last
+    /// delivery once the hub is in reach ([`dead::finish`]): no redelivery comes to do it. Runs until dropped.
+    async fn finish_buried(&self) {
+        let mut every = tokio::time::interval(self.retry_delay);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            for (message, kept) in self.buried.undelivered().await {
+                let seq = kept.dead.stream_seq;
+                match dead::finish(self.js, &kept, self.humans).await {
+                    Ok(Some(_)) => {
+                        self.attempts.forget(seq).await;
+                        self.buried.forget_id(message).await;
+                    }
+                    Ok(None) => tracing::debug!(stream_seq = seq, "the hub is out of reach; the dead letter waits"),
+                    Err(e) => tracing::warn!(stream_seq = seq, error = format!("{e:#}"), "dead-lettering"),
+                }
+            }
+        }
     }
 
     /// Note the message the ant is about to answer with its escalator: a human's ends the thread's escalation and
@@ -2375,6 +2405,8 @@ mod tests {
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
         drop(pool);
         let kept = bus.buried.get(&ask).await.expect("noted on the machine");
+        assert_eq!(kept.last_delivery, None, "the extra delivery finishes the burial");
+        let kept = kept.dead;
         assert!(kept.error.contains("doomed"), "{}", kept.error);
         assert!(dead::list(&stream).await.unwrap().is_empty(), "not in the hub's stream yet");
 
@@ -2395,6 +2427,174 @@ mod tests {
         assert!(notice.text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notice.text);
         assert_eq!(bus.unacked().await, 0);
         assert!(bus.buried.get(&ask).await.is_none(), "forgotten once terminated");
+    }
+
+    /// dev-a's daemon on a leaf node gives up on a message on the consumer's extra delivery while the leaf's uplink is
+    /// down: the dead letter goes to the machine's outbox, and no delivery is left to send its notice. Once the uplink
+    /// is back, the running daemon stores the dead letter in the hub's stream, tells the human and terminates the
+    /// message, before JetStream gives up on it.
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_is_buried_once_the_uplink_is_back() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Live).await;
+    }
+
+    /// As above, to a daemon restarted after JetStream gave up on the message, so a watcher buried it from the
+    /// advisory: after the outbox copy landed, finding it and telling nobody, or before, under the same message ids.
+    /// The human gets one notice either way.
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_outbox_copy() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: false }).await;
+    }
+
+    #[tokio::test]
+    async fn a_dead_letter_kept_on_the_extra_delivery_is_told_once_after_the_watcher_s() {
+        dead_letter_kept_on_the_extra_delivery(UplinkBack::Restarted { watcher_first: true }).await;
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum UplinkBack {
+        /// Within the hub's ack wait, with the daemon running.
+        Live,
+        /// After JetStream gave up on the message and a watcher heard so, `watcher_first` or after the outbox copy
+        /// landed, with the daemon restarted.
+        Restarted { watcher_first: bool },
+    }
+
+    async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
+        let Some((hub, uplinked)) = Uplinked::start().await else { return };
+        let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
+        let (launch, log, gate) = fake::launch(true);
+        let t1 = ThreadId::generate();
+        let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+        let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
+        let hold_seq = bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
+        let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
+        let progress_every = Duration::from_millis(200);
+        // Live, the hub still waits for the ack of the extra delivery when the uplink is back.
+        let ack_wait = if back == UplinkBack::Live { WAIT * 3 } else { ack_wait(progress_every) };
+        let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
+
+        // The doomed message's five attempts never finished; the held one, ahead of it on the thread, had one.
+        let consumer: PullConsumer = stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                durable_name: Some(ants_proto::inbox_consumer(&bus.dev)),
+                filter_subject: subject::inbox_of(&bus.dev),
+                ack_policy: jetstream::consumer::AckPolicy::Explicit,
+                ack_wait: WAIT,
+                max_deliver: MAX_DELIVER,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let fetch = |n| {
+            let consumer = consumer.clone();
+            async move {
+                let batch = consumer.fetch().max_messages(n).expires(WAIT).messages().await.unwrap();
+                batch.map(Result::unwrap).collect::<Vec<_>>().await
+            }
+        };
+        let mut first = fetch(2).await;
+        let (mut held, mut last) = (first.remove(0), first.remove(0));
+        for _ in 1..MAX_ATTEMPTS {
+            last.ack_with(AckKind::Nak(None)).await.unwrap();
+            last = fetch(1).await.remove(0);
+        }
+        assert_eq!(last.info().unwrap().delivered, MAX_ATTEMPTS);
+        for msg in [&mut held, &mut last] {
+            msg.ack_with(AckKind::Nak(None)).await.unwrap();
+        }
+
+        let buried = &bus.buried;
+        let until_buried = |kept: bool| async move {
+            let done = timeout(WAIT, async {
+                while buried.undelivered().await.is_empty() == kept {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+            done.await.unwrap_or_else(|_| panic!("{}", if kept { "not kept" } else { "not buried" }));
+        };
+        let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let down = async {
+            until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+            uplinked.switch(false).await;
+            gate.add_permits(1);
+            until_buried(true).await;
+            let kept = bus.buried.get(&doomed).await.expect("noted on the machine");
+            if back == UplinkBack::Live {
+                uplinked.switch(true).await;
+                until_buried(false).await;
+                // Only the held message is left, whose ack failed while the uplink was down.
+                timeout(WAIT, async {
+                    while bus.unacked().await != 1 {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("the doomed message is not terminated");
+            }
+            ctrl_c.add_permits(1);
+            kept
+        };
+        let ((), kept) = tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), down);
+        drop(pool);
+        assert!(kept.last_delivery.is_some(), "{kept:?}");
+        assert_eq!(kept.dead.stream_seq, seq);
+
+        let notices = || async {
+            let mut notices = Vec::new();
+            let (subject, mut from) = (subject::inbox(&UserId::human(), &bus.dev), 1);
+            while let Ok(msg) = stream.get_first_raw_message_by_subject(&subject, from).await {
+                from = msg.sequence + 1;
+                let notice: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+                notices.extend((notice.in_reply_to == Some(doomed.id)).then_some(notice));
+            }
+            notices
+        };
+        if let UplinkBack::Restarted { watcher_first } = back {
+            // The watcher's view of JetStream's max-deliveries advisory.
+            let advisory = dead::MaxDeliveries {
+                stream: ants_proto::STREAM.to_owned(),
+                consumer: ants_proto::inbox_consumer(&bus.dev),
+                stream_seq: seq,
+                deliveries: MAX_DELIVER as u64,
+            };
+            let humans = Registry::default();
+            let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &humans);
+            // As the hub's stream takes the outbox copy once the uplink is back.
+            let dead_id = kept.dead.msg_id();
+            let outbox_copy = || bus::publish_json(&uplinked.hub_js, kept.dead.subject(), &kept.dead, Some(&dead_id));
+            if watcher_first {
+                let (dead_seq, _) = watch().await.unwrap().expect("buried by the watcher");
+                uplinked.switch(true).await;
+                assert_eq!(outbox_copy().await.unwrap(), dead_seq, "the outbox copy is dropped");
+            } else {
+                uplinked.switch(true).await;
+                outbox_copy().await.unwrap();
+                assert_eq!(watch().await.unwrap(), None, "a dead letter already");
+                assert!(notices().await.is_empty(), "the watcher sends no notice for the outbox copy");
+            }
+
+            let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+            let check = async {
+                bus.until_acked(hold_seq).await;
+                until_buried(false).await;
+                ctrl_c.add_permits(1);
+            };
+            tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
+            assert_eq!(bus.unacked().await, 0);
+        }
+        let (letters, notices) = (dead::list(&stream).await.unwrap(), notices().await);
+        let prompted = {
+            let log = log.lock().unwrap();
+            (log.starts, log.doomed)
+        };
+        assert_eq!(prompted, (1, 0), "neither prompted again nor the doomed one at all");
+        assert_eq!(letters.len(), 1, "{letters:?}");
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].thread_id, t1);
+        assert!(notices[0].text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notices[0].text);
+        assert!(bus.buried.get(&doomed).await.is_none(), "forgotten once terminated");
     }
 
     #[tokio::test]
