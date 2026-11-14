@@ -824,7 +824,7 @@ impl Inbox<'_> {
                         match plan::spend(room, thread, self.persona, &reply.text, budget).await? {
                             Some(post) => Reply::Plan(post),
                             None => {
-                                let why = "Plan room out of turns before the answer was posted";
+                                let why = "Thread notes out of turns before the answer was posted";
                                 let reason = EscalationReason::PlanRoom;
                                 self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
                                 return self.done(msg, seq).await;

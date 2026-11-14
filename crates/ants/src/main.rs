@@ -48,7 +48,8 @@ enum Command {
     /// Send a message as the CLI's human, who owns the thread. Starts with @persona to pick the recipient; the
     /// messenger gets it otherwise.
     Ask {
-        /// Continue an existing thread.
+        /// Continue an existing thread. The message still prompts only its recipient (@persona, else the
+        /// messenger), not the thread's other personas.
         #[arg(long)]
         thread: Option<ThreadId>,
         /// Wait for the first reply on the thread, print it and mark it read.
@@ -108,10 +109,11 @@ enum Command {
     /// Channels: named groups of personas that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
-    /// Show the plan room of a thread, or post to it as the CLI's human, which gives the room a fresh turn budget.
+    /// Show the notes of a thread, or post to them as the CLI's human, which gives them a fresh turn budget. Thread
+    /// notes are one shared board per thread: a post wakes nobody, and agents read the board with read_plan.
     Plan {
         thread: ThreadId,
-        /// The post. Without it, show the room.
+        /// The post. Without it, show the notes.
         words: Vec<String>,
     },
     /// Print ants traffic as it happens, escalations with their level, leader and personas visited, or the live
@@ -924,12 +926,12 @@ async fn plan_room(nats: &Nats<'_>, thread: ThreadId, words: Vec<String>) -> Res
     if !words.is_empty() {
         let post = PlanPost::new(thread, nats.me.id.clone(), words.join(" "));
         plan::publish(&js, &post, None).await?;
-        println!("posted to the plan room of thread {} ({} turns left)", post.thread_id, post.turn_budget);
+        println!("posted to the notes of thread {} ({} turns left)", post.thread_id, post.turn_budget);
         return Ok(());
     }
     let room = plan::read(&js, &nats.me.id, &thread).await?;
     if room.posts.is_empty() {
-        println!("the plan room of thread {thread} is empty");
+        println!("thread {thread} has no notes");
     }
     for post in &room.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
@@ -966,7 +968,7 @@ async fn watch(nats: &Nats<'_>, filter: String) -> Result<()> {
         } else if let Ok(post) = serde_json::from_slice::<PlanPost>(&msg.payload) {
             let forged = forged(post.check_subject(&msg.subject).is_ok());
             let (thread, from, left) = (&post.thread_id, &post.from, post.turn_budget);
-            printer.line(&format!("[{thread}] {from} -> plan room ({left} turns left){forged}: {}", post.text))
+            printer.line(&format!("[{thread}] {from} -> thread notes ({left} turns left){forged}: {}", post.text))
         } else if let Ok(d) = serde_json::from_slice::<DeadLetter>(&msg.payload) {
             printer.line(&format!("dead letter of {} after {} deliveries: {}", d.persona, d.deliveries, d.error))
         } else if let Ok(r) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) {

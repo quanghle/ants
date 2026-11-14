@@ -1,4 +1,4 @@
-//! Plan rooms: the posts of a thread's room live in the ANTS stream on `ants.plan.<thread>.<from>`.
+//! Thread notes (plan rooms in the code): a thread's posts live in the ANTS stream on `ants.plan.<thread>.<from>`.
 //!
 //! A reader reads a room back through its own consumer `plan-<persona>`, created for the read and deleted after it, so
 //! its credentials need not let it touch any other consumer. Posts whose sender or thread disagrees with their subject
@@ -89,7 +89,7 @@ pub async fn read(js: &jetstream::Context, reader: &PersonaId, thread: &ThreadId
     let consumer: consumer::PullConsumer = js
         .create_consumer_on_stream(config, STREAM)
         .await
-        .with_context(|| format!("reading the plan room of thread {thread}"))?;
+        .with_context(|| format!("reading the notes of thread {thread}"))?;
     let room = collect(&consumer, thread).await;
     if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
         tracing::debug!(error = %e, consumer = name, "deleting the plan consumer");
@@ -163,5 +163,5 @@ pub async fn spend(
             return Ok(Some(post));
         }
     }
-    anyhow::bail!("the plan room of thread {thread} kept changing")
+    anyhow::bail!("the notes of thread {thread} kept changing")
 }

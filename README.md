@@ -28,8 +28,8 @@ Headless agent teams on several machines, talking to each other and to a human a
                           uplink: wss://, tls:// or a Dev Tunnel
 ```
 
-- **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, plan rooms,
-  channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
+- **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, thread
+  notes, channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
   channels and escalation chains. In operator
   mode (`ants auth`), every persona and the human connect with their own NKey/JWT credentials, limited to the subjects
   of their role.
@@ -77,7 +77,7 @@ ants ask --wait @dev-a "summarise the open TODOs"
 ants inbox                                          # replies not read yet
 ants roster                                         # personas being served
 ants approve                                        # tool requests waiting for an answer
-ants plan <thread>                                  # a thread's plan room
+ants plan <thread>                                  # a thread's notes (see Thread notes)
 ants channel create ops --member dev-a,dev-b        # a channel (see Channels)
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a only; prints the thread
 ants channel read ops                               # the channel's posts, by thread
@@ -97,10 +97,10 @@ the personas ([Config file](#config-file)) and services ([Services](#services)).
 
 | Command | Does |
 |---|---|
-| `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner (with a persona's credentials, a thread without owner); without `@persona` it goes to the messenger. `--thread` continues a thread, `--wait` prints the first reply. |
+| `ants ask [@persona] TEXT` | Sends a message as the CLI's human, the thread's owner (with a persona's credentials, a thread without owner); without `@persona` it goes to the messenger. `--thread` continues a thread, still prompting only the named recipient, `--wait` prints the first reply. |
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the personas being served, live or stale, idle or working, with their escalation chains (`--json`). |
-| `ants plan THREAD [TEXT]` | Shows a thread's plan room, or posts to it as the CLI's human. |
+| `ants plan THREAD [TEXT]` | Shows a thread's notes, or posts to them as the CLI's human; a post wakes nobody (see [Thread notes](#thread-notes)). |
 | `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@persona` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
@@ -119,7 +119,7 @@ Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`),
 `--js-domain` (`ANTS_JS_DOMAIN`). `ants <command> --help` lists the rest.
 
 The CLI acts as the human its credentials name (the `name` of their user JWT, as `ants auth user NAME --human` sets
-it), or as `human` without credentials: it sends and posts under that name, reads that human's inbox and plan room
+it), or as `human` without credentials: it sends and posts under that name, reads that human's inbox and thread notes
 consumers, and connects with that human's reply prefix. On connecting, it registers that human in the KV bucket
 `ants_humans`, creating the bucket when missing: one direct get when the entry is there already, a put otherwise
 (again after the entry was removed). `human` needs no entry. When registering fails, the command warns and goes on;
@@ -256,8 +256,8 @@ How flags and the file combine:
 
 ### Escalations
 
-What a persona cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, a plan
-room out of turns, or what its harness escalates with the `escalate` tool) goes up its escalation chain (tool requests
+What a persona cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, thread
+notes out of turns, or what its harness escalates with the `escalate` tool) goes up its escalation chain (tool requests
 outside the allowlist go to its own chain only; see Tool permissions), in the end to the thread's owner (the envelope's
 `owner`, the human who started the thread), else to the daemon's default human, the config file key `human` (default
 `human`; top-level or per persona). Without a chain it goes to the owner at once.
@@ -266,14 +266,14 @@ The chain is the persona's `escalate_to` key, a list of other personas whose fir
 and the daemon also keeps it on start in the KV bucket `ants_chains` under the persona id, whose entries never expire,
 so any daemon can follow a chain past a persona that is offline, even after its roster entry expired. Every member gets
 the escalation in its inbox, on the stuck thread, as an `[ants]` notice naming the stuck persona, the reason, the level
-and the leader, followed by the notice the owner would have got. The members coordinate in the thread's plan room, which
+and the leader, followed by the notice the owner would have got. The members coordinate in the thread's notes, which
 each level that goes up a chain gives a fresh turn budget with an `[ants]` post naming the level, the members and the
-leader, so the group has turns there even when the room ran out. Each member's prompt starts with an `[ants]` note on the
+leader, so the group has turns there even if the notes ran out. Each member's prompt starts with an `[ants]` note on the
 group: the stuck persona and thread, the level, the members and who leads. Only the leader resolves it, by answering the
 stuck persona on the thread (a reply to the notice goes to the stuck persona, also when a member sent the level), or
-escalates it further (the `escalate` tool). Another member's reply to the notice goes to the thread's plan room, for the
+escalates it further (the `escalate` tool). Another member's reply to the notice goes to the thread's notes, for the
 leader, and the member cannot `send_message` or `ask_agent` the stuck persona on the thread; a reply to a fellow member's
-message goes to that member as usual. A member's reply the room has no turns left for escalates it, the unposted answer
+message goes to that member as usual. A member's reply the notes have no turn left for escalates it, the unposted answer
 included. The leader's answer gives the thread a fresh turn budget and allowance, once per level (on a channel thread,
 the persona's answer to it is posted back to the channel with that budget; see Channels): the next time the persona is
 stuck on the thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster,
@@ -585,10 +585,10 @@ speak as the persona, on the thread the session serves:
 | `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
 | `list_personas(capability?)` | Lists the other personas in the roster with `whoami`, capabilities, harness, machine and activity (idle or working); only those advertising `capability` when given. |
 | `route(capability, text, wait?, timeout_secs?)` | Sends the request to the first persona by name, other than the caller, whose capabilities include `capability` (whole tag, any case). Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
-| `post_plan(text)` | Posts to the plan room of the current thread, spending one turn (see Plan rooms). |
-| `read_plan(thread?)` | Returns the posts of the current thread's plan room, or of `thread`, oldest first (the last 50), and the turns it has left. |
+| `post_plan(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
+| `read_plan(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting persona. |
-| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the persona's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the plan room instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
+| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the persona's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
 from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -654,30 +654,40 @@ In channels the messenger triages humans' posts that @mention nobody (see Channe
 way; `list_personas` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
 and `send_message`. Every persona gets these tools, not only the messenger.
 
-## Plan rooms
+## Thread notes
 
-Each thread has a plan room, where the personas on it plan together before the work starts: one posts a plan with
-`post_plan`, asks the others (`ask_agent`, `send_message`) to read it with `read_plan` and post their part, and so on.
-Posts go on `ants.plan.<thread>.<from>` and are kept in the stream like messages. Nobody is prompted by a post; a
-persona reads the room when asked to.
+A thread is one conversation, named by its id (`ants ask` and `ants post` print it); its messages share a turn budget
+and an owner. On a thread:
 
-Posts spend the thread's turn budget like messages between agents. Each post carries the turns the room has left: one
-less than the lower of the budget of the message its persona is handling and what the room's last post left. The post
+- **Directed messages** go to one named recipient's inbox and prompt that recipient only: `ants ask @persona` (the
+  messenger without `@persona`), `ants ask --thread <thread>` to continue the thread, and the `send_message`,
+  `ask_agent` and `route` tools between personas. The thread's other personas neither see nor answer them.
+- **Thread notes** are one shared board per thread, where the personas on it plan together before the work starts.
+  A post there notifies and wakes nobody: a persona sees the notes only when it calls `read_plan` (or a human runs
+  `ants plan <thread>`). So one persona posts a plan with `post_plan`, asks the others with directed messages
+  (`ask_agent`, `send_message`) to read it with `read_plan` and post their part, and so on.
+
+Thread notes are no group chat: for a named group of personas whose posts wake the members they concern, see
+[Channels](#channels). The command, the tools and the subjects keep the name *plan*: posts go on
+`ants.plan.<thread>.<from>` and are kept in the stream like messages.
+
+Posts spend the thread's turn budget like messages between agents. Each post carries the turns the notes have left: one
+less than the lower of the budget of the message its persona is handling and what the last post left. The post
 that spends the last turn escalates the thread (see Escalations): its persona sends a notice on the thread with the
-last post up its chain, else to the owner, and the room refuses further agent posts until a human posts there or the
+last post up its chain, else to the owner, and the notes refuse further agent posts until a human posts there or the
 escalation goes up a level of a chain, which posts there with a fresh budget, once per level. Two personas spending the
-same turn cannot both succeed: a post states the room's last message it saw (`Nats-Expected-Last-Subject-Sequence`,
-nats-server 2.11 or later), and the loser reads the room again.
+same turn cannot both succeed: a post states the notes' last message it saw (`Nats-Expected-Last-Subject-Sequence`,
+nats-server 2.11 or later), and the loser reads the notes again.
 
 ```sh
-ants plan <thread>                      # the room's posts: time, author, turns left, text
-ants plan <thread> "ship friday"        # post as the CLI's human, which gives the room a fresh budget (8 turns)
-ants watch 'ants.plan.>'                # every room, live
+ants plan <thread>                      # the notes' posts: time, author, turns left, text
+ants plan <thread> "ship friday"        # post as the CLI's human, which gives the notes a fresh budget (8 turns)
+ants watch 'ants.plan.>'                # the notes of every thread, live
 ```
 
-Personas and humans read a room back through their own consumer, `plan-<persona>`, created for the read and
+Personas and humans read the notes back through their own consumer, `plan-<persona>`, created for the read and
 deleted after it; their credentials allow it to filter plan subjects only. Persona and human credentials issued before
-plan rooms need `ants auth user` again.
+thread notes need `ants auth user` again.
 
 ## Channels
 
@@ -726,8 +736,8 @@ mentioning each other cannot multiply them. Any human's post gives the thread a 
 answer of the escalation's leader, once per level: the persona that got stuck posts its answer to it back on the thread,
 carrying the fresh budget. `ants watch` shows the turns the thread has left after each post.
 
-**Channels and plan rooms.** Plan rooms ([Plan rooms](#plan-rooms)) are passive boards attached to one thread: a
-post there wakes nobody, and a persona reads the room only when asked to. A channel is the other way round: a post
+**Channels and thread notes.** Thread notes ([Thread notes](#thread-notes)) are passive boards attached to one thread: a
+post there wakes nobody, and a persona reads the notes only when asked to. A channel is the other way round: a post
 wakes the members it @mentions, or the messenger, and replies come back to the channel.
 
 **Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
@@ -839,7 +849,7 @@ any sender, to replay dead letters as they were; `ants dead replay` replays only
 it. Messages left on the older `ants.inbox.<persona>` subjects are no longer delivered; daemons and `ants inbox` move
 their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
 
-Plan room posts work the same way: a post by `<from>` to the room of thread `<thread>` goes on
+Posts to thread notes work the same way: a post by `<from>` to the notes of thread `<thread>` goes on
 `ants.plan.<thread>.<from>`, every credential (the human's too) posts only on `ants.plan.*.<persona>`, and readers
 drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
 
