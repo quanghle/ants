@@ -10,6 +10,7 @@ mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
+mod members;
 mod notify;
 mod outbox;
 mod presence;
@@ -575,24 +576,14 @@ enum AuthCommand {
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
     /// credentials of its second uplink, which only hears the account updates `ants auth push` sends the hub.
+    /// Without --ant, --human or --webhook, it reissues them for the members of the last run, changed by --add-* and
+    /// --remove-*.
     Leaf {
         /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
         /// '-' and '_'.
         machine: Machine,
-        /// Ant served on the machine (repeatable). `human` counts as a human.
-        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "webhooks"])]
-        ants: Vec<UserId>,
-        /// Human running the CLI on the machine (repeatable), as issued with `ants auth user HUMAN --human`.
-        #[arg(long = "human", value_name = "HUMAN")]
-        humans: Vec<UserId>,
-        /// Webhook `ants webhook serve` runs on the machine (repeatable): the uplink also allows what its credentials,
-        /// <dir>/<WEBHOOK>.creds from `ants auth user WEBHOOK --webhook`, allow.
-        #[arg(long = "webhook", value_name = "WEBHOOK")]
-        webhooks: Vec<UserId>,
-        /// The machine holds the account key and runs `ants enroll` through its leaf node: the uplink also carries
-        /// every enrollment request, the answers to them and the admission of a new ant into the hub's stream.
-        #[arg(long)]
-        enroll_approver: bool,
+        #[command(flatten)]
+        members: members::UplinkArgs,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -782,20 +773,20 @@ enum LeafCommand {
     },
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
     /// what its ants and humans send while the hub is out of reach, and have the hub's stream take from it what
-    /// they may send once the uplink is back. Run it again when the machine's ants or humans change. Fails if
-    /// the hub does not hear from the outbox within 10 s, as without `feature_flags { js_api_reply_v2: true }` on the
-    /// hub.
+    /// they may send once the uplink is back. Run it again when the machine's ants or humans change; without
+    /// members, it takes those its uplink credentials carry. Fails if the hub does not hear from the outbox within
+    /// 10 s, as without `feature_flags { js_api_reply_v2: true }` on the hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
-        /// Ant served on the machine (repeatable), as given to `ants auth leaf`. `human` counts as a human.
-        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "remove"])]
-        ants: Vec<UserId>,
-        /// Human running the CLI on the machine (repeatable), as given to `ants auth leaf`.
-        #[arg(long = "human", value_name = "HUMAN")]
-        humans: Vec<UserId>,
+        #[command(flatten)]
+        members: members::OutboxArgs,
+        /// Leaf node configuration whose uplink credentials name the members when --ant and --human do not
+        /// (default: ~/.config/ants/leaf.conf).
+        #[arg(long, value_name = "FILE")]
+        leaf_config: Option<PathBuf>,
         /// Stop taking anything from the machine's outbox instead.
-        #[arg(long, conflicts_with_all = ["ants", "humans"])]
+        #[arg(long, conflicts_with_all = ["ants", "humans", "add_ants", "add_humans", "remove_ants", "remove_humans", "leaf_config"])]
         remove: bool,
     },
 }
@@ -1082,11 +1073,18 @@ async fn main() -> Result<()> {
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Leaf { machine, ants, humans, webhooks, enroll_approver, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, members, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, enroll_approver, domain, &out)?;
-            println!("{}\n{}", out.display(), auth::leaf_system_creds(&out).display());
+            let kept = members::issued(&dir, &machine, &out)?;
+            let set = members::Change::from(members).apply(&machine, kept, || {
+                anyhow::anyhow!(
+                    "{} keeps no members of {machine}: name them with --ant, --human or --webhook",
+                    dir.display()
+                )
+            })?;
+            auth::issue_leaf(&dir, &machine, &set.roles(), &set.webhooks, set.enroll_approver, domain, &out)?;
+            println!("{}\n{}\nmembers of {machine}: {set}", out.display(), auth::leaf_system_creds(&out).display());
             Ok(())
         }
         Command::Auth(AuthCommand::Revoke { name, mut keys, devices, no_push, dir }) => {
@@ -1147,6 +1145,7 @@ async fn main() -> Result<()> {
                 );
             }
             let server_conf = server_conf.unwrap_or_else(|| dir.join(auth::SERVER_CONF));
+            let default_out = out.is_none();
             let out = match out {
                 Some(out) => out,
                 None => auth::default_dir()?.with_file_name("leaf.conf"),
@@ -1169,8 +1168,9 @@ async fn main() -> Result<()> {
                 "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
                  switch the uplink: run this again, then send the running leaf SIGHUP\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
-                 once the leaf is up: ants leaf outbox {machine} --ant ... --human ...",
-                out.display()
+                 once the leaf is up: ants leaf outbox {machine}{1}",
+                out.display(),
+                if default_out { String::new() } else { format!(" --leaf-config {}", out.display()) }
             );
             Ok(())
         }
@@ -1206,18 +1206,34 @@ async fn main() -> Result<()> {
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
             remote.run(listener).await
         }
-        Command::Leaf(LeafCommand::Outbox { machine, ants, humans, remove }) => {
-            let nats = nats()?;
-            let (_, js) = nats.connect("ants-cli").await?;
+        Command::Leaf(LeafCommand::Outbox { machine, members, leaf_config, remove }) => {
             if remove {
+                let (_, js) = nats()?.connect("ants-cli").await?;
                 outbox::remove(&js, &machine).await?;
                 println!("the hub no longer takes anything from the outbox of {machine}");
-            } else {
-                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
-                outbox::admit(&leaf, &js, &machine, &auth::members(&ants, &humans)).await?;
-                outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
-                println!("outbox of {machine} ready; the hub takes from it what its ants and humans send");
+                return Ok(());
             }
+            let change = members::Change::from(members);
+            let kept = match change.lists() {
+                true => None,
+                false => {
+                    let conf = match leaf_config {
+                        Some(path) => path,
+                        None => auth::default_dir()?.with_file_name("leaf.conf"),
+                    };
+                    let members = members::uplink(&conf, &machine).with_context(|| {
+                        format!("no --ant or --human given: reading the members of {machine} from {}", conf.display())
+                    })?;
+                    Some(members)
+                }
+            };
+            let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
+            let nats = nats()?;
+            let (_, js) = nats.connect("ants-cli").await?;
+            let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
+            outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
+            outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
+            println!("outbox of {machine} ready; the hub takes from it what its members send ({set})");
             Ok(())
         }
     }

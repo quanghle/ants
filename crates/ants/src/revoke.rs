@@ -73,6 +73,10 @@ pub struct Issued {
     /// stamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perms: Option<PermissionsVersion>,
+    /// The members of a leaf node's uplink ([`crate::members`]); none for other credentials, and for an uplink issued
+    /// before the registry kept them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<crate::members::Members>,
 }
 
 impl Issued {
@@ -88,6 +92,7 @@ impl Issued {
             device: None,
             label: None,
             perms: Some(PERMISSIONS_VERSION),
+            members: None,
         })
     }
 
@@ -425,7 +430,7 @@ pub fn listing(dir: &Path, now: u64) -> Result<Vec<Listed>> {
 }
 
 /// The command renewing `issued` when no `.creds` file tells more: placeholders stand for a webhook's destinations,
-/// a leaf node's members and the hub's JetStream domain.
+/// a leaf node's members when the registry does not keep them, and the hub's JetStream domain.
 fn renew_without_file(issued: &Issued) -> Vec<String> {
     let name = &issued.name;
     let domain = "[--js-domain DOMAIN]";
@@ -433,6 +438,9 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Ant => format!("ants auth user {name} {domain}"),
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
+        Kind::Leaf if issued.members.is_some() => {
+            format!("ants auth leaf {} {domain}", name.strip_prefix("leaf-").unwrap_or(name))
+        }
         Kind::Leaf => format!(
             "ants auth leaf {} --ant ANT... --human HUMAN... --webhook WEBHOOK... {domain}",
             name.strip_prefix("leaf-").unwrap_or(name)

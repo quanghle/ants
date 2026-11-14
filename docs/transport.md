@@ -140,6 +140,8 @@ With `jetstream { domain: hub }` on the hub, every `ants` process sets `--js-dom
 ```sh
 ants auth leaf macbook --ant dev-a --ant dev-b --ant messenger --human human --human alice --js-domain hub
 ants auth leaf macbook --ant dev-a --webhook github --js-domain hub
+ants auth leaf macbook --add-ant dev-c --remove-webhook github --js-domain hub
+ants auth leaf macbook --js-domain hub                   # the same members again
 ```
 
 `ants auth leaf` writes `leaf-<machine>.creds` (`leafnodes.remotes[].credentials`):
@@ -148,7 +150,7 @@ ants auth leaf macbook --ant dev-a --webhook github --js-domain hub
 - Grants the union of listed `--ant`, `--human` (`--ant human` also counts as human), and `--webhook` permissions (read from `<webhook>.creds`), plus outbox sourcing subjects (`$JS.<machine>.API.*.ANTS_OUT`, `$JS.S.<machine>.>`, `$JSC.R.<machine>.*.ANTS_OUT.>`, `_INBOX.<human>.leaf.<machine>.>`) and literal subject anchors (such as `ants.inbox.dev-a.dev-a`) so hub wildcard stream interest crosses the uplink.
 - Carries enrollment requests up (publish `ants.enroll.*`) and their answers down (subscribe `ants.enroll.*.reply`), never other machines' requests or answers from the machine.
 - With `--enroll-approver`, for the machine holding the account key, also carries what `ants enroll` needs: every request down, answers up, and the admission of a new ant into `ANTS` and `ants_links` (stream info and update, replies under `_INBOX._enroll`).
-- Excludes `ants.out.>`. Local clients still authenticate individually against `server.conf`; the leaf filters traffic to uplink bounds so unauthorized local clients cannot drop the uplink. Reissue `leaf-<machine>.creds` whenever machine users or webhooks change; an enrollment through the leaf renews them itself (below). Uplink credentials issued before enrollment crossed leaves lack `ants.enroll.*`: issue them once more. `ants leaf config` warns about uplink credentials outdated or expiring soon and names the `ants auth leaf` and `ants leaf outbox` commands renewing them (README, Credentials across upgrades).
+- Excludes `ants.out.>`. Local clients still authenticate individually against `server.conf`; the leaf filters traffic to uplink bounds so unauthorized local clients cannot drop the uplink. Reissue `leaf-<machine>.creds` whenever machine users or webhooks change; an enrollment through the leaf renews them itself (below). Each run records the members in `issued.jsonl`, and a run without `--ant`, `--human` or `--webhook` reissues those of the last, changed by `--add-*` and `--remove-*` (from the `.creds` file for uplinks issued before); named lists replace them. Uplink credentials issued before enrollment crossed leaves lack `ants.enroll.*`: issue them once more. `ants leaf config` warns about uplink credentials outdated or expiring soon and names the `ants auth leaf` and `ants leaf outbox` commands renewing them (README, Credentials across upgrades).
 - Grows with every user: each ant adds about 4 KB to the JWT (7.5 KB with `--js-domain`, which doubles the JetStream API subjects), each human more. The hub (nats-server 2.14 and later) closes a leaf connection whose `CONNECT` exceeds 16 × `max_control_line` (256 KiB with `server.conf`), so `ants auth leaf` refuses, before writing anything, an uplink JWT over 252 KiB (about 34 ants with a domain, 66 without), naming its size and the limit. Run the rest of the machine's users behind another leaf node under another machine name. Permissions are not widened to patterns to save space: the uplink allows only what the machine's users may do.
 
 ### Enrollment behind a leaf node
@@ -165,14 +167,15 @@ ants enroll approve dev-c --js-domain hub                # account-key machine
   - re-signs the leaf's uplink JWT for the same key, adding the ant's permissions (`Permissions::for_leaf` for the ant alone) to what it already allows, and sends it with the ant's JWT (`leaf_jwt`); approval fails, before admitting or answering anything, when the renewed JWT would exceed the uplink limit (above): reject the request and enroll the ant behind another leaf node;
   - when `ANTS_IN` sources the machine's outbox, adds the ant's admission to `ANTS` (without its inbox subjects when a human's admission takes every inbox of the machine) and to `ants_links`, starting after the current `ANTS_IN` entries, before answering.
 - The asking machine checks the renewed JWT (team account, leaf key, `leaf-<machine>`) and writes it into the uplink credentials file, unless that file changed meanwhile to allow something the renewal lacks. `nats-server` reads the file at each connect but does not reconnect on `SIGHUP` for new contents, so the leaf node restarts: `ants add` restarts the leaf node service `scripts/install-units.sh` installed for that `leaf.conf` (`launchctl kickstart -k gui/<uid>/ants.nats`, `systemctl --user restart ants-nats`) when it runs, last, after reloading the daemon; otherwise it prints those commands to run by hand. Local clients, the daemon's ants among them, reconnect.
-- A rogue leaf may hear answers to its machine's requests: they hold only public JWTs, useless without the seeds that stay on the asking machine. Later `ants auth leaf` and `ants leaf outbox` runs replace the lists, so name the enrolled ant in them too.
+- A rogue leaf may hear answers to its machine's requests: they hold only public JWTs, useless without the seeds that stay on the asking machine. Approval also records the ant among the leaf's members in the team directory's `issued.jsonl`, so a later `ants auth leaf` without lists keeps it, as does `ants leaf outbox` reading the renewed uplink credentials.
 
 ## Store and forward
 
-Run `ants leaf outbox` as a human while the leaf is connected to the hub (and rerun when ants or humans on the machine change):
+Run `ants leaf outbox` as a human while the leaf is connected to the hub (and rerun when ants or humans on the machine change). Without `--ant` or `--human`, it admits those the uplink credentials of the machine's `leaf.conf` carry (`--leaf-config FILE`), changed by `--add-ant`, `--add-human`, `--remove-ant` and `--remove-human`:
 
 ```sh
 ants leaf outbox macbook --ant dev-a --ant dev-b --ant messenger --human human --human alice
+ants leaf outbox macbook
 ants leaf outbox macbook --remove
 ```
 

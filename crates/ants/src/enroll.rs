@@ -8,8 +8,9 @@
 //!
 //! A machine behind a leaf node asks through the leaf's uplink, which carries enrollment requests and their answers
 //! ([`ants_proto::Permissions::for_leaf`]). Its request names the leaf ([`EnrollLeaf`]), signed with the uplink key, and
-//! the approval renews the leaf's uplink credentials to carry the ant too, and admits the ant into the hub's stream
-//! from the leaf's outbox ([`outbox::admit_ant`]).
+//! the approval renews the leaf's uplink credentials to carry the ant too, keeps the ant among the leaf's members in
+//! the team directory ([`members::enrolled`]), and admits the ant into the hub's stream from the leaf's outbox
+//! ([`outbox::admit_ant`]).
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -25,7 +26,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 
-use crate::{auth, outbox, revoke};
+use crate::{auth, members, outbox, revoke};
 
 /// How long `ants enroll` listens for requests: one repeat of every machine still asking, and some slack.
 pub const LISTEN: Duration = ENROLL_REPEAT.saturating_add(Duration::from_secs(1));
@@ -311,8 +312,9 @@ impl Approver {
 
     /// Sign the credentials `ant` asks for, with the account key in `dir`, for the hub's JetStream domain if it
     /// has one, and send them. `public_key` picks the request when several machines ask for the ant. A request
-    /// through a leaf node also gets the leaf's uplink credentials renewed to carry the ant, and the ant admitted
-    /// into the hub's stream from the leaf's outbox, if the hub sources it.
+    /// through a leaf node also gets the leaf's uplink credentials renewed to carry the ant, the ant kept among the
+    /// leaf's members in `dir`, for later `ants auth leaf` runs, and admitted into the hub's stream from the leaf's
+    /// outbox, if the hub sources it.
     pub async fn approve(&self, dir: &Path, ant: &UserId, public_key: Option<&str>) -> Result<Approved> {
         if ant.is_human() {
             bail!("{ant} is the default human; issue its credentials with `ants auth user`");
@@ -324,6 +326,8 @@ impl Approver {
             Some(leaf) => {
                 let more = Permissions::for_leaf(&leaf.machine, [(ant, Role::Ant)]).with_js_domain(domain);
                 let renewed = auth::extend_leaf(dir, &leaf.jwt, &leaf.machine, more)?;
+                members::enrolled(dir, &leaf.machine, &renewed, ant)
+                    .with_context(|| format!("keeping {ant} among the members of {}", leaf.machine))?;
                 // Before the answer: a machine that heard none asks again, and this runs again.
                 let outbox = outbox::admit_ant(&self.hub, &leaf.machine, ant)
                     .await
@@ -663,6 +667,8 @@ mod tests {
         let leaf_approved = approved.leaf.unwrap();
         assert_eq!(leaf_approved.machine, m1);
         assert!(leaf_approved.outbox, "the hub sources m1's outbox");
+        let kept = members::issued(&team, &m1, &uplink_creds).unwrap().unwrap();
+        assert_eq!(kept.ants, [dev_a.clone(), dev_c.clone()], "a later `ants auth leaf m1` keeps dev-c");
 
         let (old, key) = auth::read_creds(&uplink_creds).unwrap();
         let renewed = approval.leaf_jwt.unwrap();
@@ -672,6 +678,8 @@ mod tests {
         let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
         assert!(bus::open_stream(&c_js, &dev_c).await.is_err(), "the uplink does not carry dev-c yet");
         auth::write_creds(&uplink_creds, &renewed, &key).unwrap();
+        let carried = members::uplink(&m1_conf, &m1).unwrap();
+        assert!(carried.ants.contains(&dev_c), "a later `ants leaf outbox m1` admits dev-c: {carried}");
         drop((_a, _c));
         drop(m1_node);
         let (m1_node, _) = spawn_leaf(&m1, &on_m1, false);
