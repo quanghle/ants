@@ -526,6 +526,7 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
             let destinations: Vec<Destination> = to.chain(channels.iter().cloned().map(Destination::Channel)).collect();
             (Permissions::for_webhook(&user()?, &destinations), json!({}))
         }
+        CredsKind::Observer => (Permissions::for_observer(&user()?), json!({})),
         CredsKind::ChannelManager => {
             let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
             (Permissions::for_channel_manager(), json!({ "resp": { "max": 1, "ttl": ttl } }))
@@ -582,6 +583,7 @@ fn registry_kind(kind: &CredsKind) -> Option<Kind> {
         CredsKind::Human => Some(Kind::Human),
         CredsKind::Webhook { .. } => Some(Kind::Webhook),
         CredsKind::ChannelManager => Some(Kind::ChannelManager),
+        CredsKind::Observer => Some(Kind::Observer),
         CredsKind::Leaf { .. } => Some(Kind::Leaf),
         CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => None,
     }
@@ -1033,6 +1035,12 @@ pub(crate) mod tests {
         let hook = Permissions::for_webhook(&p("hook"), &destinations);
         issue_with(&team, &p("hook"), Kind::Webhook, hook, &out("hook")).unwrap();
         renewed("hook");
+        let observer = Permissions::for_observer(&p("audit")).with_js_domain(Some(&hub));
+        issue_with(&team, &p("audit"), Kind::Observer, observer, &out("audit")).unwrap();
+        let audit = renewed("audit");
+        assert_eq!((&audit.finding.kind, audit.finding.js_domain.as_ref()), (&creds::Kind::Observer, Some(&hub)));
+        assert_eq!(audit.finding.renew(), ["ants auth user audit --observer --js-domain hub"]);
+        assert_eq!(revoke::issued(&team).unwrap().pop().unwrap().kind, Kind::Observer);
         issue_channel_manager(&team, None, &out("channel-manager")).unwrap();
         renewed("channel-manager");
         let m1: Machine = "m1".parse().unwrap();
@@ -1881,6 +1889,182 @@ pub(crate) mod tests {
             let v = next_violation(&a_raw, &mut errors).await;
             assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_observer_reads_approvals_dead_letters_status_and_the_roster_and_publishes_nothing() {
+        use ants_proto::Feed;
+        use async_nats::jetstream::consumer;
+        let Some(server) = Server::start() else { return };
+        let (audit, dev_a, dev_b) = (p("audit"), p("dev-a"), p("dev-b"));
+        let creds = server.dir().join("audit.creds");
+        let team = server.dir().join("auth");
+        issue_with(&team, &audit, crate::revoke::Kind::Observer, Permissions::for_observer(&audit), &creds).unwrap();
+        let text = std::fs::read_to_string(&creds).unwrap();
+        assert_eq!(ants_daemon::creds::Finding::from_creds(&text).unwrap().kind, ants_daemon::creds::Kind::Observer);
+        let (_, h_js) = server.connect(&UserId::human()).await;
+        bus::init_stream(&h_js).await.unwrap();
+        bus::ensure_roster(&h_js, Duration::from_secs(60)).await.unwrap();
+        let (a, a_js) = server.connect(&dev_a).await;
+        let (_, b_js) = server.connect(&dev_b).await;
+        let request = ants_proto::Uuid::now_v7();
+        let stored = [
+            (&a_js, subject::approvals(&dev_a)),
+            (&h_js, subject::approval_decision(&dev_a, &request)),
+            (&a_js, subject::dead(&dev_a)),
+            (&b_js, subject::inbox(&dev_a, &dev_b)),
+            (&a_js, subject::notes(&ThreadId::generate(), &dev_a)),
+        ];
+        for (js, subject) in &stored {
+            js.publish(subject.clone(), "event".into()).await.unwrap().await.unwrap();
+        }
+        a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap().put("dev-a", "{}".into()).await.unwrap();
+
+        // It finds JetStream on connecting, reads each feed through its own consumer and watches the roster.
+        let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());
+        let (o, mut o_js) = timeout(WAIT, connecting).await.expect("audit reaches JetStream").unwrap().unwrap();
+        o_js.set_timeout(Duration::from_secs(1));
+        for (feed, want) in [
+            (Feed::ApprovalRequests, subject::approvals(&dev_a)),
+            (Feed::ApprovalDecisions, subject::approval_decision(&dev_a, &request)),
+            (Feed::DeadLetters, subject::dead(&dev_a)),
+        ] {
+            let name = feed.consumer(&audit);
+            let config = consumer::pull::Config {
+                durable_name: Some(name.clone()),
+                filter_subject: feed.filter().to_owned(),
+                ..Default::default()
+            };
+            let reader: consumer::PullConsumer = o_js.create_consumer_on_stream(config, STREAM).await.unwrap();
+            let msgs: Vec<_> = reader.fetch().max_messages(10).messages().await.unwrap().try_collect().await.unwrap();
+            let subjects: Vec<&str> = msgs.iter().map(|m| m.subject.as_str()).collect();
+            assert_eq!(subjects, [want.as_str()], "{feed:?}");
+            msgs[0].ack().await.unwrap();
+            let again: consumer::PullConsumer = o_js.get_consumer_from_stream(&name, STREAM).await.unwrap();
+            assert_eq!(again.cached_info().num_ack_pending, 0, "{feed:?}");
+            o_js.delete_consumer_from_stream(&name, STREAM).await.unwrap();
+        }
+        let roster = o_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap();
+        assert_eq!(roster.get("dev-a").await.unwrap().as_deref(), Some(&b"{}"[..]));
+        let mut watch = roster.watch_all().await.unwrap();
+        a_js.get_key_value(ants_proto::ROSTER_BUCKET).await.unwrap().put("dev-a", "{\"a\":1}".into()).await.unwrap();
+        let entry = timeout(WAIT, watch.next()).await.expect("no roster entry").unwrap().unwrap();
+        assert_eq!(entry.key, "dev-a");
+        let mut status = o.subscribe(subject::ALL_STATUS).await.unwrap();
+        o.flush().await.unwrap();
+        let thread = ThreadId::generate();
+        a.publish(subject::status(&dev_a, &thread), "{}".into()).await.unwrap();
+        let heard = timeout(WAIT, status.next()).await.expect("no status").unwrap();
+        assert_eq!(heard.subject.as_str(), subject::status(&dev_a, &thread));
+
+        // It sends nothing, decides nothing, writes no bucket, and reads no conversation.
+        let (raw, mut errors) = server.watched_with(&audit, &creds).await;
+        for denied in [
+            subject::inbox(&dev_a, &audit),
+            subject::inbox(&dev_a, &dev_b),
+            subject::outbox(&subject::inbox(&dev_a, &audit)).unwrap(),
+            subject::notes(&thread, &audit),
+            subject::chan(&"ops".parse().unwrap(), &audit),
+            subject::approvals(&audit),
+            subject::approval_decision(&dev_a, &request),
+            subject::dead(&dev_a),
+            subject::status(&audit, &thread),
+            subject::cancel(&dev_a, &thread),
+            subject::renew("dev-a"),
+            "$KV.ants_roster.dev-a".to_owned(),
+            "$KV.ants_humans.audit".to_owned(),
+            "$JS.API.STREAM.INFO.ANTS".to_owned(),
+            "$JS.API.STREAM.MSG.GET.ANTS".to_owned(),
+            "$JS.API.DIRECT.GET.ANTS".to_owned(),
+            format!("$JS.API.DIRECT.GET.ANTS.{}", subject::inbox(&dev_a, &dev_b)),
+            // Consumers with another filter, or none in the subject, or another's name.
+            format!("$JS.API.CONSUMER.CREATE.ANTS.{}.ants.inbox.>", Feed::DeadLetters.consumer(&audit)),
+            "$JS.API.CONSUMER.CREATE.ANTS".to_owned(),
+            format!("$JS.API.CONSUMER.CREATE.ANTS.{}", Feed::DeadLetters.consumer(&audit)),
+            format!("$JS.API.CONSUMER.CREATE.ANTS.inbox-dev-a.{}", subject::inbox_of(&dev_a)),
+            format!("$JS.API.CONSUMER.MSG.NEXT.ANTS.{}", ants_proto::inbox_consumer(&dev_a)),
+            "$JS.API.CONSUMER.CREATE.KV_ants_sessions".to_owned(),
+            "$JS.API.DIRECT.GET.KV_ants_presence.>".to_owned(),
+            "$JS.API.STREAM.INFO.KV_ants_presence".to_owned(),
+        ] {
+            raw.publish(denied.clone(), "{}".into()).await.unwrap();
+            let v = next_violation(&raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        }
+        for denied in
+            [subject::ALL, "ants.inbox.>", subject::ALL_NOTES, subject::ALL_CHANNELS, "ants.cancel.>", "_INBOX.dev-a.>"]
+        {
+            let _sub = raw.subscribe(denied).await.unwrap();
+            let v = next_violation(&raw, &mut errors).await;
+            assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
+        use ants_proto::Feed;
+        use async_nats::jetstream::consumer;
+        let Some(server) = Server::start() else { return };
+        let (audit, dev_a) = (p("audit"), p("dev-a"));
+        let creds = server.dir().join("audit.creds");
+        issue_with(
+            &server.dir().join("auth"),
+            &audit,
+            crate::revoke::Kind::Observer,
+            Permissions::for_observer(&audit),
+            &creds,
+        )
+        .unwrap();
+        let (_, h_js) = server.connect(&UserId::human()).await;
+        bus::init_stream(&h_js).await.unwrap();
+        let (_, a_js) = server.connect(&dev_a).await;
+        let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());
+        let (_, o_js) = timeout(WAIT, connecting).await.expect("audit reaches JetStream").unwrap().unwrap();
+        let out = server.dir().join("dead.jsonl");
+        let hook = |out: &Path| crate::hook::Hook {
+            event: crate::hook::Event::DeadLetter,
+            command: vec!["sh".into(), "-c".into(), format!("cat >> '{}'", out.display())],
+            timeout: Duration::from_secs(10),
+            concurrency: 1,
+        };
+        let bury = |seq: u64, ant: &UserId| ants_proto::DeadLetter::of_payload(ant.clone(), seq, 6, "failed", b"x");
+        let lines = async |want: usize| {
+            loop {
+                let text = std::fs::read_to_string(&out).unwrap_or_default();
+                if text.lines().count() >= want {
+                    return text
+                        .lines()
+                        .map(|line| serde_json::from_str(line).unwrap())
+                        .collect::<Vec<ants_proto::DeadLetter>>();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+
+        let running = tokio::spawn({
+            let (o_js, audit, hook) = (o_js.clone(), audit.clone(), hook(&out));
+            async move { hook.run(&o_js, &audit).await }
+        });
+        let reader = Feed::DeadLetters.consumer(&audit);
+        while o_js.get_consumer_from_stream::<consumer::pull::Config, _, _>(&reader, STREAM).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // One naming another ant than its subject does is skipped.
+        bus::publish_json(&a_js, subject::dead(&dev_a), &bury(1, &p("dev-b")), None).await.unwrap();
+        bus::publish_json(&a_js, subject::dead(&dev_a), &bury(2, &dev_a), None).await.unwrap();
+        let got = timeout(WAIT, lines(1)).await.expect("the hook ran");
+        assert_eq!(got.iter().map(|d| d.stream_seq).collect::<Vec<_>>(), [2]);
+        running.abort();
+
+        // A dead letter stored while no hook runs is handed on when one starts again.
+        bus::publish_json(&a_js, subject::dead(&dev_a), &bury(3, &dev_a), None).await.unwrap();
+        let running = tokio::spawn({
+            let (o_js, audit, hook) = (o_js.clone(), audit.clone(), hook(&out));
+            async move { hook.run(&o_js, &audit).await }
+        });
+        let got = timeout(WAIT, lines(2)).await.expect("the hook ran again");
+        assert_eq!(got.iter().map(|d| d.stream_seq).collect::<Vec<_>>(), [2, 3]);
+        running.abort();
     }
 
     #[tokio::test]

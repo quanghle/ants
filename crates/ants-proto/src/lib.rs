@@ -568,6 +568,9 @@ pub mod subject {
         format!("ants.status.{ant}.*")
     }
 
+    /// Live progress of every ant on every thread.
+    pub const ALL_STATUS: &str = "ants.status.*.*";
+
     /// Live progress of every ant on a thread.
     pub fn status_on(thread: &ThreadId) -> String {
         format!("ants.status.*.{thread}")
@@ -778,6 +781,42 @@ pub fn dead_reader(ant: &UserId) -> String {
 /// [`notes_consumer`], to rebuild the context of a thread. Its filter is pinned to [`subject::inbox_from`] of the ant.
 pub fn sent_reader(ant: &UserId) -> String {
     format!("sentread-{ant}")
+}
+
+/// What an observer ([`Permissions::for_observer`]) reads from the `ANTS` stream, each through a consumer of its own
+/// ([`Feed::consumer`]) whose filter is pinned in the subject that creates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Feed {
+    /// Every [`ApprovalRequest`], on [`subject::ALL_APPROVAL_REQUESTS`].
+    ApprovalRequests,
+    /// Every [`ApprovalDecision`], on [`subject::ALL_APPROVAL_DECISIONS`].
+    ApprovalDecisions,
+    /// Every [`DeadLetter`], on [`subject::DEAD_ALL`].
+    DeadLetters,
+}
+
+impl Feed {
+    pub const ALL: [Feed; 3] = [Feed::ApprovalRequests, Feed::ApprovalDecisions, Feed::DeadLetters];
+
+    /// The subjects of the feed, its consumer's filter.
+    pub fn filter(self) -> &'static str {
+        match self {
+            Feed::ApprovalRequests => subject::ALL_APPROVAL_REQUESTS,
+            Feed::ApprovalDecisions => subject::ALL_APPROVAL_DECISIONS,
+            Feed::DeadLetters => subject::DEAD_ALL,
+        }
+    }
+
+    /// The JetStream consumer `observer` reads the feed through: `observe-<feed>-<observer>`, durable or not, as the
+    /// observer creates it.
+    pub fn consumer(self, observer: &UserId) -> String {
+        let feed = match self {
+            Feed::ApprovalRequests => "requests",
+            Feed::ApprovalDecisions => "decisions",
+            Feed::DeadLetters => "dead",
+        };
+        format!("observe-{feed}-{observer}")
+    }
 }
 
 /// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
@@ -1313,6 +1352,50 @@ impl Permissions {
             publish,
             subscribe: vec![format!("{}.>", inbox_prefix(webhook)), subject::renew_reply(webhook.as_str())],
         }
+    }
+
+    /// What the read-only credentials of `observer` allow, for hooks that act on the team's events from outside
+    /// (`ants auth user --observer`): reading every approval request, approval decision and dead letter from the
+    /// stream through its own consumers ([`Feed::consumer`], each with its filter pinned in the subject that creates
+    /// it), and hearing them live; hearing every ant's status ([`subject::status`]), escalations among them
+    /// ([`StatusUpdate::Escalated`]); reading and watching the roster, where each ant's daemon says it serves the ant
+    /// and how busy it is. It hears its own reply inboxes and asks for its own renewal ([`subject::renew`]).
+    ///
+    /// Nothing else: it publishes no message, decides no approval, cancels nothing and writes no bucket, so it can
+    /// neither act for an ant or a human nor change what they see. It reads no inbox, notes or channel, so no
+    /// conversation as stored, nor the sessions, attempts, owners, links, chains, humans, channels, webhooks, read or
+    /// presence buckets: where the devices of humans are is not even for other humans to see. It gets no stream info,
+    /// which lists every subject stored, so who messages whom, nor message gets, which take any sequence: it finds the
+    /// stream through the info of a consumer named after it, as a webhook does.
+    pub fn for_observer(observer: &UserId) -> Self {
+        let mut publish = vec![format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(observer))];
+        for feed in Feed::ALL {
+            let consumer = feed.consumer(observer);
+            publish.extend([
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", feed.filter()),
+                format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
+                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+                format!("$JS.ACK.{STREAM}.{consumer}.>"),
+                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"),
+            ]);
+        }
+        let roster = kv_stream(ROSTER_BUCKET);
+        publish.extend([
+            format!("$JS.API.STREAM.INFO.{roster}"),
+            format!("$JS.API.DIRECT.GET.{roster}.>"),
+            format!("$JS.API.CONSUMER.CREATE.{roster}"),
+            format!("$JS.FC.{roster}.>"),
+        ]);
+        publish.push(subject::renew(observer.as_str()));
+        let subscribe = vec![
+            format!("{}.>", inbox_prefix(observer)),
+            subject::ALL_APPROVAL_REQUESTS.to_owned(),
+            subject::ALL_APPROVAL_DECISIONS.to_owned(),
+            subject::DEAD_ALL.to_owned(),
+            subject::ALL_STATUS.to_owned(),
+            subject::renew_reply(observer.as_str()),
+        ];
+        Self { publish, subscribe }
     }
 
     /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment and renewal
@@ -3247,6 +3330,13 @@ pub enum StatusUpdate {
     Approval {
         request_id: Uuid,
     },
+    /// The ant escalated what it could not settle: the message carrying `escalation` to `to`, an ant of a chain or the
+    /// thread's owner (else the default human), is stored. Sent for each such message, reminders included; the
+    /// message's text is not part of it.
+    Escalated {
+        to: UserId,
+        escalation: Escalation,
+    },
 }
 
 /// Live progress of an ant on a thread, published on [`subject::status`] with core NATS: never stored, so a
@@ -3686,7 +3776,16 @@ mod tests {
         let json = serde_json::to_value(&queued).unwrap();
         assert_eq!((json["type"].as_str(), json["ahead"].as_u64()), (Some("queued"), Some(2)));
         let approval = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Approval { request_id: Uuid::nil() });
-        for event in [state, tool, queued, approval] {
+        let escalation = Escalation::new(p("dev-a"), t.clone(), EscalationReason::Asked);
+        let escalated =
+            StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Escalated { to: UserId::human(), escalation });
+        let json = serde_json::to_value(&escalated).unwrap();
+        assert_eq!((json["type"].as_str(), json["to"].as_str()), (Some("escalated"), Some("human")));
+        assert_eq!(
+            (json["escalation"]["stuck"].as_str(), json["escalation"]["reason"].as_str()),
+            (Some("dev-a"), Some("asked"))
+        );
+        for event in [state, tool, queued, approval, escalated] {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
         }
@@ -4178,6 +4277,39 @@ mod tests {
         assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_webhooks.github.>"));
         let human = Permissions::for_user(&UserId::human(), Role::Human);
         assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_webhooks"), "ants init creates it");
+    }
+
+    #[test]
+    fn an_observer_publishes_nothing_but_reads_its_feeds_status_and_the_roster() {
+        let perms = Permissions::for_observer(&p("audit"));
+        let ants: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("ants.")).collect();
+        assert_eq!(ants, ["ants.renew.audit"], "no message, approval decision or cancel request");
+        assert!(!perms.publish.iter().any(|s| s.starts_with("$KV.")), "no bucket writes");
+        let creates: Vec<&str> =
+            perms.publish.iter().filter_map(|s| s.strip_prefix("$JS.API.CONSUMER.CREATE.ANTS.")).collect();
+        assert_eq!(
+            creates,
+            [
+                "observe-requests-audit.ants.approvals.*",
+                "observe-decisions-audit.ants.approvals.*.*",
+                "observe-dead-audit.ants.dead.>"
+            ]
+        );
+        assert!(!perms.publish.iter().any(|s| s.contains("STREAM.INFO.ANTS") || s.contains("DIRECT.GET.ANTS")));
+        assert!(!perms.publish.iter().any(|s| s.contains("STREAM.MSG.GET")));
+        let buckets: Vec<&String> = perms.publish.iter().filter(|s| s.contains("KV_")).collect();
+        assert!(buckets.iter().all(|s| s.contains("KV_ants_roster")), "{buckets:?}");
+        assert_eq!(
+            perms.subscribe,
+            [
+                "_INBOX.audit.>",
+                "ants.approvals.*",
+                "ants.approvals.*.*",
+                "ants.dead.>",
+                "ants.status.*.*",
+                "ants.renew.audit.reply"
+            ]
+        );
     }
 
     #[test]

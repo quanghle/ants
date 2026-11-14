@@ -39,6 +39,8 @@ pub enum Kind {
         channels: Vec<ChannelId>,
     },
     ChannelManager,
+    /// Read-only credentials of a hook observing the team's events ([`ants_proto::Permissions::for_observer`]).
+    Observer,
     /// The uplink of `machine`'s leaf node, carrying what its members may do.
     Leaf {
         machine: Machine,
@@ -165,6 +167,7 @@ impl Finding {
             Kind::Human => format!("human {}", self.name),
             Kind::Webhook { .. } => format!("webhook {}", self.name),
             Kind::ChannelManager => "the channel manager".to_owned(),
+            Kind::Observer => format!("observer {}", self.name),
             Kind::Leaf { machine, .. } => format!("the leaf node uplink of {machine}"),
             Kind::LeafSystem { machine } => format!("the system account uplink of the leaf node of {machine}"),
             Kind::Enrollment { ant } => format!("the enrollment of {ant}"),
@@ -183,6 +186,7 @@ impl Finding {
                 vec![format!("ants auth user {} --webhook{}{channels}{domain}", self.name, flags("to", to))]
             }
             Kind::ChannelManager => vec![format!("ants auth channel-manager{domain}")],
+            Kind::Observer => vec![format!("ants auth user {} --observer{domain}", self.name)],
             Kind::Leaf { machine, ants, humans, webhooks, enroll_approver } => {
                 let members = format!("{}{}", flags("ant", ants), flags("human", humans));
                 let approver = if *enroll_approver { " --enroll-approver" } else { "" };
@@ -500,6 +504,9 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
     }
     if has(publish, &format!("$KV.{HUMANS_BUCKET}.>")) {
         return Ok(Kind::Human);
+    }
+    if has(subscribe, subject::DEAD_ALL) {
+        return Ok(Kind::Observer);
     }
     let (inbox, renewal) = (format!("{}.>", inbox_prefix(&user)), subject::renew_reply(name));
     if has(subscribe, &inbox) && subscribe.iter().all(|s| *s == inbox || *s == renewal) {

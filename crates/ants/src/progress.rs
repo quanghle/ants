@@ -180,7 +180,7 @@ impl Status {
                     },
                 }
             }
-            StatusUpdate::Plan { .. } | StatusUpdate::Queued { .. } => return,
+            StatusUpdate::Plan { .. } | StatusUpdate::Queued { .. } | StatusUpdate::Escalated { .. } => return,
         };
         view.stand = stand;
     }

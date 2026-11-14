@@ -142,7 +142,10 @@ impl NatsApprover {
             .collect();
         for (told, id) in std::iter::once((notice, id)).chain(members) {
             match bus::store(&self.js, told.subject(), &told, &id).await {
-                Ok(_) => tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request"),
+                Ok(_) => {
+                    crate::status::escalated(&self.client, &told);
+                    tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request")
+                }
                 Err(e) => tracing::warn!(
                     request = %request.id,
                     to = %told.to,
@@ -192,6 +195,7 @@ impl NatsApprover {
                     .with_escalation(Some(escalation.clone()));
             let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
+            crate::status::escalated(&self.client, &envelope);
         }
         Ok(to)
     }
