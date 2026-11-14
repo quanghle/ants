@@ -389,6 +389,44 @@ mod tests {
     }
 
     #[test]
+    fn the_logrotate_agent_copies_and_truncates_logs_over_the_cap_in_place() {
+        use std::io::Write;
+        let plist = include_str!("../../../contrib/launchd/ants.logrotate.plist");
+        let script = plist.split("<string>-c</string>").nth(1).unwrap();
+        let script = script.split_once("<string>").unwrap().1.split_once("</string>").unwrap().0;
+        let script = script.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&");
+        let logs = ants_test_support::scratch_dir("service-logrotate");
+        let rotate = || {
+            let mut sh = Command::new("sh");
+            assert!(
+                sh.args(["-c", &script, "ants-logrotate"]).arg(&logs).args(["100", "2"]).status().unwrap().success()
+            );
+        };
+        let gunzip = |name: &str| {
+            let out = Command::new("gzip").arg("-dc").arg(logs.join(name)).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let read = |name: &str| std::fs::read_to_string(logs.join(name)).unwrap();
+        // As launchd opens StandardOutPath: in append mode, held across rotations.
+        let mut daemon = std::fs::OpenOptions::new().create(true).append(true).open(logs.join("daemon.log")).unwrap();
+        std::fs::write(logs.join("nats.log"), "short\n").unwrap();
+        std::fs::write(logs.join("notes.txt"), "x".repeat(200)).unwrap();
+
+        for round in ["a", "b", "c"] {
+            daemon.write_all(format!("{round}\n").repeat(60).as_bytes()).unwrap();
+            rotate();
+            daemon.write_all(format!("after {round}\n").as_bytes()).unwrap();
+        }
+        assert_eq!(read("daemon.log"), "after c\n", "written on through the same file, from its start");
+        assert_eq!(gunzip("daemon.log.1.gz"), format!("after b\n{}", "c\n".repeat(60)));
+        assert_eq!(gunzip("daemon.log.2.gz"), format!("after a\n{}", "b\n".repeat(60)));
+        assert!(!logs.join("daemon.log.3.gz").exists(), "two copies kept");
+        assert_eq!(read("nats.log"), "short\n");
+        assert!(!logs.join("nats.log.1.gz").exists() && !logs.join("notes.txt.1.gz").exists());
+        std::fs::remove_dir_all(&logs).unwrap();
+    }
+
+    #[test]
     fn the_manual_commands_cover_both_managers() {
         assert_eq!(
             manual(Service::Nats, Action::Restart),

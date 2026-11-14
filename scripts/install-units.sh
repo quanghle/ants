@@ -37,7 +37,8 @@
 #           --out DIR                write the units into DIR; install and start nothing
 #
 # The daemon gets the PATH of this shell, so it finds the harness and configured tools. Logs: ~/Library/Logs/ants on
-# macOS, the journal on Linux (journalctl --user -u ants-daemon).
+# macOS, rotated by the agent ants.logrotate (over 10 MiB, 5 gzipped copies kept), the journal on Linux
+# (journalctl --user -u ants-daemon).
 set -eu
 
 die() {
@@ -93,7 +94,7 @@ while [ $# -gt 0 ]; do
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -152,7 +153,7 @@ fi
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist}"
+    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist} ants.logrotate.plist"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
