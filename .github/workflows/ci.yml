@@ -59,6 +59,11 @@ jobs:
       - run: cargo test
         env:
           ANTS_REQUIRE_TOOLS: "1"
+      # Again with the v2 ack and flow control subjects nats-server 2.16 uses by default, which credentials must allow.
+      - run: cargo test
+        env:
+          ANTS_REQUIRE_TOOLS: "1"
+          ANTS_TEST_JS_ACK_FC_V2: "1"
       - run: cargo build --release
 
       - name: Footprint (idle antsd under 20 MB RSS)

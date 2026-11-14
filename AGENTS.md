@@ -34,6 +34,8 @@ Before finishing, as CI (`.github/workflows/ci.yml`) does:
 - `cargo fmt`, `cargo clippy --all-targets` (no warnings), `cargo test`. CI sets `CARGO_BUILD_WARNINGS=deny`, so
   any lint warning fails it; `CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets` checks the same locally.
 - Tests needing `nats-server` skip when it is not on PATH; `ANTS_REQUIRE_TOOLS=1` makes them fail instead.
+- `ANTS_TEST_JS_ACK_FC_V2=1` runs the test servers with nats-server 2.16's v2 ack and flow control subjects; CI runs
+  `cargo test` both ways.
 - `cargo deny check` after changing dependencies. A new license goes into `deny.toml`'s allow-list only if
   permissive.
 - Dependency cooldown: `cargo update` and `cargo add` take only versions published at least 7 days ago, and a
