@@ -123,6 +123,7 @@ impl HumanEntry {
 }
 
 /// A human to notify, checked.
+#[derive(PartialEq, Eq)]
 pub struct Human {
     pub name: UserId,
     pub creds: Option<PathBuf>,
@@ -390,9 +391,10 @@ fn cut(text: &str, max: usize) -> String {
 // ---- links -----------------------------------------------------------------------------------------------------
 
 /// Signed approve and reject links under `public_url`, the address the reverse proxy gives the config's `path`.
+#[derive(PartialEq, Eq)]
 pub struct Links {
     base: String,
-    key: hmac::Key,
+    secret: String,
 }
 
 /// What one link decides.
@@ -445,11 +447,15 @@ impl Links {
         if secret.len() < 16 {
             bail!("the action secret is too short: give at least 16 random characters");
         }
-        Ok(Self { base, key: hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()) })
+        Ok(Self { base, secret: secret.to_owned() })
+    }
+
+    fn key(&self) -> hmac::Key {
+        hmac::Key::new(hmac::HMAC_SHA256, self.secret.as_bytes())
     }
 
     fn url(&self, action: &Action) -> String {
-        let sig = HEXLOWER.encode(hmac::sign(&self.key, action.signed().as_bytes()).as_ref());
+        let sig = HEXLOWER.encode(hmac::sign(&self.key(), action.signed().as_bytes()).as_ref());
         format!("{}{APPROVAL_PATH}?{}&sig={sig}", self.base, action.query())
     }
 
@@ -475,7 +481,7 @@ impl Links {
             return Err(LinkError::Malformed);
         }
         let sig = HEXLOWER_PERMISSIVE.decode(field("sig")?.as_bytes()).map_err(|_| LinkError::Forged)?;
-        hmac::verify(&self.key, action.signed().as_bytes(), &sig).map_err(|_| LinkError::Forged)?;
+        hmac::verify(&self.key(), action.signed().as_bytes(), &sig).map_err(|_| LinkError::Forged)?;
         if now.timestamp() >= action.expires {
             return Err(LinkError::Expired);
         }

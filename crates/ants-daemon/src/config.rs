@@ -794,7 +794,7 @@ pub fn entry(ant: &Ant) -> Result<String> {
 }
 
 /// `s` as a TOML basic string.
-fn toml_string(s: &str) -> String {
+pub fn toml_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
