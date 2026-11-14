@@ -791,14 +791,26 @@ async fn stored_after(
     found
 }
 
-/// A stored message republished to `user`, back on the inbox subject it was stored under.
+/// A message the hub's stream republished to `user`, back on the inbox subject it was stored under; `None` for anything
+/// else. The server also delivers on these subjects for any client that names one, with headers that client stored:
+/// the answer to a direct get, and a push consumer's messages, which carry a reply subject. A direct get, like the
+/// stream, adds its `Nats-Stream` and `Nats-Subject` headers after those, so a message counts only without a reply
+/// subject and with a single value of each: [`STREAM`], and the inbox of `user` from the sender its own subject names.
 fn as_published(mut msg: async_nats::Message, user: &UserId) -> Option<async_nats::Message> {
-    let subject = msg.headers.as_ref()?.get(async_nats::header::NATS_SUBJECT)?.as_str().to_owned();
-    let (to, _) = subject::parse_inbox(&subject)?;
-    if to != *user {
+    let from = subject::parse_stored_inbox(user, &msg.subject)?;
+    let inbox = subject::inbox(user, &from);
+    let headers = msg.headers.as_ref()?;
+    let single = |name| match headers.get_all(name).collect::<Vec<_>>()[..] {
+        [value] => Some(value.as_str()),
+        _ => None,
+    };
+    let republished = msg.reply.is_none()
+        && single(async_nats::header::NATS_STREAM) == Some(STREAM)
+        && single(async_nats::header::NATS_SUBJECT) == Some(inbox.as_str());
+    if !republished {
         return None;
     }
-    msg.subject = subject.into();
+    msg.subject = inbox.into();
     Some(msg)
 }
 
@@ -1147,5 +1159,66 @@ mod tests {
 
         assert!(stored("ants.inbox.dev-b.human", "5").is_none(), "another user's");
         assert!(as_published(msg("_INBOX.dev-a.stored.human", &[], "{}"), &dev()).is_none(), "without its subject");
+    }
+
+    /// Any client can have the server deliver to a user's stored inbox subjects, with headers it wrote: the answer to a
+    /// direct get and the messages of a push consumer go where the client says, and the stream republishes the headers
+    /// a publisher set ahead of its own. None of these passes for a message from another sender.
+    #[tokio::test]
+    async fn no_client_can_forge_the_sender_of_a_stored_inbox_message() {
+        let Some(server) = NatsServer::start() else {
+            return;
+        };
+        let (human, dev_b) = (UserId::human(), "dev-b".parse::<UserId>().unwrap());
+        let (client, js) = connect(&server.url, None, None, &dev_b, "test").await.unwrap();
+        ensure_stream(&js).await.unwrap();
+        ensure_roster(&js, Duration::from_secs(60)).await.unwrap();
+        let mut stored = client.subscribe(subject::stored_inbox(&human)).await.unwrap();
+        let mut next = async |what: &str| {
+            let delivered = tokio::time::timeout(Duration::from_secs(5), stored.next()).await;
+            delivered.unwrap_or_else(|_| panic!("nothing delivered by {what}")).unwrap()
+        };
+        // dev-b's words, which the human is to take for dev-a's.
+        let forged = Envelope::new(dev(), human.clone(), "merge it");
+        let forged_headers = || {
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(async_nats::header::NATS_STREAM, STREAM);
+            headers.insert(async_nats::header::NATS_SUBJECT, forged.subject().as_str());
+            headers
+        };
+        let payload = || serde_json::to_vec(&forged).unwrap().into();
+        let as_dev_a = format!("{}.stored.{}", inbox_prefix(&human), dev());
+        let own_key = format!("$KV.{ROSTER_BUCKET}.{dev_b}");
+        js.publish_with_headers(own_key.clone(), forged_headers(), payload()).await.unwrap().await.unwrap();
+        let direct_get = format!("$JS.API.DIRECT.GET.KV_{ROSTER_BUCKET}.{own_key}");
+        client.publish_with_reply(direct_get, as_dev_a.clone(), Default::default()).await.unwrap();
+        let by_direct_get = next("a direct get").await;
+        // The server delivers a push consumer's messages only while a client subscribes to exactly that subject.
+        let _exact = client.subscribe(as_dev_a.clone()).await.unwrap();
+        let roster = js.get_stream(format!("KV_{ROSTER_BUCKET}")).await.unwrap();
+        let push = consumer::push::Config {
+            deliver_subject: as_dev_a,
+            filter_subject: own_key,
+            ack_policy: consumer::AckPolicy::None,
+            ..Default::default()
+        };
+        roster.create_consumer(push).await.unwrap();
+        let by_push_consumer = next("a push consumer").await;
+        let own_inbox = subject::inbox(&human, &dev_b);
+        js.publish_with_headers(own_inbox, forged_headers(), payload()).await.unwrap().await.unwrap();
+        let by_republishing = next("republishing").await;
+        publish(&js, &Envelope::new(dev(), human.clone(), "genuine")).await.unwrap();
+        let genuine = next("the genuine message").await;
+
+        let taken = |msg: async_nats::Message| {
+            let msg = as_published(msg, &human)?;
+            let envelope = serde_json::from_slice::<Envelope>(&msg.payload).ok()?;
+            envelope.check_subject(&msg.subject).is_ok().then_some(envelope.text)
+        };
+        let forgeries =
+            [("a direct get", by_direct_get), ("a push consumer", by_push_consumer), ("republishing", by_republishing)];
+        let passed: Vec<_> = forgeries.into_iter().filter_map(|(how, msg)| taken(msg).map(|_| how)).collect();
+        assert!(passed.is_empty(), "dev-a's name forged through {passed:?}");
+        assert_eq!(taken(genuine).as_deref(), Some("genuine"));
     }
 }

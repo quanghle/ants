@@ -20,7 +20,10 @@ pub const STREAM_SUBJECTS: [&str; 5] =
 /// sources from a leaf's outbox it stores without publishing it on its subject.
 pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
 /// Where [`STREAM`] republishes a stored inbox message: the recipient's reply inboxes ([`subject::stored_inbox`]), which
-/// its credentials already read and only the server publishes to. The headers keep the original subject.
+/// its credentials already read and no credentials publish to. The headers keep the original subject. The server also
+/// answers a direct get, and delivers a push consumer's messages, there for any client that names the subject, with
+/// headers that client stored: only a message without a reply subject, and with a single `Nats-Stream` and a single
+/// `Nats-Subject` header, the stream's own, is one it republished.
 pub const STORED_INBOX_DESTINATION: &str = "_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}";
 /// JetStream stream on a machine's leaf node (in the leaf's own JetStream domain, the machine name) that keeps what
 /// the machine's clients send while the hub's [`STREAM`] is out of reach, under [`subject::outbox`] subjects.
@@ -372,6 +375,11 @@ pub mod subject {
     /// Every message to `user` as the hub's stream stored it, republished there ([`super::STORED_INBOX_SOURCE`]).
     pub fn stored_inbox(user: &UserId) -> String {
         format!("{}.stored.*", super::inbox_prefix(user))
+    }
+
+    /// The sender a subject of [`stored_inbox`] of `user` names, or `None` when it is none of them.
+    pub fn parse_stored_inbox(user: &UserId, subject: &str) -> Option<UserId> {
+        subject.strip_prefix(&super::inbox_prefix(user))?.strip_prefix(".stored.")?.parse().ok()
     }
 
     /// Every inbox subject `user` may send on.
