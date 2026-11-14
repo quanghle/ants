@@ -15,6 +15,7 @@ use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
+use crate::worktrees::Worktrees;
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
 #[derive(Clone)]
@@ -87,13 +88,62 @@ pub struct Pool {
     slots: Mutex<HashMap<ThreadId, Slot>>,
     /// Signalled when a harness becomes free, starts or stops.
     changed: Notify,
+    /// A git worktree per thread, instead of the shared workdir.
+    worktrees: Option<Worktrees>,
 }
 
 impl Pool {
     /// At most `max_live` harnesses (at least one); each stops after `idle_after` without a prompt. Sessions are
     /// looked up in `store` when a thread's harness starts, so only live threads are held in memory.
     pub fn new(launch: Launch, store: SessionStore, max_live: usize, idle_after: Duration) -> Self {
-        Self { launch, store, max_live: max_live.max(1), idle_after, slots: Mutex::default(), changed: Notify::new() }
+        Self {
+            launch,
+            store,
+            max_live: max_live.max(1),
+            idle_after,
+            slots: Mutex::default(),
+            changed: Notify::new(),
+            worktrees: None,
+        }
+    }
+
+    /// Each thread works in its own git worktree ([`Worktrees`]).
+    pub fn with_worktrees(self, worktrees: Worktrees) -> Self {
+        Self { worktrees: Some(worktrees), ..self }
+    }
+
+    /// Remove the worktrees of threads with no live harness whose session is no longer in the store, at once and then
+    /// every `every`. Never returns; pending for good without worktrees.
+    pub async fn prune_worktrees_every(&self, every: Duration) {
+        if self.worktrees.is_none() {
+            return std::future::pending().await;
+        }
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            self.prune_worktrees().await;
+        }
+    }
+
+    /// Remove the worktrees of threads with no live harness whose session is no longer in the store. Returns how many
+    /// were removed. A store that cannot be read removes none.
+    pub async fn prune_worktrees(&self) -> usize {
+        let Some(worktrees) = &self.worktrees else { return 0 };
+        worktrees
+            .prune(async |thread: &ThreadId| {
+                let live = self.slots().contains_key(thread);
+                if live {
+                    return false;
+                }
+                match self.store.get(thread).await {
+                    Ok(session) => session.is_none(),
+                    Err(e) => {
+                        tracing::warn!(%thread, error = format!("{e:#}"), "keeping the thread's git worktree");
+                        false
+                    }
+                }
+            })
+            .await
     }
 
     /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap
@@ -184,7 +234,14 @@ impl Pool {
     async fn start(&self, thread: &ThreadId) -> Result<Lease<'_>> {
         let mut starting = Starting { pool: self, thread, done: false };
         let resume = self.store.get(thread).await?;
-        let session = Session::start(&self.launch.for_thread(thread), resume.clone()).await?;
+        let mut launch = self.launch.for_thread(thread);
+        if let Some(worktrees) = &self.worktrees {
+            match worktrees.checkout(thread).await {
+                Ok(dir) => launch = launch.in_dir(dir),
+                Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "working in the shared workdir"),
+            }
+        }
+        let session = Session::start(&launch, resume.clone()).await?;
         match &resume {
             Some(old) if old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
@@ -277,6 +334,8 @@ pub(crate) mod fake {
         pub starts: usize,
         pub new_sessions: usize,
         pub loaded: Vec<String>,
+        /// Working directories of the sessions created or loaded, in order.
+        pub cwds: Vec<PathBuf>,
         /// Prompts received, before any is held or answered.
         pub prompted: usize,
         /// Prompts in the order they were answered.
@@ -325,16 +384,20 @@ pub(crate) mod fake {
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |_: NewSessionRequest, responder, _cx| {
+                        async move |new: NewSessionRequest, responder, _cx| {
                             let mut log = on_new.lock().unwrap();
                             log.new_sessions += 1;
+                            log.cwds.push(new.cwd);
                             responder.respond(NewSessionResponse::new(format!("s{}", log.new_sessions)))
                         },
                         agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         async move |load: LoadSessionRequest, responder, cx| {
-                            on_load.lock().unwrap().loaded.push(load.session_id.to_string());
+                            let mut log = on_load.lock().unwrap();
+                            log.loaded.push(load.session_id.to_string());
+                            log.cwds.push(load.cwd.clone());
+                            drop(log);
                             // Replayed history must not leak into the next reply.
                             cx.send_notification(chunk(&load.session_id, "old history"))?;
                             responder.respond(LoadSessionResponse::new())
@@ -436,6 +499,42 @@ mod tests {
         for _ in 0..50 {
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
+        let Some(repo) = crate::worktrees::tests::repo("pool-worktrees") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+        let pool = Pool::new(launch.in_dir(repo.clone()), store.clone(), 4, IDLE).with_worktrees(worktrees);
+        pool.prompt(&thread(1), "a").await.unwrap();
+        pool.prompt(&thread(2), "b").await.unwrap();
+        pool.evict_idle(Instant::now() + IDLE * 2);
+        pool.prompt(&thread(1), "c").await.unwrap();
+        let (t1, t2) = (home.join("worktrees/t1"), home.join("worktrees/t2"));
+        assert_eq!(log.lock().unwrap().cwds, [t1.clone(), t2.clone(), t1.clone()], "session/load in the same worktree");
+        assert_eq!(pool.prune_worktrees().await, 0, "sessions still stored");
+        let SessionStore::Memory(sessions) = &store else { unreachable!() };
+        sessions.lock().unwrap().clear();
+        assert_eq!(pool.prune_worktrees().await, 1, "only the thread without a live harness");
+        assert!(t1.is_dir() && !t2.exists());
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_thread_whose_worktree_fails_shares_the_workdir() {
+        let Some(repo) = crate::worktrees::tests::repo("pool-worktrees-fail") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let (launch, log, _) = fake::launch(true);
+        let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+        crate::worktrees::tests::run(&repo, &["branch", "ants/dev-a/t1"]);
+        crate::worktrees::tests::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
+        let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE).with_worktrees(worktrees);
+        assert_eq!(pool.prompt(&thread(1), "a").await.unwrap(), "s1: a", "its branch is checked out elsewhere");
+        assert_eq!(log.lock().unwrap().cwds, std::slice::from_ref(&repo));
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]

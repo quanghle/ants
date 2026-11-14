@@ -44,8 +44,8 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_chains` | File, none | Persistent `escalate_to` chains (`<ant>`), readable after roster expiry. |
 | KV `ants_links` | File, 30d | Verified `origin_thread` handoffs (`<from>.<thread>.<to>`), from spin-offs and from messages on a thread with a `creator` or `owner`. |
 | KV `ants_owners` | File, 30d | Thread `owner` (`<thread>.<recipient>`) recorded by a human (`ants ask`) or webhook for each ant it messages on the thread; the first record of a key stays: a second is refused, or dropped as a repeat of its `Nats-Msg-Id` (no delete or purge). |
-| KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`) and daily `<webhook>.webhook` markers. |
-| Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
+| KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`), sent schedule firings (`<schedule>.<unix time>`) and daily `<webhook>.webhook` markers of webhooks and schedules. |
+| Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.cancel.<ant>.<thread>` and `ants.cancelled.<ant>.<thread>` (`ants cancel` and the daemons' answers), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
 
 User, channel, thread and JetStream domain IDs use 1–64 characters of `a-z`, `0-9` and `-`, starting with a letter or digit (`channel-manager` is reserved). Machine and harness names also allow `_` (machine names allow uppercase ASCII and must differ from `js_domain`). Durations require whole-number units ordered largest first (`s`, `m`, `h`, `d`: `90s`, `10m`, `1h30m`) or `0`; bare non-zero numbers are rejected.
 
@@ -75,11 +75,14 @@ ants inbox                                          # unread replies
 ants roster                                         # active ants
 ants tools list                                     # pending tool approval requests
 ants notes <thread>                                 # passive thread notes
+ants thread list                                    # threads active in the last 24h
+ants thread show <thread>                           # one thread's whole history
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a; prints thread ID
 ants channel read ops
 ants watch                                          # live traffic on ants.>
 ants watch dev-a [<thread>]                         # streamed harness state, text, tools, plan
+ants cancel dev-a <thread>                          # stop the prompt dev-a runs on the thread
 ```
 
 An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with no flags serve the built-in `messenger` alone (see [Messenger](#messenger)). Multi-machine deployments add [Credentials](#credentials), [Leaf nodes](#leaf-nodes), a [Config file](#config-file) and [Services](#services).
@@ -91,12 +94,16 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants ask [--thread ID] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
 | `ants inbox [--peek] [--thread ID] [--limit N] [-f] [--json]` | Print unread replies and mark read (`--peek` keeps unread; `-f`/`--follow` streams replies and watches advisories). |
 | `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`), harnesses, capabilities, `escalate_to` chains and workdirs. |
+| `ants spend [ANT] [--thread ID \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants post [--thread ID] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). |
 | `ants channel read CHANNEL [--thread ID \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
+| `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--since DUR] [--limit N] [--json]` | List threads with messages stored within `--since` (default `24h`, `0` for all kept): id, owner, users and channels, first/last time, message count, opening line; most recently active last, up to `--limit` (default 50). `--grep` keeps threads with a message containing `TEXT` (case-insensitive) and prints the matching line. |
+| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's history in stored order: inbox messages both ways, channel posts, notes, escalations, tool requests and decisions, dead letters (see [Thread overview](#thread-overview)). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations and decisions, or live harness progress for `ANT`. |
+| `ants cancel ANT THREAD` | Stop the prompt `ANT` runs on `THREAD` (see [Prompt limits](#prompt-limits-and-spending-caps)); fails when no daemon of `ANT` runs one there or none answers within 5s. Requires human credentials. |
 | `ants tools list [-f] [--json]` | List pending tool requests (`<ant>/<id>`, thread, tool, files, options, time remaining). |
 | `ants tools show ID [--json]` | Show full request, tool input, status and answer commands for `<ant>/<id>` (unique prefix accepted). |
 | `ants tools approve ID [--always]` / `reject ID` | Allow once, allow for the session (`--always`, if offered), or reject a tool request. |
@@ -107,6 +114,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
 | `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
 | `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
+| `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`), rewrite `server.conf` and push the account to the `--nats` server (`--no-push` to skip); list revoked keys; push the account again. |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
@@ -123,7 +131,7 @@ Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying
 | `ANTS_NATS_URL` | `--nats` (global) | `nats://127.0.0.1:4222` |
 | `ANTS_CREDS` | `--creds` (global) | Path to `.creds` file; omitted connects unauthenticated as `human` |
 | `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`) |
-| `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`) | `~/.ants/config.toml` |
+| `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`, `spend`) | `~/.ants/config.toml` |
 | `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
 | `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
 | `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
@@ -150,6 +158,8 @@ Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying
 
 Human replies wait in durable consumer `inbox-<name>` (`inbox-human` for `human`) until read. Each ant maintains up to `max_harnesses` (default 4) ACP processes, one per active thread: concurrent across threads, sequential per thread, retrying failures in order. Idle harnesses stop after `idle_timeout` (`10m`) and resume via ACP `session/load` using `<ant>.<thread>` in `ants_sessions`; busy harnesses are never evicted. First Ctrl-C or `SIGTERM` drains prompts in flight; a second Ctrl-C exits immediately for redelivery.
 
+Threads of one ant share its workdir unless `worktrees = true` (or `--worktrees`) gives each thread its own git worktree of the workdir's repository: `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, started from the repository's `HEAD` (uncommitted changes in the workdir are not carried over). Sessions of the thread work at the workdir's place inside it, and allowlist paths resolve against it. The worktree is created on the thread's first prompt, reused when its harness starts again (`session/load` sees the same directory), and removed with `git worktree remove --force` once `<ant>.<thread>` has expired from `ants_sessions` (checked at start and hourly, for threads with no live harness), deleting the branch unless it holds commits not merged into the repository's `HEAD`. A workdir outside a git work tree, or a missing `git`, is logged once and stays shared; a worktree that cannot be created (an empty repository, the branch checked out elsewhere) logs a warning and the thread works in the shared workdir.
+
 Held messages send 20s progress acks against a 60s `ack_wait` (ignoring duplicate deliveries while held). Delivery is at-least-once and acks only after storing the reply:
 
 1. Before prompting, the daemon writes `<ant>.<seq>` in `ants_attempts`. On redelivery after a cut-off, finding that marker resumes the session and prepends a warning that prior tool calls may have run.
@@ -169,6 +179,13 @@ nats = "wss://hub.example/nats"            # default NATS URL for ants without `
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
 
+[[schedule]]                               # see Schedules
+name = "nightly"
+creds = "~/.config/ants/auth/nightly.creds"
+cron = "0 3 * * 1-5"
+ant = "dev-a"
+text = "Triage the failing nightly tests."
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -187,6 +204,7 @@ allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
+worktrees = false                          # default; true gives each thread its own git worktree
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -203,16 +221,16 @@ workdir = "~/src/repo-b"
 creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
-`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant names, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
+`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant or schedule names, a schedule named after an ant, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
 Flag and file precedence on `ants daemon`:
 
-- `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled).
+- `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled) and runs its schedules.
 - `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present.
-- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`.
-- Per-ant and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant).
+- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`. With `--ant`, no schedule runs.
+- Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. A file that fails to load is logged and the ants served stay as they were.
+`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. Schedules newly listed start, schedules no longer listed stop at once, and schedules whose entry changed or that stopped start again. A file that fails to load is logged and the ants served and schedules run stay as they were.
 
 ## Harnesses
 
@@ -269,9 +287,22 @@ Per-prompt limits default to `prompt_timeout = "30m"` (includes approval wait; `
 Crossing a limit or cap cancels the prompt via ACP `session/cancel` (restarting the harness after 30s if hung), returns partial output plus an `[ants]` notice, and escalates agent-originated threads (reason `cap`). Further agent messages on a capped thread escalate immediately without prompting.
 
 - Per-prompt limits reset every prompt.
+
+A human stops a running prompt with `ants cancel ANT THREAD`: a `CancelRequest` on `ants.cancel.<ant>.<thread>` (core NATS, so only daemons connected at the time hear it). The daemon running the prompt cancels it the same way, replies with the partial output and `[ants] The prompt was cancelled by <human> (ants cancel).`, and acks the message: no retry, dead letter or escalation. Every daemon serving the ant answers with a `CancelReply` on `ants.cancelled.<ant>.<thread>` saying whether it cancelled one; the CLI succeeds on the first that did. Messages waiting behind the cancelled one on the thread still run.
+
 - Thread allowances reset on any human message on the thread, and once per escalation level when the level's leader replies.
 - Daily allowances reset at 00:00 UTC (or on daemon restart with a higher cap).
-- Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude's adapter reports both at turn end; Codex's adapter reports tokens only; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
+- Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`, with or without caps. Claude's adapter reports both at turn end; Codex's adapter reports tokens only; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
+
+### Spend report
+
+`ants spend` (human credentials) reads those keys:
+
+- `ants spend`: one row per ant that spent anything in the last `--days` UTC days (default 7, today included, at most 366; `ants_sessions` keeps keys 30 days after their last write): today's tokens and cost, and their totals over the days.
+- `ants spend ANT`: each day and the total, then each thread that spent anything since a human's last message on it, most costly first.
+- `ants spend [ANT] --thread ID`: what the ant, or each ant on the thread, spent on it since a human's last message there.
+
+Today's and each day's figures show as `spent/cap` against `max_daily_tokens` and `max_daily_cost`, and threads' against `max_thread_tokens` and `max_thread_cost`, for the ants the local config file (`--config`, `ANTS_CONFIG`, default `~/.ants/config.toml`) lists with caps; ants served from other machines show spend alone. Costs are in the harness's unit (USD for Claude), with two decimals. `--json` prints one object per line: per ant `{ant, days: [{day, tokens, cost}], total: {tokens, cost}, threads?, caps?}` (`threads` only for one `ANT`), or with `--thread` `{ant, thread, tokens, cost, caps?}`; `caps` holds the caps set (`thread_tokens`, `thread_cost`, `daily_tokens`, `daily_cost`).
 
 ## Roster, identity and memory
 
@@ -303,7 +334,7 @@ Tool calls requested by a harness are checked against the ant's allowlist (`allo
 | `*` | Every tool call |
 | `<kind>` | ACP tool kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other` |
 | `execute:cargo test*` | Commands matching glob; commands containing `;`, `&`, `\|`, `<`, `>`, `` ` `` or `$(` never match |
-| `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`) |
+| `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`; with `worktrees = true`, the thread's worktree) |
 | `edit:/srv/notes/*` | Exact absolute path glob |
 | `fetch:https://docs.rs/*` | Matching URLs |
 | `other:send_message` / `other:bd-*` | MCP and `other` tools by title, or by the tool in Claude Code's `mcp__<server>__<tool>` and Codex's `mcp.<server>.<tool>` titles |
@@ -359,6 +390,10 @@ allow = ["other:list_ants", "other:route", "other:ask_agent", "other:send_messag
 Thread notes (`ants.notes.<thread>.<from>`) provide one passive shared board per thread for multi-agent coordination, separate from live execution plans (`ants watch <ant>`) and wake-on-post [Channels](#channels). Posting wakes nobody; agents inspect notes only via `read_notes`.
 
 Agent posts spend 1 turn from the lower of the active message's budget and the last note's remaining turns, serialized with `Nats-Expected-Last-Subject-Sequence` (losers re-read and retry). Spending the final turn escalates the thread (`notes`) and blocks further agent note posts until a human runs `ants notes <thread> TEXT` (8 fresh turns) or an escalation climbs a chain level. Daemons read via ephemeral consumer `notes-<ant>`; CLI runs with ant credentials use spare consumers `notes-<ant>_1..3`; humans read directly via `STREAM.MSG.GET`.
+
+## Thread overview
+
+`ants thread list` and `ants thread show` read the `ANTS` stream back with human credentials by `STREAM.MSG.GET` (as `ants channel read` and `ants notes` do), so they consume, ack and mark read nothing and create no consumer; ant credentials are refused. Only notes subjects name their thread, so each read goes through every message stored in its window: `--since` bounds it (`list` defaults to `24h`; `show` starts at the thread's start when its id is a time-ordered UUID, as generated ids are, else reads all the stream keeps). Entries are kinds `message`, `escalation` (with level, reason, leader and ants visited), `mention`, `post`, `note`, `approval`, `decision` (a human's, which names no human, or a chain agent's) and `dead`; a human's decision is placed on its request's thread only when the request is in the window. A message stored on a subject naming another sender is marked `(forged)`. A thread's owner is the one its first message naming one gives; `list` counts only what was stored within `--since`, so a thread older than that shows its first message in the window as the opening.
 
 ## Channels
 
@@ -445,6 +480,35 @@ mention = ["dev-a"]                           # optional; or broadcast = true fo
 - **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 2m `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
 - **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 
+## Schedules
+
+`[[schedule]]` entries of the config file send a prompt on a timetable: each firing sends `text`, literally, as a new thread to an ant's inbox or a channel. `ants daemon` runs them when serving the whole file (not with `--ant`), each over its own NATS connection with its own credentials:
+
+```toml
+[[schedule]]
+name = "nightly"                              # ants auth user nightly --webhook --to dev-a
+creds = "~/.config/ants/auth/nightly.creds"
+cron = "0 3 * * 1-5"                          # minute hour day-of-month month day-of-week, in UTC
+ant = "dev-a"
+owner = "alice"                               # optional human owner for replies and escalations
+text = "Triage the failing nightly tests and summarise them."
+
+[[schedule]]
+name = "standup"                              # ants auth user standup --webhook --channel ops
+creds = "standup.creds"
+every = "4h"                                  # at whole multiples since 1970-01-01 00:00 UTC
+channel = "ops"
+broadcast = true                              # optional; or mention = ["dev-a"]; else the channel messenger triages
+text = "Post what changed since the last standup."
+nats = "nats://127.0.0.1:4222"                # optional, as js_domain: default the top-level values, then the flags
+```
+
+- **Timetable:** exactly one of `cron` and `every`. `cron` takes 5 fields with `*`, lists, ranges, steps (`*/15`, `1-5/2`, `10/20`), month and weekday names (`jan`, `mon`; day of week `0` and `7` are Sunday) or `@yearly`, `@monthly`, `@weekly`, `@daily` and `@hourly`; when both day fields are restricted, a day matching either fires (as cron does). `every` is a duration of at least `1m` (`15m`, `1h30m`, `1d`), so `every = "1d"` fires at 00:00 UTC. All times are UTC.
+- **Destination:** exactly one of `ant` and `channel`; `mention` and `broadcast` (all members at the firing) only with `channel`. `owner` works as for webhooks.
+- **Identity:** a schedule is a webhook-role user (`ants auth user NAME --webhook --to ANT` or `--channel CH`, and `--webhook NAME` in `ants auth leaf`), checked at load: its credentials must name it, be no human's and allow its destination. Its messages carry `webhook: true` and it refreshes `<schedule>.webhook` in `ants_webhooks` daily, so replies and triage work as for a [webhook](#webhooks).
+- **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 2m `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.
+- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, never made up.
+
 ## Credentials
 
 `ants auth` manages decentralized NATS NKey/JWT credentials in `~/.config/ants/auth` (`--dir` / `ANTS_AUTH_DIR`; keep `*.nk` seeds private):
@@ -455,16 +519,29 @@ ants auth user human --js-domain hub                    # human.creds ("human" a
 ants auth user alice --human --js-domain hub            # alice.creds (human role)
 ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
 ants auth user github --webhook --to dev-a --js-domain hub
+ants auth user nightly --webhook --to dev-a --js-domain hub  # a schedule sends as a webhook
 ants auth channel-manager --js-domain hub               # channel-manager.creds
 ```
 
-Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all nine KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`). Upgrades that withdraw stream info of `ants_sessions`, `ants_attempts` and `ants_owners` from ants and webhooks need new ant, webhook and leaf credentials only after every daemon and `ants webhook serve` runs the new version (older ones need that stream info); until then, old credentials keep working and keep the listing open. The same holds for upgrades that withdraw stream info of `ANTS` and `ants_webhooks` from ants, webhooks and the channel manager: those credentials then find JetStream through their own inbox consumer's info instead. Upgrades that add `ants_owners`, have it take records from leaf outboxes, or key it by recipient, need both for every ant, human and webhook, and `ants leaf outbox` again per machine: until then, ants' messages on threads no channel post started carry no owner, and their escalations go to the daemon's default human. Records keyed by thread alone, from before the recipient key, are not read.
+Every key issued or signed here (`ants auth user`, `enroll`, `channel-manager`, `leaf`, `enroll approve`) is recorded in `issued.jsonl` (key, name, kind, issue time, expiry). Credentials stay valid until they expire, unless revoked:
+
+```sh
+ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, on all devices
+ants auth revoke --key UABC... --nats wss://hub.example/nats # one key
+ants auth revoke leaf-macbook --no-push                     # a leaf uplink; enroll-<ant>, channel-manager alike
+ants auth revoked                                           # key, name, revoked at, expiry
+ants auth push --nats wss://hub.example/nats                # push the account again
+```
+
+`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`. Either way, copy the new `server.conf` to the hub and every leaf node and reload them (`SIGHUP`): restarts otherwise bring back the old account, and leaf nodes authenticate their local clients themselves, so a revoked ant behind a leaf keeps working there until its leaf has it (or until `ants auth leaf` is issued again without it). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
+
+Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all nine KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`). Upgrades that withdraw stream info of `ants_sessions`, `ants_attempts` and `ants_owners` from ants and webhooks need new ant, webhook and leaf credentials only after every daemon and `ants webhook serve` runs the new version (older ones need that stream info); until then, old credentials keep working and keep the listing open. The same holds for upgrades that withdraw stream info of `ANTS` and `ants_webhooks` from ants, webhooks and the channel manager: those credentials then find JetStream through their own inbox consumer's info instead. Upgrades that add `ants_owners`, have it take records from leaf outboxes, or key it by recipient, need both for every ant, human and webhook, and `ants leaf outbox` again per machine: until then, ants' messages on threads no channel post started carry no owner, and their escalations go to the daemon's default human. Records keyed by thread alone, from before the recipient key, are not read. `ants spend` needs human and leaf credentials issued with its reads of spend keys. `ants cancel` needs new human and ant credentials, and new leaf credentials where they run on a leaf; until then the request is refused or unheard.
 
 ### Wire ACLs and verification invariants
 
-- **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`.
+- **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, publish cancel requests (`ants.cancel.<ant>.<thread>`, heard only by `<ant>`, which answers only on `ants.cancelled.<ant>.*`), write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`.
 - **Scoped ant reads:** without `STREAM.MSG.GET`, ant credentials pin consumer filters (`inbox-<ant>[_1..3]`, `chan-<ant>`, `chanread-<ant>[_1..3]`, `notes-<ant>[_1..3]`, `deadread-<ant>`) and restrict direct gets to `ants.approvals.<ant>.*`, their own `$KV.ants_sessions.<ant>.>` and `$KV.ants_attempts.<ant>.>`, `$KV.ants_humans.*`, `$KV.ants_chains.*`, `$KV.ants_owners.>` and `$KV.ants_webhooks.*.webhook`. Users write only their own keys in `ants_roster`, `ants_chains`, `ants_links` and `ants_webhooks`. Only humans and webhooks with an ant destination write `ants_owners`, webhooks only `<thread>.<ant>` keys of those ants (humans also through a leaf outbox), and its stream refuses a second record of a key (`discard_new_per_subject`, deletes and purges denied), but drops one repeating the first's `Nats-Msg-Id` (`owner.<key>`, which every writer sets) within the 30 d retention, so a record sourced from an outbox never stalls the source. `ants init` and `ants leaf outbox` widen the duplicate window of a stream from before.
-- **Private keys:** stream info with a subjects filter lists every key of a bucket, so only human credentials get stream info of `ants_sessions`, `ants_attempts` and `ants_owners` (to create them). Daemons read their own keys there and owners by direct get and write their own keys by plain publish, and webhooks record owners by plain publish, so neither ants nor webhooks can list other ants' thread ids. Likewise stream info of `ANTS` lists every subject stored (who messages whom, approvals, dead letters) and that of `ants_webhooks` every webhook's events, so only human credentials get them: ants, webhooks and the channel manager find JetStream through the info of their own inbox consumer, ants open `ANTS` without its info and read back from the last message through their own reader, and a webhook records each event it delivered by a publish expecting no earlier record of it and reads it back by direct get.
+- **Private keys:** stream info with a subjects filter lists every key of a bucket, so only human credentials get stream info of `ants_sessions`, `ants_attempts` and `ants_owners` (to create them, and for `ants spend` to find spend keys). Humans direct-get only the spend keys of `ants_sessions` (`$KV.ants_sessions.*.*.spend` and `$KV.ants_sessions.*.day.*`), not ants' sessions. Daemons read their own keys there and owners by direct get and write their own keys by plain publish, and webhooks record owners by plain publish, so neither ants nor webhooks can list other ants' thread ids. Likewise stream info of `ANTS` lists every subject stored (who messages whom, approvals, dead letters) and that of `ants_webhooks` every webhook's events, so only human credentials get them: ants, webhooks and the channel manager find JetStream through the info of their own inbox consumer, ants open `ANTS` without its info and read back from the last message through their own reader, and a webhook records each event it delivered by a publish expecting no earlier record of it and reads it back by direct get.
 - **Metadata trust:** daemons accept `owner` only for `human` or entries in `ants_humans`, and honour `webhook: true` only with `<sender>.webhook` in `ants_webhooks` (or from a human). Channel thread `owner` and `creator` come from stored root/human posts in `ANTS`; an ant's non-channel `owner` comes from `ants_owners` for its thread or its `origin_thread`, else is dropped: a channel `origin_thread` gives the owner its posts say, under the same participation check as `creator`; a message thread, its own or its `origin_thread`, gives the owner of its `<thread>.<sender>` record, else of the record of an ant `ants_links` traces the sender's link back to; non-channel `creator` requires `origin_thread` backed by participation or `<from>.<thread>.<to>` links in `ants_links` (max 32 hops).
 
 ### Adding an ant
@@ -583,7 +660,7 @@ Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANT
 |---|---|
 | `crates/ants-proto` | Wire contract: IDs, subjects, envelopes, turn budgets, NATS permissions (no I/O) |
 | `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, delivery loop, approvals, escalations, MCP server |
-| `crates/ants` | `ants` binary: CLI, `daemon`, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `mcp` |
+| `crates/ants` | `ants` binary: CLI, `daemon` and its schedules, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `mcp` |
 | `crates/ants-test-support` | Dev-only test helpers: `PATH` checks and throwaway `nats-server` |
 | `contrib/` | `launchd` plists, `systemd` user units and CLI agent skill (`contrib/skills/ants/SKILL.md`) |
 | `scripts/` | `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |

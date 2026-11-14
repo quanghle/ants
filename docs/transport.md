@@ -42,6 +42,14 @@ include "server.conf"
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).
 - `feature_flags { js_api_reply_v2: true }` scopes JetStream source control replies to `$JSC.R.<machine>.*.ANTS_OUT.>`, required for hub outbox sourcing under scoped leaf credentials.
 
+### Revocation
+
+`server.conf` preloads the team's account JWT into a `MEMORY` resolver. `ants auth revoke NAME` (or `--key U...`) adds the user keys to the account's `revocations` (key to revocation time; JWTs of the key issued at or before it are refused), rewrites `server.conf` keeping its operator JWT (nats-server reloads no change of the trusted operator), and pushes the account JWT to the `--nats` server:
+
+- **Push:** a user of the system account, signed with `system.nk` for ten minutes, requests `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`; the server applies the account at once and closes the revoked users' connections. Pointed at a leaf node, the push updates that leaf only. An unreachable server leaves the revocation recorded in `revoked.json` and `server.conf`; `ants auth push` retries. Hubs on a `server.conf` from before revocations (whose system account allows no connection) need the new one copied and reloaded first.
+- **Reload:** copying the new `server.conf` over the hub's or a leaf's and sending `SIGHUP` applies the revocations too, also closing connections. Copy it to the hub and to every leaf node in any case: a restart otherwise loads the old account, and a leaf authenticates its local clients against its own copy, so a revoked ant behind a leaf keeps working through the leaf's uplink until the leaf reloads (or its uplink credentials are reissued without the ant).
+- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink at the hub.
+
 ## Reverse proxy
 
 Caddy passes WebSocket upgrades with no extra config and sets no idle timeout on upgraded connections:
@@ -154,7 +162,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Unsequenced notes (`ants notes <thread> TEXT`), channel posts (`ants post`, daemon replies), passed links (`ants_links`) | Buffered in `ANTS_OUT` and sourced into `ANTS` or `ants_links` on reconnect. |
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates past 2 min. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
-| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), enrollment (`ants.enroll.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
+| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), enrollment (`ants.enroll.*`), `ants cancel` of a prompt on another machine (`ants.cancel.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
 | KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
 | Owner records (`ants_owners`, from `ants ask`) | Buffered in `ANTS_OUT` ahead of the message and sourced into `ants_owners` on reconnect; a second record of a thread and ant is dropped as a repeat. `ANTS` and `ants_owners` source apart, so a daemon holds a human's message sourced from an outbox (`Nats-Stream-Source`) up to 10 s until its thread's owner is recorded for the ant. Webhooks reach the hub directly and record no owner in an outbox. |
 

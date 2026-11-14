@@ -301,6 +301,11 @@ impl Launch {
         Self { thread: Some(thread.clone()), ..self.clone() }
     }
 
+    /// The same launch, with sessions working in `cwd`.
+    pub fn in_dir(self, cwd: PathBuf) -> Self {
+        Self { cwd, ..self }
+    }
+
     /// The same launch, offering `mcp` to the sessions of each thread.
     pub fn with_mcp(self, mcp: McpServers) -> Self {
         Self { mcp: Some(mcp), ..self }
