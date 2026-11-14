@@ -24,10 +24,10 @@ use crate::auth;
 
 #[derive(clap::Subcommand, Debug)]
 pub enum KeysCommand {
-    /// Move the seed of each credentials file (default: --creds) into the OS credential store: the macOS keychain or
-    /// the Linux Secret Service. The seed leaves the file only once stored, read back and used to authenticate at
-    /// --nats; the file then keeps the user JWT and the stored key's reference. Leaf node uplink credentials, which
-    /// nats-server reads, are refused.
+    /// Move the seed of each credentials file (default: --creds) into the OS credential store: the macOS keychain,
+    /// the Linux Secret Service or the Windows Credential Manager. The seed leaves the file only once stored, read
+    /// back and used to authenticate at --nats; the file then keeps the user JWT and the stored key's reference. Leaf
+    /// node uplink credentials, which nats-server reads, are refused.
     Store { files: Vec<PathBuf> },
     /// Move the seed of each credentials file (default: --creds) back from the OS credential store into the file,
     /// readable by its owner only, then delete it from the store: for a machine without an unlocked store, or to

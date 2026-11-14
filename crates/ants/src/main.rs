@@ -218,8 +218,8 @@ enum Command {
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
     /// Credentials expired, or older than renewal over NATS, are renewed with `ants auth` instead.
     Renew(renew::RenewArgs),
-    /// Keep the NKey seeds of credentials files in the OS credential store (macOS keychain, Linux Secret Service)
-    /// instead of the files, move them back, or remove credentials from the machine.
+    /// Keep the NKey seeds of credentials files in the OS credential store (macOS keychain, Linux Secret Service,
+    /// Windows Credential Manager) instead of the files, move them back, or remove credentials from the machine.
     #[command(subcommand)]
     Keys(keys::KeysCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
@@ -602,9 +602,9 @@ enum AuthCommand {
         /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
         #[arg(long, conflicts_with = "webhook")]
         label: Option<String>,
-        /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service), never in a file,
-        /// for credentials used on this machine: the file names the stored key, written only once the seed reads
-        /// back and authenticates at --nats, unless no server answers there.
+        /// Keep the NKey seed in the OS credential store (macOS keychain, Linux Secret Service, Windows Credential
+        /// Manager), never in a file, for credentials used on this machine: the file names the stored key, written
+        /// only once the seed reads back and authenticates at --nats, unless no server answers there.
         #[arg(long, conflicts_with = "public_key")]
         store_key: bool,
     },

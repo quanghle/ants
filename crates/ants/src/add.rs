@@ -34,10 +34,10 @@ pub struct AddArgs {
     /// ~/.config/ants/auth/<ant>.creds). The seed waits beside them, as <name>.nk, until they are complete.
     #[arg(long)]
     pub out: Option<PathBuf>,
-    /// Keep the ant's NKey seed in the OS credential store (macOS keychain, Linux Secret Service), never in a file:
-    /// while it waits for its JWT, <name>.nk holds only its public key, and the credentials, once complete, name the
-    /// stored key. They are written only once the seed reads back and authenticates at the server, unless none
-    /// answers. A seed already waiting in <name>.nk moves into the store.
+    /// Keep the ant's NKey seed in the OS credential store (macOS keychain, Linux Secret Service, Windows Credential
+    /// Manager), never in a file: while it waits for its JWT, <name>.nk holds only its public key, and the
+    /// credentials, once complete, name the stored key. They are written only once the seed reads back and
+    /// authenticates at the server, unless none answers. A seed already waiting in <name>.nk moves into the store.
     #[arg(long)]
     pub store_key: bool,
     /// Complete the credentials with the user JWT `ants auth user NAME --public-key ...` printed: the JWT, a file
