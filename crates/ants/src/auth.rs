@@ -531,6 +531,12 @@ pub(crate) mod tests {
     }
 
     /// The server handles operations in order, so the next violation names the first denied one.
+    /// Returns once the server has registered the subscriptions of `js`'s client: async-nats' flush only writes them
+    /// out, so another client's publish could otherwise get there first, and be missed.
+    async fn subscribed(js: &jetstream::Context) {
+        js.get_stream(STREAM).await.unwrap();
+    }
+
     async fn next_violation(client: &Client, errors: &mut mpsc::UnboundedReceiver<String>) -> String {
         client.flush().await.unwrap();
         timeout(WAIT, errors.recv()).await.expect("no violation").unwrap()
@@ -692,8 +698,8 @@ pub(crate) mod tests {
         // Both watch all traffic and read dead letters.
         let mut a_all = a_client.subscribe(subject::ALL).await.unwrap();
         let mut b_all = b_client.subscribe(subject::ALL).await.unwrap();
-        for c in [&a_client, &b_client] {
-            c.flush().await.unwrap();
+        for js in [&a_js, &b_js] {
+            subscribed(js).await;
         }
         assert!(dead::list(&b_stream).await.unwrap().is_empty());
 
@@ -717,13 +723,17 @@ pub(crate) mod tests {
         // Either human decides dev-a's approval requests.
         let request = ants_proto::Uuid::now_v7();
         let mut decisions = d_client.subscribe(subject::approval_decision(&dev_a, &request)).await.unwrap();
-        d_client.flush().await.unwrap();
+        subscribed(&d_js).await;
         a_client.publish(subject::approval_decision(&dev_a, &request), "allow".into()).await.unwrap();
         a_client.flush().await.unwrap();
         b_client.publish(subject::approval_decision(&dev_a, &request), "reject".into()).await.unwrap();
-        for verdict in [&b"allow"[..], b"reject"] {
-            assert_eq!(&timeout(WAIT, decisions.next()).await.unwrap().unwrap().payload[..], verdict);
+        // Published on different connections, so heard in either order.
+        let mut heard = Vec::new();
+        for _ in 0..2 {
+            heard.push(timeout(WAIT, decisions.next()).await.unwrap().unwrap().payload);
         }
+        heard.sort();
+        assert_eq!(heard, [&b"allow"[..], b"reject"]);
     }
 
     #[tokio::test]
