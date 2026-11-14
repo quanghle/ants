@@ -776,6 +776,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | Dev Tunnel host (`devtunnel host`, hub) | `ants.devtunnel-host` (`devtunnel-host.log`) | `ants-devtunnel-host.service` | `--devtunnel-host TUNNEL` |
 | HTTPS bridge (`ants bridge connect`) | `ants.bridge` (`bridge.log`) | `ants-bridge.service` | `--bridge URL` |
 | HTTPS bridge server (`ants bridge serve`, hub) | `ants.bridge-serve` (`bridge-serve.log`) | `ants-bridge-serve.service` | `--bridge-serve` |
+| Log rotation (macOS) | `ants.logrotate` (`logrotate.log`) | — (the journal rotates) | Always on macOS |
 
 - **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux); `ants leaf config` does it itself.
 - **Reload daemon config:** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
@@ -783,6 +784,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 - **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
 - **Upgrade:** the ants services restart onto a new `ants` executable by themselves, exiting with status 75 ([Upgrade](#upgrade)); run `scripts/install-units.sh` again so systemd units installed before treat that exit as a restart rather than a failure.
+- **Logs (macOS):** launchd never rotates `~/Library/Logs/ants/*.log`, so `ants.logrotate` checks them at load and hourly: a log over 10 MiB is copied to `<name>.log.1`, gzipped, and truncated in place (copy-truncate, as launchd keeps the file open in append mode; no restart, signal or root needed), keeping 5 copies (`<name>.log.5.gz`). Lines written between the copy and the truncation are lost. Rotate now: `launchctl kickstart gui/$(id -u)/ants.logrotate`; the cap and count are the last two `ProgramArguments` of its plist.
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.
 

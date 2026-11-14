@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: rotates the services' logs in @LOGS@, which launchd never rotates.
+     scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.logrotate.plist.
+     At load and then hourly, each *.log over the size cap (in bytes) is copied to *.log.1, gzipped, and truncated in
+     place, the older copies shifting up to the number kept (*.log.5.gz). launchd opens StandardOutPath in append mode
+     and keeps it open, so truncating in place lets the services write on without a restart or signal; lines written
+     between the copy and the truncation are lost. Runs as the user: newsyslog would need root for /etc/newsyslog.d
+     and has no copy-truncate. Rotate now: launchctl kickstart gui/$(id -u)/ants.logrotate -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.logrotate</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>cd "$1" || exit 1
+for f in $(find . -maxdepth 1 -type f -name '*.log' -size +"$2"c); do
+    i=$3
+    while [ "$i" -gt 1 ]; do
+        [ ! -f "$f.$((i - 1)).gz" ] || mv -f "$f.$((i - 1)).gz" "$f.$i.gz"
+        i=$((i - 1))
+    done
+    cp "$f" "$f.1" &amp;&amp; : &gt;"$f" &amp;&amp; gzip -f "$f.1"
+done</string>
+		<string>ants-logrotate</string>
+		<string>@LOGS@</string>
+		<string>10485760</string>
+		<string>5</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/logrotate.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/logrotate.log</string>
+</dict>
+</plist>
