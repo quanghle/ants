@@ -309,7 +309,7 @@ fn creds_jwt(creds: &str) -> Option<&str> {
 fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -> Result<Kind> {
     let has = |list: &[String], s: &str| list.iter().any(|one| one == s);
     if leaf_only {
-        let machine = name.strip_prefix("leaf-").unwrap_or(name);
+        let machine = name.trim_prefix("leaf-");
         let machine: Machine = machine.parse().map_err(|e| anyhow!("a leaf node's credentials named {name}: {e}"))?;
         if !subscribe.is_empty() && subscribe.iter().all(|s| s.starts_with("$SYS.")) {
             return Ok(Kind::LeafSystem { machine });

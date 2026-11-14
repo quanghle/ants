@@ -439,14 +439,14 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Human => format!("ants auth user {name} --human {domain}"),
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
         Kind::Leaf if issued.members.is_some() => {
-            format!("ants auth leaf {} {domain}", name.strip_prefix("leaf-").unwrap_or(name))
+            format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-"))
         }
         Kind::Leaf => format!(
             "ants auth leaf {} --ant ANT... --human HUMAN... --webhook WEBHOOK... {domain}",
-            name.strip_prefix("leaf-").unwrap_or(name)
+            name.trim_prefix("leaf-")
         ),
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
-        Kind::Enrollment => format!("ants auth enroll {}", name.strip_prefix("enroll-").unwrap_or(name)),
+        Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
     }]
 }
 
