@@ -1,0 +1,730 @@
+//! Ants added by manager ants, signed on the machine holding the account key: a manager asks for an ant from a
+//! template over NATS ([`ask`], behind its `request_ant` tool), and `ants signer` there ([`serve`]) signs its
+//! credentials when the request keeps within the signer's own copy of the template's policy, asks the humans through
+//! the approvals path otherwise, and refuses what it can never sign.
+//!
+//! Requests are core NATS messages and stored nowhere, as enrollment requests are ([`crate::enroll`]): the manager's
+//! machine repeats its request every [`ENROLL_REPEAT`] until an answer comes or it stops waiting
+//! ([`AntRequest::expires_at`]), and the signer answers each repeat of a request it decided the same way.
+//!
+//! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
+//! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
+//! from the manager's machine. How many ants a template has is counted from the keys the team issued
+//! ([`revoke::Issued::template`]), live ones only.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+use std::time::Duration;
+
+use ants_daemon::config;
+use ants_daemon::roster;
+use ants_daemon::template::{AntTemplate, Request};
+use ants_proto::{
+    AntReply, AntRequest, ApprovalDecision, ApprovalRequest, ENROLL_REPEAT, EnrollLeaf, JsDomain, Permissions, STREAM,
+    ThreadId, ToolCall, UserId, Verdict, subject,
+};
+use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream::stream::DirectGetErrorKind;
+use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
+use nkeys::KeyPair;
+
+use crate::enroll::{Approver, Leaf};
+use crate::{auth, members, outbox, revoke};
+
+/// Most requests of one manager waiting for a human at once; more are refused.
+pub const MAX_WAITING: usize = 3;
+/// How often the signer looks for the humans' decisions on the requests it asked them about.
+pub const TICK: Duration = Duration::from_secs(1);
+/// Least time a request must have left for a human to be asked about it.
+const LEAST_ASKING: Duration = Duration::from_secs(10);
+
+/// How `ants signer` runs.
+pub struct Options<'a> {
+    /// The config file whose `[[ant_template]]` tables are the policy.
+    pub config: &'a Path,
+    /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+    pub approval_timeout: Duration,
+    /// How long it stays connected with one set of the credentials it issues itself ([`crate::renew::AUTO_RECONNECT`]).
+    pub reconnect: Duration,
+    /// How often it looks for decisions ([`TICK`]).
+    pub tick: Duration,
+}
+
+/// What the signer did with a request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Signed, within the policy (`human: false`) or on a human's approval.
+    Approved { human: bool },
+    /// Refused, and why.
+    Refused(String),
+    /// Asked the humans with approval request `id`, as the request is outside the policy for the reason given.
+    Asked { id: ants_proto::Uuid, why: String },
+}
+
+/// Print what the signer did with `request`.
+pub fn print(request: &AntRequest, event: &Event) {
+    let asked = format!(
+        "{} for {} from template {} (key {}, host {})",
+        request.manager, request.name, request.template, request.public_key, request.host
+    );
+    match event {
+        Event::Approved { human: false } => println!("signed {asked}: within the template's policy"),
+        Event::Approved { human: true } => println!("signed {asked}: a human approved"),
+        Event::Refused(reason) => println!("refused {asked}: {reason}"),
+        Event::Asked { id, why } => {
+            println!("asked the humans about {asked}, as {why}: `ants tools approve|reject {}/{id}`", request.manager)
+        }
+    }
+}
+
+/// What [`Signer::judge`] makes of a request.
+enum Judgement {
+    Approve,
+    Ask(String),
+    Refuse(String),
+}
+
+/// A request a human is asked about, and the approval request asking.
+struct Waiting {
+    request: AntRequest,
+    approval: ApprovalRequest,
+}
+
+/// `ants signer`: answer the ant requests of manager ants ([`AntRequest`]) over the server at `url`, signing with the
+/// account key in the team directory `dir`, until `stop` completes. Each run connects afresh every
+/// [`Options::reconnect`], with credentials it issues itself, and reads the revocations again; the templates are read
+/// for each request. Calls `report` with what it did with each request.
+pub async fn serve(
+    url: &str,
+    dir: &Path,
+    js_domain: Option<&JsDomain>,
+    options: &Options<'_>,
+    mut report: impl FnMut(&AntRequest, &Event),
+    stop: impl Future<Output = ()>,
+) -> Result<()> {
+    let mut signer = Signer { dir, js_domain, options, answered: HashMap::new(), waiting: Vec::new() };
+    tokio::pin!(stop);
+    loop {
+        let approver = Approver::connect(url, dir, js_domain, crate::enroll::LISTEN).await?;
+        let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
+        approver.client.flush().await?;
+        let until = tokio::time::sleep(options.reconnect);
+        let mut ticks = tokio::time::interval(options.tick);
+        tokio::pin!(until);
+        loop {
+            tokio::select! {
+                msg = requests.next() => {
+                    let msg = msg.context("the NATS connection closed")?;
+                    signer.heard(&approver, &msg, &mut report).await?;
+                }
+                _ = ticks.tick() => signer.look(&approver, &mut report).await?,
+                () = &mut until => break,
+                () = &mut stop => return Ok(()),
+            }
+        }
+    }
+}
+
+struct Signer<'a> {
+    dir: &'a Path,
+    js_domain: Option<&'a JsDomain>,
+    options: &'a Options<'a>,
+    /// The answer to each manager, ant and key: a machine that missed it asks again and gets the same.
+    answered: HashMap<(UserId, UserId, String), (AntReply, DateTime<Utc>)>,
+    waiting: Vec<Waiting>,
+}
+
+fn key(request: &AntRequest) -> (UserId, UserId, String) {
+    (request.manager.clone(), request.name.clone(), request.public_key.clone())
+}
+
+impl Signer<'_> {
+    async fn heard(
+        &mut self,
+        approver: &Approver,
+        msg: &async_nats::Message,
+        report: &mut impl FnMut(&AntRequest, &Event),
+    ) -> Result<()> {
+        let request = match serde_json::from_slice::<AntRequest>(&msg.payload) {
+            Ok(request) => request,
+            Err(e) => {
+                tracing::warn!(subject = %msg.subject, error = %e, "ignoring a malformed ant request");
+                return Ok(());
+            }
+        };
+        if let Err(e) =
+            request.check_subject(&msg.subject).map_err(anyhow::Error::from).and_then(|()| check(approver, &request))
+        {
+            tracing::warn!(manager = %request.manager, ant = %request.name, "ignoring an ant request: {e:#}");
+            return Ok(());
+        }
+        if let Some((reply, _)) = self.answered.get(&key(&request)) {
+            return answer(approver, reply).await;
+        }
+        if self.waiting.iter().any(|w| key(&w.request) == key(&request)) {
+            return Ok(());
+        }
+        let judgement = match self.judge(&request) {
+            Ok(judgement) => judgement,
+            Err(e) => Judgement::Refuse(format!("{e:#}")),
+        };
+        match judgement {
+            Judgement::Approve => self.sign(approver, &request, false, report).await,
+            Judgement::Refuse(reason) => self.refuse(approver, &request, reason, report).await,
+            Judgement::Ask(why) => self.ask_humans(approver, request, why, report).await,
+        }
+    }
+
+    /// Whether `request`, proven the manager's ([`check`]), may be signed: never when its name is no ant's to take,
+    /// at once when it keeps within the policy, else on a human's approval, saying why.
+    fn judge(&self, request: &AntRequest) -> Result<Judgement> {
+        let (manager, name) = (&request.manager, &request.name);
+        let refuse = |why: String| Ok(Judgement::Refuse(why));
+        if name.is_human() || *name == *manager {
+            return refuse(format!("{name} cannot be an ant added by {manager}"));
+        }
+        if let Err(e) = auth::check_not_reserved(name) {
+            return refuse(format!("{e:#}"));
+        }
+        let asked: Request = match serde_json::from_str(&request.request) {
+            Ok(asked) => asked,
+            Err(e) => return refuse(format!("the settings asked for do not read as a template request: {e}")),
+        };
+        let issued = live(self.dir)?;
+        if issued.iter().any(|i| i.name == manager.as_str() && i.template.is_some()) {
+            return refuse(format!("{manager} was added from a template, and added ants never add ants"));
+        }
+        if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.key != request.public_key) {
+            return refuse(format!("the team holds credentials named {name} already (key {})", other.key));
+        }
+        let waiting = self.waiting.iter().filter(|w| w.request.manager == *manager).count();
+        let templates = match config::signer_templates(self.options.config) {
+            Ok(templates) => templates,
+            Err(e) => return self.ask_or_refuse(waiting, format!("the signer's templates do not load: {e:#}")),
+        };
+        match policy(&templates, &issued, request, &asked) {
+            Ok(()) => Ok(Judgement::Approve),
+            Err(why) => self.ask_or_refuse(waiting, why),
+        }
+    }
+
+    fn ask_or_refuse(&self, waiting: usize, why: String) -> Result<Judgement> {
+        if waiting >= MAX_WAITING {
+            return Ok(Judgement::Refuse(format!(
+                "{why}, and {waiting} requests of the manager wait for a human already"
+            )));
+        }
+        Ok(Judgement::Ask(why))
+    }
+
+    /// Sign the credentials `request` asks for, renew the uplink of the leaf node it came through to carry the ant,
+    /// and answer.
+    async fn sign(
+        &mut self,
+        approver: &Approver,
+        request: &AntRequest,
+        human: bool,
+        report: &mut impl FnMut(&AntRequest, &Event),
+    ) -> Result<()> {
+        let signed = self.signed(approver, request).await;
+        let (manager, name, public_key) = (request.manager.clone(), request.name.clone(), request.public_key.clone());
+        let reply = match signed {
+            Ok((jwt, leaf_jwt)) => {
+                report(request, &Event::Approved { human });
+                AntReply::Approved { manager, name, public_key, jwt, leaf_jwt }
+            }
+            Err(e) => {
+                let reason = format!("signing failed: {e:#}");
+                report(request, &Event::Refused(reason.clone()));
+                AntReply::Refused { manager, name, public_key, reason }
+            }
+        };
+        answer(approver, &reply).await?;
+        self.answered.insert(key(request), (reply, request.expires_at));
+        Ok(())
+    }
+
+    async fn signed(&self, approver: &Approver, request: &AntRequest) -> Result<(String, Option<String>)> {
+        let (name, domain) = (&request.name, self.js_domain);
+        let jwt = auth::sign_added(self.dir, name, domain, &request.public_key, &request.template, &request.manager)?;
+        let Some(leaf) = &request.leaf else {
+            return Ok((jwt, None));
+        };
+        let more = Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)]).with_js_domain(domain);
+        let renewed = auth::extend_leaf(self.dir, &leaf.jwt, &leaf.machine, more)?;
+        members::enrolled(self.dir, &leaf.machine, &renewed, name)
+            .with_context(|| format!("keeping {name} among the members of {}", leaf.machine))?;
+        outbox::admit_ant(approver.hub(), &leaf.machine, name)
+            .await
+            .with_context(|| format!("admitting {name} from the outbox of {}", leaf.machine))?;
+        Ok((jwt, Some(renewed)))
+    }
+
+    async fn refuse(
+        &mut self,
+        approver: &Approver,
+        request: &AntRequest,
+        reason: String,
+        report: &mut impl FnMut(&AntRequest, &Event),
+    ) -> Result<()> {
+        report(request, &Event::Refused(reason.clone()));
+        let (manager, name, public_key) = (request.manager.clone(), request.name.clone(), request.public_key.clone());
+        let reply = AntReply::Refused { manager, name, public_key, reason };
+        answer(approver, &reply).await?;
+        self.answered.insert(key(request), (reply, request.expires_at));
+        Ok(())
+    }
+
+    /// Ask the humans about `request` with an approval request of its manager, on the manager's thread, until a
+    /// human decides or it expires: [`Options::approval_timeout`] at most, and never past the manager's wait.
+    async fn ask_humans(
+        &mut self,
+        approver: &Approver,
+        request: AntRequest,
+        why: String,
+        report: &mut impl FnMut(&AntRequest, &Event),
+    ) -> Result<()> {
+        let left = (request.expires_at - Utc::now()).to_std().unwrap_or_default().saturating_sub(ENROLL_REPEAT);
+        let timeout = self.options.approval_timeout.min(left);
+        if timeout < LEAST_ASKING {
+            let reason = format!("{why}, and too little time is left to ask a human");
+            return self.refuse(approver, &request, reason, report).await;
+        }
+        let approval = approval_request(&request, &why, timeout);
+        approver
+            .hub()
+            .publish(approval.subject(), serde_json::to_vec(&approval)?.into())
+            .await
+            .context("publishing the approval request")?
+            .await
+            .context("waiting for JetStream to store the approval request")?;
+        report(&request, &Event::Asked { id: approval.id, why });
+        self.waiting.push(Waiting { request, approval });
+        Ok(())
+    }
+
+    /// Act on the humans' decisions stored on the requests asked about, and drop answers no machine waits for.
+    async fn look(&mut self, approver: &Approver, report: &mut impl FnMut(&AntRequest, &Event)) -> Result<()> {
+        let now = Utc::now();
+        self.answered.retain(|_, (_, expires_at)| *expires_at > now);
+        if self.waiting.is_empty() {
+            return Ok(());
+        }
+        let stream = approver.hub().get_stream_no_info(STREAM).await.context("opening the ANTS stream")?;
+        for waiting in std::mem::take(&mut self.waiting) {
+            let decision = match stream.direct_get_last_for_subject(waiting.approval.decision_subject()).await {
+                Ok(msg) => serde_json::from_slice::<ApprovalDecision>(&msg.payload)
+                    .ok()
+                    .filter(|d| d.request_id == waiting.approval.id && d.ant == waiting.approval.ant),
+                Err(e) if e.kind() == DirectGetErrorKind::NotFound => None,
+                Err(e) => {
+                    tracing::warn!(request = %waiting.approval.id, error = %e, "reading the decision");
+                    None
+                }
+            };
+            match decision.map(|d| waiting.approval.decide(d.verdict).verdict) {
+                Some(Verdict::AllowOnce | Verdict::AllowAlways) => {
+                    self.sign(approver, &waiting.request, true, report).await?;
+                }
+                Some(Verdict::Reject) => {
+                    self.refuse(approver, &waiting.request, "a human rejected the request".to_owned(), report).await?;
+                }
+                None if waiting.approval.is_expired(now) => {
+                    let reason = "no human decided on the request in time".to_owned();
+                    self.refuse(approver, &waiting.request, reason, report).await?;
+                }
+                None => self.waiting.push(waiting),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Check that `request` is its manager's: signed by the manager's credentials of the team's account, unexpired and
+/// unrevoked, for a well-formed key, still waited for, and if it names a leaf node, signed by the leaf's uplink
+/// credentials too.
+fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
+    auth::check_user_key(&request.public_key)?;
+    if request.expires_at <= Utc::now() {
+        bail!("the manager stopped waiting at {}", request.expires_at);
+    }
+    let signed = request.signed();
+    let manager = &request.manager;
+    let claims = auth::verified(&request.credentials).context("the manager's credentials")?;
+    if claims.iss != approver.account {
+        bail!("credentials issued by {}, not by the team's account", claims.iss);
+    }
+    if claims.name != manager.as_str() {
+        bail!("credentials of {}, not of {manager}", claims.name);
+    }
+    if claims.exp.is_some_and(|exp| exp <= auth::now().unwrap_or(u64::MAX)) {
+        bail!("expired credentials of {manager}");
+    }
+    if approver.revoked.contains(&claims.sub) {
+        bail!("revoked credentials of {manager}");
+    }
+    auth::check_signature(&claims.sub, &signed, &request.signature).context("the manager's credentials")?;
+    if let Some(leaf) = &request.leaf {
+        let uplink = auth::check_leaf(&approver.account, &leaf.jwt, &leaf.machine)
+            .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
+        if approver.revoked.contains(&uplink.sub) {
+            bail!("revoked uplink credentials of {}", leaf.machine);
+        }
+        auth::check_signature(&uplink.sub, &signed, &leaf.signature)
+            .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
+    }
+    Ok(())
+}
+
+/// The keys the team issued that are neither revoked nor expired.
+fn live(dir: &Path) -> Result<Vec<revoke::Issued>> {
+    let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
+    let now = auth::now()?;
+    let issued = revoke::issued(dir)?;
+    Ok(issued.into_iter().filter(|i| !revoked.contains(&i.key) && i.expires_at.is_none_or(|exp| exp > now)).collect())
+}
+
+/// Whether `request`, asking for `asked`, keeps within the policy of `templates`: its template lists the manager, has
+/// room under its `max_ants` among the live keys `issued`, and bounds what is asked; else why not.
+fn policy(
+    templates: &[AntTemplate],
+    issued: &[revoke::Issued],
+    request: &AntRequest,
+    asked: &Request,
+) -> Result<(), String> {
+    let (manager, name, template) = (&request.manager, &request.name, request.template.as_str());
+    let t = templates
+        .iter()
+        .find(|t| t.name == template)
+        .ok_or_else(|| format!("the signer's config has no ant template {template}"))?;
+    if !t.managers.contains(manager) {
+        return Err(format!("{manager} is not among the managers of template {template} in the signer's config"));
+    }
+    let added: BTreeSet<&str> = issued
+        .iter()
+        .filter(|i| i.template.as_deref() == Some(template) && i.name != name.as_str())
+        .map(|i| i.name.as_str())
+        .collect();
+    if added.len() >= t.max_ants {
+        return Err(format!("template {template} has {} ants already, its max_ants", added.len()));
+    }
+    let canonical = |dir: &Path| Ok(dir.canonicalize().unwrap_or_else(|_| dir.to_owned()));
+    t.resolve_with(manager, name, asked, canonical).map(drop).map_err(|e| format!("{e:#}"))
+}
+
+/// The approval request asking the humans about `request`, outside the policy for `why`, for `timeout`: one of its
+/// manager's, on the manager's thread, offering to allow once or reject.
+fn approval_request(request: &AntRequest, why: &str, timeout: Duration) -> ApprovalRequest {
+    let title = format!("request_ant: add ant {} from template {} ({why})", request.name, request.template);
+    let input = serde_json::json!({
+        "name": request.name,
+        "template": request.template,
+        "reason": request.reason,
+        "overrides": serde_json::from_str::<serde_json::Value>(&request.request).unwrap_or_default(),
+        "host": request.host,
+        "leaf": request.leaf.as_ref().map(|l| &l.machine),
+    });
+    let tool = ToolCall { kind: "other".to_owned(), title, locations: Vec::new(), input: Some(input.to_string()) };
+    let thread: ThreadId = request.thread_id.clone();
+    ApprovalRequest::new(request.manager.clone(), thread, tool, vec![Verdict::AllowOnce], timeout)
+}
+
+async fn answer(approver: &Approver, reply: &AntReply) -> Result<()> {
+    approver.client.publish(reply.subject(), serde_json::to_vec(reply)?.into()).await?;
+    approver.client.flush().await?;
+    Ok(())
+}
+
+/// What [`ask`] got: the ant's user JWT, and for a request through a leaf node, the renewed uplink JWT of the leaf.
+#[derive(Debug)]
+pub struct Signed {
+    pub jwt: String,
+    pub leaf_jwt: Option<String>,
+}
+
+/// Ask, as `manager` with its connection `client` and the credentials at `creds`, for ant `name` from `template` with
+/// the settings `request` (JSON), for the public key of `user`, through the machine's `leaf` node if it has one:
+/// repeat the request every `repeat` until an answer for the key arrives or `until` passes. Returns the ant's user
+/// JWT of an approval, checked to be the account's for that key and ant, and the leaf's renewed uplink JWT, checked
+/// likewise; a refusal is an error carrying the signer's reason.
+#[allow(clippy::too_many_arguments)]
+pub async fn ask(
+    client: &async_nats::Client,
+    creds: &Path,
+    template: &str,
+    request: &str,
+    reason: &str,
+    thread: &ThreadId,
+    name: &UserId,
+    user: &KeyPair,
+    leaf: Option<&Leaf>,
+    repeat: Duration,
+    until: DateTime<Utc>,
+) -> Result<Signed> {
+    let (jwt, key) = auth::read_creds(creds)?;
+    let claims = auth::verified(&jwt).with_context(|| format!("the manager's credentials {}", creds.display()))?;
+    let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
+    let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
+    let public_key = user.public_key();
+    let host = roster::machine().await;
+    let mut asking = AntRequest::new(
+        manager.clone(),
+        name.clone(),
+        template,
+        request,
+        reason,
+        thread.clone(),
+        &public_key,
+        host,
+        until,
+    );
+    asking.credentials = jwt;
+    let mut uplink: Option<KeyPair> = None;
+    let mut repeats = tokio::time::interval(repeat);
+    let left = (until - Utc::now()).to_std().unwrap_or_default();
+    let deadline = tokio::time::sleep(left);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = repeats.tick() => {
+                if let Some(leaf) = leaf {
+                    let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
+                    asking.leaf = Some(EnrollLeaf { machine: leaf.machine.clone(), jwt, signature: String::new() });
+                    let signature = auth::sign(&key, &asking.signed())?;
+                    asking.leaf.as_mut().expect("the leaf just set").signature = signature;
+                    uplink = Some(key);
+                }
+                asking.signature = auth::sign(&key, &asking.signed())?;
+                client.publish(asking.subject(), serde_json::to_vec(&asking)?.into()).await?;
+                client.flush().await?;
+            }
+            msg = replies.next() => {
+                let msg = msg.context("the NATS connection closed")?;
+                let reply = match serde_json::from_slice::<AntReply>(&msg.payload) {
+                    Ok(reply) if reply.manager() == &manager && reply.answers(name, &public_key) => reply,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring a malformed answer to an ant request");
+                        continue;
+                    }
+                };
+                match reply {
+                    AntReply::Approved { jwt, leaf_jwt, .. } => {
+                        match check_signed(&claims.iss, &jwt, name, &public_key, leaf_jwt.as_deref(), leaf, uplink.as_ref()) {
+                            Ok(()) => return Ok(Signed { jwt, leaf_jwt }),
+                            Err(e) => tracing::warn!(error = format!("{e:#}"), "ignoring an approval of an ant request"),
+                        }
+                    }
+                    AntReply::Refused { reason, .. } => bail!("the signer refused {name}: {reason}"),
+                }
+            }
+            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the team's account key) in time"),
+        }
+    }
+}
+
+/// Check that `jwt` is the user JWT of ant `name` for `public_key`, signed by `account`, and that `leaf_jwt` is there
+/// only when the request named `leaf`, and is then the account's for the uplink key `uplink` and the leaf's machine.
+fn check_signed(
+    account: &str,
+    jwt: &str,
+    name: &UserId,
+    public_key: &str,
+    leaf_jwt: Option<&str>,
+    leaf: Option<&Leaf>,
+    uplink: Option<&KeyPair>,
+) -> Result<()> {
+    let claims = auth::verified(jwt)?;
+    if claims.iss != account {
+        bail!("signed by {}, not by the account {account}", claims.iss);
+    }
+    if claims.sub != public_key || claims.name != name.as_str() {
+        bail!("issued to {} ({}), not to {name} ({public_key})", claims.name, claims.sub);
+    }
+    match (leaf_jwt, leaf, uplink) {
+        (None, None, _) => Ok(()),
+        (None, Some(leaf), _) => bail!("no renewed uplink credentials for the leaf node {}", leaf.machine),
+        (Some(jwt), Some(leaf), Some(uplink)) => {
+            let claims = auth::check_leaf(account, jwt, &leaf.machine).context("the renewed uplink credentials")?;
+            if claims.sub != uplink.public_key() {
+                bail!("the renewed uplink credentials are for the key {}, not for this leaf node's", claims.sub);
+            }
+            Ok(())
+        }
+        (Some(_), _, _) => bail!("renews uplink credentials no leaf node asked for"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::path::PathBuf;
+
+    use ants_daemon::bus;
+    use ants_proto::Role;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::auth::tests::Server;
+    use crate::tools;
+
+    const WAIT: Duration = Duration::from_secs(20);
+    const REPEAT: Duration = Duration::from_millis(200);
+
+    fn p(s: &str) -> UserId {
+        s.parse().unwrap()
+    }
+
+    /// A config file on the signer's machine with template `worker` for manager `lead`, of at most `max_ants`.
+    fn templates(server: &Server, max_ants: usize) -> PathBuf {
+        let src = server.dir().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let path = server.dir().join("config.toml");
+        let text = format!(
+            "[[ant_template]]\nname = \"worker\"\nmanagers = [\"lead\"]\nmax_ants = {max_ants}\nworkdirs = [{src:?}]\n\
+             models = {{ \"gpt-5\" = \"high\" }}\n"
+        );
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Run `asking` while `ants signer` answers over `server` with the templates of `config`, and return its output
+    /// with what the signer did.
+    async fn signing<T>(server: &Server, config: &Path, asking: impl Future<Output = T>) -> (T, Vec<(UserId, Event)>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let options = Options { config, approval_timeout: WAIT, reconnect: WAIT * 3, tick: REPEAT };
+        let report = move |r: &AntRequest, e: &Event| drop(tx.send((r.name.clone(), e.clone())));
+        let team = server.dir().join("auth");
+        let serving = Box::pin(serve(&server.url, &team, None, &options, report, pending()));
+        let out = timeout(WAIT * 2, async {
+            tokio::select! {
+                r = serving => panic!("the signer stopped: {r:?}"),
+                out = asking => out,
+            }
+        })
+        .await
+        .unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        (out, events)
+    }
+
+    struct Manager {
+        creds: PathBuf,
+        client: async_nats::Client,
+    }
+
+    impl Manager {
+        async fn new(server: &Server) -> Self {
+            let lead = p("lead");
+            let creds = server.creds_as(&lead, Role::Ant);
+            let (client, _) = bus::connect(&server.url, Some(&creds), None, &lead, "test").await.unwrap();
+            Self { creds, client }
+        }
+
+        async fn ask(&self, name: &str, request: &str, user: &KeyPair) -> Result<Signed> {
+            let until = Utc::now() + WAIT;
+            let thread = ThreadId::generate();
+            ask(
+                &self.client,
+                &self.creds,
+                "worker",
+                request,
+                "more hands",
+                &thread,
+                &p(name),
+                user,
+                None,
+                REPEAT,
+                until,
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_within_the_policy_is_signed_at_once_and_counted() {
+        let Some(server) = Server::start() else { return };
+        let (team, config) = (server.dir().join("auth"), templates(&server, 1));
+        let lead = Manager::new(&server).await;
+        let user = KeyPair::new_user();
+
+        let (signed, events) = signing(&server, &config, lead.ask("lead-a", r#"{"model":"gpt-5"}"#, &user)).await;
+        let signed = signed.unwrap();
+        assert_eq!(events, [(p("lead-a"), Event::Approved { human: false })]);
+        assert_eq!(signed.leaf_jwt, None);
+        let issued = revoke::issued(&team).unwrap();
+        let record = issued.iter().find(|i| i.name == "lead-a").unwrap();
+        assert_eq!((record.key.as_str(), record.template.as_deref()), (user.public_key().as_str(), Some("worker")));
+        assert_eq!(record.added_by, Some(p("lead")));
+        let out = server.dir().join("lead-a.creds");
+        auth::write_creds(&out, &signed.jwt, &user).unwrap();
+        let (client, _) = bus::connect(&server.url, Some(&out), None, &p("lead-a"), "test").await.unwrap();
+        client.flush().await.unwrap();
+
+        // The same request again, as from a machine that missed the answer, gets the same credentials.
+        let (again, events) = signing(&server, &config, lead.ask("lead-a", r#"{"model":"gpt-5"}"#, &user)).await;
+        assert_eq!(auth::verified(&again.unwrap().jwt).unwrap().sub, user.public_key());
+        assert_eq!(events, [(p("lead-a"), Event::Approved { human: false })], "signed anew by a new signer");
+
+        let other = KeyPair::new_user();
+        let (taken, _) = signing(&server, &config, lead.ask("lead-a", "{}", &other)).await;
+        let err = format!("{:#}", taken.unwrap_err());
+        assert!(err.contains("the signer refused lead-a") && err.contains("holds credentials named lead-a"), "{err}");
+
+        // An ant added from a template never adds ants, whatever the signer's templates say.
+        auth::sign_added(&team, &p("lead"), None, &KeyPair::new_user().public_key(), "worker", &p("boss")).unwrap();
+        let (added, _) = signing(&server, &config, lead.ask("lead-b", "{}", &KeyPair::new_user())).await;
+        let err = format!("{:#}", added.unwrap_err());
+        assert!(err.contains("added ants never add ants"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn outside_the_policy_a_human_approves_or_rejects() {
+        let Some(server) = Server::start() else { return };
+        let (team, config) = (server.dir().join("auth"), templates(&server, 1));
+        let human = p("alice");
+        let (_, js) = server.connect_as(&human, Role::Human).await;
+        let stream = bus::ensure_stream(&js).await.unwrap();
+        let lead = Manager::new(&server).await;
+        // The template's one ant, from an earlier request.
+        auth::sign_added(&team, &p("lead-x"), None, &KeyPair::new_user().public_key(), "worker", &p("lead")).unwrap();
+
+        let decide = async |verdict| {
+            let asked = loop {
+                let stored = tools::requests(&stream).await.unwrap();
+                let mut pending = Vec::new();
+                for (_, request) in stored {
+                    if tools::decision(&stream, &request).await.unwrap().is_none() {
+                        pending.push(request);
+                    }
+                }
+                if let Some(request) = pending.pop() {
+                    break request;
+                }
+                tokio::time::sleep(REPEAT).await;
+            };
+            assert_eq!(asked.ant, p("lead"));
+            assert!(asked.tool.title.contains("max_ants"), "{}", asked.tool.title);
+            tools::answer(&js, &stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+        };
+
+        let user = KeyPair::new_user();
+        let asking = async { tokio::join!(lead.ask("lead-a", "{}", &user), decide(Verdict::AllowOnce)).0 };
+        let (signed, events) = signing(&server, &config, Box::pin(asking)).await;
+        assert_eq!(auth::verified(&signed.unwrap().jwt).unwrap().sub, user.public_key());
+        assert!(matches!(&events[..], [(_, Event::Asked { .. }), (_, Event::Approved { human: true })]), "{events:?}");
+
+        let other = KeyPair::new_user();
+        let asking = async { tokio::join!(lead.ask("lead-b", "{}", &other), decide(Verdict::Reject)).0 };
+        let (rejected, events) = signing(&server, &config, Box::pin(asking)).await;
+        let err = format!("{:#}", rejected.unwrap_err());
+        assert!(err.contains("a human rejected the request"), "{err}");
+        assert!(matches!(&events[..], [(_, Event::Asked { .. }), (_, Event::Refused(_))]), "{events:?}");
+        assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-b"), "a rejected ant is not signed");
+    }
+}

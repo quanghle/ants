@@ -1,15 +1,16 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
 # machine), the ant daemon (`ants daemon --config`), on the hub the channel manager (`ants channel serve`) and the
-# webhook ingress (`ants webhook serve`), for an uplink through a private Dev Tunnel `devtunnel connect` and, on the hub
-# machine, `devtunnel host` of that tunnel, and for an uplink through the HTTPS fallback bridge `ants bridge connect`
-# and, on the hub machine, `ants bridge serve`. launchd agents on macOS, systemd user units on Linux and WSL; templates
-# in contrib/.
+# webhook ingress (`ants webhook serve`), on the machine holding the team directory the signer (`ants signer`), for
+# an uplink through a private Dev Tunnel `devtunnel connect` and, on the hub machine, `devtunnel host` of that tunnel,
+# and for an uplink through the HTTPS fallback bridge `ants bridge connect` and, on the hub machine,
+# `ants bridge serve`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
 #
 #   scripts/install-units.sh                         # install nats-server and the daemon and (re)start them
 #   scripts/install-units.sh --devtunnel ants-hub    # and `devtunnel connect ants-hub` for nats-leaf://127.0.0.1:7422
 #   scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # on the hub
 #   scripts/install-units.sh --webhook               # and `ants webhook serve` for ~/.ants/webhooks.toml
+#   scripts/install-units.sh --signer                # with the team directory, and `ants signer` for --config
 #   scripts/install-units.sh --devtunnel-host ants-hub   # on the hub, and `devtunnel host ants-hub`
 #   scripts/install-units.sh --bridge https://hub.example/bridge --bridge-token FILE   # and `ants bridge connect`
 #   scripts/install-units.sh --no-daemon --bridge-serve --bridge-token FILE           # on the hub, `ants bridge serve`
@@ -21,6 +22,8 @@
 #           --config FILE            daemon config file (default: ~/.ants/config.toml)
 #           --no-daemon              no daemon service, on a machine without ants
 #           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
+#           --signer                 also keep `ants signer --config FILE` running, on the machine holding the team
+#                                    directory (see README.md, Manager ants)
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
 #           --devtunnel-host TUNNEL  also keep `devtunnel host TUNNEL` running, on the hub machine
 #           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
@@ -66,6 +69,7 @@ tunnel=
 host_tunnel=
 token_file=
 channel_creds=
+signer=
 bridge_url=
 bridge_serve=
 bridge_token=
@@ -83,6 +87,7 @@ while [ $# -gt 0 ]; do
     --config) config=$2; shift 2 ;;
     --no-daemon) daemon=; shift ;;
     --channel-manager) channel_creds=$2; shift 2 ;;
+    --signer) signer=1; shift ;;
     --devtunnel) tunnel=$2; shift 2 ;;
     --devtunnel-host) host_tunnel=$2; shift 2 ;;
     --devtunnel-bin) devtunnel=$2; shift 2 ;;
@@ -95,7 +100,7 @@ while [ $# -gt 0 ]; do
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -104,7 +109,7 @@ done
 nats_server=$(absolute "$nats_server")
 [ -x "$nats_server" ] || die "no nats-server binary at $nats_server"
 nats_conf=$(absolute "$nats_conf")
-if [ -n "$daemon$channel_creds$webhook$bridge_url$bridge_serve" ]; then
+if [ -n "$daemon$channel_creds$signer$webhook$bridge_url$bridge_serve" ]; then
     [ -n "$ants" ] || ants=$(command -v ants) || die "ants not found (give --ants, or cargo install --path crates/ants)"
     ants=$(absolute "$ants")
     [ -x "$ants" ] || die "no ants binary at $ants"
@@ -139,6 +144,7 @@ fi
 if [ -z "$out" ]; then
     [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
     [ -z "$daemon" ] || [ -f "$config" ] || die "no daemon config file at $config (see README.md, Config file)"
+    [ -z "$signer" ] || [ -f "$config" ] || die "no config file at $config for the signer's templates"
     [ -z "$token_file" ] || [ -r "$token_file" ] || die "no devtunnel token file at $token_file"
     [ -z "$channel_creds" ] || [ -r "$channel_creds" ] || die "no channel manager credentials at $channel_creds"
     [ -z "$webhook" ] || [ -f "$webhook_config" ] || die "no webhook config file at $webhook_config (see README.md, Webhooks)"
@@ -154,13 +160,13 @@ fi
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist} ants.logrotate.plist"
+    units="${tunnel:+ants.devtunnel.plist }${bridge_url:+ants.bridge.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${signer:+ ants.signer.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}${bridge_serve:+ ants.bridge-serve.plist} ants.logrotate.plist"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
 Linux)
     kind=systemd
-    units="${tunnel:+ants-devtunnel.service }${bridge_url:+ants-bridge.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${webhook:+ ants-webhook.service}${host_tunnel:+ ants-devtunnel-host.service}${bridge_serve:+ ants-bridge-serve.service}"
+    units="${tunnel:+ants-devtunnel.service }${bridge_url:+ants-bridge.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${signer:+ ants-signer.service}${webhook:+ ants-webhook.service}${host_tunnel:+ ants-devtunnel-host.service}${bridge_serve:+ ants-bridge-serve.service}"
     dest=${out:-$HOME/.config/systemd/user}
     logs=
     ;;
@@ -240,8 +246,9 @@ else
     systemctl --user enable $names
     # shellcheck disable=SC2086
     systemctl --user restart $names
-    printf 'started; logs: journalctl --user%s%s -u ants-nats%s%s%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
+    printf 'started; logs: journalctl --user%s%s -u ants-nats%s%s%s%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
         "${bridge_url:+ -u ants-bridge}" "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}" \
+        "${signer:+ -u ants-signer}" \
         "${webhook:+ -u ants-webhook}" "${host_tunnel:+ -u ants-devtunnel-host}" "${bridge_serve:+ -u ants-bridge-serve}"
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         printf 'to keep them running without a login session: loginctl enable-linger %s\n' "$(id -un)"
