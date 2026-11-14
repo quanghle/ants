@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ants_daemon::schedule::Mentions;
 use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
@@ -176,16 +177,6 @@ enum IdSource {
     BodySha256,
 }
 
-/// Whom a channel webhook's posts mention.
-#[derive(Debug, PartialEq)]
-enum Mentions {
-    /// Nobody: the channel's messenger triages them.
-    Nobody,
-    Listed(Vec<UserId>),
-    /// Every member when the event arrives.
-    Members,
-}
-
 #[derive(Debug, PartialEq)]
 enum Piece {
     Text(String),
@@ -337,30 +328,34 @@ impl Webhook {
         Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner: entry.owner, text })
     }
 
-    /// Fail unless the credentials name the webhook, are no human's and may send to its destination.
     fn check_creds(&self) -> Result<()> {
-        let Some(path) = &self.creds else { return Ok(()) };
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
-        let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
-        let name = &self.name;
-        let issue = |what: &str| {
-            let to = match &self.destination {
-                Destination::Ant(ant) => format!("--to {ant}"),
-                Destination::Channel(channel) => format!("--channel {channel}"),
-            };
-            anyhow!("credentials {} {what}; issue them with `ants auth user {name} --webhook {to}`", path.display())
-        };
-        if claims["name"].as_str() != Some(name.as_str()) {
-            return Err(issue(&format!("are not webhook {name}'s")));
-        }
-        if crate::humans::may_publish(&claims, &format!("$KV.{}.>", ants_proto::HUMANS_BUCKET)) {
-            return Err(issue("are a human's"));
-        }
-        if !crate::humans::may_publish(&claims, &self.destination.subject(name)) {
-            return Err(issue("do not allow this destination"));
-        }
-        Ok(())
+        check_creds("webhook", &self.name, self.creds.as_deref(), &self.destination)
     }
+}
+
+/// Fail unless the credentials at `path`, if any, name `name`, the user a webhook or schedule (`kind`) sends as, are
+/// no human's and may send to `destination`.
+pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destination: &Destination) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
+    let issue = |what: &str| {
+        let to = match destination {
+            Destination::Ant(ant) => format!("--to {ant}"),
+            Destination::Channel(channel) => format!("--channel {channel}"),
+        };
+        anyhow!("credentials {} {what}; issue them with `ants auth user {name} --webhook {to}`", path.display())
+    };
+    if claims["name"].as_str() != Some(name.as_str()) {
+        return Err(issue(&format!("are not {kind} {name}'s")));
+    }
+    if crate::humans::may_publish(&claims, &format!("$KV.{}.>", ants_proto::HUMANS_BUCKET)) {
+        return Err(issue("are a human's"));
+    }
+    if !crate::humans::may_publish(&claims, &destination.subject(name)) {
+        return Err(issue("do not allow this destination"));
+    }
+    Ok(())
 }
 
 pub(crate) fn read_secret(path: &Path) -> Result<String> {
@@ -532,20 +527,39 @@ struct Seen {
     seq: u64,
 }
 
-/// A webhook's connection to the hub.
-struct Bus {
-    client: async_nats::Client,
+/// A webhook's, or a schedule's, connection to the hub, as itself.
+pub(crate) struct Bus {
+    pub(crate) client: async_nats::Client,
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
     seen: kv::Store,
+    /// When it last put its marker.
+    marked: Mutex<Option<Instant>>,
+}
+
+/// An event to deliver, once.
+pub(crate) struct Delivery<'a> {
+    pub(crate) from: &'a UserId,
+    pub(crate) destination: &'a Destination,
+    pub(crate) mentions: &'a Mentions,
+    pub(crate) owner: Option<&'a UserId>,
+    /// Its key in [`WEBHOOKS_BUCKET`] ([`webhook_seen_key`]).
+    pub(crate) key: String,
+    /// The stream's `Nats-Msg-Id` of the message.
+    pub(crate) message_id: String,
+    pub(crate) text: String,
+}
+
+/// The thread an event went to, if known, and whether it went there before.
+pub(crate) struct Delivered {
+    pub(crate) thread: Option<ThreadId>,
+    pub(crate) duplicate: bool,
 }
 
 struct Hook {
     config: Webhook,
     bus: OnceCell<Bus>,
     last_warned: Mutex<Option<Instant>>,
-    /// When the webhook last put its marker.
-    marked: Mutex<Option<Instant>>,
 }
 
 struct Server {
@@ -562,7 +576,7 @@ struct Server {
 pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
     bus::check_url(nats)?;
     let hooks = config.webhooks.into_iter().map(|config| {
-        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default(), marked: Mutex::default() };
+        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default() };
         (hook.config.name.to_string(), Arc::new(hook))
     });
     let humans: Vec<_> = config.humans.into_iter().map(|human| Arc::new(notify::Notified::new(human))).collect();
@@ -628,26 +642,102 @@ pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, lis
 
 /// Connect `hook` as itself, and open the bucket of delivered events, waiting for both as long as it takes.
 async fn connect(hook: &Hook, nats: &str, js_domain: Option<&JsDomain>) -> Result<()> {
-    let name = &hook.config.name;
-    let creds = hook.config.creds.as_deref();
-    let pending = std::future::pending();
-    let (client, mut js) =
-        bus::connect_retrying(nats, creds, js_domain, name, "ants-webhook", pending).await?.context("stopped")?;
-    js.set_timeout(ACK_TIMEOUT);
-    let mut delay = Duration::from_secs(1);
-    let seen = loop {
-        match js.get_key_value(WEBHOOKS_BUCKET).await {
-            Ok(seen) => break seen,
-            Err(e) => {
-                tracing::warn!(webhook = %name, error = %e, retry_in = ?delay, "no bucket {WEBHOOKS_BUCKET} yet: `ants init` creates it");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
+    let config = &hook.config;
+    let bus = Bus::connect(&config.name, config.creds.as_deref(), nats, js_domain, "ants-webhook").await?;
+    tracing::info!(webhook = %config.name, to = ?config.destination, "webhook ready");
+    let _ = hook.bus.set(bus);
+    Ok(())
+}
+
+impl Bus {
+    /// Connect as `name`, and open the bucket of delivered events, waiting for both as long as it takes.
+    pub(crate) async fn connect(
+        name: &UserId,
+        creds: Option<&Path>,
+        nats: &str,
+        js_domain: Option<&JsDomain>,
+        client_name: &str,
+    ) -> Result<Self> {
+        let pending = std::future::pending();
+        let (client, mut js) =
+            bus::connect_retrying(nats, creds, js_domain, name, client_name, pending).await?.context("stopped")?;
+        js.set_timeout(ACK_TIMEOUT);
+        let mut delay = Duration::from_secs(1);
+        let seen = loop {
+            match js.get_key_value(WEBHOOKS_BUCKET).await {
+                Ok(seen) => break seen,
+                Err(e) => {
+                    tracing::warn!(user = %name, error = %e, retry_in = ?delay, "no bucket {WEBHOOKS_BUCKET} yet: `ants init` creates it");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        };
+        Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marked: Mutex::default() })
+    }
+
+    /// Deliver `event` as a new thread unless it was delivered already, and return once the hub's stream stored it.
+    pub(crate) async fn deliver(&self, event: Delivery<'_>) -> Result<Delivered> {
+        let Delivery { from, destination, mentions, owner, key, message_id, text } = event;
+        if let Some(seen) = self.seen(&key).await? {
+            return Ok(Delivered { thread: Some(seen.thread), duplicate: true });
+        }
+        self.mark(from).await?;
+        let (subject, payload, thread) = match destination {
+            Destination::Ant(ant) => {
+                let message = Envelope::new(from.clone(), ant.clone(), text).with_owner(owner.cloned()).from_webhook();
+                if let Some(owner) = owner {
+                    owners::recording(&self.js, self.js_domain.as_ref(), &message.thread_id, ant, owner).await;
+                }
+                (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
+            }
+            Destination::Channel(channel) => {
+                let mentions = match mentions {
+                    Mentions::Nobody => Vec::new(),
+                    Mentions::Listed(mentions) => mentions.clone(),
+                    Mentions::Members => members(&self.js, channel).await?,
+                };
+                let post = ChannelPost::new(channel.clone(), from.clone(), text)
+                    .with_owner(owner.cloned())
+                    .from_webhook(mentions);
+                (post.subject(), serde_json::to_vec(&post)?, post.thread_id)
+            }
+        };
+        let message = jetstream::message::PublishMessage::build().payload(payload.into()).message_id(message_id);
+        let ack = self.js.send_publish(subject, message).await?.await.context("waiting for the hub to store it")?;
+        if ack.duplicate {
+            let thread = self.seen(&key).await.ok().flatten().map(|seen| seen.thread);
+            return Ok(Delivered { thread, duplicate: true });
+        }
+        let seen = serde_json::to_vec(&Seen { thread: thread.clone(), seq: ack.sequence })?;
+        for attempt in 1..=3 {
+            match self.seen.create(&key, seen.clone().into()).await {
+                Ok(_) => break,
+                Err(e) if e.kind() == kv::CreateErrorKind::AlreadyExists => break,
+                Err(e) => {
+                    tracing::warn!(user = %from, error = %e, attempt, "recording a delivered event");
+                    tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
+                }
             }
         }
-    };
-    tracing::info!(webhook = %name, to = ?hook.config.destination, "webhook ready");
-    let _ = hook.bus.set(Bus { client, js, js_domain: js_domain.cloned(), seen });
-    Ok(())
+        Ok(Delivered { thread: Some(thread), duplicate: false })
+    }
+
+    /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`MARK_EVERY`]: without it, daemons
+    /// take its messages for an ant's, and answer it in its own inbox.
+    async fn mark(&self, name: &UserId) -> Result<()> {
+        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < MARK_EVERY) {
+            return Ok(());
+        }
+        self.seen.put(webhook_marker_key(name), name.to_string().into()).await.context("putting the marker")?;
+        *self.marked.lock().unwrap() = Some(Instant::now());
+        Ok(())
+    }
+
+    async fn seen(&self, key: &str) -> Result<Option<Seen>> {
+        let found = self.seen.get(key).await.context("reading the webhooks bucket")?;
+        Ok(found.and_then(|value| serde_json::from_slice(&value).ok()))
+    }
 }
 
 impl Server {
@@ -740,74 +830,24 @@ impl Hook {
     /// Deliver `event` unless it was delivered already, and answer once the hub's stream stored it.
     async fn deliver(&self, bus: &Bus, event: Event) -> Result<Response<Full<Bytes>>> {
         let hook = &self.config;
-        let key = webhook_seen_key(&hook.name, &event.hash);
-        if let Some(seen) = self.seen(bus, &key).await? {
-            return Ok(accepted(StatusCode::OK, Some(&seen.thread), true));
+        let delivered = bus
+            .deliver(Delivery {
+                from: &hook.name,
+                destination: &hook.destination,
+                mentions: &hook.mentions,
+                owner: hook.owner.as_ref(),
+                key: webhook_seen_key(&hook.name, &event.hash),
+                message_id: format!("webhook.{}.{}", hook.name, event.hash),
+                text: event.text,
+            })
+            .await?;
+        if delivered.duplicate {
+            return Ok(accepted(StatusCode::OK, delivered.thread.as_ref(), true));
         }
-        self.mark(bus).await?;
-        let (subject, payload, thread) = match &hook.destination {
-            Destination::Ant(ant) => {
-                let message = Envelope::new(hook.name.clone(), ant.clone(), event.text)
-                    .with_owner(hook.owner.clone())
-                    .from_webhook();
-                if let Some(owner) = &hook.owner {
-                    owners::recording(&bus.js, bus.js_domain.as_ref(), &message.thread_id, ant, owner).await;
-                }
-                (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
-            }
-            Destination::Channel(channel) => {
-                let mentions = match &hook.mentions {
-                    Mentions::Nobody => Vec::new(),
-                    Mentions::Listed(mentions) => mentions.clone(),
-                    Mentions::Members => members(&bus.js, channel).await?,
-                };
-                let post = ChannelPost::new(channel.clone(), hook.name.clone(), event.text)
-                    .with_owner(hook.owner.clone())
-                    .from_webhook(mentions);
-                (post.subject(), serde_json::to_vec(&post)?, post.thread_id)
-            }
-        };
-        let message = jetstream::message::PublishMessage::build()
-            .payload(payload.into())
-            .message_id(format!("webhook.{}.{}", hook.name, event.hash));
-        let ack = bus.js.send_publish(subject, message).await?.await.context("waiting for the hub to store it")?;
-        if ack.duplicate {
-            let thread = self.seen(bus, &key).await.ok().flatten().map(|seen| seen.thread);
-            return Ok(accepted(StatusCode::OK, thread.as_ref(), true));
+        if let Some(thread) = &delivered.thread {
+            tracing::info!(webhook = %hook.name, %thread, "event delivered");
         }
-        let seen = serde_json::to_vec(&Seen { thread: thread.clone(), seq: ack.sequence })?;
-        for attempt in 1..=3 {
-            match bus.seen.create(&key, seen.clone().into()).await {
-                Ok(_) => break,
-                Err(e) if e.kind() == kv::CreateErrorKind::AlreadyExists => break,
-                Err(e) => {
-                    tracing::warn!(webhook = %hook.name, error = %e, attempt, "recording a delivered event");
-                    tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
-                }
-            }
-        }
-        tracing::info!(webhook = %hook.name, thread = %thread, "event delivered");
-        Ok(accepted(StatusCode::ACCEPTED, Some(&thread), false))
-    }
-
-    /// Put the webhook's marker ([`webhook_marker_key`]), unless put in the last [`MARK_EVERY`]: without it, daemons
-    /// take the webhook's messages for an ant's, and answer it in its own inbox.
-    async fn mark(&self, bus: &Bus) -> Result<()> {
-        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < MARK_EVERY) {
-            return Ok(());
-        }
-        let name = &self.config.name;
-        bus.seen
-            .put(webhook_marker_key(name), name.to_string().into())
-            .await
-            .context("putting the webhook's marker")?;
-        *self.marked.lock().unwrap() = Some(Instant::now());
-        Ok(())
-    }
-
-    async fn seen(&self, bus: &Bus, key: &str) -> Result<Option<Seen>> {
-        let found = bus.seen.get(key).await.context("reading the webhooks bucket")?;
-        Ok(found.and_then(|value| serde_json::from_slice(&value).ok()))
+        Ok(accepted(StatusCode::ACCEPTED, delivered.thread.as_ref(), false))
     }
 
     fn warn_rejected(&self) {
@@ -856,7 +896,7 @@ fn reply(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::SocketAddr;
 
     use ants_proto::{ChannelEntry, Permissions, STREAM};
@@ -1069,7 +1109,7 @@ mod tests {
 
     /// The hub with its stream and buckets, as `ants init` leaves it, with #ops of dev-a and dev-b, and a private
     /// secret file.
-    async fn hub() -> Option<(Server, jetstream::Context, PathBuf)> {
+    pub(crate) async fn hub() -> Option<(Server, jetstream::Context, PathBuf)> {
         let server = Server::start()?;
         let (_, js) = server.connect(&UserId::human()).await;
         bus::init_stream(&js).await.unwrap();
@@ -1090,14 +1130,21 @@ mod tests {
         Some((server, js, secret))
     }
 
-    fn creds(server: &Server, webhook: &UserId, to: Destination) -> PathBuf {
+    pub(crate) fn creds(server: &Server, webhook: &UserId, to: Destination) -> PathBuf {
         let out = server.dir().join(format!("{webhook}.creds"));
-        issue_with(&server.dir().join("auth"), webhook, Permissions::for_webhook(webhook, &[to]), &out).unwrap();
+        issue_with(
+            &server.dir().join("auth"),
+            webhook,
+            crate::revoke::Kind::Webhook,
+            Permissions::for_webhook(webhook, &[to]),
+            &out,
+        )
+        .unwrap();
         out
     }
 
     /// The messages stored on `subject`, oldest first.
-    async fn stored<T: serde::de::DeserializeOwned>(js: &jetstream::Context, subject: &str) -> Vec<T> {
+    pub(crate) async fn stored<T: serde::de::DeserializeOwned>(js: &jetstream::Context, subject: &str) -> Vec<T> {
         let stream = js.get_stream(STREAM).await.unwrap();
         let count: usize = stream
             .info_with_subjects(subject)
