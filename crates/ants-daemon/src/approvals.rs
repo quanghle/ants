@@ -3,7 +3,9 @@
 //! The daemon subscribes to `ants.approvals.<ant>.<request id>`, then publishes the [`ApprovalRequest`] to
 //! `ants.approvals.<ant>`, where the stream keeps it, so an `ants tools list` started later still finds it. Any human
 //! publishes the [`ApprovalDecision`] to the request's own subject, which only humans may write to; the first decision
-//! stored wins. No decision before `expires_at` rejects the request.
+//! stored wins. No decision before `expires_at` rejects the request, and tells the thread's owner, else the default
+//! human, on the thread ([`NatsApprover::begin`]): the request vanishes from `ants tools list`, and the notice says
+//! how to retry, wait longer or allow such calls.
 //!
 //! A decision heard on the subject is only a sign that one was published: core NATS delivers a publish the stream then
 //! refuses, as when `ants tools approve` loses to another human's decision, and the two may arrive in either order. So
@@ -47,6 +49,7 @@ use tokio::sync::mpsc;
 
 use crate::bus;
 use crate::escalation::Chain;
+use crate::humans::Registry;
 use crate::permission::Approver;
 
 /// How long a tool request waits for a human by default.
@@ -70,6 +73,9 @@ type FromChain = (UserId, ApprovalDecision);
 /// The requests waiting for a decision, by id, with where a chain decision on each goes.
 type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<FromChain>)>>>;
 
+/// The message being answered on each thread, naming whom a request of its turn that expires is told of.
+type Answering = Arc<Mutex<HashMap<ThreadId, Envelope>>>;
+
 /// Asks the humans on `ants.approvals.<ant>`, and the ant's chain.
 #[derive(Clone)]
 pub struct NatsApprover {
@@ -80,6 +86,9 @@ pub struct NatsApprover {
     /// The ant's escalate_to and its hop limit; an empty chain asks only the humans.
     chain: Chain,
     waiting: Waiting,
+    /// Who is a human, and who is told of an expired request on a thread with no owner.
+    humans: Registry,
+    answering: Answering,
 }
 
 /// Something heard while a request waits.
@@ -95,12 +104,43 @@ enum Heard {
 
 impl NatsApprover {
     pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
-        Self { client, js, ant, timeout, chain: Chain::default(), waiting: Waiting::default() }
+        let (chain, waiting, humans, answering) = Default::default();
+        Self { client, js, ant, timeout, chain, waiting, humans, answering }
     }
 
     /// The same, also asking every ant of `chain`'s escalate_to, which may decide too.
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
+    }
+
+    /// The same, telling the thread's owner when a human, else the default human of `humans`, of an expired request.
+    pub fn with_humans(self, humans: Registry) -> Self {
+        Self { humans, ..self }
+    }
+
+    /// Note that the ant answers `envelope` on its thread until the returned guard drops: a tool request of the turn
+    /// that expires unanswered is told to the owner it names, and carries its creator and the thread it links to.
+    pub fn begin(&self, envelope: &Envelope) -> Turn {
+        let thread = envelope.thread_id.clone();
+        self.answering.lock().expect("answering").insert(thread.clone(), envelope.clone());
+        Turn { answering: self.answering.clone(), thread }
+    }
+
+    /// Tell the thread's owner, else the default human, that `request` expired unanswered and was rejected. Stored
+    /// before the ant goes on, so before the message being answered is acked; failing to, it only warns.
+    async fn tell_expired(&self, request: &ApprovalRequest) {
+        let answering = self.answering.lock().expect("answering").get(&request.thread_id).cloned();
+        let notice = expired_notice(&self.ant, request, self.timeout, answering.as_ref(), &self.humans);
+        let id = format!("approval-expired-{}-{}", self.ant, request.id);
+        match bus::store(&self.js, notice.subject(), &notice, &id).await {
+            Ok(_) => tracing::info!(request = %request.id, to = %notice.to, "told of the expired approval request"),
+            Err(e) => tracing::warn!(
+                request = %request.id,
+                to = %notice.to,
+                error = format!("{e:#}"),
+                "telling of the expired approval request"
+            ),
+        }
     }
 
     /// Hand `envelope`, which carries an approval decision and arrived on its own subject
@@ -235,10 +275,14 @@ impl NatsApprover {
                 return request.decide(decision.verdict).verdict;
             }
         };
-        let verdict = tokio::time::timeout(self.timeout, wait).await.unwrap_or_else(|_| {
-            tracing::info!(request = %request.id, "approval request expired; rejecting");
-            Verdict::Reject
-        });
+        let verdict = match tokio::time::timeout(self.timeout, wait).await {
+            Ok(verdict) => verdict,
+            Err(_) => {
+                tracing::info!(request = %request.id, "approval request expired; rejecting");
+                self.tell_expired(&request).await;
+                Verdict::Reject
+            }
+        };
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
     }
@@ -277,6 +321,53 @@ impl NatsApprover {
         }
         Some((envelope.from, decided?))
     }
+}
+
+/// See [`NatsApprover::begin`].
+pub struct Turn {
+    answering: Answering,
+    thread: ThreadId,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        self.answering.lock().expect("answering").remove(&self.thread);
+    }
+}
+
+/// The message on `request`'s thread that tells its owner, else the default human of `humans`, that the request
+/// expired unanswered after `timeout` and was rejected. `answering` is the message the ant was answering, naming the
+/// thread's owner and creator. No reply to it: the ant's reply follows, for `ants ask --wait` to wait for.
+fn expired_notice(
+    ant: &UserId,
+    request: &ApprovalRequest,
+    timeout: Duration,
+    answering: Option<&Envelope>,
+    humans: &Registry,
+) -> Envelope {
+    let owner = humans.human_owner(answering.and_then(|e| e.owner.as_ref()));
+    let (id, thread, tool) = (request.id, &request.thread_id, &request.tool);
+    let mut text = format!(
+        "[ants] Tool request {ant}/{id} on thread {thread} expired unanswered after {} and was rejected: {} ({}). \
+         {ant} goes on without it.",
+        ants_proto::duration::format(timeout),
+        tool.title,
+        tool.kind,
+    );
+    if !tool.locations.is_empty() {
+        let _ = write!(text, "\nFiles: {}", tool.locations.join(", "));
+    }
+    let _ = write!(
+        text,
+        "\nTo retry, ask again with `ants ask --thread {thread} @{ant} TEXT` and decide the new request in time \
+         (`ants tools list -f`). To wait longer, raise {ant}'s approval_timeout; to let such calls run unasked, add \
+         an allow rule matching them."
+    );
+    let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
+    Envelope::on_thread(thread.clone(), ant.clone(), to, text)
+        .with_owner(owner)
+        .with_creator(answering.and_then(|e| humans.ant_creator(e.creator.as_ref())))
+        .with_origin_thread(answering.and_then(|e| e.origin_thread.clone()))
 }
 
 /// The next message of `subscriber`, if there is one; without one, never.
@@ -359,7 +450,7 @@ mod tests {
         let ant: UserId = "dev-a".parse().unwrap();
         let thread: ThreadId = "t1".parse().unwrap();
         let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
-        bus::ensure_stream(&js).await.unwrap();
+        let stream = bus::ensure_stream(&js).await.unwrap();
         let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
         let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
         let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
@@ -386,12 +477,61 @@ mod tests {
         assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
 
         // Both the request and the decision stay in the stream for a late `ants tools list`.
-        let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
         assert_eq!(stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap().sequence, 1);
         assert!(stream.get_last_raw_message_by_subject(&decision.subject()).await.is_ok());
 
-        let impatient = NatsApprover::new(client, js, ant, Duration::from_millis(300));
+        // Silence rejects, and the thread's owner is told before the ant goes on.
+        let alice: UserId = "alice".parse().unwrap();
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let impatient =
+            NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_humans(humans.clone());
+        let asked =
+            Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
+        let turn = impatient.begin(&asked);
+        assert_eq!(impatient.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+        let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
+        let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
+        assert_eq!((&told.from, &told.thread_id, &told.owner), (&ant, &thread, &Some(alice.clone())));
+        assert!(told.text.contains("expired unanswered") && told.text.contains("git push"), "{}", told.text);
+
+        // With the turn over, the default human is told.
+        drop(turn);
         assert_eq!(impatient.decide(thread, tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+        let stored = stream.direct_get_last_for_subject(subject::inbox(&UserId::human(), &ant)).await.unwrap();
+        let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
+        assert_eq!((&told.to, &told.owner), (&UserId::human(), &None));
+    }
+
+    #[test]
+    fn an_expired_request_is_told_to_the_owner_else_the_default_human() {
+        let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let thread: ThreadId = "t1".parse().unwrap();
+        let tool = ToolCall { locations: vec!["src/main.rs".into()], ..tool() };
+        let request =
+            ApprovalRequest::new(ant.clone(), thread.clone(), tool, vec![Verdict::AllowOnce], DEFAULT_TIMEOUT);
+        let asked = Envelope::on_thread(thread.clone(), lead.clone(), ant.clone(), "push")
+            .with_owner(Some("alice".parse().unwrap()))
+            .with_creator(Some(lead.clone()))
+            .with_origin_thread(Some("t0".parse().unwrap()));
+        let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, Some(&asked), &humans);
+        assert_eq!((told.to.as_str(), &told.owner, &told.creator), ("alice", &asked.owner, &Some(lead)));
+        assert_eq!((&told.thread_id, &told.origin_thread, told.in_reply_to), (&thread, &asked.origin_thread, None));
+        for part in [
+            format!("Tool request dev-a/{} on thread t1 expired unanswered after 5m", request.id),
+            "git push (execute)".into(),
+            "Files: src/main.rs".into(),
+            "`ants ask --thread t1 @dev-a TEXT`".into(),
+            "approval_timeout".into(),
+            "allow rule".into(),
+        ] {
+            assert!(told.text.contains(&part), "{part}: {}", told.text);
+        }
+        let by_ant = asked.with_owner(Some("dev-c".parse().unwrap()));
+        let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, Some(&by_ant), &humans);
+        assert_eq!((&told.to, &told.owner), (&UserId::human(), &None), "an ant owns no thread");
+        let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, None, &humans);
+        assert_eq!((&told.to, &told.owner, &told.creator), (&UserId::human(), &None, &None));
     }
 
     /// A decision the stream refuses, as `ants tools approve` loses to another human's, still reaches the ant.

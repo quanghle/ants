@@ -399,6 +399,7 @@ Matched calls auto-approve with `allow_once`. Unmatched calls set `waiting_appro
 - **Human decisions:** `ants tools approve|reject <ant>/<id>` stores an `ApprovalDecision` on `ants.approvals.<ant>.<id>` using `Nats-Expected-Last-Subject-Sequence` so the first human answer wins; the daemon verifies the stored decision via direct get.
 - **Off the terminal:** `ants webhook serve` pushes pending requests to each configured human's ntfy, Slack or Telegram, with signed approve/reject links that store the same `ApprovalDecision` (see [Notifications](#notifications)).
 - **Chain decisions:** ants with `escalate_to` also send an `[ants]` notice (`approval` escalation) to every ant in `escalate_to` on the thread. Members handling that notice may call `decide_approval(verdict)` (`ants.inbox.<ant>.<decider>`); `escalate` is refused on approval notices. Earliest stored decision wins (human or chain member), and `ants tools` inspects both.
+- **Expiry:** a request left undecided for `approval_timeout` leaves `ants tools list` and is rejected; the thread's owner (else the default human) gets an `[ants]` notice on the thread naming the ant, request, tool and thread, with how to retry (`ants ask --thread`), raise `approval_timeout` or add an `allow` rule.
 
 ```sh
 ants tools list -f                         # stream pending requests (--json: JSON lines)
