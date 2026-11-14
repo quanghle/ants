@@ -109,7 +109,7 @@ pub async fn publish(js: &jetstream::Context, post: &NotesPost, last_seq: Option
     match ack.await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
-        Err(e) => Err(e).context("waiting for JetStream to store the post"),
+        Err(e) => Err(bus::explain(js, &post.subject(), e).await).context("waiting for JetStream to store the post"),
     }
 }
 

@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_proto::{Envelope, UserId};
+use chrono::{DateTime, Utc};
 
 use crate::harness::SignedOut;
 use crate::humans::Registry;
@@ -33,6 +34,12 @@ impl SignIn {
     /// Whether messages wait for the harness to be signed in.
     pub fn is_out(&self) -> bool {
         self.period().out
+    }
+
+    /// When the harness said it is signed out first since it last answered, while messages wait for it.
+    pub fn out_since(&self) -> Option<DateTime<Utc>> {
+        let period = self.period();
+        period.since.filter(|_| period.out).and_then(|ms| DateTime::from_timestamp_millis(ms as i64))
     }
 
     /// Note that the harness said it is signed out: messages wait until a handshake succeeds. Returns when that started,
@@ -123,13 +130,16 @@ mod tests {
         let sign_in = SignIn::default();
         let since = sign_in.out().expect("first time: tell");
         assert!(sign_in.is_out());
+        assert_eq!(sign_in.out_since().map(|t| t.timestamp_millis() as u64), Some(since));
         assert_eq!(sign_in.out(), None, "told already");
         sign_in.untold();
         assert_eq!(sign_in.out(), Some(since), "telling failed: tell again, of the same period");
 
         sign_in.back();
         assert!(!sign_in.is_out());
+        assert_eq!(sign_in.out_since(), None, "messages go on");
         assert_eq!(sign_in.out(), None, "a handshake alone does not end the period");
+        assert_eq!(sign_in.out_since().map(|t| t.timestamp_millis() as u64), Some(since), "of the same period");
         sign_in.settled();
         assert!(sign_in.is_out(), "a message handled while out does not end it either");
 

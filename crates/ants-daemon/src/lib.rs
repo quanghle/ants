@@ -18,6 +18,7 @@ pub mod hub;
 pub mod humans;
 pub mod links;
 pub mod mcp;
+pub mod metrics;
 pub mod notes;
 pub mod owners;
 pub mod permission;

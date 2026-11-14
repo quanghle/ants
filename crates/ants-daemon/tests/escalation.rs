@@ -42,6 +42,7 @@ fn roster() -> Roster {
             escalate_to: vec![ant(chain)],
             version: None,
             perms: None,
+            signed_out: None,
         };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })

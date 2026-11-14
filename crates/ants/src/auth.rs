@@ -211,7 +211,9 @@ pub fn issue_leaf(
     let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)?;
+    let issued = Issued::new(&user.public_key(), &name, Kind::Leaf, None)?;
+    let members = crate::members::Members::new(members, webhooks, enroll_approver);
+    revoke::record(dir, &Issued { members: Some(members), ..issued })?;
     issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
 }
 
@@ -223,23 +225,38 @@ pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
 
 /// Write to `out` the credentials of the system account for the second uplink of `machine`'s leaf node, through which
 /// the account updates `ants auth push` sends the hub reach the leaf: they hear those of `account` only, answer only
-/// the push ([`revoke::PUSH_INBOX`]), and connect only as a leaf node.
+/// the push ([`revoke::PUSH_INBOX`]), and connect only as a leaf node. They also let the leaf's `full` resolver ask
+/// the hub's for the accounts it holds ([`PACK_REQUEST`]) and hear the answers on the leaf's own system inbox only
+/// ([`system_inbox`]), which catches a leaf up on the pushes it missed while offline.
 fn issue_leaf_system(dir: &Path, machine: &Machine, account: &str, out: &Path) -> Result<()> {
     let system = load(&dir.join(SYSTEM_SEED))?;
     let user = KeyPair::new_user();
     let permissions = Permissions {
-        publish: vec![format!("{}.>", revoke::PUSH_INBOX)],
-        subscribe: vec![format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE")],
+        publish: vec![format!("{}.>", revoke::PUSH_INBOX), PACK_REQUEST.to_owned()],
+        subscribe: vec![format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE"), format!("{}.*", system_inbox(machine))],
     };
     let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
     let jwt = user_jwt(&system, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
+/// What a `full` resolver periodically sends the other servers of its system account, with the hash of the accounts
+/// it holds; those with a `full` resolver too answer with theirs when they differ, and it keeps the newer ones.
+const PACK_REQUEST: &str = "$SYS.REQ.CLAIMS.PACK";
+
+/// The inbox prefix of the system requests of `machine`'s leaf node, named after the machine (`ants leaf config`):
+/// nats-server takes `$SYS._INBOX.` and 8 base-62 digits of the SHA-256 of its server name.
+fn system_inbox(machine: &Machine) -> String {
+    const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let sha = ring::digest::digest(&ring::digest::SHA256, machine.as_str().as_bytes());
+    let hash: String = sha.as_ref()[..8].iter().map(|b| char::from(DIGITS[usize::from(b % 62)])).collect();
+    format!("$SYS._INBOX.{hash}")
+}
+
 const LEAF_CONNECTIONS: [&str; 2] = ["LEAFNODE", "LEAFNODE_WS"];
 
 /// The `name` of the uplink user of `machine`'s leaf node.
-fn leaf_user(machine: &Machine) -> String {
+pub fn leaf_user(machine: &Machine) -> String {
     format!("leaf-{machine}")
 }
 
@@ -1336,6 +1353,7 @@ pub(crate) mod tests {
             escalate_to: Vec::new(),
             version: None,
             perms: None,
+            signed_out: None,
         };
         let registration =
             Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
@@ -1677,6 +1695,7 @@ pub(crate) mod tests {
             escalate_to: Vec::new(),
             version: None,
             perms: None,
+            signed_out: None,
         };
         let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
         b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

@@ -52,6 +52,35 @@ fn chain(entry: &RosterEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
+/// What the ant is doing: `signed-out` while its harness is, else its activity, or `-` when its daemon does not say.
+fn activity(entry: &RosterEntry) -> &'static str {
+    match (&entry.signed_out, entry.activity) {
+        (Some(_), _) => "signed-out",
+        (None, activity) => activity.map_or("-", |a| a.as_str()),
+    }
+}
+
+/// One line per ant whose harness is signed out: since when, and how to sign it in.
+pub fn signed_out(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let out = e.signed_out.as_ref()?;
+            let how = match &out.sign_in {
+                Some(command) => format!("Run `{command}` on {}", e.machine),
+                None => format!("Sign {} in on {}", e.harness, e.machine),
+            };
+            Some(format!(
+                "{}: harness {} signed out for {}; messages to {} wait. {how} as the user the daemon runs as.",
+                e.ant,
+                e.harness,
+                short(since(out.since, now)),
+                e.ant
+            ))
+        })
+        .collect()
+}
+
 /// The roster as a table: one row per ant under a header, columns padded to line up. `-` stands for what an older
 /// daemon does not publish.
 pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
@@ -76,7 +105,7 @@ pub fn table(entries: &[RosterEntry], now: DateTime<Utc>) -> String {
             [
                 e.ant.to_string(),
                 State::of(e, now).as_str().to_owned(),
-                e.activity.map_or("-", |a| a.as_str()).to_owned(),
+                activity(e).to_owned(),
                 e.harnesses.map_or_else(|| "-".to_owned(), |n| n.to_string()),
                 e.harness.clone(),
                 e.machine.clone(),
@@ -137,6 +166,10 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         if let Some(note) = crate::versions::roster_note(&entries, now) {
             println!("{note}");
         }
+        let signed_out = signed_out(&entries, now);
+        if !signed_out.is_empty() {
+            println!("\n{}", signed_out.join("\n"));
+        }
     }
     Ok(())
 }
@@ -166,6 +199,7 @@ mod tests {
             escalate_to: Vec::new(),
             version: None,
             perms: None,
+            signed_out: None,
         }
     }
 
@@ -229,6 +263,28 @@ mod tests {
         assert_eq!(rows[2], ["dev-b", "stale", "-", "-", "copilot", "m1", "-", "-", "25s", "ago", "2h", "-", "-", "-"]);
         let columns: Vec<Option<usize>> = table.lines().map(|l| l.find("copilot").or(l.find("HARNESS "))).collect();
         assert!(columns.iter().all(|c| c.is_some() && *c == columns[0]), "{table}");
+
+        let mut out = entry("dev-c", 600, 2, now);
+        out.activity = Some(Activity::Idle);
+        let since = now - chrono::Duration::seconds(300);
+        out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
+        let mut unnamed = entry("dev-d", 600, 2, now);
+        unnamed.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
+        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now)];
+        let table = super::table(&entries, now);
+        let activities: Vec<&str> = table.lines().map(|l| l.split_whitespace().nth(2).unwrap()).collect();
+        assert_eq!(activities, ["ACTIVITY", "signed-out", "signed-out", "-"]);
+        assert_eq!(
+            signed_out(&entries, now),
+            [
+                "dev-c: harness copilot signed out for 5m; messages to dev-c wait. Run `copilot login` on m1 as the \
+                 user the daemon runs as.",
+                "dev-d: harness copilot signed out for 5m; messages to dev-d wait. Sign copilot in on m1 as the user \
+                 the daemon runs as."
+            ]
+        );
+        let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();
+        assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
 
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];

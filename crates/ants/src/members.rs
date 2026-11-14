@@ -1,0 +1,390 @@
+//! The members of a machine's leaf node, its ants, humans and webhooks, kept between runs of `ants auth leaf` and
+//! `ants leaf outbox`: a run naming none takes those of the last one, and `--add-*` and `--remove-*` change them.
+//!
+//! `ants auth leaf` runs where the team keys are. It keeps the members in the line of the registry
+//! ([`revoke::ISSUED`]) recording the uplink key it issues, and `ants enroll approve`, there too, adds an ant enrolled
+//! through the leaf node with a later line for that key. For uplink credentials issued before the registry kept
+//! members, their `.creds` file, where `ants auth leaf` wrote them, names them.
+//!
+//! `ants leaf outbox` runs on the machine itself: the uplink credentials of its leaf node configuration name its
+//! members, enrolled ants included, as an enrollment through the leaf renews them there.
+
+use std::fmt;
+use std::path::Path;
+
+use ants_daemon::creds::{self, Finding};
+use ants_proto::{Machine, Role, UserId};
+use anyhow::{Context as _, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::revoke::{self, Issued, Kind};
+use crate::{auth, leaf};
+
+/// The members of a machine's leaf node, as a line of the registry keeps them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Members {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ants: Vec<UserId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub humans: Vec<UserId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<UserId>,
+    /// The uplink also carries what `ants enroll` on the machine needs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enroll_approver: bool,
+}
+
+impl Members {
+    /// The members of an uplink issued for `members`, ants and humans each in its role, and `webhooks`.
+    pub fn new(members: &[(UserId, Role)], webhooks: &[UserId], enroll_approver: bool) -> Self {
+        let of = |human: bool| members.iter().filter(move |(_, role)| role.is_human() == human).map(|(u, _)| u.clone());
+        Self { ants: of(false).collect(), humans: of(true).collect(), webhooks: webhooks.to_vec(), enroll_approver }
+    }
+
+    /// The ants and humans, each in its role ([`auth::members`]).
+    pub fn roles(&self) -> Vec<(UserId, Role)> {
+        auth::members(&self.ants, &self.humans)
+    }
+
+    /// The members leaf uplink credentials of `machine` carry, as `finding` tells; none for other credentials.
+    fn carried(finding: Finding, machine: &Machine) -> Option<Self> {
+        match finding.kind {
+            creds::Kind::Leaf { machine: m, ants, humans, webhooks, enroll_approver } if m == *machine => {
+                Some(Self { ants, humans, webhooks, enroll_approver })
+            }
+            _ => None,
+        }
+    }
+
+    fn holds(&self, user: &UserId) -> bool {
+        [&self.ants, &self.humans, &self.webhooks].iter().any(|list| list.contains(user))
+    }
+}
+
+impl fmt::Display for Members {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let list = |users: &[UserId]| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
+        let mut parts: Vec<String> = [("ants", &self.ants), ("humans", &self.humans), ("webhooks", &self.webhooks)]
+            .into_iter()
+            .filter(|(_, users)| !users.is_empty())
+            .map(|(what, users)| format!("{what} {}", list(users)))
+            .collect();
+        if self.enroll_approver {
+            parts.push("enroll approver".to_owned());
+        }
+        match parts.is_empty() {
+            true => f.write_str("no members"),
+            false => f.write_str(&parts.join("; ")),
+        }
+    }
+}
+
+/// A change of a machine's members, as given on the command line.
+#[derive(Debug, Default)]
+pub struct Change {
+    /// The members instead of those kept, when any is named: the lists replace them.
+    pub set: Members,
+    pub add: Members,
+    pub remove: Members,
+    /// Make the uplink the enrollment approver's or not; none keeps what it was.
+    pub enroll_approver: Option<bool>,
+}
+
+impl Change {
+    /// Whether it names the members in full.
+    pub fn lists(&self) -> bool {
+        !(self.set.ants.is_empty() && self.set.humans.is_empty() && self.set.webhooks.is_empty())
+    }
+
+    /// The members of `machine` after the change to `kept`, the members of its last run if known; `unknown` is the
+    /// error when they are needed but not known.
+    pub fn apply(
+        self,
+        machine: &Machine,
+        kept: Option<Members>,
+        unknown: impl FnOnce() -> anyhow::Error,
+    ) -> Result<Members> {
+        let lists = self.lists();
+        let approver = kept.as_ref().is_some_and(|k| k.enroll_approver);
+        let mut members = match (lists, kept) {
+            (true, _) => Members { enroll_approver: approver, ..self.set },
+            (false, Some(kept)) => kept,
+            (false, None) => return Err(unknown()),
+        };
+        let add = [(self.add.ants, "ant"), (self.add.humans, "human"), (self.add.webhooks, "webhook")];
+        for (n, (users, what)) in add.into_iter().enumerate() {
+            for user in users {
+                let lists = [&mut members.ants, &mut members.humans, &mut members.webhooks];
+                if lists.iter().enumerate().any(|(other, list)| other != n && list.contains(&user)) {
+                    bail!("{user} is a member of {machine} already, not as {what}: remove it first");
+                }
+                if !lists[n].contains(&user) {
+                    lists[n].push(user);
+                }
+            }
+        }
+        let remove = [
+            (&self.remove.ants, &mut members.ants, "ant"),
+            (&self.remove.humans, &mut members.humans, "human"),
+            (&self.remove.webhooks, &mut members.webhooks, "webhook"),
+        ];
+        for (users, list, what) in remove {
+            for user in users {
+                let Some(at) = list.iter().position(|u| u == user) else {
+                    bail!("{user} is no {what} of {machine}");
+                };
+                list.remove(at);
+            }
+        }
+        if let Some(approver) = self.enroll_approver {
+            members.enroll_approver = approver;
+        }
+        Ok(members)
+    }
+}
+
+/// The members `ants auth leaf` names on its command line.
+#[derive(clap::Args, Debug)]
+pub struct UplinkArgs {
+    /// Ant served on the machine (repeatable). `human` counts as a human. With any of --ant, --human or --webhook,
+    /// the members are exactly those named; without, those of the last run, which the team directory keeps (with
+    /// the ants enrolled through the leaf node since).
+    #[arg(long = "ant", value_name = "ANT")]
+    ants: Vec<UserId>,
+    /// Human running the CLI on the machine (repeatable), as issued with `ants auth user HUMAN --human`.
+    #[arg(long = "human", value_name = "HUMAN")]
+    humans: Vec<UserId>,
+    /// Webhook `ants webhook serve` runs on the machine (repeatable): the uplink also allows what its credentials,
+    /// <dir>/<WEBHOOK>.creds from `ants auth user WEBHOOK --webhook`, allow.
+    #[arg(long = "webhook", value_name = "WEBHOOK")]
+    webhooks: Vec<UserId>,
+    /// Add an ant to the members of the last run (repeatable).
+    #[arg(long = "add-ant", value_name = "ANT", conflicts_with_all = UPLINK_LISTS)]
+    add_ants: Vec<UserId>,
+    /// Add a human to the members of the last run (repeatable).
+    #[arg(long = "add-human", value_name = "HUMAN", conflicts_with_all = UPLINK_LISTS)]
+    add_humans: Vec<UserId>,
+    /// Add a webhook to the members of the last run (repeatable).
+    #[arg(long = "add-webhook", value_name = "WEBHOOK", conflicts_with_all = UPLINK_LISTS)]
+    add_webhooks: Vec<UserId>,
+    /// Remove an ant from the members of the last run (repeatable).
+    #[arg(long = "remove-ant", value_name = "ANT", conflicts_with_all = UPLINK_LISTS)]
+    remove_ants: Vec<UserId>,
+    /// Remove a human from the members of the last run (repeatable).
+    #[arg(long = "remove-human", value_name = "HUMAN", conflicts_with_all = UPLINK_LISTS)]
+    remove_humans: Vec<UserId>,
+    /// Remove a webhook from the members of the last run (repeatable).
+    #[arg(long = "remove-webhook", value_name = "WEBHOOK", conflicts_with_all = UPLINK_LISTS)]
+    remove_webhooks: Vec<UserId>,
+    /// The machine holds the account key and runs `ants enroll` through its leaf node: the uplink also carries
+    /// every enrollment request, the answers to them and the admission of a new ant into the hub's stream. Later
+    /// runs keep it until --no-enroll-approver.
+    #[arg(long, conflicts_with = "no_enroll_approver")]
+    enroll_approver: bool,
+    /// The uplink no longer carries what `ants enroll` needs.
+    #[arg(long)]
+    no_enroll_approver: bool,
+}
+
+const UPLINK_LISTS: [&str; 3] = ["ants", "humans", "webhooks"];
+
+impl From<UplinkArgs> for Change {
+    fn from(args: UplinkArgs) -> Self {
+        let members = |ants, humans, webhooks| Members { ants, humans, webhooks, enroll_approver: false };
+        Self {
+            set: members(args.ants, args.humans, args.webhooks),
+            add: members(args.add_ants, args.add_humans, args.add_webhooks),
+            remove: members(args.remove_ants, args.remove_humans, args.remove_webhooks),
+            enroll_approver: (args.enroll_approver || args.no_enroll_approver).then_some(args.enroll_approver),
+        }
+    }
+}
+
+/// The members `ants leaf outbox` names on its command line.
+#[derive(clap::Args, Debug)]
+pub struct OutboxArgs {
+    /// Ant served on the machine (repeatable). `human` counts as a human. With any of --ant or --human, the members
+    /// are exactly those named; without, those the uplink credentials of the machine's leaf node carry.
+    #[arg(long = "ant", value_name = "ANT")]
+    ants: Vec<UserId>,
+    /// Human running the CLI on the machine (repeatable).
+    #[arg(long = "human", value_name = "HUMAN")]
+    humans: Vec<UserId>,
+    /// Add an ant to the members the uplink credentials carry (repeatable).
+    #[arg(long = "add-ant", value_name = "ANT", conflicts_with_all = OUTBOX_LISTS)]
+    add_ants: Vec<UserId>,
+    /// Add a human to the members the uplink credentials carry (repeatable).
+    #[arg(long = "add-human", value_name = "HUMAN", conflicts_with_all = OUTBOX_LISTS)]
+    add_humans: Vec<UserId>,
+    /// Remove an ant from the members the uplink credentials carry (repeatable).
+    #[arg(long = "remove-ant", value_name = "ANT", conflicts_with_all = OUTBOX_LISTS)]
+    remove_ants: Vec<UserId>,
+    /// Remove a human from the members the uplink credentials carry (repeatable).
+    #[arg(long = "remove-human", value_name = "HUMAN", conflicts_with_all = OUTBOX_LISTS)]
+    remove_humans: Vec<UserId>,
+}
+
+const OUTBOX_LISTS: [&str; 2] = ["ants", "humans"];
+
+impl From<OutboxArgs> for Change {
+    fn from(args: OutboxArgs) -> Self {
+        let members = |ants, humans| Members { ants, humans, ..Members::default() };
+        Self {
+            set: members(args.ants, args.humans),
+            add: members(args.add_ants, args.add_humans),
+            remove: members(args.remove_ants, args.remove_humans),
+            enroll_approver: None,
+        }
+    }
+}
+
+/// The latest line of the registry of `dir` for an uplink of `machine`'s leaf node.
+fn latest(dir: &Path, machine: &Machine) -> Result<Option<Issued>> {
+    let name = auth::leaf_user(machine);
+    Ok(revoke::issued(dir)?.into_iter().rev().find(|i| i.name == name && i.kind == Kind::Leaf))
+}
+
+/// The members `ants auth leaf` last issued the uplink of `machine` for, from the team directory `dir`, with the ants
+/// enrolled through the leaf node since. For an uplink issued before the registry kept them, those its credentials
+/// at `creds` carry, if the team's account issued them for `machine`. None when neither tells.
+pub fn issued(dir: &Path, machine: &Machine, creds: &Path) -> Result<Option<Members>> {
+    if let Some(members) = latest(dir, machine)?.and_then(|line| line.members) {
+        return Ok(Some(members));
+    }
+    if !creds.is_file() {
+        return Ok(None);
+    }
+    let (jwt, _) = auth::read_creds(creds)?;
+    // Expired credentials still tell their members: renewing them is what the run is for.
+    if auth::verified(&jwt).is_ok_and(|claims| claims.iss == auth::account_key(dir).unwrap_or_default()) {
+        return Ok(Members::carried(Finding::from_jwt(&jwt)?, machine));
+    }
+    Ok(None)
+}
+
+/// Keep `ant`, enrolled through the leaf node of `machine`, among its members in the registry of `dir`, with a later
+/// line for the latest uplink key issued there; `renewed` is the uplink JWT the approval extended to carry `ant`,
+/// which tells the members when the registry kept none.
+pub fn enrolled(dir: &Path, machine: &Machine, renewed: &str, ant: &UserId) -> Result<()> {
+    let finding = Finding::from_jwt(renewed)?;
+    let latest = latest(dir, machine)?;
+    let mut members = match latest.as_ref().and_then(|line| line.members.clone()) {
+        Some(members) => members,
+        None => Members::carried(finding.clone(), machine).context("the renewed uplink credentials")?,
+    };
+    if !members.holds(ant) {
+        members.ants.push(ant.clone());
+    }
+    let line = match latest {
+        Some(line) => Issued { members: Some(members), ..line },
+        None => Issued {
+            perms: finding.version,
+            members: Some(members),
+            ..Issued::new(&finding.key, &finding.name, Kind::Leaf, finding.expires_at)?
+        },
+    };
+    revoke::record(dir, &line)
+}
+
+/// The ants and humans the uplink credentials of the leaf node configuration at `leaf_conf` carry, which must be
+/// that of `machine`.
+pub fn uplink(leaf_conf: &Path, machine: &Machine) -> Result<Members> {
+    let (configured, creds) = leaf::read_uplink(leaf_conf)?;
+    if configured != *machine {
+        bail!("{} configures the leaf node of {configured}, not of {machine}", leaf_conf.display());
+    }
+    let finding = creds::check(&creds)?;
+    let holder = finding.holder();
+    let carried = Members::carried(finding, machine)
+        .with_context(|| format!("{} are the credentials of {holder}, not the uplink of {machine}", creds.display()))?;
+    Ok(Members { ants: carried.ants, humans: carried.humans, ..Members::default() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> UserId {
+        s.parse().unwrap()
+    }
+
+    fn users(names: &[&str]) -> Vec<UserId> {
+        names.iter().map(|n| p(n)).collect()
+    }
+
+    fn m1() -> Machine {
+        "m1".parse().unwrap()
+    }
+
+    #[test]
+    fn a_change_replaces_or_edits_the_kept_members() {
+        let kept = Members {
+            ants: users(&["dev-a", "dev-b"]),
+            humans: users(&["alice"]),
+            webhooks: users(&["github"]),
+            enroll_approver: true,
+        };
+        let unknown = || anyhow::anyhow!("unknown");
+        let keep = Change::default().apply(&m1(), Some(kept.clone()), unknown).unwrap();
+        assert_eq!(keep, kept, "no lists: the kept members");
+        assert_eq!(Change::default().apply(&m1(), None, unknown).unwrap_err().to_string(), "unknown");
+
+        let set = Members { ants: users(&["dev-c"]), ..Members::default() };
+        let replaced = Change { set: set.clone(), ..Change::default() }.apply(&m1(), Some(kept.clone()), unknown);
+        assert_eq!(replaced.unwrap(), Members { enroll_approver: true, ..set.clone() }, "lists replace, approver kept");
+        let fresh = Change { set: set.clone(), ..Change::default() }.apply(&m1(), None, unknown).unwrap();
+        assert_eq!(fresh, set);
+
+        let edit = Change {
+            add: Members { ants: users(&["dev-c", "dev-a"]), humans: users(&["bob"]), ..Members::default() },
+            remove: Members { ants: users(&["dev-b"]), webhooks: users(&["github"]), ..Members::default() },
+            enroll_approver: Some(false),
+            ..Change::default()
+        };
+        let edited = edit.apply(&m1(), Some(kept.clone()), unknown).unwrap();
+        let want = Members { ants: users(&["dev-a", "dev-c"]), humans: users(&["alice", "bob"]), ..Members::default() };
+        assert_eq!(edited, want);
+
+        let absent =
+            Change { remove: Members { humans: users(&["dev-a"]), ..Members::default() }, ..Change::default() };
+        let err = absent.apply(&m1(), Some(kept.clone()), unknown).unwrap_err().to_string();
+        assert_eq!(err, "dev-a is no human of m1");
+        let twice = Change { add: Members { humans: users(&["dev-a"]), ..Members::default() }, ..Change::default() };
+        let err = twice.apply(&m1(), Some(kept), unknown).unwrap_err().to_string();
+        assert!(err.contains("dev-a is a member of m1 already"), "{err}");
+    }
+
+    #[test]
+    fn the_team_directory_keeps_a_leaf_s_members_and_its_enrolled_ants() {
+        let dir = ants_test_support::scratch_dir("leaf-members");
+        let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), m1());
+        auth::init(&team).unwrap();
+        assert_eq!(issued(&team, &m1, &out).unwrap(), None, "nothing issued yet");
+
+        let on_m1 = auth::members(&users(&["dev-a", "human"]), &users(&["alice"]));
+        auth::issue_leaf(&team, &m1, &on_m1, &[], true, None, &out).unwrap();
+        let kept = Members {
+            ants: users(&["dev-a"]),
+            humans: users(&["alice", "human"]),
+            webhooks: Vec::new(),
+            enroll_approver: true,
+        };
+        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(kept.clone()));
+        assert_eq!(issued(&team, &"m2".parse().unwrap(), &dir.join("none")).unwrap(), None);
+
+        let (jwt, _) = auth::read_creds(&out).unwrap();
+        let more = ants_proto::Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]);
+        let renewed = auth::extend_leaf(&team, &jwt, &m1, more).unwrap();
+        enrolled(&team, &m1, &renewed, &p("dev-c")).unwrap();
+        let with_c = Members { ants: users(&["dev-a", "dev-c"]), ..kept.clone() };
+        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(with_c.clone()), "the enrolled ant joins");
+        let listed = revoke::listing(&team, auth::now().unwrap()).unwrap();
+        assert!(listed.len() == 1 && !listed[0].reissued, "the same key, once: {listed:?}");
+
+        // A registry from before members were kept: the uplink credentials tell them.
+        std::fs::remove_file(team.join(revoke::ISSUED)).unwrap();
+        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(kept));
+        enrolled(&team, &m1, &renewed, &p("dev-c")).unwrap();
+        assert_eq!(issued(&team, &m1, &out).unwrap(), Some(with_c));
+    }
+}

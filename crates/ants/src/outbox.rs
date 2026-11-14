@@ -17,7 +17,8 @@
 //!
 //! A machine's credentials thus never decide what the hub's stream stores: only a human, who sets up both hops here,
 //! does. Each message keeps its `Nats-Msg-Id`, so the hub's stream drops a buffered copy of a message it already took
-//! within its duplicate window.
+//! within its duplicate window, a day ([`ants_daemon::bus::DUPLICATE_WINDOW`]). Only the hub's stream needs that
+//! window: a message stored directly never passes through the outbox or the intake, so its twins meet there.
 
 use std::path::Path;
 use std::time::Duration;

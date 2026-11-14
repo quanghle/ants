@@ -3,11 +3,13 @@
 #
 #   scripts/footprint.sh                          # idle RSS; fails at or above 20 MB
 #   scripts/footprint.sh --ask "reply with ok"    # also one harness session (runs the real harness)
+#   scripts/footprint.sh --metrics 127.0.0.1:9464 # idle RSS with health and metrics served and scraped
 #
 # Options:  --ants PATH     ants binary (default: $ANTS_BIN, else target/release/ants, built when missing)
 #           --port N        nats-server port (default: $FOOTPRINT_PORT or 14722)
 #           --max-mb N      idle RSS limit in MB (default: $FOOTPRINT_MAX_MB or 20)
 #           --ask TEXT      send TEXT to the ant and measure again with its harness session live
+#           --metrics ADDR  serve health and metrics on ADDR, and scrape both before each idle sample (needs curl)
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
 #           default: $TMPDIR or /tmp), FOOTPRINT_SAMPLES (idle samples, 1 s apart, default 5),
 #           FOOTPRINT_ASK_TIMEOUT (seconds, default 180)
@@ -25,6 +27,7 @@ ants=${ANTS_BIN:-}
 port=${FOOTPRINT_PORT:-14722}
 max_mb=${FOOTPRINT_MAX_MB:-20}
 ask=
+metrics=
 samples=${FOOTPRINT_SAMPLES:-5}
 ask_timeout=${FOOTPRINT_ASK_TIMEOUT:-180}
 nats_server=${NATS_SERVER:-nats-server}
@@ -35,7 +38,8 @@ while [ $# -gt 0 ]; do
     --port) port=$2; shift 2 ;;
     --max-mb) max_mb=$2; shift 2 ;;
     --ask) ask=$2; shift 2 ;;
-    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --metrics) metrics=$2; shift 2 ;;
+    -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -48,6 +52,7 @@ if [ -z "$ants" ]; then
 fi
 [ -x "$ants" ] || die "no ants binary at $ants"
 command -v "$nats_server" >/dev/null 2>&1 || die "nats-server not found (set NATS_SERVER)"
+[ -z "$metrics" ] || command -v curl >/dev/null 2>&1 || die "curl not found, needed with --metrics"
 
 work=$(mktemp -d "${FOOTPRINT_DIR:-${TMPDIR:-/tmp}}/ants-footprint.XXXXXX")
 nats_pid=
@@ -122,7 +127,7 @@ wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
 
 url=nats://127.0.0.1:$port
 ANTS_LOG=${ANTS_LOG:-info} "$ants" --nats "$url" daemon --ant footprint \
-    --workdir "$work/workdir" --home "$work/home" >"$work/daemon.log" 2>&1 &
+    --workdir "$work/workdir" --home "$work/home" ${metrics:+--metrics "$metrics"} >"$work/daemon.log" 2>&1 &
 daemon_pid=$!
 wait_for "$work/daemon.log" "serving inbox" 30 "$daemon_pid"
 
@@ -130,6 +135,10 @@ sleep 2
 idle=0
 n=0
 while [ $n -lt "$samples" ]; do
+    if [ -n "$metrics" ]; then
+        curl -fsS "http://$metrics/healthz" >/dev/null || die "GET /healthz failed"
+        curl -fsS "http://$metrics/metrics" >"$work/metrics.txt" || die "GET /metrics failed"
+    fi
     kb=$(rss_kb "$daemon_pid")
     if [ "$kb" -gt "$idle" ]; then idle=$kb; fi
     n=$((n + 1))
@@ -138,6 +147,7 @@ done
 
 printf 'ants       %s (%s)\n' "$("$ants" --version)" "$(uname -sm)"
 printf 'idle       %s (%s KB), limit %s MB\n' "$(mb "$idle")" "$idle" "$max_mb"
+[ -z "$metrics" ] || printf 'metrics    http://%s/metrics, %s lines\n' "$metrics" "$(wc -l <"$work/metrics.txt" | tr -d ' ')"
 
 if [ -n "$ask" ]; then
     "$ants" --nats "$url" ask --wait @footprint "$ask" >"$work/ask.log" 2>&1 &

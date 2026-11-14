@@ -1035,15 +1035,26 @@ fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
     Ok(wait)
 }
 
-/// Ant, capabilities, harness, machine and advertised role instructions.
+/// Ant, capabilities, harness, machine, activity or a signed-out harness, and advertised role instructions.
 fn describe(entries: &[&RosterEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
         .map(|e| {
             let capabilities =
                 if e.capabilities.is_empty() { "no capabilities".to_owned() } else { e.capabilities.join(", ") };
-            let activity = e.activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default();
+            let activity = match (&e.signed_out, e.activity) {
+                (Some(_), _) => ", signed out".to_owned(),
+                (None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
+            };
             let mut text = format!("{}: {capabilities} ({} on {}{activity})", e.ant, e.harness, e.machine);
+            if let Some(out) = &e.signed_out {
+                let how = out.sign_in.as_ref().map(|c| format!(" (`{c}` on {})", e.machine)).unwrap_or_default();
+                text.push_str(&format!(
+                    "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",
+                    out.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    e.ant
+                ));
+            }
             if let Some(whoami) = &e.whoami
                 && !whoami.trim().is_empty()
             {
@@ -1171,7 +1182,8 @@ impl Tools {
     }
 
     #[tool(description = "List the other ants being served, from the roster, with each ant's advertised \
-        whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working. \
+        whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working, \
+        or signed out: messages to an ant whose harness is signed out wait unanswered until a human signs it in. \
         `capability` keeps only those advertising it. Pick whom to send_message or ask_agent by these capabilities.")]
     async fn list_ants(&self, Parameters(args): Parameters<ListAnts>) -> Result<CallToolResult, ErrorData> {
         let result = async {
@@ -1190,8 +1202,9 @@ impl Tools {
     }
 
     #[tool(description = "Route a request to an ant whose roster capabilities include `capability`, other than \
-        this one: a live ant before a stale one, then an idle ant before a busy one, then the one with the fewest \
-        messages in hand, then the first by name. By default it waits for the reply and returns it, like ask_agent; \
+        this one: an ant whose harness is signed in before one signed out, then a live ant before a stale one, then \
+        an idle ant before a busy one, then the one with the fewest messages in hand, then the first by name. By \
+        default it waits for the reply and returns it, like ask_agent; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
         and follows its turn budget, as those do.")]
     async fn route(
@@ -1439,6 +1452,7 @@ mod tests {
             escalate_to: Vec::new(),
             version: None,
             perms: None,
+            signed_out: None,
         }
     }
 
@@ -1692,7 +1706,11 @@ mod tests {
         let mut busy = listed("dev-b", &["rust"]);
         busy.activity = Some(ants_proto::Activity::Working);
         busy.handling = Some(1);
-        let roster = vec![listed("dev-a", &["rust"]), billing, busy, docs];
+        let mut out = listed("ops", &["billing"]);
+        out.activity = Some(ants_proto::Activity::Idle);
+        let since = "2026-01-01T00:00:00Z".parse().unwrap();
+        out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: Some("copilot login".to_owned()) });
+        let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs];
         let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
         let current = from_human();
         let _turn = mcp.begin(&current);
@@ -1705,6 +1723,13 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("whoami (advertised):\nMaintain billing services.\nReview invoices."), "{text}");
+        assert!(
+            text.contains(
+                "ops: billing (copilot on m1, signed out)\n  harness signed out since 2026-01-01T00:00:00Z: messages \
+                 to ops wait unanswered until a human signs it in (`copilot login` on m1)"
+            ),
+            "{text}"
+        );
         let (ok, text) = call(&client, "list_ants", serde_json::json!({"capability": "billing"})).await;
         assert!(ok && text.starts_with("dev-c: Rust, billing (copilot on m1)") && !text.contains("dev-b"), "{text}");
         assert!(text.contains("Maintain billing services.\nReview invoices."), "{text}");
@@ -1720,7 +1745,7 @@ mod tests {
             call(&client, "route", serde_json::json!({"capability": "billing", "text": "invoice?"})).await
         });
         let ask = sent.recv().await.unwrap();
-        assert_eq!(ask.to, user("dev-c"));
+        assert_eq!(ask.to, user("dev-c"), "not ops: idle, but signed out");
         let reply = ask.reply(user("dev-c"), "paid", Role::Ant).unwrap();
         mcp.hub.route(reply).await;
         let (ok, text) = asking.await.unwrap();

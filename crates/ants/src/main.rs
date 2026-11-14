@@ -10,6 +10,7 @@ mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
+mod members;
 mod notify;
 mod outbox;
 mod presence;
@@ -21,10 +22,13 @@ mod service;
 mod spend;
 mod thread;
 mod tools;
+mod upgrade;
 mod versions;
 mod webhook;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -177,8 +181,8 @@ enum Command {
     Cancel { ant: UserId, thread: ThreadId },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
-    /// republishing of inbox messages, the owners bucket's duplicate window), keeping the rest of their settings. Needs
-    /// a human's credentials. Every other command run with them does the same on connecting.
+    /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
+    /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
     /// sees every request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
@@ -388,7 +392,10 @@ enum ChannelCommand {
     /// Run the channel manager, where no ant runs (on the hub, say), with the credentials of
     /// `ants auth channel-manager` as --creds: it applies the changes owners ask for, refuses the others, and posts
     /// each change in its channel.
-    Serve,
+    Serve {
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -404,6 +411,12 @@ enum WebhookCommand {
         /// Address for the reverse proxy (default: the file's `listen`, else 127.0.0.1:8424).
         #[arg(long)]
         listen: Option<String>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: the file's `metrics`, else off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
 }
 
@@ -426,6 +439,12 @@ enum BridgeCommand {
         /// command line and environment.
         #[arg(long, value_name = "FILE", conflicts_with = "token")]
         token_file: Option<PathBuf>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
     /// On a worker: listen locally and carry each connection to the hub's `ants bridge serve`. The machine's leaf
     /// node then uses the uplink nats-leaf://127.0.0.1:7422.
@@ -448,6 +467,12 @@ enum BridgeCommand {
         /// HTTP CONNECT forward proxy, http://[user:password@]host:port.
         #[arg(long, value_name = "URL")]
         proxy: Option<String>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
+        #[command(flatten)]
+        upgrade: upgrade::UpgradeArgs,
     },
 }
 
@@ -576,24 +601,14 @@ enum AuthCommand {
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
     /// credentials of its second uplink, which only hears the account updates `ants auth push` sends the hub.
+    /// Without --ant, --human or --webhook, it reissues them for the members of the last run, changed by --add-* and
+    /// --remove-*.
     Leaf {
         /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
         /// '-' and '_'.
         machine: Machine,
-        /// Ant served on the machine (repeatable). `human` counts as a human.
-        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "webhooks"])]
-        ants: Vec<UserId>,
-        /// Human running the CLI on the machine (repeatable), as issued with `ants auth user HUMAN --human`.
-        #[arg(long = "human", value_name = "HUMAN")]
-        humans: Vec<UserId>,
-        /// Webhook `ants webhook serve` runs on the machine (repeatable): the uplink also allows what its credentials,
-        /// <dir>/<WEBHOOK>.creds from `ants auth user WEBHOOK --webhook`, allow.
-        #[arg(long = "webhook", value_name = "WEBHOOK")]
-        webhooks: Vec<UserId>,
-        /// The machine holds the account key and runs `ants enroll` through its leaf node: the uplink also carries
-        /// every enrollment request, the answers to them and the admission of a new ant into the hub's stream.
-        #[arg(long)]
-        enroll_approver: bool,
+        #[command(flatten)]
+        members: members::UplinkArgs,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -746,7 +761,7 @@ enum EnrollCommand {
 enum LeafCommand {
     /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, with one uplink
     /// to the hub, and a JetStream of its own (domain: the machine name) for the outbox. Run it again to switch the
-    /// uplink, then reload the leaf (SIGHUP).
+    /// uplink: it reloads the leaf node service (ants.nats, ants-nats) running the file, or says how.
     Config {
         /// Machine name, as given to `ants auth leaf`.
         machine: Machine,
@@ -783,20 +798,20 @@ enum LeafCommand {
     },
     /// As a human, with the leaf node of the machine up and connected: create the machine's outbox, which keeps
     /// what its ants and humans send while the hub is out of reach, and have the hub's stream take from it what
-    /// they may send once the uplink is back. Run it again when the machine's ants or humans change. Fails if
-    /// the hub does not hear from the outbox within 10 s, as without `feature_flags { js_api_reply_v2: true }` on the
-    /// hub.
+    /// they may send once the uplink is back. Run it again when the machine's ants or humans change; without
+    /// members, it takes those its uplink credentials carry. Fails if the hub does not hear from the outbox within
+    /// 10 s, as without `feature_flags { js_api_reply_v2: true }` on the hub.
     Outbox {
         /// Machine name, as given to `ants leaf config`.
         machine: Machine,
-        /// Ant served on the machine (repeatable), as given to `ants auth leaf`. `human` counts as a human.
-        #[arg(long = "ant", value_name = "ANT", required_unless_present_any = ["humans", "remove"])]
-        ants: Vec<UserId>,
-        /// Human running the CLI on the machine (repeatable), as given to `ants auth leaf`.
-        #[arg(long = "human", value_name = "HUMAN")]
-        humans: Vec<UserId>,
+        #[command(flatten)]
+        members: members::OutboxArgs,
+        /// Leaf node configuration whose uplink credentials name the members when --ant and --human do not
+        /// (default: ~/.config/ants/leaf.conf).
+        #[arg(long, value_name = "FILE")]
+        leaf_config: Option<PathBuf>,
         /// Stop taking anything from the machine's outbox instead.
-        #[arg(long, conflicts_with_all = ["ants", "humans"])]
+        #[arg(long, conflicts_with_all = ["ants", "humans", "add_ants", "add_humans", "remove_ants", "remove_humans", "leaf_config"])]
         remove: bool,
     },
 }
@@ -865,7 +880,9 @@ async fn main() -> Result<()> {
             spend::show(&nats()?, &spend::Select { ant, thread, days }, &caps, json).await
         }
         Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
-        Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
+        Command::Channel(ChannelCommand::Serve { upgrade }) => {
+            upgrade::or_exit(channel::serve(&cli.nats, cli.creds.as_deref(), domain), &upgrade).await
+        }
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
         Command::Thread(ThreadCommand::List { ant, owner, grep, since, limit, json }) => {
@@ -920,9 +937,12 @@ async fn main() -> Result<()> {
                 let configs =
                     serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
-                Ok(serve::Served { configs, schedules })
+                Ok(serve::Served { configs, schedules, metrics: listed.metrics })
             };
-            serve::run(served()?, served).await
+            match serve::run(served()?, served, upgrade::replaced(args.upgrade.upgrade_check)).await? {
+                serve::Ended::Stopped => Ok(()),
+                serve::Ended::Replaced => upgrade::exit(),
+            }
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { pick }) => {
@@ -1083,11 +1103,18 @@ async fn main() -> Result<()> {
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Leaf { machine, ants, humans, webhooks, enroll_approver, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, members, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, enroll_approver, domain, &out)?;
-            println!("{}\n{}", out.display(), auth::leaf_system_creds(&out).display());
+            let kept = members::issued(&dir, &machine, &out)?;
+            let set = members::Change::from(members).apply(&machine, kept, || {
+                anyhow::anyhow!(
+                    "{} keeps no members of {machine}: name them with --ant, --human or --webhook",
+                    dir.display()
+                )
+            })?;
+            auth::issue_leaf(&dir, &machine, &set.roles(), &set.webhooks, set.enroll_approver, domain, &out)?;
+            println!("{}\n{}\nmembers of {machine}: {set}", out.display(), auth::leaf_system_creds(&out).display());
             Ok(())
         }
         Command::Auth(AuthCommand::Revoke { name, mut keys, devices, no_push, dir }) => {
@@ -1148,6 +1175,7 @@ async fn main() -> Result<()> {
                 );
             }
             let server_conf = server_conf.unwrap_or_else(|| dir.join(auth::SERVER_CONF));
+            let default_out = out.is_none();
             let out = match out {
                 Some(out) => out,
                 None => auth::default_dir()?.with_file_name("leaf.conf"),
@@ -1163,31 +1191,40 @@ async fn main() -> Result<()> {
                 proxy: proxy.as_deref(),
                 listen: &listen,
             };
+            let old = std::fs::read_to_string(&out).ok();
             leaf::write(&config, &out)?;
             ants_daemon::creds::warn(&creds);
             system_creds.as_deref().map(ants_daemon::creds::warn);
+            let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
+            let taken = leaf::take(&out, old.as_deref(), &new, |action| {
+                service::Services::local().apply(service::Service::Nats, action, &out)
+            });
             println!(
-                "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
-                 switch the uplink: run this again, then send the running leaf SIGHUP\n\
+                "{}\n{taken}\n\
+                 switch the uplink: run this again\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
-                 once the leaf is up: ants leaf outbox {machine} --ant ... --human ...",
-                out.display()
+                 once the leaf is up: ants leaf outbox {machine}{1}",
+                out.display(),
+                if default_out { String::new() } else { format!(" --leaf-config {}", out.display()) }
             );
             Ok(())
         }
-        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file }) => {
+        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file, metrics, upgrade }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let addr = bridge::listen_addr(&listen, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let server = bridge::Server::new(upstream.clone(), token);
+            let _metrics = serve_metrics(metrics, server.traffic()).await?;
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
-            bridge::Server::new(upstream, token).run(listener).await
+            upgrade::or_exit(server.run(listener), &upgrade).await
         }
-        Command::Webhook(WebhookCommand::Serve { config, listen }) => {
+        Command::Webhook(WebhookCommand::Serve { config, listen, metrics, upgrade }) => {
             let path = match config {
                 Some(path) => path,
                 None => webhook::default_path()?,
             };
-            let config = webhook::Config::load(&path)?;
+            let mut config = webhook::Config::load(&path)?;
+            config.metrics = metrics.or(config.metrics);
             let listen = listen.or_else(|| config.listen.clone()).unwrap_or_else(|| webhook::DEFAULT_LISTEN.to_owned());
             let addr = bridge::listen_addr(&listen, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
@@ -1197,28 +1234,54 @@ async fn main() -> Result<()> {
             if config.links.is_some() {
                 tracing::info!("approval links on http://{addr}{}/_approval", config.path);
             }
-            webhook::serve(config, &nats, domain.as_ref(), listener).await
+            upgrade::or_exit(webhook::serve(config, &nats, domain.as_ref(), listener), &upgrade).await
         }
-        Command::Bridge(BridgeCommand::Connect { url, listen, token, token_file, headers, proxy }) => {
+        Command::Bridge(BridgeCommand::Connect {
+            url,
+            listen,
+            token,
+            token_file,
+            headers,
+            proxy,
+            metrics,
+            upgrade,
+        }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;
             let addr = bridge::listen_addr(&listen, true)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let _metrics = serve_metrics(metrics, remote.traffic()).await?;
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
-            remote.run(listener).await
+            upgrade::or_exit(remote.run(listener), &upgrade).await
         }
-        Command::Leaf(LeafCommand::Outbox { machine, ants, humans, remove }) => {
-            let nats = nats()?;
-            let (_, js) = nats.connect("ants-cli").await?;
+        Command::Leaf(LeafCommand::Outbox { machine, members, leaf_config, remove }) => {
             if remove {
+                let (_, js) = nats()?.connect("ants-cli").await?;
                 outbox::remove(&js, &machine).await?;
                 println!("the hub no longer takes anything from the outbox of {machine}");
-            } else {
-                let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
-                outbox::admit(&leaf, &js, &machine, &auth::members(&ants, &humans)).await?;
-                outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
-                println!("outbox of {machine} ready; the hub takes from it what its ants and humans send");
+                return Ok(());
             }
+            let change = members::Change::from(members);
+            let kept = match change.lists() {
+                true => None,
+                false => {
+                    let conf = match leaf_config {
+                        Some(path) => path,
+                        None => auth::default_dir()?.with_file_name("leaf.conf"),
+                    };
+                    let members = members::uplink(&conf, &machine).with_context(|| {
+                        format!("no --ant or --human given: reading the members of {machine} from {}", conf.display())
+                    })?;
+                    Some(members)
+                }
+            };
+            let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
+            let nats = nats()?;
+            let (_, js) = nats.connect("ants-cli").await?;
+            let leaf = outbox::connect(&cli.nats, cli.creds.as_deref(), &nats.me.id, &machine).await?;
+            outbox::admit(&leaf, &js, &machine, &set.roles()).await?;
+            outbox::sourced(&js, &machine, outbox::SOURCE_WAIT).await?;
+            println!("outbox of {machine} ready; the hub takes from it what its members send ({set})");
             Ok(())
         }
     }
@@ -1272,6 +1335,17 @@ impl<'a> Nats<'a> {
 /// ([`hub::check`]), saying what was done. Those the credentials may not fix are reported as needing `ants init`;
 /// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
 /// alone. Returns what was fixed.
+/// Serve health and metrics from `source` on `addr`, if given, for as long as the result is kept.
+async fn serve_metrics(
+    addr: Option<SocketAddr>,
+    source: Arc<dyn ants_daemon::metrics::Source>,
+) -> Result<Option<ants_daemon::metrics::Listening>> {
+    match addr {
+        Some(addr) => Ok(Some(ants_daemon::metrics::start(addr, source).await?)),
+        None => Ok(None),
+    }
+}
+
 async fn upgrade_hub(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut fixed = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
@@ -1559,7 +1633,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             channel::delete(&kv, &channel).await?;
             println!("deleted #{channel}; the posts to #{channel} stay in the stream");
         }
-        ChannelCommand::Serve => unreachable!("main runs the channel manager"),
+        ChannelCommand::Serve { .. } => unreachable!("main runs the channel manager"),
     }
     Ok(())
 }
