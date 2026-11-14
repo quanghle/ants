@@ -261,7 +261,7 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     if let Ok(store) = js.get_key_value(ROSTER_BUCKET).await {
         return Ok(store);
     }
-    js.create_key_value(hub::roster_config(ttl))
+    hub::create_bucket(js, hub::roster_config(ttl))
         .await
         .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
