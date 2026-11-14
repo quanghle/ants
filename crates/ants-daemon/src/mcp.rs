@@ -1177,6 +1177,7 @@ mod tests {
         RosterEntry {
             persona: persona(name),
             machine: "m1".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             whoami: None,

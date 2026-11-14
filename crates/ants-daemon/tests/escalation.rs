@@ -28,6 +28,7 @@ fn roster() -> Roster {
         let entry = move |name: &str, chain: &str| RosterEntry {
             persona: persona(name),
             machine: "test".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: Vec::new(),
             whoami: None,

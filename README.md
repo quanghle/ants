@@ -415,11 +415,12 @@ docs/transport.md, "`devtunnel connect` as a service". Other tunnels, such as `a
 
 ## Roster
 
-Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, harness, workdir,
+Each daemon lists its persona in the KV bucket `ants_roster`, keyed by persona id: machine, `instance` (an id of the
+daemon run, telling apart daemons on one machine), harness, workdir,
 capabilities, `whoami`, escalation chain (`escalate_to`), start and last heartbeat time, activity (`idle`, or `working` while a message is being
 handled), the number of messages being handled and of live harnesses (`RosterEntry` in `ants-proto`). It refreshes the
 entry every 10 s, and at once when the persona turns idle or working, and deletes it on a clean stop. Entries from older
-daemons lack the activity fields. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
+daemons lack the activity fields and `instance`. The bucket keeps an entry 30 s after its last refresh, so a persona whose daemon died
 drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
 `--capability rust --capability billing`. A persona's credentials write only its own entry; every persona's and the
 human's read the roster, so agents can pick whom to ask (see Messenger). Readers take the persona from the key and
@@ -624,12 +625,15 @@ A daemon whose config file sets `provider` serves a built-in messenger on that p
 model, reasoning effort and context and the settings of a persona that sets nothing else: no allowlist, capabilities
 or `whoami`, the file's `nats` and `js_domain`. Its home and workdir are `~/.ants/messenger`, created on start, and its
 credentials `~/.config/ants/auth/messenger.creds` (`ants auth user messenger`) when that file exists; with no other
-persona served, `--creds` (`ANTS_CREDS`) fills in otherwise. One messenger keeps one session store, so a daemon does not
-start the built-in messenger while the roster lists a messenger on another machine: it checks the roster every 10 s
-and starts once that entry is gone, deleted on a clean stop or expired 30 s after its daemon's last heartbeat. Of two
-daemons starting at once, one claims the roster entry and the other waits. A daemon on a machine whose entry is
-already there (its own earlier run) starts at once. A persona named `messenger` in the file replaces the built-in one
-and starts without the check.
+persona served, `--creds` (`ANTS_CREDS`) fills in otherwise. One messenger keeps one session store, so a daemon serves
+the built-in messenger only while it holds the messenger's roster entry. It does not start while the roster lists a
+messenger of another daemon, on another machine or the same one: it checks the roster every 10 s and starts once that
+entry is gone, deleted on a clean stop or expired 30 s after its daemon's last heartbeat (so a restart after a crash
+waits that long). Of two daemons starting at once, one claims the roster entry and the other waits. Its heartbeats put
+the entry only over its own, and it watches the entry: once another daemon puts it, such as one serving a persona
+named `messenger`, the built-in messenger takes no more messages, finishes the prompts in flight, hands the messages
+waiting back for redelivery and waits again, to take over once the other stops. A persona named `messenger` in the
+file replaces the built-in one and starts without the check.
 
 The messenger's MCP server instructions say what to do; a persona `messenger` with a workdir holding an `AGENTS.md` (or
 the harness's own instructions file) along these lines makes it firmer:

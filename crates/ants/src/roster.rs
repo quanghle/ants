@@ -149,6 +149,7 @@ mod tests {
         RosterEntry {
             persona: persona.parse().unwrap(),
             machine: "m1".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned(), "review".to_owned()],
             whoami: None,

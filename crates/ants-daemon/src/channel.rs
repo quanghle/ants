@@ -474,6 +474,7 @@ mod tests {
         let a = RosterEntry {
             persona: p("dev-a"),
             machine: "m".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned(), "ci".to_owned()],
             whoami: Some("Keeps the build\ngreen.".to_owned()),

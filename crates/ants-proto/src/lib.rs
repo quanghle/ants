@@ -735,13 +735,18 @@ impl Permissions {
 /// A persona's entry in the [`ROSTER_BUCKET`], under the key of its persona id.
 ///
 /// The serving daemon puts it on start, re-puts it every [`ROSTER_HEARTBEAT`] and deletes it on a clean stop. The
-/// bucket's max age is [`ROSTER_TTL`], so the entry of a daemon that died expires on its own. Readers should treat
-/// unknown fields as additions, not errors.
+/// bucket's max age is [`ROSTER_TTL`], so the entry of a daemon that died expires on its own. A daemon that defers to
+/// others, as the built-in messenger's does, puts it only over its own entry or none, and stops serving once another
+/// daemon puts it. Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
     pub persona: PersonaId,
     /// Host name of the machine the daemon runs on.
     pub machine: String,
+    /// The daemon run that put the entry, unique to it, so two daemons on one machine tell their entries apart.
+    /// Missing from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// Agent harness behind the persona, such as `copilot`.
     pub harness: String,
     /// Free-form tags the persona is good for (`rust`, `frontend`, `billing`), for routing requests to it.
@@ -2445,6 +2450,7 @@ mod tests {
         let entry = RosterEntry {
             persona: p("dev-a"),
             machine: "build-1".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: vec!["rust".to_owned(), "nats".to_owned()],
             whoami: Some("Maintain the Rust backend.\nReview NATS changes.".to_owned()),
@@ -2458,7 +2464,7 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
-        assert!(!json.contains("escalate_to"), "{json}");
+        assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let chained = RosterEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
@@ -2480,7 +2486,7 @@ mod tests {
             "started_at":"2026-01-01T00:00:00Z","heartbeat_at":"2026-01-01T00:00:10Z"}"#;
         let entry: RosterEntry = serde_json::from_str(minimal).unwrap();
         assert!(entry.capabilities.is_empty() && entry.escalate_to.is_empty());
-        assert_eq!(entry.whoami, None);
+        assert_eq!((entry.whoami, entry.instance), (None, None));
         assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
 
         let newer = r#"{"persona":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,

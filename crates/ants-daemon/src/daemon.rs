@@ -92,8 +92,9 @@ pub struct Config {
     pub limits: PromptLimits,
     /// Token and cost caps of each thread and of the persona.
     pub caps: Caps,
-    /// Wait to serve the persona while the roster lists it on another machine, as the built-in messenger does.
-    pub defer_to_other_machines: bool,
+    /// Serve the persona only while holding its roster entry, as the built-in messenger does: wait while another
+    /// daemon lists it, and hand over to a daemon that puts it later ([`roster::hold`]).
+    pub defer_to_others: bool,
     /// The default human, who gets escalations and notices of threads with no owner.
     pub human: PersonaId,
     /// The persona's escalation chain, published in the roster, and its limits.
@@ -101,8 +102,25 @@ pub struct Config {
 }
 
 /// Serve the persona's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
-/// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]).
+/// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
+/// that defers to others ([`Config::defer_to_others`]) and hands the persona over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
+    while serve(&config).await? == Served::HandedOver {
+        tracing::info!("another daemon serves the persona; waiting for it to stop");
+    }
+    Ok(())
+}
+
+/// How [`serve`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Served {
+    Stopped,
+    /// Another daemon took over the persona's roster entry.
+    HandedOver,
+}
+
+/// Serve the persona's inbox until Ctrl-C, or until another daemon takes over its roster entry.
+async fn serve(config: &Config) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = bus::connect_retrying(
         &config.nats_url,
@@ -119,20 +137,21 @@ pub async fn run(config: Config) -> Result<()> {
     .await?
     else {
         tracing::info!("stopped before connecting");
-        return Ok(());
+        return Ok(Served::Stopped);
     };
-    let mut entry = roster::entry(&config).await;
-    if config.defer_to_other_machines {
+    let mut entry = roster::entry(config).await;
+    let mut claimed = None;
+    if config.defer_to_others {
         let kv = bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
         tokio::select! {
-            result = roster::wait_for_turn(&kv, &mut entry, ants_proto::ROSTER_HEARTBEAT) => result?,
+            revision = roster::wait_for_turn(&kv, &mut entry, ants_proto::ROSTER_HEARTBEAT) => claimed = Some(revision?),
             () = async {
                 if stop_signal().await.is_err() {
                     std::future::pending::<()>().await;
                 }
             } => {
                 tracing::info!("stopped before serving");
-                return Ok(());
+                return Ok(Served::Stopped);
             }
         }
     }
@@ -199,7 +218,10 @@ pub async fn run(config: Config) -> Result<()> {
     };
     let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
     let workload = std::sync::Arc::new(roster::Workload::default());
-    let registration = roster::register(&js, entry, workload.clone()).await?;
+    let registration = match claimed {
+        Some(revision) => roster::hold(&js, entry, revision, workload.clone()).await?,
+        None => roster::register(&js, entry, workload.clone()).await?,
+    };
     tracing::info!(
         persona = %config.persona,
         harness = %config.harness,
@@ -244,14 +266,32 @@ pub async fn run(config: Config) -> Result<()> {
             std::future::pending::<()>().await;
         }
     };
+    let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
+    // The first stop is Ctrl-C or the hand-over, after which the prompts in flight finish; the second only Ctrl-C.
+    let stop = || {
+        asked += 1;
+        let (first, stopping, registration) = (asked == 1, &stopping, &registration);
+        async move {
+            tokio::select! {
+                () = ctrl_c() => stopping.set(true),
+                () = registration.lost(), if first => {
+                    tracing::info!("another daemon took over the persona; taking no more messages");
+                }
+            }
+        }
+    };
     tokio::select! {
-        () = inbox.serve(messages, channels, config.idle_timeout, ctrl_c) => {}
+        () = inbox.serve(messages, channels, config.idle_timeout, stop) => {}
         () = escalator.deadlines() => {}
     }
+    let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;
     pool.shutdown().await;
+    if handed_over {
+        return Ok(Served::HandedOver);
+    }
     tracing::info!("stopped");
-    Ok(())
+    Ok(Served::Stopped)
 }
 
 /// The channels, and the posts to them through the persona's channel consumer.
@@ -1154,6 +1194,7 @@ mod tests {
             let entry = ants_proto::RosterEntry {
                 persona: persona.clone(),
                 machine: "m".to_owned(),
+                instance: None,
                 harness: "copilot".to_owned(),
                 capabilities: Vec::new(),
                 whoami: None,
@@ -2483,6 +2524,7 @@ mod tests {
         let dev_b = ants_proto::RosterEntry {
             persona: "dev-b".parse().unwrap(),
             machine: "m".to_owned(),
+            instance: None,
             harness: "copilot".to_owned(),
             capabilities: vec!["ci".to_owned()],
             whoami: Some("Keeps the build green.".to_owned()),

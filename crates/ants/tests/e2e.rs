@@ -24,10 +24,11 @@ fn main() {
     if Path::new(&me).file_name().is_some_and(|name| name == "copilot") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 3] = [
+    let tests: [(&str, fn()); 4] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
+        ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
     ];
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     for (name, test) in tests {
@@ -230,6 +231,68 @@ fn channels_are_managed_posted_to_and_read() {
     assert_eq!(ok(&["channel", "delete", "dev"]).0, "deleted #dev; the posts to #dev stay in the stream\n");
     assert!(!ok(&["channel", "list"]).0.contains("#dev"));
     drop(server);
+}
+
+/// A daemon serving the built-in messenger hands it over to a daemon started later with a listed messenger, on the same
+/// machine, and serves it again once that daemon stops.
+fn the_builtin_messenger_hands_over_to_a_listed_one() {
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("handover");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    let ants = |args: &[&str]| {
+        let mut command = Command::new(ANTS);
+        command.args(["--nats", &server.url]).args(args).env_remove("ANTS_CREDS").env_remove("ANTS_CONFIG");
+        command
+    };
+    assert!(run(ants(&["init"])).status.success());
+    let log = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let logs = || format!("builtin log:\n{}\nlisted log:\n{}", log("builtin"), log("listed"));
+    let daemon = |name: &str, config: &str| {
+        let (path, home) = (dir.join(format!("{name}.toml")), dir.join(name));
+        std::fs::write(&path, config).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let log = std::fs::File::create(dir.join(format!("{name}.log"))).unwrap();
+        let mut command = ants(&["daemon", "--config"]);
+        command.arg(path).env("HOME", home).env("PATH", &bin).env("RUST_LOG", "info");
+        Killed(command.stdout(Stdio::null()).stderr(log).spawn().unwrap())
+    };
+    let wait_for = |name: &str, text: &str, times: usize| {
+        let start = Instant::now();
+        while log(name).matches(text).count() < times {
+            assert!(start.elapsed() < WAIT, "{name} log lacks {text:?} {times} times\n{}", logs());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let served_from = || {
+        let roster = run(ants(&["roster", "--json"]));
+        let entry: serde_json::Value = serde_json::from_slice(&roster.stdout).unwrap();
+        assert_eq!(entry["persona"], "messenger");
+        entry["workdir"].as_str().unwrap().to_owned()
+    };
+    let ask = |text: &str| {
+        let ask = run(ants(&["ask", "--wait", text]));
+        let stdout = String::from_utf8_lossy(&ask.stdout);
+        assert!(stdout.contains("messenger: stub:") && stdout.contains(text), "{stdout}\n{}", logs());
+    };
+
+    let _builtin = daemon("builtin", "provider = \"copilot\"\n");
+    wait_for("builtin", "serving inbox", 1);
+    let listed = daemon("listed", &format!("[[persona]]\nname = \"messenger\"\nworkdir = {dir:?}\n"));
+    wait_for("listed", "serving inbox", 1);
+    wait_for("builtin", "another daemon took over the persona", 1);
+    assert_eq!(served_from(), dir.canonicalize().unwrap().display().to_string(), "{}", logs());
+    ask("first");
+
+    let mut listed = listed;
+    assert!(Command::new("kill").arg("-TERM").arg(listed.0.id().to_string()).status().unwrap().success());
+    listed.0.wait().unwrap();
+    wait_for("builtin", "serving inbox", 2);
+    assert!(served_from().ends_with(".ants/messenger"), "{}", logs());
+    ask("second");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Run `command` to completion, killing it after [`WAIT`].
