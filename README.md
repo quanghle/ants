@@ -2,7 +2,7 @@
 
 Headless agent teams across machines, communicating with each other and with humans at the terminal over NATS.
 
-- **Backbone:** NATS + JetStream for durable inboxes, channels, thread notes, approvals and dead letters, plus NATS KV for roster, session, attempt, channel, human, chain, link and webhook state.
+- **Backbone:** NATS + JetStream for durable inboxes, channels, thread notes, approvals and dead letters, plus NATS KV for roster, session, attempt, channel, human, chain, link, owner and webhook state.
 - **Transport:** `wss://`/`ws://` behind a reverse proxy, `tls://`, a Dev Tunnel, or the plain-HTTPS fallback bridge (`ants bridge`), optionally with a local store-and-forward leaf node per machine. See [Transport options](#transport-options) and [docs/transport.md](docs/transport.md).
 - **Harnesses:** ACP (Agent Client Protocol) agents over stdio: Copilot CLI (`copilot --acp`, default), Claude Code (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or custom `[harnesses.NAME]` definitions. See [Harnesses](#harnesses).
 - **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS.
@@ -22,12 +22,13 @@ Headless agent teams across machines, communicating with each other and with hum
 |            |                  |      |      ants_humans,        |      |            |             |
 |            |                  |      |      ants_chains,        |      |            |             |
 |            |                  |      |      ants_links,         |      |            |             |
+|            |                  |      |      ants_owners,        |      |            |             |
 | nats-server (leaf, outbox)  --+----->|      ants_webhooks       |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
                         uplink: wss://, tls://, Dev Tunnel, or ants bridge
 ```
 
-- **Hub:** one `nats-server` with JetStream holding stream `ANTS` and eight KV buckets (`ants init`). With `ants auth`, every ant, human, webhook, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials.
+- **Hub:** one `nats-server` with JetStream holding stream `ANTS` and nine KV buckets (`ants init`). With `ants auth`, every ant, human, webhook, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials.
 - **Leaf:** optional per-machine `nats-server` (`ants leaf config`) on `127.0.0.1:4222` with a store-and-forward outbox (`ants leaf outbox`). Local `ants` processes target `127.0.0.1:4222`; only the leaf uplink crosses the network. Single-machine setups point `ants` straight at the hub.
 - **Daemon:** `ants daemon` serves ants over per-ant NATS connections and durable consumers, runs up to `max_harnesses` ACP processes per ant, enforces tool allowlists, limits and spending caps, refreshes roster heartbeats and exposes an MCP server to each session.
 - **Ants and humans:** ants are named agents (`dev-a`, `reviewer`, `messenger`) with a workdir, harness, capabilities and optional `whoami`. Humans (`human` by default, or named users from `ants auth user NAME --human`) own threads they start and approve tools. Unaddressed `ants ask` requests go to `messenger` for capability routing. Agent-to-agent messages share a per-thread turn budget (default 8).
@@ -42,6 +43,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_humans` | File, none | Registered humans (`<human>`), written automatically on CLI connection. |
 | KV `ants_chains` | File, none | Persistent `escalate_to` chains (`<ant>`), readable after roster expiry. |
 | KV `ants_links` | File, 30d | Verified `origin_thread` handoffs (`<from>.<channel_thread>.<to>`) for spun-off channel threads. |
+| KV `ants_owners` | File, 30d | Thread `owner` (`<thread>`) recorded by the human (`ants ask`) or webhook that first messages an ant on the thread; the first record stays (no update, delete or purge). |
 | KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`) and daily `<webhook>.webhook` markers. |
 | Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
 
@@ -99,7 +101,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants tools show ID [--json]` | Show full request, tool input, status and answer commands for `<ant>/<id>` (unique prefix accepted). |
 | `ants tools approve ID [--always]` / `reject ID` | Allow once, allow for the session (`--always`, if offered), or reject a tool request. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or delete dead letters; `watch` turns `MAX_DELIVERIES` advisories into dead letters. |
-| `ants init` | Create or update stream `ANTS` and all eight KV buckets (requires human credentials). |
+| `ants init` | Create or update stream `ANTS` and all nine KV buckets (requires human credentials). |
 | `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
@@ -365,7 +367,7 @@ ants channel read ops --limit 10
 ```
 
 - **Mentions and triage:** `@ant` wakes mentioned channel members only; `@human` sends an inbox notice to mentioned human members (excluding the author) without waking ants. Human or webhook posts with zero mentions prompt the channel messenger (`--messenger`, else `messenger`, member or not) to post a short `@mention` triage reply (1 turn). Agent posts with zero mentions wake nobody.
-- **Threads, owners and creators:** omitting `--thread` starts a thread named after the post ID. A human starter, first human poster, or webhook `owner` becomes thread `owner`. An ant starting a thread (`post_channel` or `ants post`) becomes its `creator` (ownerless until a human posts); spin-off messages via `send_message` carry `origin_thread` and propagate `creator` across `ants_links` (see [Credentials](#credentials)).
+- **Threads, owners and creators:** omitting `--thread` starts a thread named after the post ID. A human starter, first human poster, or webhook `owner` becomes thread `owner`. An ant starting a thread (`post_channel` or `ants post`) becomes its `creator` (ownerless until a human posts); spin-off messages via `send_message` carry `origin_thread` and propagate `creator` across `ants_links` (see [Credentials](#credentials)). On threads no channel post started, the `owner` of an ant's message is the one in `ants_owners` for the thread, else the one recorded for its `origin_thread` (spin-offs via `send_message` with `on: new` or a thread ID), else none: the owner an ant names there is never taken as is.
 - **Turn budget:** each agent post spends 1 turn from the thread's shared budget (minimum turns remaining across later posts on the thread, so fan-out never multiplies turns). Exhausted posts/answers are withheld and escalated (`turn_budget`). Human posts, or an escalation leader's reply (posted to the channel with 7 turns left), renew the budget.
 
 ### Channel owners
@@ -444,13 +446,13 @@ ants auth user github --webhook --to dev-a --js-domain hub
 ants auth channel-manager --js-domain hub               # channel-manager.creds
 ```
 
-Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all eight KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`).
+Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all nine KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`). Upgrades that add `ants_owners` need both for every ant, human and webhook: until then, ants' messages on threads no channel post started carry no owner, and their escalations go to the daemon's default human.
 
 ### Wire ACLs and verification invariants
 
 - **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`.
-- **Scoped ant reads:** without `STREAM.MSG.GET`, ant credentials pin consumer filters (`inbox-<ant>`, `chan-<ant>`, `chanread-<ant>[_1..3]`, `notes-<ant>[_1..3]`, `deadread-<ant>`) and restrict direct gets to `ants.approvals.<ant>.*`, `$KV.ants_humans.*`, `$KV.ants_chains.*` and `$KV.ants_webhooks.*.webhook`. Users write only their own keys in `ants_roster`, `ants_chains`, `ants_links` and `ants_webhooks`.
-- **Metadata trust:** daemons accept `owner` only for `human` or entries in `ants_humans`, and honour `webhook: true` only with `<sender>.webhook` in `ants_webhooks` (or from a human). Channel thread `owner` and `creator` come from stored root/human posts in `ANTS`; non-channel `creator` requires `origin_thread` backed by participation or `<from>.<channel_thread>.<to>` links in `ants_links` (max 32 hops).
+- **Scoped ant reads:** without `STREAM.MSG.GET`, ant credentials pin consumer filters (`inbox-<ant>`, `chan-<ant>`, `chanread-<ant>[_1..3]`, `notes-<ant>[_1..3]`, `deadread-<ant>`) and restrict direct gets to `ants.approvals.<ant>.*`, `$KV.ants_humans.*`, `$KV.ants_chains.*`, `$KV.ants_owners.*` and `$KV.ants_webhooks.*.webhook`. Users write only their own keys in `ants_roster`, `ants_chains`, `ants_links` and `ants_webhooks`. Only humans and webhooks with an ant destination write `ants_owners`, and its stream refuses a second record of a thread (`discard_new_per_subject`, deletes and purges denied).
+- **Metadata trust:** daemons accept `owner` only for `human` or entries in `ants_humans`, and honour `webhook: true` only with `<sender>.webhook` in `ants_webhooks` (or from a human). Channel thread `owner` and `creator` come from stored root/human posts in `ANTS`; an ant's non-channel `owner` comes from `ants_owners` for its thread or its `origin_thread` (a channel `origin_thread` gives the owner its posts say, under the same participation check as `creator`), else is dropped; non-channel `creator` requires `origin_thread` backed by participation or `<from>.<channel_thread>.<to>` links in `ants_links` (max 32 hops).
 
 ### Adding an ant
 
@@ -485,7 +487,7 @@ nats-server -c ~/.config/ants/leaf.conf &
 ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 ```
 
-`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. While offline, outbound inbox messages, replies, notes, channel posts, dead letters and `ants_links` entries queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS` and `ants_links` on reconnect (`ants leaf outbox --remove` removes sourcing). `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`, and human `ants ask --wait`/`--follow` polls stored replies every 5s. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
+`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. While offline, outbound inbox messages, replies, notes, channel posts, dead letters and `ants_links` entries queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS` and `ants_links` on reconnect (`ants leaf outbox --remove` removes sourcing). `ants_owners` records do not queue: a thread a human starts with `ants ask` while the hub is unreachable gets no recorded owner (with a warning). `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`, and human `ants ask --wait`/`--follow` polls stored replies every 5s. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
 
 ### Transport options
 
