@@ -100,12 +100,12 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 
 | Command | Does |
 |---|---|
-| `ants ask [@ant] TEXT` | Sends a message as the CLI's human, the thread's owner (with an ant's credentials, a thread without owner); without `@ant` it goes to the messenger. `--thread` continues a thread, still prompting only the named recipient, `--wait` prints the first reply. |
+| `ants ask [@ant] TEXT` | Sends a message as the CLI's human, the thread's owner (with an ant's credentials, a thread without owner); without `@ant` it goes to the messenger. `--thread` continues a thread, still prompting only the named recipient; `--wait` prints the first reply and exits, `-f`/`--follow` prints each reply until Ctrl-C, either marking what it prints read; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
 | `ants plan THREAD [TEXT]` | Shows a thread's notes, or posts to them as the CLI's human; a post wakes nobody (see [Thread notes](#thread-notes)). |
-| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@ant` wakes that member only. `--thread` posts on a thread, `--wait` prints the posts on the thread as they arrive (`--timeout`). |
-| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger`, `--no-messenger`). |
+| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
+| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
 | `ants tools list` / `show ID` / `approve ID` / `reject ID` | Lists pending tool requests (`--follow`, `--json`), shows one, allows it once (`--always`: for the rest of the session) or rejects it; every human sees every request, and the first decision wins, a human's or that of an agent of the ant's chain. |
@@ -130,7 +130,21 @@ consumers, and connects with that human's reply prefix. On connecting, it regist
 (again after the entry was removed). `human` needs no entry. When registering fails, the command warns and goes on;
 until a later connection registers the human, daemons take its messages for an agent's. Credentials issued without
 `--human` are an ant's: the CLI then acts as that ant, registers nothing and warns, `ants inbox` refuses (the
-ant's daemon reads its inbox), and `ants ask --wait` marks nothing read.
+ant's daemon reads its inbox), and `ants ask --wait` or `--follow` marks nothing read.
+
+### Waiting for replies
+
+`ants ask` and `ants post` print the thread and return at once. Two flags keep them on the thread, and conflict:
+
+- `--wait` prints the first reply on the thread and exits: for `ants ask`, the first reply to the CLI's human; for
+  `ants post`, the first post on the thread by someone other than the poster.
+- `-f`, `--follow` prints every reply (every other post, for `ants post`) on the thread as it arrives, until
+  `--timeout` or Ctrl-C.
+
+`--timeout DURATION` (`90s`, `10m`, `1h30m`; needs `--wait` or `--follow`) bounds the wait; without it there is no
+limit. Exit status: 0 once `--wait` prints its reply, and when `--follow` ends at the timeout or on Ctrl-C; 1 with
+`no reply on thread <thread> within <timeout>` on stderr when `--wait` times out; Ctrl-C ends a `--wait` at once, as
+interrupted (130 in most shells).
 
 ### Agent skill
 
@@ -146,7 +160,7 @@ so those that arrive while no CLI runs are kept. `ants inbox` prints the unread 
 leaves them unread, `--thread` and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new
 ones (and dead-letters what JetStream stops delivering, see [Dead letters](#dead-letters)) and `--json` prints one
 envelope per line.
-`ants ask --wait` marks only the reply it prints read.
+`ants ask --wait` and `--follow` mark only the replies they print read.
 
 The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
 prompted concurrently; messages on one thread are handled one at a time, in order, and a failed one is retried before
@@ -715,14 +729,16 @@ A channel is a named group of ants, like a Slack channel: humans post to it, eac
 ants channel create ops --member dev-a,dev-b --messenger triage   # fails if #ops exists
 ants channel add ops dev-c                     # more members
 ants channel remove ops dev-a
-ants channel set ops --member dev-b,dev-c      # replace the members; --messenger ANT or --no-messenger the messenger
+ants channel set ops --member dev-b,dev-c      # replace the members; --messenger ANT sets the messenger
+ants channel set ops --default-messenger       # the default messenger `messenger` triages again
 ants channel list                              # channels, members and messenger
 ants channel delete ops                        # the posts stay in the stream
 
 ants post '#ops' "@dev-b the deploy failed"    # wakes dev-b only; prints the new thread
 ants post ops "who owns billing?"              # no @mention: the messenger triages it
 ants post ops --thread <thread> "any news?"    # on an existing thread
-ants post --wait ops "status, anyone?"         # also print the posts on the thread as they arrive
+ants post --wait ops "status, anyone?"         # then print the first answer on the thread and exit
+ants post -f --timeout 10m ops "deploying"     # then print each post on the thread as it arrives, for 10 minutes
 ants channel read ops                          # posts by thread (--thread T, --limit N for the last N threads)
 ants watch 'ants.chan.>'                       # every channel, live
 ```
@@ -734,17 +750,17 @@ warns about a mention of an ant that is not a member, which wakes nobody. An age
 nobody.
 
 **Messenger triage.** A post of any human that @mentions nobody goes to the channel's messenger: the ant
-`--messenger` names, else the default ant `messenger` (`ants channel list` shows `messenger (default)`). The
-messenger decides which members the post concerns and wakes them by @mentioning them in a post on the thread. The
-messenger need not be a member.
+`--messenger` names, else the default ant `messenger` (`ants channel list` shows `messenger (default)`, and
+`ants channel set --default-messenger` goes back to it). The messenger decides which members the post concerns and
+wakes them by @mentioning them in a post on the thread. The messenger need not be a member.
 
 **Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which `ants
 post` prints. The ants a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
 too. A thread's owner is the human whose post started it: each post carries it as `owner`, every later post on the
 thread keeps it, whoever writes it, and `ants post --thread` reads it back from the thread's first posts kept. Only when
-no post kept names one, the posting human takes the thread. `ants post --wait` prints each post on the thread as it
-arrives, until `--timeout` (seconds, default 600) or Ctrl-C. `ants channel read` prints each thread under its id: the
-post that started it, then the replies, indented.
+no post kept names one, the posting human takes the thread. `ants post --wait` prints the first post on the thread by
+someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)). `ants channel
+read` prints each thread under its id: the post that started it, then the replies, indented.
 
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
 turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the ant's chain,
