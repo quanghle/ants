@@ -14,6 +14,7 @@ use crate::auth;
 use crate::enroll;
 use crate::leaf;
 use crate::serve::AntOptions;
+use crate::service::{Action, Outcome, Service, Services};
 
 /// The server `--nats` defaults to.
 const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
@@ -89,16 +90,19 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         (None, Some(enrollment)) => {
             let url = args.hub.as_deref().unwrap_or(nats);
             let leaf = leaf_node(args.leaf_config.as_deref())?;
-            let through = leaf.as_ref().map(|l| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
+            let through =
+                leaf.as_ref().map(|(_, l)| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
             eprintln!(
                 "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
             );
             let stop = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let approval = enroll::request(url, enrollment, name, &user, leaf.as_ref(), ENROLL_REPEAT, stop).await?;
-            if let (Some(leaf), Some(renewed)) = (leaf, approval.leaf_jwt) {
-                uplink = Some((renew_uplink(&leaf, &renewed)?, leaf));
+            let approval =
+                enroll::request(url, enrollment, name, &user, leaf.as_ref().map(|(_, l)| l), ENROLL_REPEAT, stop)
+                    .await?;
+            if let (Some((conf, leaf)), Some(renewed)) = (leaf, approval.leaf_jwt) {
+                uplink = Some((renew_uplink(&leaf, &renewed)?, leaf, conf));
             }
             Some(approval.jwt)
         }
@@ -119,17 +123,15 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         Some(_) => {
             println!("credentials of {name} in {}", out.display());
             match &uplink {
-                Some((true, leaf)) => println!(
-                    "uplink credentials of {} renewed in {} to carry {name}: restart the leaf node to use them \
-                     (macOS: launchctl kickstart -k gui/$(id -u)/ants.nats, Linux: systemctl --user restart \
-                     ants-nats; SIGHUP does not read them again). List {name} too when running `ants auth leaf {}` \
-                     or `ants leaf outbox {}` again",
+                Some((true, leaf, _)) => println!(
+                    "uplink credentials of {} renewed in {} to carry {name}; list {name} too when running \
+                     `ants auth leaf {}` or `ants leaf outbox {}` again",
                     leaf.machine,
                     leaf.creds.display(),
                     leaf.machine,
                     leaf.machine
                 ),
-                Some((false, leaf)) => println!(
+                Some((false, leaf, _)) => println!(
                     "{} changed while waiting and were left as they are: add {name} to the uplink with \
                      `ants auth leaf {} --ant ...` on the machine holding the account key",
                     leaf.creds.display(),
@@ -141,10 +143,35 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
                      `ants leaf outbox MACHINE --ant ...`"
                 ),
             }
-            println!(
-                "serve it: reload `ants daemon` with SIGHUP, or its service (macOS: launchctl kill SIGHUP \
-                 gui/$(id -u)/ants.daemon, Linux: systemctl --user reload ants-daemon); the ants it serves carry on"
-            );
+            let mut services = Services::local();
+            match services.apply(Service::Daemon, Action::Reload, &path) {
+                Outcome::Done(command) => println!("daemon reloaded to serve {name} ({command})"),
+                Outcome::NotRunning => println!("the daemon service is not running; it serves {name} once started"),
+                outcome => println!(
+                    "{}serve {name}: reload `ants daemon` with SIGHUP, or its service ({}); the ants it serves carry on",
+                    failure(outcome),
+                    crate::service::manual(Service::Daemon, Action::Reload)
+                ),
+            }
+            // Last, as the restart cuts the connections through the leaf node.
+            if let Some((true, _, conf)) = &uplink {
+                match services.apply(Service::Nats, Action::Restart, conf) {
+                    Outcome::Done(command) => {
+                        println!("leaf node restarted to use the renewed uplink credentials ({command})")
+                    }
+                    Outcome::NotRunning => {
+                        println!(
+                            "the leaf node service is not running; it uses the renewed uplink credentials once started"
+                        )
+                    }
+                    outcome => println!(
+                        "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP does not read them \
+                         again",
+                        failure(outcome),
+                        crate::service::manual(Service::Nats, Action::Restart)
+                    ),
+                }
+            }
         }
         None => println!(
             "public key of {name}: {public_key}\n\
@@ -177,8 +204,17 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
     config::entry(&p)
 }
 
-/// The machine's leaf node, from the configuration at `path`, or at ~/.config/ants/leaf.conf when it exists.
-fn leaf_node(path: Option<&Path>) -> Result<Option<enroll::Leaf>> {
+/// `outcome` of a failed command, as the start of a message.
+fn failure(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Failed(command, error) => format!("`{command}` failed ({error}): "),
+        _ => String::new(),
+    }
+}
+
+/// The configuration of the machine's leaf node, at `path`, or at ~/.config/ants/leaf.conf when it exists, and the
+/// node.
+fn leaf_node(path: Option<&Path>) -> Result<Option<(PathBuf, enroll::Leaf)>> {
     let path = match path {
         Some(path) => path.to_owned(),
         None => {
@@ -190,7 +226,7 @@ fn leaf_node(path: Option<&Path>) -> Result<Option<enroll::Leaf>> {
         }
     };
     let (machine, creds) = leaf::read_uplink(&path)?;
-    Ok(Some(enroll::Leaf { machine, creds }))
+    Ok(Some((path, enroll::Leaf { machine, creds })))
 }
 
 /// Replace the JWT of the uplink credentials of `leaf` by `renewed`, unless it would drop something they allow (they
