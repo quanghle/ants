@@ -190,6 +190,10 @@ impl Signer<'_> {
             Ok(asked) => asked,
             Err(e) => return refuse(format!("the settings asked for do not read as a template request: {e}")),
         };
+        // Before a human is asked: no approval makes room on an uplink the hub would refuse.
+        if let Err(e) = self.uplink(request) {
+            return refuse(format!("{e:#}"));
+        }
         let issued = live(self.dir)?;
         if issued.iter().any(|i| i.name == manager.as_str() && i.template.is_some()) {
             return refuse(format!("{manager} was added from a template, and added ants never add ants"));
@@ -244,16 +248,29 @@ impl Signer<'_> {
         Ok(())
     }
 
+    /// The uplink JWT of the leaf node `request` came through, renewed to carry the ant too; refused when the hub
+    /// would not take it.
+    fn uplink(&self, request: &AntRequest) -> Result<Option<String>> {
+        let Some(leaf) = &request.leaf else { return Ok(None) };
+        let domain = ants_daemon::creds::Finding::from_jwt(&request.credentials)?.js_domain;
+        let name = &request.name;
+        let more =
+            Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)]).with_js_domain(domain.as_ref());
+        auth::extend_leaf(self.dir, &leaf.jwt, &leaf.machine, more)
+            .map(Some)
+            .with_context(|| format!("the uplink of the leaf node {} cannot carry {name}", leaf.machine))
+    }
+
     async fn signed(&self, approver: &Approver, request: &AntRequest) -> Result<(String, Option<String>)> {
         // The ant runs where its manager does, so it reaches JetStream the same way.
         let manager = ants_daemon::creds::Finding::from_jwt(&request.credentials)?;
         let (name, domain) = (&request.name, manager.js_domain.as_ref());
+        // First, as it records nothing: an uplink the hub would refuse leaves no ant signed.
+        let renewed = self.uplink(request)?;
         let jwt = auth::sign_added(self.dir, name, domain, &request.public_key, &request.template, &request.manager)?;
-        let Some(leaf) = &request.leaf else {
+        let (Some(leaf), Some(renewed)) = (&request.leaf, renewed) else {
             return Ok((jwt, None));
         };
-        let more = Permissions::for_leaf(&leaf.machine, [(name, ants_proto::Role::Ant)]).with_js_domain(domain);
-        let renewed = auth::extend_leaf(self.dir, &leaf.jwt, &leaf.machine, more)?;
         members::enrolled(self.dir, &leaf.machine, &renewed, name)
             .with_context(|| format!("keeping {name} among the members of {}", leaf.machine))?;
         outbox::admit_ant(approver.hub(), &leaf.machine, name)
@@ -717,5 +734,50 @@ mod tests {
         assert!(err.contains("a human rejected the request"), "{err}");
         assert!(matches!(&events[..], [(_, Event::Asked { .. }), (_, Event::Refused(_))]), "{events:?}");
         assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-b"), "a rejected ant is not signed");
+    }
+
+    /// Behind a leaf node whose uplink the hub would refuse with one more ant, a request is refused at once, before
+    /// any human is asked, with the reason; nothing is signed or kept for the ant.
+    #[tokio::test]
+    async fn an_ant_the_uplink_has_no_room_for_is_refused_before_a_human_is_asked() {
+        let Some(server) = Server::start() else { return };
+        let (team, config) = (server.dir().join("auth"), templates(&server, 1));
+        // Outside the policy: the template's one ant is there already, so only a human could approve.
+        auth::sign_added(&team, &p("lead-x"), None, &KeyPair::new_user().public_key(), "worker", &p("lead")).unwrap();
+        let m1: ants_proto::Machine = "m1".parse().unwrap();
+        let uplink = server.dir().join("leaf-m1.creds");
+        auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
+        let before = std::fs::read_to_string(&uplink).unwrap();
+        let lead = Manager::new(&server).await;
+        let leaf = Leaf { machine: m1, creds: uplink.clone() };
+
+        let asking = async {
+            let (jwt, key) = auth::read_creds(&lead.creds).unwrap();
+            let (thread, until) = (ThreadId::generate(), Utc::now() + WAIT);
+            let user = KeyPair::new_user();
+            let leaf = Some(&leaf);
+            ask(
+                &lead.client,
+                &jwt,
+                &key,
+                "worker",
+                "{}",
+                "more hands",
+                &thread,
+                &p("lead-a"),
+                &user,
+                leaf,
+                REPEAT,
+                until,
+            )
+            .await
+        };
+        let (refused, events) = signing(&server, &config, asking).await;
+        let err = format!("{:#}", refused.unwrap_err());
+        assert!(err.contains("the signer refused lead-a: the uplink of the leaf node m1 cannot carry lead-a"), "{err}");
+        assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
+        assert!(matches!(&events[..], [(_, Event::Refused(_))]), "no human asked: {events:?}");
+        assert!(!revoke::issued(&team).unwrap().iter().any(|i| i.name == "lead-a"), "nothing signed");
+        assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
     }
 }

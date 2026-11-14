@@ -16,8 +16,8 @@ use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use nkeys::KeyPair;
 
-use crate::service::{Action, Service};
-use crate::{add, auth, signer};
+use crate::service::{Action, Service, Services};
+use crate::{add, auth, leaf, signer};
 
 /// Where and how a manager ant's daemon adds ants.
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ impl Manager {
             ants_daemon::bus::connect(&self.nats, Some(creds), self.js_domain.as_ref(), &manager, "request_ant")
                 .await?;
         let leaf = match &self.leaf_config {
-            Some(path) if path.exists() => add::leaf_node(Some(path))?.map(|(_, leaf)| leaf),
+            Some(path) if path.exists() => add::leaf_node(Some(path))?,
             _ => None,
         };
         let settings = serde_json::to_string(&request)?;
@@ -89,7 +89,7 @@ impl Manager {
             &thread,
             &name,
             &user,
-            leaf.as_ref(),
+            leaf.as_ref().map(|(_, leaf)| leaf),
             ENROLL_REPEAT,
             until,
         )
@@ -98,14 +98,21 @@ impl Manager {
         let seed = add::seed_path(&out);
         std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
         let mut said = format!("Added {name} from template {template}, with its credentials in {}.", out.display());
-        if let (Some(leaf), Some(renewed)) = (&leaf, &signed.leaf_jwt) {
+        if let (Some((conf, leaf)), Some(renewed)) = (leaf, &signed.leaf_jwt) {
             let machine = &leaf.machine;
-            let uplink = if add::renew_uplink(leaf, renewed)? {
-                let restart = crate::service::manual(Service::Nats, Action::Restart);
-                format!(
-                    " The uplink credentials of the leaf node {machine} were renewed to carry {name}: until a human \
-                     restarts the leaf node ({restart}), {name} reaches only the ants of this machine."
-                )
+            let uplink = if add::renew_uplink(&leaf, renewed)? {
+                // Before listing the ant, so its first connection finds the uplink carrying it.
+                let reconnect = move || {
+                    leaf::reconnect_uplink(&conf, |action| Services::local().apply(Service::Nats, action, &conf))
+                };
+                let said = match tokio::task::spawn_blocking(reconnect).await.map_err(anyhow::Error::from) {
+                    Ok(Ok(said)) => said,
+                    Ok(Err(e)) | Err(e) => format!(
+                        "{e:#}; a human restarts the leaf node to use them ({})",
+                        crate::service::manual(Service::Nats, Action::Restart)
+                    ),
+                };
+                format!(" The uplink credentials of the leaf node {machine} were renewed to carry {name}: {said}.")
             } else {
                 format!(
                     " The uplink credentials of {machine} changed meanwhile and were left as they are: until a human \

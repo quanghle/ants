@@ -166,6 +166,61 @@ pub fn take(out: &Path, old: Option<&str>, new: &str, apply: impl FnOnce(Action)
     }
 }
 
+/// Have the leaf node of the configuration at `path`, as [`write`] writes it, connect its uplink again, to send the
+/// uplink credentials just renewed in their file. nats-server reads that file at each connect, but a reload keeps the
+/// connection of an unchanged remote, and a restart would cut every local connection too. So the remote's credentials
+/// path switches between two spellings of the same file, with and without `./` before its name: a remote being its
+/// URLs, account and credentials path, the reload drops it and adds it again, which reconnects the uplink alone
+/// (nats-server 2.14 and later). `apply` reloads the leaf node's service ([`crate::service::Services::apply`]);
+/// returns what came of it, or how to do it by hand.
+pub fn reconnect_uplink(path: &Path, apply: impl FnOnce(Action) -> Outcome) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let creds = value(&text, path, "credentials")?;
+    let mut respelled = false;
+    let mut new = String::with_capacity(text.len() + 2);
+    for line in text.split_inclusive('\n') {
+        let key = line.trim_start();
+        if !respelled && key.starts_with("credentials") {
+            let indent = &line[..line.len() - key.len()];
+            let end = if line.ends_with('\n') { "\n" } else { "" };
+            let _ = write!(new, "{indent}credentials: {}{end}", quote(&respell(&creds)));
+            respelled = true;
+        } else {
+            new.push_str(line);
+        }
+    }
+    fs::write(path, new).with_context(|| format!("writing {}", path.display()))?;
+    Ok(match apply(Action::Reload) {
+        Outcome::Done(command) => {
+            format!("the leaf node reloaded to connect its uplink again with the renewed credentials ({command})")
+        }
+        Outcome::NotRunning => {
+            "the leaf node service is not running; it connects with the renewed uplink credentials once started"
+                .to_owned()
+        }
+        outcome => format!(
+            "{}send the running leaf node SIGHUP (`nats-server --signal reload`), or reload its service ({}), to \
+             connect its uplink again with the renewed credentials ({} names them anew for that); local connections \
+             stay up",
+            failure(outcome),
+            manual(Service::Nats, Action::Reload),
+            path.display()
+        ),
+    })
+}
+
+/// The other spelling of the file `path`: with `./` before its name, or without.
+fn respell(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((".", name)) => name.to_owned(),
+        Some((dir, name)) => match dir.strip_suffix("/.") {
+            Some(dir) => format!("{dir}/{name}"),
+            None => format!("{dir}/./{name}"),
+        },
+        None => format!("./{path}"),
+    }
+}
+
 /// The configuration of `leaf`, for a file in `dir`.
 fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     let dir = normalize(dir)?;
@@ -436,7 +491,7 @@ mod tests {
     use std::time::Duration;
 
     use ants_daemon::{bus, notes};
-    use ants_proto::{ChannelPost, Envelope, NotesPost, Role, UserId};
+    use ants_proto::{ChannelPost, Envelope, NotesPost, Permissions, Role, UserId};
     use ants_test_support::{NatsServer, scratch_dir};
     use async_nats::jetstream;
     use tokio::time::timeout;
@@ -720,6 +775,89 @@ mod tests {
         assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over ws://");
         let stream = bus::open_stream(&a_js, &dev_a).await.unwrap();
         bus::inbox_consumer(&stream, &dev_a, Duration::from_secs(5), 5, 2).await.unwrap();
+    }
+
+    /// Uplink credentials renewed to carry another ant take a reload that respells their path: a plain reload keeps
+    /// the uplink on the old ones, and the local connections of the leaf node stay up all along.
+    #[tokio::test]
+    async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
+        let leaf_port = free_port();
+        let Some(hub) = NatsServer::spawn_with(|dir| {
+            auth::init(&dir.join("auth")).unwrap();
+            format!(
+                "jetstream {{ store_dir: {:?}, domain: hub }}\ninclude \"auth/{}\"\n\
+                 leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",
+                dir.join("js"),
+                auth::SERVER_CONF
+            )
+        }) else {
+            return;
+        };
+        let team = hub.dir().join("auth");
+        let domain: JsDomain = "hub".parse().unwrap();
+        let (human, dev_a, dev_b) = (UserId::human(), "dev-a".parse::<UserId>().unwrap(), "dev-b".parse().unwrap());
+        let creds = |p: &UserId| {
+            let out = hub.dir().join(format!("{p}.creds"));
+            auth::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+            out
+        };
+        let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
+        bus::init_stream(&h_js).await.unwrap();
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], false, Some(&domain), &leaf_creds).unwrap();
+        let server_conf = team.join(auth::SERVER_CONF);
+        let listen = format!("127.0.0.1:{}", free_port());
+        let leaf_node = NatsServer::spawn_with(|dir| {
+            let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+            write(&Leaf { listen: &listen, ..leaf(&uplinks, &leaf_creds, &server_conf) }, &dir.join("leaf.conf"))
+                .unwrap();
+            "include \"leaf.conf\"\n".to_owned()
+        })
+        .unwrap();
+        let conf = leaf_node.dir().join("leaf.conf");
+        let connect = async |p: &UserId| {
+            let (_, mut js) = bus::connect(&leaf_node.url, Some(&creds(p)), Some(&domain), p, "test").await.unwrap();
+            js.set_timeout(Duration::from_secs(1));
+            js
+        };
+        let (a_js, b_js) = (connect(&dev_a).await, connect(&dev_b).await);
+        let (_watched, mut closed) = watched(&leaf_node.url, &hub.dir().join("dev-a.creds")).await.unwrap();
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream for dev-a");
+        assert!(reaches_hub_stream(&b_js, &dev_b, false).await, "dev-b is not on the uplink yet");
+
+        let (jwt, key) = auth::read_creds(&leaf_creds).unwrap();
+        let more = Permissions::for_leaf(&M1, [(&dev_b, Role::Ant)]).with_js_domain(Some(&domain));
+        let renewed = auth::extend_leaf(&team, &jwt, &M1, more).unwrap();
+        auth::write_creds(&leaf_creds, &renewed, &key).unwrap();
+        let hup = || Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap().success();
+        assert!(hup());
+        assert!(!reaches_hub_stream(&b_js, &dev_b, true).await, "a plain reload reconnected the uplink");
+
+        let before = fs::read_to_string(&conf).unwrap();
+        let said = reconnect_uplink(&conf, |action| {
+            assert_eq!(action, Action::Reload);
+            assert!(hup());
+            Outcome::Done("kill -HUP".to_owned())
+        })
+        .unwrap();
+        assert!(said.contains("reloaded to connect its uplink again"), "{said}");
+        let after = fs::read_to_string(&conf).unwrap();
+        assert_eq!(switch(Some(&before), &after), Action::Reload);
+        assert_eq!(read_uplink(&conf).unwrap().1, normalize(&leaf_creds).unwrap(), "the same file");
+        assert!(reaches_hub_stream(&b_js, &dev_b, true).await, "dev-b reaches no hub stream after the reconnect");
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "dev-a lost the hub stream");
+        assert!(closed.try_recv().is_err(), "a local connection was closed");
+
+        reconnect_uplink(&conf, |_| Outcome::NotRunning).unwrap();
+        assert_eq!(fs::read_to_string(&conf).unwrap(), before, "two respellings give the path back");
+    }
+
+    #[test]
+    fn a_respelled_path_names_the_same_file() {
+        assert_eq!(respell("/home/me/.config/ants/leaf-m1.creds"), "/home/me/.config/ants/./leaf-m1.creds");
+        assert_eq!(respell("/home/me/.config/ants/./leaf-m1.creds"), "/home/me/.config/ants/leaf-m1.creds");
+        assert_eq!(respell("leaf-m1.creds"), "./leaf-m1.creds");
+        assert_eq!(respell("./leaf-m1.creds"), "leaf-m1.creds");
     }
 
     /// A connection with `creds` to `url` that reports when the server closes it.
