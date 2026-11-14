@@ -1733,6 +1733,7 @@ mod tests {
 
     /// An endpoint on loopback answering 200 to a `POST` signed with `secret` and 401 to others, handing over the
     /// JSON of each.
+    #[cfg(unix)]
     async fn endpoint(secret: &'static str) -> (std::net::SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Value>) {
         use hyper::body::Incoming;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
