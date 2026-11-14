@@ -1,1569 +1,569 @@
 # ants
 
-Headless agent teams on several machines, talking to each other and to a human at the terminal over NATS.
+Headless agent teams across machines, communicating with each other and with humans at the terminal over NATS.
 
-- **Backbone:** NATS + JetStream for durable inboxes with acks and redelivery, and NATS KV for the roster, sessions and
-  attempt markers.
-- **Transport:** any uplink that carries NATS: `wss://`/`ws://` through a reverse proxy, `tls://`, or a Dev Tunnel to
-  the hub's ports, optionally through an HTTP `CONNECT` proxy, or the HTTPS fallback bridge (`ants bridge`). See [Transport options](#transport-options).
-- **Harnesses:** agents run behind ACP (Agent Client Protocol) over stdio: Copilot CLI (`copilot --acp`, the default),
-  Claude Code through its ACP adapter (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or any other ACP
-  agent or adapter defined in the config file. See [Harnesses](#harnesses).
-- **Footprint:** one Rust binary, `ants`, runs as the CLI, the ant daemon and its MCP server.
+- **Backbone:** NATS + JetStream for durable inboxes, channels, thread notes, approvals and dead letters, plus NATS KV for roster, session, attempt, channel, human, chain, link and webhook state.
+- **Transport:** `wss://`/`ws://` behind a reverse proxy, `tls://`, a Dev Tunnel, or the plain-HTTPS fallback bridge (`ants bridge`), optionally with a local store-and-forward leaf node per machine. See [Transport options](#transport-options) and [docs/transport.md](docs/transport.md).
+- **Harnesses:** ACP (Agent Client Protocol) agents over stdio: Copilot CLI (`copilot --acp`, default), Claude Code (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or custom `[harnesses.NAME]` definitions. See [Harnesses](#harnesses).
+- **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS.
 
 ## Architecture
 
 ```text
  machine "macbook"                      hub machine                       machine "desk"
 +-------------------------------+      +--------------------------+      +--------------------------+
-| ants daemon                   |      | nats-server (hub)        |      | ants CLI (the human)     |
-|   dev-a -> harness per thread |      |   JetStream domain "hub" |      |   ask, inbox, approve    |
-|   dev-b -> harness per thread |      |   stream ANTS            |      |            |             |
-|   MCP server for the sessions |      |   KV ants_roster,        |      |            |             |
+| ants daemon                   |      | nats-server (hub)        |      | ants CLI (human)         |
+|   dev-a -> harness per thread |      |   JetStream domain "hub" |      |   ask, post, inbox,      |
+|   dev-b -> harness per thread |      |   stream ANTS            |      |   tools, watch           |
+|   MCP server for sessions     |      |   KV ants_roster,        |      |            |             |
 |            |                  |      |      ants_sessions,      |      |            |             |
 |            |                  |      |      ants_attempts,      |      |            |             |
 |            |                  |      |      ants_channels,      |      |            |             |
-| nats-server (leaf, outbox)  --+----->|      ants_chains         |<-----+-- nats-server (leaf)     |
+|            |                  |      |      ants_humans,        |      |            |             |
+|            |                  |      |      ants_chains,        |      |            |             |
+|            |                  |      |      ants_links,         |      |            |             |
+| nats-server (leaf, outbox)  --+----->|      ants_webhooks       |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
-                          uplink: wss://, tls:// or a Dev Tunnel
+                        uplink: wss://, tls://, Dev Tunnel, or ants bridge
 ```
 
-- **Hub:** one nats-server with JetStream, reachable by every machine. It holds the stream `ANTS` (inboxes, thread
-  notes, channels, approvals, dead letters) and the KV buckets for the roster, the thread sessions, attempt markers,
-  channels, escalation chains and links to channel threads passed on. In operator
-  mode (`ants auth`), every ant and every human connects as its own NATS user with its own NKey/JWT credentials,
-  limited to the subjects of its role.
-- **Leaf:** each machine runs its own nats-server as a leaf node of the hub (`ants leaf config`). Every `ants` process
-  on the machine connects to it on `127.0.0.1:4222`; only the leaf's uplink crosses the network, and switching the
-  uplink touches nothing else. While the uplink is down, what the machine's ants send waits in its outbox.
-  A single machine can skip the leaf and point `ants` at the hub directly.
-- **Daemon:** `ants daemon` serves the ants of a machine, each over its own NATS connection with its own durable
-  inbox consumer. It runs one harness process per active thread, answers tool permission requests from an allowlist
-  or the human, enforces limits and spending caps, keeps the ant's roster entry fresh, and gives every harness
-  session an MCP server for messaging other ants.
-- **Ants:** named agents (`dev-a`, `reviewer`, ...), each with a workdir, a harness, capabilities and a `whoami`
-  role. The CLI acts as a human: the one its credentials name, or `human` without credentials. The ant
-  `messenger` gets every `ants ask` without `@ant` and routes it by capability. Messages go on
-  `ants.inbox.<to>.<from>`, grouped into threads with a turn budget for agent-to-agent traffic.
-- **Harnesses:** the agent CLIs the daemon drives over ACP on stdio, by name: the built-in `copilot`, `claude` and
-  `antigravity`, or one defined under `[harnesses.NAME]` in the config file.
+- **Hub:** one `nats-server` with JetStream holding stream `ANTS` and eight KV buckets (`ants init`). With `ants auth`, every ant, human, webhook, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials.
+- **Leaf:** optional per-machine `nats-server` (`ants leaf config`) on `127.0.0.1:4222` with a store-and-forward outbox (`ants leaf outbox`). Local `ants` processes target `127.0.0.1:4222`; only the leaf uplink crosses the network. Single-machine setups point `ants` straight at the hub.
+- **Daemon:** `ants daemon` serves ants over per-ant NATS connections and durable consumers, runs up to `max_harnesses` ACP processes per ant, enforces tool allowlists, limits and spending caps, refreshes roster heartbeats and exposes an MCP server to each session.
+- **Ants and humans:** ants are named agents (`dev-a`, `reviewer`, `messenger`) with a workdir, harness, capabilities and optional `whoami`. Humans (`human` by default, or named users from `ants auth user NAME --human`) own threads they start and approve tools. Unaddressed `ants ask` requests go to `messenger` for capability routing. Agent-to-agent messages share a per-thread turn budget (default 8).
+
+| Store / subject | Storage / TTL | Purpose |
+|---|---|---|
+| Stream `ANTS` | File, 30d | Captures `ants.inbox.>`, `ants.notes.>`, `ants.approvals.>`, `ants.dead.>`, `ants.chan.>`; enables direct gets; republishes `ants.inbox.*.*` to `_INBOX.<to>.stored.<from>`. |
+| KV `ants_roster` | Memory, 30s | Live `RosterEntry` per ant (`<ant>`), refreshed every 10s. |
+| KV `ants_sessions` | File, 30d | Thread ACP session IDs (`<ant>.<thread>`), spend/escalation state, channel seen cursors, mention markers. |
+| KV `ants_attempts` | File, 30d | Started delivery markers and saved replies (`<ant>.<seq>`) before consumer ack. |
+| KV `ants_channels` | File, none | `ChannelEntry` (`<channel>`): members, optional messenger, optional owner ant. |
+| KV `ants_humans` | File, none | Registered humans (`<human>`), written automatically on CLI connection. |
+| KV `ants_chains` | File, none | Persistent `escalate_to` chains (`<ant>`), readable after roster expiry. |
+| KV `ants_links` | File, 30d | Verified `origin_thread` handoffs (`<from>.<channel_thread>.<to>`) for spun-off channel threads. |
+| KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`) and daily `<webhook>.webhook` markers. |
+| Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
+
+User, channel, thread and JetStream domain IDs use 1–64 characters of `a-z`, `0-9` and `-`, starting with a letter or digit (`channel-manager` is reserved). Machine and harness names also allow `_` (machine names allow uppercase ASCII and must differ from `js_domain`). Durations require whole-number units ordered largest first (`s`, `m`, `h`, `d`: `90s`, `10m`, `1h30m`) or `0`; bare non-zero numbers are rejected.
 
 ## Install
 
 Requirements:
 
-- Rust 1.100 or later, to build `ants`.
-- [nats-server](https://github.com/nats-io/nats-server/releases) 2.11 or later (tested with 2.15.3), for the hub and
-  each leaf.
-- On machines that serve ants, a harness CLI signed in (see [Harnesses](#harnesses)), for example
-  `copilot login`.
+- Rust 1.100 or later.
+- [nats-server](https://github.com/nats-io/nats-server/releases) 2.11 or later (tested with 2.15.3).
+- A signed-in harness CLI on machines running `ants daemon` (see [Harnesses](#harnesses)).
 
 ```sh
 cargo install --path crates/ants        # ~/.cargo/bin/ants
 ants --help
 ```
 
-The same binary runs everywhere: the CLI, `ants daemon`, and the stdio MCP bridge `ants mcp`. To run the hub, the
-leaf and the daemon as user services, see [Services](#services).
-
 ## Quick start
 
-On one machine, with no credentials:
+Single machine without credentials:
 
 ```sh
 nats-server -js &                                   # local hub
 ants harness check                                  # ACP handshake with Copilot CLI
 ants daemon --ant dev-a --workdir ~/src/some-repo &
 ants ask --wait @dev-a "summarise the open TODOs"
-ants inbox                                          # replies not read yet
-ants roster                                         # ants being served
-ants tools list                                     # tool requests waiting for an answer
-ants notes <thread>                                 # a thread's notes (see Thread notes)
-ants channel create ops --member dev-a,dev-b        # a channel (see Channels)
-ants post '#ops' "@dev-a the build is red"          # wakes dev-a only; prints the thread
-ants channel read ops                               # the channel's posts, by thread
-ants watch                                          # live traffic
-ants watch dev-a [<thread>]                         # what dev-a is doing: state, reply text, tool calls, execution plan
+ants inbox                                          # unread replies
+ants roster                                         # active ants
+ants tools list                                     # pending tool approval requests
+ants notes <thread>                                 # passive thread notes
+ants channel create ops --member dev-a,dev-b
+ants post '#ops' "@dev-a the build is red"          # wakes dev-a; prints thread ID
+ants channel read ops
+ants watch                                          # live traffic on ants.>
+ants watch dev-a [<thread>]                         # streamed harness state, text, tools, plan
 ```
 
-The minimum config file is an empty `~/.ants/config.toml`, or one line choosing the harness, `harness = "claude"` (or
-`"copilot"`, the default, or `"antigravity"`): `ants daemon` with no flags then serves the built-in messenger, which
-takes `ants ask` without `@ant` (see [Messenger](#messenger)).
-
-Durations, in flags and config keys alike, are whole numbers with a unit, `s`, `m`, `h` or `d`, largest unit first:
-`90s`, `10m`, `1h30m`, or a bare `0`. A number without a unit is rejected.
-
-`ANTS_NATS_URL` (or `--nats`) selects the server, for example `wss://hub.example/nats`. A team across machines adds
-credentials ([Credentials](#credentials)), a leaf node per machine ([Leaf nodes](#leaf-nodes)), a config file listing
-the ants ([Config file](#config-file)) and services ([Services](#services)).
+An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with no flags serve the built-in `messenger` alone (see [Messenger](#messenger)). Multi-machine deployments add [Credentials](#credentials), [Leaf nodes](#leaf-nodes), a [Config file](#config-file) and [Services](#services).
 
 ## CLI
 
-| Command | Does |
+| Command | Description |
 |---|---|
-| `ants ask [@ant] TEXT` | Sends a message as the CLI's human, the thread's owner (with an ant's credentials, a thread without owner); without `@ant` it goes to the messenger. `--thread` continues a thread, still prompting only the named recipient; `--wait` prints the first reply and exits, `-f`/`--follow` prints each reply until Ctrl-C, either marking what it prints read; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
-| `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
-| `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
-| `ants notes THREAD [TEXT]` | Shows a thread's notes, or posts TEXT to them as the CLI's human, which gives them a fresh turn budget; a post wakes nobody (see [Thread notes](#thread-notes)). Distinct from the execution plan `ants watch <ant>` shows. |
-| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread (with an ant's credentials, as that ant, which creates the thread it starts; see Channels); `@ant` wakes that member only, and `@human` puts a notice in a human member's inbox. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
-| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members, ants or humans (`--member`), messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`) and owner (`--owner ANT`, or `--no-owner`; see [Channel owners](#channel-owners)). |
-| `ants channel serve` | Runs the channel manager, which applies the changes channel owners ask for, with the credentials of `ants auth channel-manager`; on the hub, say, where no ant runs. |
-| `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
-| `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
-| `ants tools list` / `show ID` / `approve ID` / `reject ID` | Lists pending tool requests (`--follow`, `--json`), shows one, allows it once (`--always`: for the rest of the session) or rejects it; every human sees every request, and the first decision wins, a human's or that of an agent of the ant's chain. |
-| `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspects, replays or drops dead letters; `watch` turns max-deliveries advisories into dead letters. |
-| `ants init` | Creates the stream and buckets on the hub, or adds the stream subjects, direct gets and republishing of inbox messages an older version lacks. Needs a human's credentials. |
-| `ants daemon` | Serves the ants of the config file, or one ant described by flags. |
-| `ants add NAME` | Lists an ant in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding an ant](#adding-an-ant). |
-| `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants add --enroll`, signs one or refuses it. |
-| `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME [--human \| --webhook] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` / `channel-manager` | Issues the team's operator and account, ant, human or webhook credentials (`--webhook` with `--to ANT` or `--channel CHANNEL`; with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, leaf uplink credentials (`--ant`, `--human`, `--webhook`), and the channel manager's credentials. |
-| `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
-| `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
-| `ants webhook serve` | Takes events from outside services over HTTP and delivers each to the ant or channel its webhook names (see [Webhooks](#webhooks)). |
-| `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
+| `ants ask [--thread ID] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
+| `ants inbox [--peek] [--thread ID] [--limit N] [-f] [--json]` | Print unread replies and mark read (`--peek` keeps unread; `-f`/`--follow` streams replies and watches advisories). |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`), harnesses, capabilities, `escalate_to` chains and workdirs. |
+| `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
+| `ants post [--thread ID] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
+| `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). |
+| `ants channel read CHANNEL [--thread ID \| --limit N]` | Print channel posts grouped by thread. |
+| `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
+| `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations and decisions, or live harness progress for `ANT`. |
+| `ants tools list [-f] [--json]` | List pending tool requests (`<ant>/<id>`, thread, tool, files, options, time remaining). |
+| `ants tools show ID [--json]` | Show full request, tool input, status and answer commands for `<ant>/<id>` (unique prefix accepted). |
+| `ants tools approve ID [--always]` / `reject ID` | Allow once, allow for the session (`--always`, if offered), or reject a tool request. |
+| `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or delete dead letters; `watch` turns `MAX_DELIVERIES` advisories into dead letters. |
+| `ants init` | Create or update stream `ANTS` and all eight KV buckets (requires human credentials). |
+| `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
+| `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
+| `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
+| `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
+| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`). |
+| `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
+| `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests. |
+| `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
+| `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
 
-Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
-`--js-domain` (`ANTS_JS_DOMAIN`). `ants <command> --help` lists the rest.
+### Identity and human registration
 
-The CLI acts as the human its credentials name (the `name` of their user JWT, as `ants auth user NAME --human` sets
-it), or as `human` without credentials: it sends and posts under that name, reads that human's inbox and thread notes
-consumers, and connects with that human's reply prefix. On connecting, it registers that human in the KV bucket
-`ants_humans`, creating the bucket when missing: one direct get when the entry is there already, a put otherwise
-(again after the entry was removed). `human` needs no entry. When registering fails, the command warns and goes on;
-until a later connection registers the human, daemons take its messages for an agent's. Credentials issued without
-`--human` are an ant's: the CLI then acts as that ant, registers nothing and warns, `ants inbox` refuses (the
-ant's daemon reads its inbox), and `ants ask --wait` or `--follow` marks nothing read.
+Every command accepts `--nats`, `--creds` and `--js-domain`. The CLI acts as the user named in the `--creds` JWT, or `human` without credentials. With human credentials (`ants auth user NAME --human`, or `human`), connecting ensures `ants_humans` exists and registers `<name>` (direct get first, put if absent; `human` needs no entry; warns and continues on failure, though daemons treat unregistered senders as agents until registered). With ant credentials, the CLI acts as that ant, skips `ants_humans`, warns, refuses `ants inbox` and leaves replies unread during `ants ask --wait` or `--follow`.
 
-### Waiting for replies
+### Environment variables
 
-`ants ask` and `ants post` print the thread and return at once. Two flags keep them on the thread, and conflict:
-
-- `--wait` prints the first reply on the thread and exits: for `ants ask`, the first reply to the CLI's human; for
-  `ants post`, the first post on the thread by someone other than the poster.
-- `-f`, `--follow` prints every reply (every other post, for `ants post`) on the thread as it arrives, until
-  `--timeout` or Ctrl-C.
-
-`--timeout DURATION` (`90s`, `10m`, `1h30m`; needs `--wait` or `--follow`) bounds the wait; without it there is no
-limit. Exit status: 0 once `--wait` prints its reply, and when `--follow` ends at the timeout or on Ctrl-C; 1 with
-`no reply on thread <thread> within <timeout>` on stderr when `--wait` times out; Ctrl-C ends a `--wait` at once, as
-interrupted (130 in most shells).
+| Variable | Flag / Scope | Default / Behavior |
+|---|---|---|
+| `ANTS_NATS_URL` | `--nats` (global) | `nats://127.0.0.1:4222` |
+| `ANTS_CREDS` | `--creds` (global) | Path to `.creds` file; omitted connects unauthenticated as `human` |
+| `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`) |
+| `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`) | `~/.ants/config.toml` |
+| `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
+| `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
+| `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions |
+| `ANTS_MCP_TOKEN` | `--token` (`ants mcp`) | Per-thread session token passed automatically by `ants daemon` |
+| `ANTS_LOG` | All commands | `tracing` stderr filter, default `info,rmcp=warn` |
+| `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by rustls for private CAs |
+| `ANTS_REQUIRE_TOOLS` | `cargo test` | When `1`, tests fail instead of skipping if `nats-server` is missing on `PATH` |
 
 ### Agent skill
 
-`contrib/skills/ants/SKILL.md` teaches a coding agent outside ants (an interactive Copilot CLI session, say) to
-message ants as the CLI's human through this CLI: `ants roster`, `ants ask`, `ants inbox --thread`,
-`ants watch`, and how escalation chains show there. Install it as a user-level skill with `copilot skill add contrib/skills/ants/SKILL.md`, or copy the directory into
-another agent's skills directory.
+`contrib/skills/ants/SKILL.md` teaches an external coding agent to message ants through the CLI (`ants roster`, `ants ask`, `ants inbox --thread`, `ants watch`). Install with `copilot skill add contrib/skills/ants/SKILL.md` or copy into another agent's skills directory.
 
 ## Delivery
 
-Replies to a human wait in its own durable JetStream consumer, `inbox-<name>` (`inbox-human` for `human`), until read,
-so those that arrive while no CLI runs are kept. `ants inbox` prints the unread ones and marks them read; `--peek`
-leaves them unread, `--thread` and `--limit` pick some and leave the rest unread, `--follow` keeps waiting for new
-ones (and dead-letters what JetStream stops delivering, see [Dead letters](#dead-letters)) and `--json` prints one
-envelope per line.
-`ants ask --wait` and `--follow` mark only the replies they print read.
+### Waiting for replies
 
-The daemon keeps one harness process per active thread, at most `--max-harnesses` (default 4). Different threads are
-prompted concurrently; messages on one thread are handled one at a time, in order, and a failed one is retried before
-the rest of its thread. A thread's harness stops after `--idle-timeout` (default 10m) without a message, and its
-session resumes with ACP `session/load` on the next one. A harness with a prompt in flight is never stopped: when all
-are busy at the cap, a new thread waits for one to finish. Ctrl-C lets prompts in flight finish (a second Ctrl-C stops
-at once, and their messages are redelivered later). SIGTERM, as service managers send, stops it like Ctrl-C.
+`ants ask` and `ants post` print the thread ID and exit immediately unless `--wait` or `-f`/`--follow` is set (mutually exclusive):
 
-Every message in hand, waiting for its thread or a harness or being prompted (a tool request waiting for the human
-included), gets a progress ack every 20 s. A message held by a daemon that crashed or lost its link is redelivered
-after the 60 s ack wait; a copy redelivered to a daemon still holding the message is ignored. The daemon updates its
-inbox consumer to these settings when it starts.
+- `--wait` prints the first reply on the thread (to the CLI human for `ants ask`; by another author for `ants post`) and exits `0`.
+- `-f`, `--follow` prints every arriving reply or post on the thread until `--timeout` or Ctrl-C, then exits `0`.
+- `--timeout DURATION` (requires `--wait` or `--follow`) bounds the wait. If `--wait` times out, `ants` prints `no reply on thread <thread> within <timeout>` to stderr and exits `1`. Ctrl-C during `--wait` exits immediately as interrupted (`130`). `ants ask --wait` and `--follow` mark only printed replies read.
 
-Delivery is at least once: a daemon acks a message only after its reply is stored, so an attempt cut off in between
-(a crash, a lost link, a second Ctrl-C, a failed prompt) is redelivered and its tools may run again. Before prompting,
-the daemon marks the attempt as started in the KV bucket `ants_attempts` under `<ant>.<stream sequence>`. A later
-attempt that finds the mark gets this warning before the message text, and resumes the thread's session, whose history
-may show what ran:
+### Inbox consumers, pool and retries
 
-> [ants] An earlier attempt at this message was cut off before its reply was stored, so tools it ran may already have
-> taken effect. The session history may show what ran. Check the current state before repeating any action.
+Human replies wait in durable consumer `inbox-<name>` (`inbox-human` for `human`) until read. Each ant maintains up to `max_harnesses` (default 4) ACP processes, one per active thread: concurrent across threads, sequential per thread, retrying failures in order. Idle harnesses stop after `idle_timeout` (`10m`) and resume via ACP `session/load` using `<ant>.<thread>` in `ants_sessions`; busy harnesses are never evicted. First Ctrl-C or `SIGTERM` drains prompts in flight; a second Ctrl-C exits immediately for redelivery.
 
-Once the harness has answered, the reply is recorded with the mark before it goes to the stream, so an attempt cut off
-after that sends the recorded reply without prompting again. Replies carry a message id made of the ant and the
-message's envelope id, so JetStream keeps one copy of a reply sent twice within its duplicate window (2 min). A mark is
-removed when the message is acked or dead-lettered; one left behind expires after 30 days. Once its reply is stored, a
-message is also noted in `<home>/answered` until its ack is confirmed: while a leaf node's uplink is down the reply
-waits in the machine's outbox and the ack fails, so the redelivery, even to a restarted daemon, is acked without being
-answered again. A note left behind is removed after 30 days. A daemon needs the bucket: `ants init`
-as the human creates it, and ant and leaf credentials issued before it existed must be issued again.
+Held messages send 20s progress acks against a 60s `ack_wait` (ignoring duplicate deliveries while held). Delivery is at-least-once and acks only after storing the reply:
 
-While prompting, the daemon streams progress to `ants.status.<ant>.<thread>` as JSON `StatusEvent`s: the thread's
-state (`working`, `waiting_approval`, `idle`, `failed`), the reply text and reasoning as the harness streams them,
-joined for up to 250 ms, tool calls as they start or change status, and the harness's execution plan. Status is core NATS only:
-nothing keeps it, so `ants watch dev-a` shows only what happens while it runs, and an update the daemon cannot send at
-once is dropped rather than hold up the harness.
+1. Before prompting, the daemon writes `<ant>.<seq>` in `ants_attempts`. On redelivery after a cut-off, finding that marker resumes the session and prepends a warning that prior tool calls may have run.
+2. When the harness finishes, the reply is saved in `<ant>.<seq>` before publishing with dedup ID `<ant>/<envelope_id>` (2m window), so a post-generation cut-off republishes without re-prompting.
+3. Stored replies are also noted in `<home>/answered` until acked, avoiding re-prompts when an offline leaf buffers replies in its outbox. Markers clear on ack or dead-lettering (30d TTL).
 
-Which session each thread runs in is kept in the KV bucket `ants_sessions` under `<ant>.<thread>`, so a restarted
-daemon resumes it too. `ants init` (or a daemon without credentials) creates the bucket. An entry is rewritten whenever the thread's harness starts and expires
-30 days later, like the stream's messages.
+During prompts, the daemon streams unpersisted `StatusEvent` JSON to `ants.status.<ant>.<thread>` (`working`, `waiting_approval`, `idle`, `failed`, 250ms batched text/reasoning, tool calls, execution plan), dropping backpressured frames.
 
 ## Config file
 
-One daemon process can serve several ants, each over its own NATS connection with its own credentials. List them
-in `~/.ants/config.toml` (or the file named by `--config` / `ANTS_CONFIG`) and run `ants daemon`. The minimum file is
-empty, or names the harness, and serves the built-in messenger alone (see [Messenger](#messenger)):
+`~/.ants/config.toml` (`--config` / `ANTS_CONFIG`) configures multi-ant daemons, shared defaults and custom harnesses. An empty file is valid and serves the built-in `messenger` on `copilot`.
 
 ```toml
-harness = "copilot"                        # the default; or "claude", "antigravity", or a [harnesses.NAME] table
-```
-
-A fuller file:
-
-```toml
-harness = "copilot"                        # default harness of every ant and of the built-in messenger
-messenger = true                           # default: serve the built-in messenger (see Messenger)
-nats = "wss://hub.example/nats"            # server for every ant that sets none
-js_domain = "hub"                          # the hub's JetStream domain, if it has one (see Leaf nodes)
-human = "alice"                            # default human, see Escalations; default "human"; also per ant
+harness = "copilot"                        # default for every ant and built-in messenger
+messenger = true                           # default: serve built-in messenger unless [[ant]] names "messenger"
+nats = "wss://hub.example/nats"            # default NATS URL for ants without `nats`
+js_domain = "hub"                          # default hub JetStream domain; also settable per ant
+human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
 
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
 creds = "~/.config/ants/auth/dev-a.creds"
-harness = "claude"                         # default: the top-level harness, else "copilot"; see Harnesses
-model = "gpt-6.1-sol"                      # optional; exact model ID offered by the harness
-reasoning_effort = "high"                  # optional; a value offered by the selected model
-context = "long_context"                  # optional; provider-native tier/window, not a token cap
+harness = "claude"                         # overrides top-level harness
+model = "claude-sonnet-4-5"                # optional exact ACP model ID
+reasoning_effort = "high"                  # optional effort ID offered by the model
+context = "1m"                             # optional key from the harness's context table
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
-whoami = "Maintain Rust services and review backend changes." # optional; shared in the roster
-memory = "Use the notes MCP server for durable memory."  # optional, any tool available to the harness
-tasks = "Use the tracker CLI for task tracking."         # optional, independent of memory
-env = { TRACKER_DB = "/srv/ants/dev-a/tasks.db" }         # optional harness environment overrides
-allow = ["read", "search"]                 # tool allowlist, see Tool permissions
+whoami = "Maintain Rust backend services." # published in roster and prepended to prompts
+memory = "Use notes MCP for durable memory."
+tasks = "Use bd for task tracking."
+env = { BD_DB = "/srv/ants/dev-a/bd.db" }  # literal environment overrides for harness + subprocesses
+allow = ["read", "search", "execute:cargo test*"]
+allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
-capabilities = ["rust", "review"]          # advertised in the roster
+capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
 idle_timeout = "10m"                       # default
-allow_tools = false                        # default
-prompt_timeout = "30m"                     # default; "0" for no limit (see Limits and caps)
-max_tool_calls = 300                       # default; 0 for no limit
-max_thread_cost = 5.0                      # default: no cap; also max_thread_tokens
-max_daily_cost = 50.0                      # default: no cap; also max_daily_tokens
-escalate_to = ["lead", "dev-b"]            # optional escalation chain, the first one leads (see Escalations)
+prompt_timeout = "30m"                     # default; "0" disables
+max_tool_calls = 300                       # default; 0 disables
+max_thread_cost = 5.0                      # optional; also max_thread_tokens
+max_daily_cost = 50.0                      # optional; also max_daily_tokens
+escalate_to = ["lead", "dev-b"]            # optional escalation chain; first ant leads
 max_escalation_hops = 3                    # default
-escalate_after = "30m"                     # default; "0" waits for the leader indefinitely
+escalate_after = "30m"                     # default; "0" waits indefinitely
 
 [[ant]]
 name = "dev-b"
-nats = "nats://127.0.0.1:4222"             # this ant's own server
+nats = "nats://127.0.0.1:4222"
 workdir = "~/src/repo-b"
 creds = "~/.config/ants/auth/dev-b.creds"
 ```
 
-`~` expands to the home directory; other relative paths are relative to the file. Names must be unique and unknown
-keys are errors. Durations are TOML strings such as `"90s"`, `"10m"` or `"1h30m"`. A file that sets
-`messenger = false` needs at least one `[[ant]]`. An ant that fails to start (a missing credentials file, credentials the server rejects) is logged and
-the others keep running; the daemon exits with an error only when none could start. An ant whose server cannot be
-reached yet waits for it: the connection is retried after 1 s, then twice as long each time up to 30 s, with a warning
-naming the URL. Once connected it waits the same way for JetStream to answer, as a leaf node whose uplink has not joined
-the hub yet; a JetStream request the credentials do not permit fails the ant at once. Ctrl-C stops them all,
-waiting or not.
+`~` expands to the home directory; other relative paths resolve against the config file's directory (`env` values remain literal). Unknown keys, duplicate ant names, or `messenger = false` with no `[[ant]]` fail config loading. Unreachable NATS or JetStream endpoints retry with exponential backoff (`1s` to `30s`); credential or permission errors fail that ant immediately while remaining ants keep running, exiting non-zero only if none start.
 
-How flags and the file combine:
+Flag and file precedence on `ants daemon`:
 
-- `ants daemon` serves every ant in `~/.ants/config.toml`.
-- `ants daemon --ant dev-a` ignores the ants of that default file and takes the ant from the flags (`--workdir`,
-  `--home`, `--harness`, `--max-harnesses`, ...), as before; `--harness` may name a harness the default file defines
-  under `[harnesses.NAME]`, so that file, when present, must parse.
-- `ants daemon --config FILE --ant dev-a` serves only `dev-a` from `FILE`; ant flags given override its entries.
-- `ants daemon --config FILE --ant messenger` serves only the built-in messenger of a file.
-- In the file, `nats`, `js_domain` and `creds` win over `--nats` / `ANTS_NATS_URL`, `--js-domain` / `ANTS_JS_DOMAIN` and
-  `--creds` / `ANTS_CREDS`, which fill in what the file leaves out. `--creds` applies only when one ant is served.
-  `nats`, `js_domain` and `human` may also be set per ant.
-
-### Escalations
-
-What an ant cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, thread
-notes out of turns, or what its harness escalates with the `escalate` tool) goes up the thread's origin chain (tool
-requests outside the allowlist go to the ant's own chain only; see Tool permissions), in the end to the thread's owner
-(the envelope's `owner`, the human who started the thread or took it), else to the daemon's default human, the config
-file key `human` (default `human`; top-level or per ant). Without a chain it goes to the owner at once.
-
-The origin chain is the stuck ant's own escalation chain, except on a thread another ant created (its `creator`, the
-ant whose top-level channel post started it; see Channels): there the creator leads level 0 as if it were the one
-stuck, and level 1 goes to the creator's `escalate_to`. The stuck ant and the creator both count as visited, so a
-chain leading back to either hands the thread to the owner, and `max_escalation_hops` counts from the creator's
-chain. The creator never receives an escalation of its own thread at level 0: with no `escalate_to` it goes to the
-owner at once, with an `[ants]` notice naming the creator. A channel's membership or messenger never picks the chain:
-an ant-created thread has no owner until a human posts on it, so until then its escalations end at the default human
-of the stuck ant's daemon.
-
-The chain is the ant's `escalate_to` key, a list of other ants whose first one leads; the roster publishes it,
-and the daemon also keeps it on start in the KV bucket `ants_chains` under the ant id, whose entries never expire,
-so any daemon can follow a chain past an ant that is offline, even after its roster entry expired. Every member gets
-the escalation in its inbox, on the stuck thread, as an `[ants]` notice naming the stuck ant, the reason, the level
-and the leader, followed by the notice the owner would have got. The members coordinate in the thread's notes, which
-each level that goes up a chain gives a fresh turn budget with an `[ants]` post naming the level, the members and the
-leader, so the group has turns there even if the notes ran out. Each member's prompt starts with an `[ants]` note on the
-group: the stuck ant and thread, the level, the members and who leads. Only the leader resolves it, by answering the
-stuck ant on the thread (a reply to the notice goes to the stuck ant, also when a member sent the level), or
-escalates it further (the `escalate` tool). Another member's reply to the notice goes to the thread's notes, for the
-leader, and the member cannot `send_message` or `ask_agent` the stuck ant on the thread; a reply to a fellow member's
-message goes to that member as usual. A member's reply the notes have no turn left for escalates it, the unposted answer
-included. The leader's answer gives the thread a fresh turn budget and allowance, once per level (on a channel thread,
-the ant's answer to it is posted back to the channel with that budget; see Channels): the next time the ant is
-stuck on the thread, the escalation goes one level higher, to every member of the leader's own chain (from the roster,
-else `ants_chains`) not visited yet. A chain member stuck while working on an escalation sends it one level higher the
-same way, and sends the stuck ant an `[ants]` notice carrying the new level, which its daemon takes in without
-prompting: the thread's escalation moves to that level, waiting for its leader, so the ant stuck again sends it to
-that level's members. A level past `max_escalation_hops` (default 3), a chain leading back to an ant already visited,
-or a leader without a chain hands the thread to the owner, with the escalation and the reason. Until the leader answers,
-an ant stuck again on the thread sends the same members the new notice. Members offline are not skipped: their
-inboxes keep the escalation. When the leader does not answer within `escalate_after` (default 30m, as long as a
-prompt may run; 0 waits indefinitely), the ant that escalated sends it one level higher. Only a human's message on
-the thread ends its escalation, and the next one starts at the thread's origin chain again. The thread's escalation, its
-level, whether the leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
-keep them.
-
-`ants roster` shows each live ant's chain, leader first, in its `ESCALATE_TO` column. `ants watch` prints each
-message carrying an escalation with its level, reason (and request, for a tool request), stuck ant and thread,
-leader and the ants visited so far, and an agent's approval decision in place of its text:
-
-```text
-[t1] dev-a -> lead [escalation level 1, turn_budget: dev-a stuck on t1, leader lead, visited dev-a > lead > dev-b]: [ants] ...
-[t1] dev-a -> lead [escalation level 1, approval dev-a/019a7d2e-...: dev-a stuck on t1, leader lead, visited dev-a > lead]: [ants] ...
-[t1] lead -> dev-a decides allow-once on approval request dev-a/019a7d2e-...
-```
-
-The daemon tells humans by the KV bucket
-`ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
-looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
-ignores an `owner` that is no human, as an ant may name any, and neither escalates to it nor passes it on. On a
-thread a channel post started, it takes an ant's message's `owner` and `creator` from the thread's posts, as in the
-channel; on any other thread, it keeps the `owner` an ant's message names, unchecked, and drops its `creator` unless
-the thread was spun off a channel thread the sender takes part in or got the link to from an ant with one (see
-Channels). A reply
-to any human spends no turn, a message from any human renews the thread's allowance, and `send_message` to a human
-spends no turn either; `ask_agent` refuses a human.
-
-## Limits and caps
-
-### Model, reasoning effort and context
-
-Each ant may set `model`, `reasoning_effort` and `context`. The matching flags are `--model`,
-`--reasoning-effort` and `--context`; with a config file, select one ant using `--ant` before overriding
-settings. Omitted fields keep the harness's defaults, including saved session settings on resume.
-
-The daemon selects the model through ACP before setting reasoning effort, since available effort levels depend on
-the selected model. Settings are reapplied to new and resumed sessions. Values must match the harness's advertised
-option IDs; unsupported values, missing selectors, rejected changes or a selector that reports a different value
-fail the session before a prompt runs. Errors list available choices for unsupported values.
-
-The values `context` may take come from the harness definition's `context` table (see [Harnesses](#harnesses)): each
-value appends launch arguments, a suffix to the model ID, or both. A harness without the table takes no `context`.
-
-| Harness | Model and reasoning effort | Native `context` selection |
-|---|---|---|
-| Copilot | ACP model and reasoning-effort selectors | `default` or `long_context`, passed to `copilot --acp --context ...`; support depends on the selected model and account |
-| Claude | ACP model and effort selectors | `default`, or `1m` with an explicit `model`; `1m` selects the exact advertised `<model>[1m]` variant, without falling back to another model |
-| Antigravity | ACP model and thinking-level selectors | No separate context selector; omit `context` and select a model with the required native window |
-
-A value with a `model_suffix` requires an explicit `model`. A model ID already ending in a value's suffix (Claude's
-`[1m]`) can be used without a separate `context`; another `context` with such an ID (`context = "default"`) is a
-configuration error. Other model IDs must match the advertised IDs exactly; aliases work only when the harness lists
-the alias. A configured context is a native tier/window, not a custom numeric token limit
-or a spending cap. ants does not truncate or compact history to enforce a context size. Copilot's context tier is
-applied at process launch; ACP does not expose a context selector for read-back. Actual context capacity remains
-model- and account-dependent.
-
-These settings are separate from `whoami`; the roster's role description does not claim an effective model or
-context capacity. Provider settings and credentials remain managed by the harness and ant `env`.
-
-### Prompt limits and spending caps
-
-Every prompt has a time limit, `--prompt-timeout` (default 30m, tool requests waiting for the human included; 0 for none),
-and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spending can be capped per thread,
-`--max-thread-tokens` and `--max-thread-cost`, and per ant per UTC day, `--max-daily-tokens` and
-`--max-daily-cost`; there are no spending caps by default. The config file keys have the same names with underscores.
-
-A prompt that passes a limit or a cap is cancelled with ACP `session/cancel` (a harness that does not stop within 30 s
-is restarted, and its session resumes on the next message). The reply carries what the harness wrote so far and an
-`[ants]` notice naming the limit. When the message came from another agent, the thread then escalates (see Escalations)
-like a spent turn budget: the thread's origin chain, else the owner, gets the notice, "needs a decision", and the last
-message. While a cap is reached, later messages on the thread are not prompted; each escalates the same way.
-
-- Per-prompt limits start afresh with every prompt.
-- A thread's allowance starts afresh with every message from a human on it, and once per escalation level with the
-  answer of the escalation's leader.
-- An ant's daily allowance starts afresh at 00:00 UTC (or when the daemon restarts with a higher cap); a message
-  from a human does not lift it.
-
-Spending counts what the harness reports: the session cost of ACP `usage_update` and the tokens of each prompt
-response. Claude's ACP adapter reports both, at the end of each turn, so a cap usually takes effect after the turn that
-crossed it. Copilot CLI reports neither, so spending caps never trigger for it; the per-prompt limits still apply.
-Whether Antigravity CLI reports either has not been verified, so its spending caps may never trigger either.
-Spending is kept in the KV bucket `ants_sessions`, under `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>`,
-so it survives daemon and harness restarts; entries expire 30 days after their last update.
-
-## Services
-
-Each machine runs two user services: its nats-server (the leaf node, or the hub on the hub machine) and the ant
-daemon, `ants daemon --config ~/.ants/config.toml`. Templates are in `contrib/`: launchd agents on macOS
-(`contrib/launchd/ants.nats.plist`, `ants.daemon.plist`), systemd user units on Linux and WSL
-(`contrib/systemd/ants-nats.service`, `ants-daemon.service`). Both restart on failure; the daemon starts after
-nats-server under systemd, and under launchd, which has no start order, it waits until nats-server listens (see Config
-file). The units name files only: credentials stay in the files the config names. On the hub, or another machine
-where no ant runs, `--channel-manager CREDS` adds the channel manager, `ants channel serve` with the credentials of
-`ants auth channel-manager` (`contrib/launchd/ants.channels.plist`, `contrib/systemd/ants-channels.service`; see
-[Channel owners](#channel-owners)).
-
-Setting up a machine (`macbook`, ants `dev-a` and `dev-b`, hub `wss://hub.example.com/nats` with
-`jetstream { domain: hub }`):
-
-```sh
-# on the machine holding the team directory
-ants auth user dev-a --js-domain hub && ants auth user dev-b --js-domain hub && ants auth user human --js-domain hub
-ants auth user messenger --js-domain hub                                  # for the built-in messenger
-ants auth leaf macbook --ant dev-a --ant dev-b --ant messenger --human human --js-domain hub
-# copy server.conf, leaf-macbook.creds and the ant and human .creds to ~/.config/ants/auth on macbook (not the .nk seeds)
-
-# on macbook
-cargo install --path crates/ants                                          # ~/.cargo/bin/ants
-ants leaf config macbook --uplink wss://hub.example.com/nats             # ~/.config/ants/leaf.conf
-$EDITOR ~/.ants/config.toml                                               # harness, js_domain = "hub", the ants; see Config file
-scripts/install-units.sh                                                  # installs and starts both services
-export ANTS_JS_DOMAIN=hub ANTS_CREDS=~/.config/ants/auth/human.creds      # for the CLI, in the shell profile
-ants leaf outbox macbook --ant dev-a --ant dev-b --ant messenger --human human  # store and forward, see Leaf nodes
-ants roster
-```
-
-`scripts/install-units.sh` fills in the absolute paths of `ants` and `nats-server` (found on `PATH`, or `--ants`,
-`--nats-server`), the nats-server configuration (`--nats-conf`, default `~/.config/ants/leaf.conf`; the hub machine
-gives its hub configuration), the daemon config file (`--config`) and the current `PATH`, on which the daemon finds the
-harness and configured tools. It installs them in `~/Library/LaunchAgents` or `~/.config/systemd/user` and (re)starts them.
-`--out DIR` only writes the filled-in units; `--no-daemon` leaves the daemon out. Run it again after moving a
-binary or changing `PATH`.
-
-| | macOS (launchd) | Linux, WSL (systemd) |
-|---|---|---|
-| Logs | `~/Library/Logs/ants/nats.log`, `daemon.log`, `channels.log` | `journalctl --user -u ants-nats -u ants-daemon -u ants-channels` |
-| Switch the uplink | `ants leaf config ...`, then `launchctl kill SIGHUP gui/$(id -u)/ants.nats` | `ants leaf config ...`, then `systemctl --user reload ants-nats` |
-| Restart the daemon | `launchctl kickstart -k gui/$(id -u)/ants.daemon` | `systemctl --user restart ants-daemon` |
-| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`, `ants.devtunnel`, `ants.channels`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats` (and `ants-devtunnel`, `ants-channels`), delete the units |
-
-On stop the daemon gets SIGTERM and lets prompts in flight finish for up to 120 s; messages cut off are redelivered.
-launchd agents run while the user is logged in. systemd user units outlive the login session only with
-`loginctl enable-linger $USER`; on WSL, systemd must be enabled (`[boot] systemd=true` in `/etc/wsl.conf`).
-An uplink through a private Dev Tunnel (`--uplink nats-leaf://127.0.0.1:7422`) also needs `devtunnel connect`:
-`--devtunnel ants-hub.<region>` adds a service keeping it running (`ants.devtunnel`, `ants-devtunnel`; log
-`devtunnel.log` on macOS), authorized by the CLI login of the user (`devtunnel user login -g -d`) or, with
-`--devtunnel-token FILE`, by a connect token read from FILE at each start. Both expire; renewal is in
-docs/transport.md, "`devtunnel connect` as a service". Other tunnels, such as `ants bridge connect`, need a service of their own.
-On the hub, `--webhook` adds a service running `ants webhook serve --config ~/.ants/webhooks.toml` (`--webhook-config
-FILE` names another; `ants.webhook`, `ants-webhook`; log `webhook.log` on macOS), see [Webhooks](#webhooks).
-
-## Roster
-
-Each daemon lists each of its ants in the KV bucket `ants_roster`, keyed by ant id: machine, `instance` (an id of the
-daemon run, telling apart daemons on one machine), harness, workdir,
-capabilities, `whoami`, escalation chain (`escalate_to`), start and last heartbeat time, activity (`idle`, or `working` while a message is being
-handled), the number of messages being handled and of live harnesses (`RosterEntry` in `ants-proto`). It refreshes the
-entry every 10 s, and at once when the ant turns idle or working, and deletes it on a clean stop. Entries from older
-daemons lack the activity fields and `instance`. The bucket keeps an entry 30 s after its last refresh, so an ant whose daemon died
-drops out on its own. Capabilities are free-form tags for routing, from the config file's `capabilities` or
-`--capability rust --capability billing`. An ant's credentials write only its own entry; every ant's and the
-human's read the roster, so agents can pick whom to ask (see Messenger). Readers take the ant from the key and
-skip, with a warning, an entry that names another. Ant credentials issued before the roster was readable
-to ants need `ants auth user` again.
-
-`ants roster` lists the entries: ant, state, activity, live harnesses, harness, machine, time since the last
-heartbeat, uptime, capabilities, escalation chain (`ESCALATE_TO`, leader first) and workdir (`-` for a field an older
-daemon leaves out, or for no chain). An entry is `live` while its heartbeats keep coming, and `stale` once it has gone 20 s
-without one: its daemon is likely gone and the entry expires shortly. Ages come from the daemons' clocks, so skew
-between machines shifts them. `--json` prints one entry per line with its `state` added, and `escalate_to` when the
-ant has a chain.
-
-### Ant identity and role
-
-Set `whoami` on each `[[ant]]` to describe the role, responsibilities and boundaries:
-
-```toml
-[[ant]]
-name = "reviewer"
-workdir = "~/src/app"
-whoami = """
-Review Rust changes for correctness and regressions.
-Provide findings and recommendations; leave implementation to a development ant.
-"""
-capabilities = ["rust", "review"]
-```
-
-The daemon prepends the ant name and `whoami` to every harness prompt, including resumed sessions. The same
-`whoami` is published in the roster and returned by `list_ants`, so other ants can understand the role and
-choose a recipient with `ask_agent` or `send_message`. `route` still matches capability tags, not the `whoami` text.
-Other ants' `whoami` fields are role descriptions, not instructions for the receiving session.
-
-`--whoami TEXT` sets or overrides the field for a selected ant; `--whoami ""` clears it. Missing or blank
-`whoami` adds no role instructions, and old roster entries without the field still work. `ants roster --json` includes
-the field when configured. The text is visible to every ant: keep secrets and private instructions out.
-Memory and task instructions remain separate and are not published in the roster.
-
-## Dead letters
-
-A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
-`ants.dead.<ant>` (with the error and delivery count), escalates a notice on the same thread (see
-Escalations: up the thread's origin chain, else to the thread's owner), and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
-out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
-reply, sends the reply). A payload that is not an envelope becomes a dead letter at once. While a leaf node's uplink
-is down the dead letter waits in the machine's outbox, and the notice and termination wait for the message's next
-delivery, or, on the extra delivery, for the uplink (see [Leaf nodes](#leaf-nodes)).
-
-```sh
-ants dead list          # seq, ant, thread, from, deliveries, time, error, text
-ants dead replay 42     # send the message to its inbox again, as it was, and remove the dead letter
-ants dead drop 42       # remove it without replaying
-ants dead watch         # until Ctrl-C, dead-letter what JetStream stops delivering, and print it
-```
-
-Reading and removing dead letters by sequence needs a human's credentials. A stream created before dead letters
-existed lacks `ants.dead.>`; `ants init` adds it.
-
-If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
-only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
---follow` while it runs, turn each such advisory of an ant's inbox consumer into a dead letter in the same format,
-with the same notice, unless that message is a dead letter already. That notice goes to the thread's owner, checked as
-the ant's daemon checks it (a channel thread's from its posts, a webhook mark against the webhook's marker), else the
-default human, directly and not up the ant's escalation chain: the ant's daemon is failing, which no chain member
-can fix, and human credentials cannot follow the escalation the ant keeps in `ants_sessions`. Fetching a message by sequence
-(`STREAM.MSG.GET`) would let an ant read every inbox, so only human credentials hear the advisories; those
-issued before must be issued again with `ants auth user human`. Advisories are core NATS and not stored: one published
-while no watcher runs is lost, and its message stays in the stream unnoticed until it expires.
+- `ants daemon`: serves all ants in `~/.ants/config.toml` (plus built-in `messenger` when enabled).
+- `ants daemon --ant dev-a` (`ANTS_ANT=dev-a`) without `--config`: ignores `[[ant]]` entries in `~/.ants/config.toml` and configures `dev-a` from CLI flags, while still loading `[harnesses.NAME]` definitions from `~/.ants/config.toml` if present.
+- `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`.
+- Per-ant and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant).
 
 ## Harnesses
 
-A harness is a named definition: an executable that speaks ACP on stdio, its arguments, the environment it adds, the
-session mode it must run in and the `context` values it takes. Three are built in:
+A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode and valid `context` options. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
 
-| `--harness` / `harness =` | Runs | Mode | Sign-in |
+| Name | Command | Forced ACP mode | Sign-in |
 |---|---|---|---|
-| `copilot` (default) | `copilot --acp` | its own | `copilot login` |
-| `claude` | `claude-agent-acp`, from `npm install -g @agentclientprotocol/claude-agent-acp` | `default` | `claude login`, or `ANTHROPIC_API_KEY` |
-| `antigravity` | `agy acp --disable-telemetry`, from `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `default` | `agy` once (or `agy acp --login` without a browser), or a Gemini API key |
+| `copilot` (default) | `copilot --acp` | none | `copilot login` |
+| `claude` | `claude-agent-acp` (`npm install -g @agentclientprotocol/claude-agent-acp`) | `default` | `claude login` or `ANTHROPIC_API_KEY` |
+| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` / `agy acp --login` or Gemini API key |
 
-The config file adds others, or replaces a built-in one whole, with `[harnesses.NAME]` tables. Names are lowercase
-letters, digits, `-` and `_`. For example, an independently installed ACP adapter:
+Add new harnesses or replace a built-in whole under `[harnesses.NAME]`:
 
 ```toml
-harness = "my-agent"                       # the default of every ant and of the built-in messenger
+[harnesses.custom-acp]
+command = "~/.local/bin/custom-acp"            # path if containing '/', else resolved on PATH
+args = ["--stdio", "--log-level", "warn"]
+env = { CUSTOM_ACP_TELEMETRY = "off" }         # layered: daemon env < harness env < ant env < --env
+mode = "default"                               # session fails if harness lacks this mode
 
-[harnesses.my-agent]
-command = "~/.local/bin/my-agent-acp"      # required; a bare name is looked up on PATH
-args = ["--stdio", "--log-level", "warn"]  # optional; passed as they are, without a shell
-env = { MY_AGENT_TELEMETRY = "off" }       # optional; added to the daemon's environment
-mode = "default"                           # optional ACP session mode; a session without it fails
-
-[harnesses.my-agent.context]               # optional; the values an ant's `context` may take
+[harnesses.custom-acp.context]
 default = {}
-large = { args = ["--context-window", "1m"] }   # appended to the arguments
-huge = { model_suffix = "-1m" }            # appended to the explicit model ID, as Claude's [1m]
-
-[[ant]]
-name = "dev-c"
-workdir = "~/src/repo-c"
-harness = "my-agent"
+large = { args = ["--context-window", "1m"] }  # appended to launch args
+huge = { model_suffix = "-1m" }                # appended to explicit `model`
 ```
 
-The built-in definitions in this form are in `crates/ants-daemon/src/harnesses.toml`; copying one is the way to
-change a built-in's command or arguments, for example to run a wrapper script.
+- **Claude Code:** forced to `default` mode (`auto` approves tools internally). Built-in read-only tools/commands (`Read`, `Grep`, `ls`, `echo`) and `~/.claude/settings.json` / `.claude/settings*.json` rules still run unasked; loads `CLAUDE.md` and hooks.
+- **Antigravity CLI:** forced to `default` mode (`agentMode` `auto` runs edits/commands unasked). Workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` rules still apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain sign-in requires services to run as the signed-in OS user (logs: `~/.gemini/antigravity-cli/log/`).
 
-- `command` with a `/` is a path: `~` expands to the home directory, and a relative path is relative to the config
-  file. A bare name is looked up on the daemon's `PATH` (or the `PATH` the definition or the ant's `env` sets) when
-  the harness starts.
-- The environment of a harness process is the daemon's, then the definition's `env` over it, then the ant's `env`
-  (and `--env`) over both.
-- `mode` names an ACP session mode in which tool requests reach ants rather than being approved by the harness. Every
-  new and resumed session is switched to it; a harness that does not offer it fails the session. Without `mode`,
-  sessions keep the harness's own mode.
-- Model and reasoning effort are always chosen through the harness's ACP selectors; see
-  [Model, reasoning effort and context](#model-reasoning-effort-and-context). The daemon's MCP server, session resume
-  and the MCP transport are negotiated through ACP as for the built-in harnesses.
-- Unknown keys, an empty `command`, a bad name, or an ant, top-level `harness` or `--harness` naming no definition
-  fail when the file loads.
+### Model, reasoning effort and context
 
-`ants harness check` tests the ACP handshake and `ants harness prompt TEXT` runs one prompt, each with the file's
-top-level harness, or the one `--harness NAME` names; definitions come from `--config FILE` (`ANTS_CONFIG`, default
-`~/.ants/config.toml` if it exists). `ants harness check --harness claude` tests Claude Code.
+Set `model`, `reasoning_effort` and `context` per ant or via `--model`, `--reasoning-effort` and `--context`. The daemon sets `model` before `reasoning_effort` via ACP selectors on new and resumed sessions; unsupported IDs or mismatched read-backs fail the session and list valid options.
 
-Claude Code sessions are switched to its `default` permission mode when they open, since its `auto` mode approves
-tools without asking the client; a Claude Code that does not offer `default` fails the session. Claude Code still
-decides some requests on its own before ants sees them: read-only tools and commands (such as `Read`, `Grep`, `ls`,
-`echo`), and anything its own settings allow (`permissions.allow` in `~/.claude/settings.json` and the workdir's
-`.claude/settings*.json`). It also reads `CLAUDE.md` and runs its own hooks from those settings.
+- **Copilot:** `context` takes `default` or `long_context` (launch flag `--context ...`).
+- **Claude:** `context` takes `default`, or `1m` with an explicit `model` (selects exact `<model>[1m]` variant). A `model` already ending in `[1m]` must omit or match `context`.
+- **Antigravity:** no `context` table; pick a model with the desired window.
 
-Antigravity CLI sessions are likewise switched to its `default` mode, since its saved `agentMode` (Auto unless set)
-runs edits and commands it deems safe without asking the client. Its own rules still decide some requests first: the
-allow and deny rules in `~/.gemini/antigravity-cli/settings.json`, and reads and edits inside the workspace. It reads
-`GEMINI.md` and `AGENTS.md`. Sign-in is kept in the OS keychain, so a daemon running as a launchd or systemd service
-must run as the user who signed in. Its logs are in `~/.gemini/antigravity-cli/log/`.
+`context` selects a provider-native tier/window; `ants` never truncates or compacts history.
 
-## Tool permissions
+### Prompt limits and spending caps
 
-When a harness asks to run a tool, the daemon answers from the ant's allowlist (`--allow RULE`, repeatable, or
-`allow = [...]` in the config file). A rule is `*`, an ACP tool kind (`read`, `edit`, `delete`, `move`, `search`,
-`execute`, `think`, `fetch`, `switch_mode`, `other`), or `<kind>:<pattern>`, where `*` in the pattern stands for any
-run of characters:
+Per-prompt limits default to `prompt_timeout = "30m"` (includes approval wait; `"0"` disables) and `max_tool_calls = 300` (`0` disables). Optional spending caps bound tokens or cost per thread (`max_thread_tokens`, `max_thread_cost`) and per ant per UTC day (`max_daily_tokens`, `max_daily_cost`).
 
-| Rule | Allows |
-|---|---|
-| `read` | every read |
-| `execute:cargo test*` | commands starting with `cargo test`; a command with `;`, `&`, `\|`, `<`, `>`, a backtick or `$(` never matches |
-| `edit:src/*` | edits under `<workdir>/src`; relative patterns never match outside the workdir |
-| `edit:/home/me/notes/*` | edits matching the absolute path |
-| `fetch:https://docs.rs/*` | fetches of matching URLs |
-| `other:bd-*` | other tools, such as MCP tools, by title |
-| `other:send_message` | the daemon's own messaging tool (see MCP tools) |
+Crossing a limit or cap cancels the prompt via ACP `session/cancel` (restarting the harness after 30s if hung), returns partial output plus an `[ants]` notice, and escalates agent-originated threads (reason `cap`). Further agent messages on a capped thread escalate immediately without prompting.
 
-Allowed requests are answered "allow once". Every other request goes to the humans: the daemon publishes an
-`ApprovalRequest` to `ants.approvals.<ant>` (kept in the stream), sets the thread's status to `waiting_approval`,
-and waits `--approval-timeout` (default 5m) for an `ApprovalDecision` on `ants.approvals.<ant>.<request id>`.
-Only human credentials may publish decisions there. The verdict is `allow_once`, `allow_always` (the harness
-remembers it for the session) or `reject`; no decision in time rejects the request.
+- Per-prompt limits reset every prompt.
+- Thread allowances reset on any human message on the thread, and once per escalation level when the level's leader replies.
+- Daily allowances reset at 00:00 UTC (or on daemon restart with a higher cap).
+- Spending uses ACP `usage_update` cost and prompt token totals stored at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude's adapter reports both at turn end; Copilot CLI reports neither (so only prompt limits trigger); Antigravity reporting is unverified.
 
-An ant with an `escalate_to` (see Escalations) also sends the request to every ant of that chain, in its inbox
-on the request's thread, as an `[ants]` notice showing the tool call, its files and its input, and carrying an
-`approval` escalation with the request id. Any of them may decide it with the MCP tool `decide_approval` while handling
-that notice; the decision goes to the requesting ant's inbox, `ants.inbox.<ant>.<decider>`. The ant takes
-such a decision only from an ant of its own `escalate_to` and only while the request waits: decisions from anyone
-else, for another request or arriving late are acked and ignored, and none is ever prompted with. The first decision
-wins, whether a human's or an agent's: an agent's loses to a human's already stored when it arrives. The request does
-not climb past the ant's own chain, and the time limit stays the same: the `escalate` tool refuses to send it higher,
-and no member leads it, so a member's reply to the notice goes to the requesting ant as any reply. Without a chain
-only humans decide.
-`ants tools` reads such decisions back from the requesting ant's inbox in the stream (human credentials read every
-inbox) and takes them as the ant does: from an ant of its `escalate_to` (its roster entry's, else the one kept in
-`ants_chains`), on one of its own requests, sent before the request expired, and stored before any human's decision. A
-request so decided is no longer listed, shows `answered allow-once by lead`, and answering it is refused with
-`request dev-a/019a7d2e-... was already answered by lead: allow-once`. A human answering in the moment between that
-check and an agent's decision still stores a decision the ant may not act on: the ant takes the first one.
-`--allow-tools` is `--allow '*'`, for trusted, sandboxed workdirs only. `ants harness prompt` rejects every tool request.
+## Roster, identity and memory
 
-```sh
-ants tools list                            # pending requests: ant/id, thread, tool, files, options, time left
-ants tools list --follow                   # then keep printing new ones until Ctrl-C (--json: one request per line)
-ants tools show dev-a/019a7d2e             # one request in full, with the tool input; a unique start of the id will do
-ants tools approve dev-a/019a7d2e          # allow it once (allow-once)
-ants tools approve dev-a/019a7d2e --always # allow it for the rest of the session (allow-always), when offered
-ants tools reject dev-a/019a7d2e           # reject it
-ants watch 'ants.approvals.>'              # requests and humans' decisions as they come
-```
+Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count), refreshing every 10s and on activity transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
 
-A request is named `<ant>/<id>`. Ids are unique only per ant, as any ant may publish a request reusing
-another's id, so the ant picks among requests sharing an id. A bare id (or start of one) still works when it
-matches a single request; when it matches several, the command lists their `<ant>/<id>` names and answers none.
+### Identity, memory and task tracking
 
-A request is pending until it has a decision or expires; both requests and decisions are read back from the stream,
-without consuming anything, so every human sees every request, including those made while no CLI was running.
-Answering stores the decision in the stream before returning, and refuses a request already answered, an expired one,
-or a verdict the harness did not offer. The decision is stored only while the request's decision subject holds none
-(`Nats-Expected-Last-Subject-Sequence`), so when two humans answer at once, the first decision wins and the second
-human is told the request was already answered. The ant acts on the decision stored, which it reads back from the
-stream with a direct get once it hears one, not on the first it hears: core NATS still delivers a publish the stream
-refuses. On a stream from before direct gets, or with credentials from before them, the ant takes the first
-decision it hears and logs a warning; `ants init` and new credentials from `ants auth user` fix that. A request
-belongs to the ant its subject names; one whose body names another ant is skipped with a warning, so it is
-neither listed nor answerable.
+- `whoami` (`--whoami TEXT`, `--whoami ""` clears): role description and boundaries prepended to every prompt (including resumed sessions) and published in `ants_roster` and `list_ants` so peers can pick recipients. Visible to all ants; keep secrets out. `route` matches `capabilities` tags, not `whoami`.
+- `memory` and `tasks` (`--memory TEXT`, `--tasks TEXT`): optional tool-agnostic instructions prepended to every prompt and kept private (not published in the roster). `ants` initializes no external tool state automatically.
+- `env` (`--env NAME=VALUE`, repeatable): literal environment overrides passed to the harness, hooks and tool subprocesses. Use absolute paths to isolate per-ant state.
 
-## MCP tools
-
-Every harness session gets the daemon's MCP server, named `ants`, in ACP `session/new` and `session/load`. Its tools
-speak as the ant, on the thread the session serves:
-
-| Tool | Does |
-|---|---|
-| `send_message(to, text, thread?)` | Sends to another ant or `human` and returns once JetStream has stored it. `thread` omitted: the current thread; `new`: a fresh one; else that thread id. |
-| `ask_agent(to, text, timeout_secs?)` | Sends on the current thread and waits for the reply (default 300 s, at most 1800), which it returns. |
-| `check_inbox(all_threads?)` | Returns, once each, replies to `ask_agent` calls that arrived after the call gave up; this thread's only unless `all_threads`. |
-| `list_ants(capability?)` | Lists the other ants in the roster with `whoami`, capabilities, harness, machine and activity (idle or working); only those advertising `capability` when given. |
-| `route(capability, text, wait?, timeout_secs?)` | Sends the request to an ant, other than the caller, whose capabilities include `capability` (whole tag, any case): live before stale, idle before working, fewest messages in hand, then first by name. Waits for the reply and returns it like `ask_agent`, or with `wait: false` returns once sent like `send_message`. |
-| `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
-| `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
-| `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
-| `post_channel(channel, text)` | Posts to `channel` (`ops` or `#ops`) a top-level post starting a new thread, which the ant creates (see Channels): it has no owner and the turns the message being handled leaves, one fewer unless that message is a human's, refused when none are left. `@ant` wakes that member only; a mention of a human member notifies that human's inbox. Only a member or the messenger of the channel may post. Returns the new thread and whom the post wakes or notifies. |
-| `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | Changes a channel the ant owns through the channel manager (see [Channel owners](#channel-owners)): `add` and `remove` list members, ants or humans (each ant added must be in the roster), `messenger` sets the messenger, an ant in the roster, `clear_messenger` gives back the default one. Returns the changes and the channel, or why the channel manager refused. With only `channel` it shows the channel; with nothing it lists the channels the ant owns. |
-| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the thread's origin chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
-
-Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
-from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
-same budget and owner). `ask_agent` also needs a turn left for the reply, and a session may not message its own ant.
-The tools work only while a message is in progress on the thread.
-
-A reply to `ask_agent` reaches the waiting call through a live subscription to the ant's inbox (and to what the
-hub's stream republishes of it, see [Leaf nodes](#leaf-nodes)), while the inbox consumer still holds it back behind the
-prompt that asked. When the consumer delivers it later, the daemon acks it
-without prompting, or keeps it for `check_inbox` when the call gave up (also across restarts: asks waiting for a reply
-and late replies are kept in `<home>/mcp.json`). Until `check_inbox` takes them, each later prompt on the thread starts
-with a line counting its late replies. Only a reply from the ant asked counts; any other message is a prompt as
-usual.
-
-The server listens on `127.0.0.1` on a free port (streamable HTTP, stateless) and on the Unix socket
-`<home>/mcp.sock` (mode 0600). The sessions of each thread get their own bearer token, which tells the daemon the
-calling thread; requests without a known token get 401. Harnesses whose ACP `mcpCapabilities` lack `http` get a stdio
-server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
-socket: one small process per session, only for those harnesses. Tool requests go through the ant's allowlist like
-any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_ants`, `other:route`,
-`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:post_channel`, `other:escalate`,
-`other:manage_channel`, or `other`). Ant credentials issued before the MCP tools existed lack the subscription to the
-ant's own inbox; issue them again with `ants auth user`.
-
-## Messenger
-
-`ants ask` without `@ant` goes to the ant `messenger`. The messenger is an ant like any other, served by
-`ants daemon`, whose job is to route: it finds the ant for a request by the capabilities in the roster, with
-`list_ants` and `route`, and answers with that ant's reply.
-
-A daemon serves a built-in messenger unless its config file sets `messenger = false` or lists an ant named
-`messenger`. It runs on the file's top-level `harness` (default `copilot`), with that harness's default
-model, reasoning effort and context and the settings of an ant that sets nothing else: no allowlist, capabilities
-or `whoami`, the file's `nats` and `js_domain`. Its home and workdir are `~/.ants/messenger`, created on start, and its
-credentials `~/.config/ants/auth/messenger.creds` (`ants auth user messenger`) when that file exists; with no other
-ant served, `--creds` (`ANTS_CREDS`) fills in otherwise. One messenger keeps one session store, so a daemon serves
-the built-in messenger only while it holds the messenger's roster entry. It does not start while the roster lists a
-messenger of another daemon, on another machine or the same one: it checks the roster every 10 s and starts once that
-entry is gone, deleted on a clean stop or expired 30 s after its daemon's last heartbeat (so a restart after a crash
-waits that long). Of two daemons starting at once, one claims the roster entry and the other waits. Its heartbeats put
-the entry only over its own, and it watches the entry: once another daemon puts it, such as one serving an ant
-named `messenger`, the built-in messenger takes no more messages, finishes the prompts in flight, hands the messages
-waiting back for redelivery and waits again, to take over once the other stops. An ant named `messenger` in the
-file replaces the built-in one and starts without the check.
-
-The messenger's MCP server instructions say what to do; an ant `messenger` with a workdir holding an `AGENTS.md` (or
-the harness's own instructions file) along these lines makes it firmer:
-
-```toml
-[[ant]]
-name = "messenger"
-workdir = "~/.ants/messenger-work"          # holds AGENTS.md below
-creds = "~/.config/ants/auth/messenger.creds"
-allow = ["other:list_ants", "other:route", "other:ask_agent", "other:send_message", "other:check_inbox"]
-```
-
-```markdown
-This agent is the messenger of an ants team. It routes each request instead of doing the work itself.
-1. Decide which capability the request needs; `list_ants` shows who advertises what.
-2. Call `route` with that capability and the request, and answer with the reply.
-3. A request needing several capabilities gets one `route` per capability; combine the replies.
-4. When no ant has the capability, say so and name the capabilities there are.
-```
-
-In channels the messenger triages the posts of humans and webhooks that mention nobody (see Channel delivery).
-
-`route` picks deterministically from the roster entries of the ants with the tag: a `live` entry before a `stale` one
-(see Roster), then an idle ant before one of unknown activity (an older daemon) and one working, then the fewest
-messages being handled, then the first by name, so the same roster at the same moment always routes the same way;
-`list_ants` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
-and `send_message`. Every ant gets these tools, not only the messenger.
-
-## Thread notes
-
-A thread is one conversation, named by its id (`ants ask` and `ants post` print it); its messages share a turn budget
-and an owner. On a thread:
-
-- **Directed messages** go to one named recipient's inbox and prompt that recipient only: `ants ask @ant` (the
-  messenger without `@ant`), `ants ask --thread <thread>` to continue the thread, and the `send_message`,
-  `ask_agent` and `route` tools between ants. The thread's other ants neither see nor answer them.
-- **Thread notes** are one passive shared board per thread, where the ants on it coordinate before the work starts.
-  A post there notifies and wakes nobody: an ant sees the notes only when it calls `read_notes` (or a human runs
-  `ants notes <thread>`). So one ant posts a proposal with `post_notes`, asks the others with directed messages
-  (`ask_agent`, `send_message`) to read it with `read_notes` and post their part, and so on.
-
-Thread notes are no group chat: for a named group of ants whose posts wake the members they concern, see
-[Channels](#channels). Nor are they the execution plan an ant reports while it works, which `ants watch <ant>` shows.
-Posts go on `ants.notes.<thread>.<from>` and are kept in the stream like messages.
-
-Posts spend the thread's turn budget like messages between agents. Each post carries the turns the notes have left: one
-less than the lower of the budget of the message its ant is handling and what the last post left. The post
-that spends the last turn escalates the thread (see Escalations): its ant sends a notice on the thread with the
-last post up the thread's origin chain, else to the owner, and the notes refuse further agent posts until a human
-posts there or the escalation goes up a level of a chain, which posts there with a fresh budget, once per level. Two
-ants spending the same turn cannot both succeed: a post states the notes' last message it saw
-(`Nats-Expected-Last-Subject-Sequence`, nats-server 2.11 or later), and the loser reads the notes again.
-
-```sh
-ants notes <thread>                     # the notes' posts: time, author, turns left, text
-ants notes <thread> "ship friday"       # post as the CLI's human, which gives the notes a fresh budget (8 turns)
-ants watch 'ants.notes.>'               # the notes of every thread, live
-```
-
-An ant's daemon reads the notes back through the ant's own consumer, `notes-<ant>`, created for the read and
-deleted after it; `ants notes` with an ant's credentials takes a free spare of it instead (`notes-<ant>_1` to
-`notes-<ant>_3`, waiting for one when all are taken), so it never gets in the way of the daemon's read or of another
-`ants notes`. Credentials allow these consumers to filter notes subjects only. A human reads the notes by fetching the
-posts one by one (`STREAM.MSG.GET`, with no consumer), so any number of `ants notes` read at once. Ant and human
-credentials issued before thread notes, and ant credentials issued before the spares, need `ants auth user` again (and
-leaf uplinks issued before the spares `ants auth leaf`).
-
-## Channels
-
-A channel is a named group of ants and humans, like a Slack channel: humans post to it, each as the CLI's human (see
-[CLI](#cli)), and the ant members a post concerns wake up and answer in the channel, on the post's thread; the human
-members it @mentions find it in their inbox.
-
-```sh
-ants channel create ops --member dev-a,dev-b --messenger triage   # fails if #ops exists
-ants channel add ops dev-c                     # more members
-ants channel add ops alice                     # a human member: its @mentions reach alice's inbox
-ants channel remove ops dev-a
-ants channel set ops --member dev-b,dev-c      # replace the members; --messenger ANT sets the messenger
-ants channel set ops --default-messenger       # the default messenger `messenger` triages again
-ants channel set ops --owner lead              # lead manages the members and the messenger; --no-owner ends that
-ants channel list                              # channels, members, messenger and owner
-ants channel delete ops                        # the posts stay in the stream
-
-ants post '#ops' "@dev-b the deploy failed"    # wakes dev-b only; prints the new thread
-ants post ops "who owns billing?"              # no @mention: the messenger triages it
-ants post ops --thread <thread> "any news?"    # on an existing thread
-ants post --wait ops "status, anyone?"         # then print the first answer on the thread and exit
-ants post -f --timeout 10m ops "deploying"     # then print each post on the thread as it arrives, for 10 minutes
-ants channel read ops                          # posts by thread (--thread T, --limit N for the last N threads)
-ants watch 'ants.chan.>'                       # every channel, live
-```
-
-`#` before the channel name is optional; quote it, as shells take an unquoted `#` for the start of a comment.
-
-**Mentions.** A post that @mentions ants wakes only those of them that are members of the channel. A post that
-@mentions a human member other than its author puts a notice in that human's inbox, from the post's author (a
-webhook's through the channel's messenger) with its text, channel and thread (see [Human members](#human-members)); it
-prompts no agent. `ants post` warns about a mention of a user that is not a member, which reaches nobody. An agent's post that @mentions nobody wakes nobody.
-
-**Messenger triage.** A post of any human or webhook (see [Webhooks](#webhooks)) that mentions nobody goes to the
-channel's messenger: the ant
-`--messenger` names, else the default ant `messenger` (`ants channel list` shows `messenger (default)`, and
-`ants channel set --default-messenger` goes back to it). The messenger decides which members the post concerns and
-wakes them by @mentioning them in a post on the thread. The messenger need not be a member.
-
-**Threads.** A post that starts no thread (no `--thread`) starts a new one, named after the post's own id, which `ants
-post` prints. The ants a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
-too. A thread's owner is the human whose post started it, else the first human to post on it (or the `owner` of the
-webhook that started it): each post carries it as `owner`, but daemons and `ants post --thread` take it from the
-thread's posts kept in the stream, not from what a later post says, so no ant can name or change it; both take a
-top-level post marked `webhook: true` as a webhook's only from a sender with a webhook marker (see
-[Webhooks](#webhooks)) or a human. An ant can start a thread too, with the MCP tool `post_channel` or `ants post` under
-its own credentials, in a channel it is a member or the messenger of: the thread has no owner until a human posts on
-it, and the ant is its `creator`, which every later post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
-post, whatever that post or a later one says, and never a human, a webhook or the channel manager. A daemon takes the
-`owner` and `creator` of a message an ant sends on the thread from the thread's posts too. A message an ant sends
-from the thread on another one (`send_message` with `thread`) links back to it as `origin_thread`, and so do the
-replies and messages on or from that thread: a daemon takes the `creator` of an ant's message on a thread no channel
-post started from the channel thread it links to, only when the sender is a member or the messenger of that thread's
-channel and has a post on the thread or was woken by one there, or when an ant that does passed the link on to the
-sender, directly or through other ants. Each daemon records the links its ants pass on (a message from them carrying
-`origin_thread`, escalations and their notices included) in the KV bucket `ants_links`, under
-`<sender>.<channel thread>.<recipient>`, keys only the sender's credentials write, before sending the message; the
-receiving daemon follows these records back from the sender, through at most 32 ants, to one
-taking part in the thread. Otherwise it drops the `creator`: a message started that thread, or the ant made the
-`creator` or the link up. So an ant woken on the thread passes its creator on to the ants it messages from there, and
-they to the ants they message in turn, while no ant outside the thread can claim a link no linked ant passed on
-to it. A link recorded expires after 30 days. While the machine's uplink is down, the machine's outbox keeps the
-link, as it keeps the message (see Leaf nodes), and while `ants_links` does not exist (`ants init` creates it) only an
-ant taking part in the thread passes its creator on. An escalation on
-a thread an ant created goes up the creator's chain, whichever ant gets stuck (see Escalations), and on a thread spun
-off it, the escalation links back to it too, so chain members answering or escalating further keep the creator. `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
-on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
-`ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
-
-**Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
-turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the thread's
-origin chain, else to its owner) when none are left. A thread an ant starts gets the turns the message the ant handles
-leaves. So the agents one post wakes spend from the same turns, and agents
-mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns), and so does the
-answer of the escalation's leader, once per level: the ant that got stuck posts its answer to it back on the thread,
-carrying the fresh budget. `ants watch` shows the turns the thread has left after each post.
-
-**Channels and thread notes.** Thread notes ([Thread notes](#thread-notes)) are passive boards attached to one thread: a
-post there wakes nobody, and an ant reads the notes only when asked to. A channel is the other way round: a post
-wakes the members it @mentions, or the messenger, and replies come back to the channel.
-
-**Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
-them back by fetching the channel's posts one by one (`STREAM.MSG.GET`, with no consumer), so any number of `ants
-channel read`, `ants post --thread`, `ants dead watch` and `ants inbox --follow` read at once without getting in each
-other's way (with an ant's credentials, through a spare of the ant's reader as below), and drops a post whose sender or
-channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and messenger are an
-entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials and the channel manager's
-write (see [Channel owners](#channel-owners)):
-`create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else changed it
-since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a warning (`set`,
-`add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning rather than a
-refusal, as their daemon may start later. A registered human may be a member, never the messenger or the owner.
-
-### Channel owners
-
-A human may make an ant a channel's owner: `ants channel create --owner ANT` or `ants channel set --owner ANT`
-(`--no-owner` takes it back). The owner adds and removes the channel's members and sets or clears its messenger with
-the MCP tool `manage_channel`; only humans change the owner, and humans keep changing every channel with
-`ants channel` as before, owner or not. An owner changes nothing else: who a post wakes, thread owners and
-escalations stay as they are.
-
-| | Members, messenger | Owner | Create, delete |
-|---|---|---|---|
-| Human (`ants channel`) | yes | yes | yes |
-| Owner ant (`manage_channel`) | through the channel manager | no | no |
-| Other ant | no | no | no |
-
-Ants never write `ants_channels`. The owner's daemon sends each change as a request on
-`ants.chanadm.<channel>.<ant>`, which an ant's credentials publish only under its own name, to the channel manager,
-`ants channel serve`. The channel manager reads the channel's entry, refuses the request unless the requesting ant is
-its owner, checks that each member added is a human or an ant in the roster and that the messenger is an ant in the
-roster, never a human, and stores the change
-only if the entry has not changed since it was read, checking the owner again on each retry. It answers only on the
-requester's own reply subjects (`_INBOX.<ant>.`), drops requests older than 60 s, and gives a request it has already
-answered the same answer again. `manage_channel` asks again every 2 s, for 10 s at most; when no channel manager
-answers, it says so, and a human can make the change with `ants channel`. A change applied is announced in the
-channel, on a new thread, by the reserved user `channel-manager` (`ants.chan.<channel>.channel-manager`):
-"lead, the channel's owner, changed #ops: added dev-c." The announcement mentions nobody, so it wakes nobody; members
-see it among a thread's posts. No ant or human may take the name `channel-manager`: `ants add` and `ants auth` refuse
-it.
-
-An owner ant learns of its channels from `manage_channel` without arguments, which lists them, and from the prompt
-of each post in a channel it owns, which ends with a line saying so.
-
-Setting up the channel manager, on one machine where no ant runs, such as the hub:
-
-```sh
-ants auth channel-manager --js-domain hub     # ~/.config/ants/auth/channel-manager.creds
-ants --creds ~/.config/ants/auth/channel-manager.creds channel serve
-scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # or as a service
-```
-
-Several channel managers may run at once: they share the requests (a queue group), and the compare-and-set keeps
-their writes apart. `ants auth channel-manager` credentials allow hearing `ants.chanadm.*.*` and answering each
-request once, reading the roster and `ants_humans`, reading and writing `ants_channels`, and posting on
-`ants.chan.*.channel-manager`, nothing else.
-
-An `ants channel set`, `add` or `remove` of a version before owners rewrites the entry without its `owner`, so the
-channel loses its owner: upgrade every human's CLI before giving channels owners.
-
-### Channel delivery
-
-A daemon takes every channel post through its ant's durable consumer `chan-<ant>` (filter `ants.chan.>`),
-with the same guarantees as its inbox: the posts of one thread are answered in order and different threads
-concurrently, an attempt is marked in `ants_attempts`, a post is acked only once its reply is stored, and a post whose
-last attempt fails becomes a dead letter on `ants.dead.<ant>`, with a notice escalated on the post's thread (see
-Escalations). The
-consumer starts at the posts stored from its creation on, so an ant's first start does not answer the channels'
-history. The daemon watches `ants_channels` for the members of each channel, skipping an entry whose channel disagrees
-with its key.
-
-A post prompts an ant only when it @mentions it and the ant is a member of the channel, or when the ant is
-to triage it (below). The rest are acked without a prompt: posts in other channels, the ant's own, posts that
-mention only others or nobody. A malformed post, or one whose `from` or channel disagrees with its subject, is dropped (terminated, no dead
-letter). A prompt starts with the posts on its thread that the ant has not been shown yet, oldest first, without its own: those
-since the last post it answered on the thread, or since the thread started. At most 50 are shown, with a count of the
-older ones left out. The stream sequence of the last post answered is kept per thread under
-`<ant>.<thread>.seen` in `ants_sessions`, so a restarted daemon goes on from there.
-
-The final answer is posted to the same channel and thread on `ants.chan.<channel>.<ant>`, replying to the post. An
-@mention in it wakes only members of the channel. Every agent's post spends one turn of the thread's budget: each post
-carries the turns the thread has left after it, and the daemon reads the posts stored on the thread after the one it
-answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's, which
-gives a fresh budget. A post that reaches an ant with no turns left is not prompted, and an answer whose thread ran
-out of turns during the prompt is not posted: either way a notice on the thread with the post, and the unposted answer if
-any, escalates as in the inbox: up the thread's origin chain, else to the thread's owner, else the default human
-(`ants.inbox.<human>.<ant>`). The leader's reply to such an escalation gives the thread its fresh budget in the
-channel: the ant's answer to it is posted to the thread (not sent to the leader's inbox) with 7 turns left after it,
-so the members it @mentions, and later posts, go on from there. The channel is kept with the thread's escalation in
-`ants_sessions`; a message the leader sends with `ask_agent` or `send_message` is answered in its inbox as before.
-Replies racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it. Spending
-caps apply as to inbox messages.
-
-A post of any human (`human` or one `ants_humans` lists) or webhook (a post carrying `"webhook": true`, see
-[Webhooks](#webhooks)) that mentions nobody prompts the channel's messenger instead:
-the ant its entry assigns, or else `messenger` (built in or configured), a member or not. Its prompt adds the triage
-rules of ants and lists the channel's members with their capabilities and `whoami` from the roster, members missing from
-the roster as offline; the messenger's own instructions add to the rules. It answers on the post's thread with a short
-post that @mentions the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it
-does not answer the request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any
-agent's post. Its mentions wake ant members and notify human members only: a mention of a non-member stays in the
-post's `mentions` but reaches nobody. Triage takes only posts that mention nobody: a post that mentions anyone, a human
-only included, goes to no messenger.
-
-### Human members
-
-A human member has no daemon and no channel consumer: a post that @mentions it, other than its own, puts one envelope
-in its inbox (`ants.inbox.<human>.<author>`), kept until `ants inbox` reads it, with no CLI running meanwhile. The
-envelope is from the post's author, on the post's thread, with the post's text and `mention: {channel, post}`;
-`ants inbox` shows it as `<author> mentioned <human> in #<channel> on thread <thread>`, with the `ants post` that
-answers on the thread. A webhook's notice is from the channel's messenger instead, with `mention: {channel, post,
-author}` naming the webhook, shown as `<webhook> mentioned <human> in #<channel> on thread <thread> (relayed by
-<messenger>)`. It spends no turn and names no owner or creator. A mention of a human who is not a member, or of
-a human by a post to another channel, notifies nobody.
-
-The author's side sends the notices. An ant's daemon sends those of the ant's own posts (from `post_channel`, its
-answers on a thread, `ants post` under the ant's credentials) when its consumer `chan-<ant>` takes the post, before
-acking it, re-reading the channel's entry when a mentioned human is not a member yet; a failure naks the post, which is
-taken again, so an offline hub or a restart loses no notice. Each notice has the JetStream msg id
-`mention.<post>.<human>`, and once stored the daemon keeps a marker under `<ant>.mention.<seq>.<human>` in
-`ants_sessions` (expiring with the stream), so a post taken again, within JetStream's duplicate window or after it,
-notifies each human once. A human's `ants post` sends the notices of its post after storing it, with the same msg ids.
-A webhook's credentials publish only to its destination, so the daemon of the channel's messenger (the assigned one,
-else `messenger`, member or not) sends the notices of a webhook's post when its consumer `chan-<messenger>` takes it,
-the same way, with the same msg ids and markers under `<messenger>.mention.<seq>.<human>`. Only a post whose author
-has its webhook marker (see [Webhooks](#webhooks)) counts as a webhook's: an ant that marks its post as a webhook's
-has its own daemon send its notices. While no daemon of the messenger runs, the notices wait in its consumer, as its
-triage does; a messenger changed while a post waits may notify twice past JetStream's duplicate window, or not at
-all.
-
-## Webhooks
-
-`ants webhook serve` takes events from outside services (CI, monitoring, GitHub) over HTTP and delivers each to one
-ant's inbox or one channel, on a new thread. Each `[[webhook]]` of `~/.ants/webhooks.toml` (`--config FILE`) is its
-own NATS user, sending as itself and only to the destination its credentials allow; the request cannot choose another.
-The server speaks plain HTTP on `127.0.0.1:8424` (`listen`, or `--listen`), for the TLS-terminating reverse proxy of
-the hub (Caddy: `handle /hooks/* { reverse_proxy 127.0.0.1:8424 }`), and takes `POST /hooks/<webhook>` (`path`).
-
-```toml
-# ~/.ants/webhooks.toml
-# listen = "127.0.0.1:8424"
-# path = "/hooks"
-# nats = "nats://127.0.0.1:4222"         # else --nats; the hub, or a leaf node (see below)
-# js_domain = "hub"                      # else --js-domain
-
-[[webhook]]
-name = "github"                          # POST /hooks/github, sending as the user github
-creds = "~/.config/ants/auth/github.creds"   # from `ants auth user github --webhook --to dev-a`
-auth = "hmac-sha256"                     # X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body>
-secret_file = "~/.ants/github.secret"    # mode 0600; or secret_env = "VAR"
-id = "header:X-GitHub-Delivery"          # or "json:/pointer", default "body-sha256"
-ant = "dev-a"
-owner = "alice"                          # the threads' owner, a human; default none
-text = "GitHub {header:X-GitHub-Event} on {json:/repository/full_name}\n\n{body}"
-
-[[webhook]]
-name = "alerts"                          # `ants auth user alerts --webhook --channel ops`
-creds = "alerts.creds"                   # relative to this file's directory
-auth = "bearer"                          # Authorization: Bearer <secret>
-secret_env = "ANTS_ALERTS_TOKEN"
-id = "json:/alert/id"
-channel = "ops"
-# mention = ["dev-a"]                    # wake these members; or broadcast = true: every member
-```
-
-- **Authentication** comes first: `hmac-sha256` checks the signature in `signature_header` (default
-  `X-Hub-Signature-256`, `sha256=<hex>`) against the raw body, `bearer` the `Authorization` header, both in constant
-  time. A failure answers 401 and touches nothing. The secret comes from `secret_env` or a `secret_file` only its
-  owner may read.
-- **Answers**: 202 with `{"thread": ..., "duplicate": false}` once the hub's stream stored the event; 200 with
-  `"duplicate": true` for an event already delivered; 503 with `Retry-After` while NATS is unreachable or does not
-  store it, as nothing is kept locally; 400 for a body the `id` or `text` cannot read (not JSON, no id), 413 past
-  256 KiB, 415 for a `{body}` that is no UTF-8 text, 404 for an unknown webhook, 405 for a method other than
-  `POST`. Requests are limited to 15 s and to 64 at once (503 beyond).
-- **Retries** deliver nothing new for 7 days: the event's id is kept in the KV bucket `ants_webhooks` (`ants init`
-  creates it) under the webhook's name, and the stream also drops a repeated `Nats-Msg-Id`
-  `webhook.<webhook>.<hash>` for 2 minutes.
-- **Marker**: before delivering, and again each day it delivers, `ants webhook serve` puts the webhook's marker,
-  `<webhook>.webhook` in `ants_webhooks`. Only the webhook's credentials write it, and daemons honour `webhook: true`
-  on a message or channel post only from a sender with a marker there (or a human): from an ant, the message is an
-  ant's, and the answer goes back to its inbox; the post is an ant's too, so the messenger does not triage it, and a
-  thread it starts has the ant as its `creator` and no owner until a human posts on it, as `ants post --thread` also
-  reads it. A webhook served by a CLI from before the marker has its answers sent to its own inbox, which nobody
-  reads, until the CLI is upgraded.
-- **Text**: `text` is a template, default `[webhook {webhook}] {id}` and the body. `{body}`, `{id}`, `{webhook}`,
-  `{header:Name}` and `{json:/pointer}` (a JSON string unquoted, a missing field empty) are replaced; `{{` and `}}`
-  are literal braces. The text is untrusted input for the ant's prompt: give a webhook a destination whose tools
-  and approvals suit what outsiders can write.
-- **Mentions** are never read from the event. A channel post mentions nobody by default, so the channel's
-  messenger triages it, as a human's post (see [Channels](#channels)); `mention` lists the members it wakes, and
-  `broadcast = true` mentions every member of the channel when the event arrives. A human member it mentions gets a
-  notice through the channel's messenger (see [Human members](#human-members)).
-- **Threads**: each event starts a thread, owned by `owner` if set. A webhook is no human: its posts never renew the
-  turn budget, and escalations on its threads go to `owner`, else the daemon's default human. An ant's reply to a
-  webhook's message goes to `owner` as a reply to a human, else nowhere: the daemon only logs it. A channel's thread
-  keeps the conversation.
-
-Credentials: `ants auth user NAME --webhook` with `--to ANT` or `--channel CHANNEL` (repeatable) issues a webhook's
-(`Permissions::for_webhook`): it publishes only to its destinations and its own keys in `ants_webhooks`, reads only
-those keys and its channels' entries (for `broadcast`), and writes neither channels nor humans. The name `human` is
-refused; `ants webhook serve` refuses credentials naming another user, a human's, or ones without the configured
-destination. A webhook joins no roster and needs no `ants_humans` entry. Its messages and posts carry `webhook: true`,
-so readers never take them for a human's, even when a human goes by the same name. Ant and human credentials read the
-webhooks' markers by direct get (`$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.*.webhook`), none of their
-events; credentials and leaf uplinks issued before the marker lack it, and need `ants auth user` and `ants auth leaf`
-again: until then their daemons send no answer to a webhook's `owner`, and `ants post --thread` on a webhook's thread
-takes the webhook for the thread's `creator` and the posting human for its owner.
-
-Behind a leaf node, issue the leaf's uplink with the webhook too, `ants auth leaf MACHINE --webhook NAME`, after its
-credentials (see [Leaf nodes](#leaf-nodes)). Events cross to the hub as they arrive, without the leaf's outbox: while
-the uplink is down the server answers 503 and the source retries.
-
-```sh
-ants auth user github --webhook --to dev-a --js-domain hub   # on the machine holding the team directory
-ants init                                                   # once, as a human: creates ants_webhooks
-ants webhook serve                                          # or scripts/install-units.sh --webhook, see Services
-```
-
-## Ant memory
-
-Memory and task tracking are optional and tool-agnostic. ants does not initialize a tool workspace, run setup or
-context-loading commands, or require bd. Install and configure any CLI or MCP tools through the harness as usual.
-
-Set `memory` and `tasks` independently on each `[[ant]]` to describe which tools to use and how. Both default to
-unset. Their text is prepended to every prompt, including prompts in resumed sessions; it is guidance to the agent,
-not commands the daemon runs. An empty string clears that role's instructions. Configured tools still follow the
-normal harness permissions and the daemon's tool permissions (see [Tool permissions](#tool-permissions)).
-
-The ant's `env` map overrides the harness's inherited environment, including for hooks and tool subprocesses.
-Values are literal: `~`, `$HOME` and relative paths are not expanded or resolved by the daemon. Use absolute paths
-for ant-local data; sharing a path shares the tool's state across ants. The ant's `home` holds the daemon's own files
-for that ant, and does not configure external tools.
-
-The equivalent flags are `--memory TEXT`, `--tasks TEXT` and repeatable `--env NAME=VALUE`. With a config file, select
-an ant using `--ant`; each flag overrides only its corresponding instructions or environment key.
-
-### Example: bd for memory and task tracking
-
-bd is one possible tool, configured entirely outside ants. Create a workspace manually:
-
-```sh
-mkdir -p ~/.ants/dev-a
-bd init -C ~/.ants/dev-a --prefix dev-a
-```
-
-Then configure the ant (replace `/absolute/path` with the home directory):
+Example using `bd` (`mkdir -p ~/.ants/dev-a && bd init -C ~/.ants/dev-a --prefix dev-a`):
 
 ```toml
 [[ant]]
 name = "dev-a"
 workdir = "~/src/some-repo"
-memory = "Run bd prime at the start; use bd remember for durable memories."
+memory = "Run bd prime at session start; use bd remember for durable notes."
 tasks = "Use bd ready, bd claim, bd create and bd close for task tracking."
-env = { BD_DB = "/absolute/path/.ants/dev-a/.bd/bd.db", BD_REMOTE = "" }
+env = { BD_DB = "/Users/alice/.ants/dev-a/.bd/bd.db", BD_REMOTE = "" }
 ```
 
-Keep `bd` on the harness's `PATH`. `BD_DB` selects the workspace instead of the workdir's; empty `BD_REMOTE` avoids an
-inherited remote overriding it. Optional harness hooks can load context (`bd setup copilot` or `bd setup claude` in
-the workdir, or user-level hooks; `bd setup gemini` writes instructions to run `bd prime` into `GEMINI.md`).
-Memory and tasks can instead use different tools by changing their instructions and environment settings.
+## Tool permissions
 
-**Migration:** existing ants no longer get a bd workspace or `BD_DB` automatically. Existing databases are left
-untouched; add the instructions and environment settings above to retain bd-based memory and task tracking.
+Tool calls requested by a harness are checked against the ant's allowlist (`allow = [...]` or repeatable `--allow RULE`; `--allow-tools` equals `*`, for sandboxed workdirs only):
+
+| Rule | Matches |
+|---|---|
+| `*` | Every tool call |
+| `<kind>` | ACP tool kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `switch_mode`, `other` |
+| `execute:cargo test*` | Commands matching glob; commands containing `;`, `&`, `\|`, `<`, `>`, `` ` `` or `$(` never match |
+| `edit:src/*` | Relative paths inside `<workdir>/src` (never outside `<workdir>`) |
+| `edit:/srv/notes/*` | Exact absolute path glob |
+| `fetch:https://docs.rs/*` | Matching URLs |
+| `other:send_message` / `other:bd-*` | MCP and `other` tools by title |
+
+Matched calls auto-approve with `allow_once`. Unmatched calls set `waiting_approval`, publish an `ApprovalRequest` on `ants.approvals.<ant>`, and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject` before rejecting:
+
+- **Human decisions:** `ants tools approve|reject <ant>/<id>` stores an `ApprovalDecision` on `ants.approvals.<ant>.<id>` using `Nats-Expected-Last-Subject-Sequence` so the first human answer wins; the daemon verifies the stored decision via direct get.
+- **Chain decisions:** ants with `escalate_to` also send an `[ants]` notice (`approval` escalation) to every ant in `escalate_to` on the thread. Members handling that notice may call `decide_approval(verdict)` (`ants.inbox.<ant>.<decider>`); `escalate` is refused on approval notices. Earliest stored decision wins (human or chain member), and `ants tools` inspects both.
+
+```sh
+ants tools list -f                         # stream pending requests (--json: JSON lines)
+ants tools show dev-a/019a7d2e --json      # full request + tool input (unique ID prefix accepted)
+ants tools approve dev-a/019a7d2e --always # allow-always when offered by the harness
+ants tools reject dev-a/019a7d2e
+```
+
+## MCP tools
+
+Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or, without HTTP MCP support, via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`). Tools run on the active thread during a prompt (allowlist: `other:<tool>`):
+
+| Tool | Description |
+|---|---|
+| `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
+| `ask_agent(to, text, timeout_secs?)` | Ask an ant on the current thread and wait for its reply (default 300s, max 1800s; refuses humans). |
+| `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
+| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity). |
+| `route(capability, text, wait?, timeout_secs?)` | Pick a peer with `capability` (`live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
+| `post_notes(text)` | Append to the current thread's notes (1 turn; wakes nobody). |
+| `read_notes(thread?)` | Read up to 50 notes posts (oldest first) and turns left on the current or named thread (0 turns). |
+| `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
+| `post_channel(channel, text)` | Start a channel thread as `creator` (member/messenger only; inherits turns minus 1 for agent messages). |
+| `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | List owned channels, show one, or change members/messenger via `ants channel serve`. |
+| `escalate(issue)` | Escalate the thread one level up its origin chain (or to the owner) with reason `asked`. |
+
+Human traffic costs 0 turns; agent-to-agent sends/replies cost 1 turn (`ask_agent` requires 1 turn left for the reply), and self-messaging is refused. `ask_agent` hears replies immediately on live inbox and `_INBOX.<ant>.stored.*` subscriptions without waiting behind the active prompt; late replies persist in `<home>/mcp.json` and prepend a count on later prompts until `check_inbox` drains them.
+
+## Messenger
+
+`ants ask` without `@ant` routes through `messenger` (`list_ants` + `route`); channels also use `messenger` by default to triage unmentioned human and webhook posts.
+
+Unless `messenger = false` or an `[[ant]]` is named `messenger`, each daemon serves a built-in `messenger` (`~/.ants/messenger`, `~/.config/ants/auth/messenger.creds` if present, top-level `harness`). Built-in instances coordinate via `ants_roster`: one daemon holds the `messenger` entry while others poll every 10s to take over on exit or 30s TTL expiry, yielding immediately if a configured `[[ant]]` named `messenger` claims the entry. Define `[[ant]] name = "messenger"` with an `AGENTS.md` in `workdir` for custom instructions and `allow` rules:
+
+```toml
+[[ant]]
+name = "messenger"
+workdir = "~/.ants/messenger-work"
+creds = "~/.config/ants/auth/messenger.creds"
+allow = ["other:list_ants", "other:route", "other:ask_agent", "other:send_message", "other:check_inbox"]
+```
+
+## Thread notes
+
+Thread notes (`ants.notes.<thread>.<from>`) provide one passive shared board per thread for multi-agent coordination, separate from live execution plans (`ants watch <ant>`) and wake-on-post [Channels](#channels). Posting wakes nobody; agents inspect notes only via `read_notes`.
+
+Agent posts spend 1 turn from the lower of the active message's budget and the last note's remaining turns, serialized with `Nats-Expected-Last-Subject-Sequence` (losers re-read and retry). Spending the final turn escalates the thread (`notes`) and blocks further agent note posts until a human runs `ants notes <thread> TEXT` (8 fresh turns) or an escalation climbs a chain level. Daemons read via ephemeral consumer `notes-<ant>`; CLI runs with ant credentials use spare consumers `notes-<ant>_1..3`; humans read directly via `STREAM.MSG.GET`.
+
+## Channels
+
+Channels (`ants.chan.<channel>.<from>`, metadata in `ants_channels`) are named groups of ants and humans:
+
+```sh
+ants channel create ops --member dev-a,dev-b --messenger triage --owner lead
+ants channel add ops dev-c alice               # ant and human members
+ants channel remove ops dev-a
+ants channel set ops --default-messenger       # revert triage to `messenger`; --no-owner clears owner
+ants channel list
+ants channel delete ops                        # removes entry; stored posts remain in ANTS
+
+ants post '#ops' "@dev-b deploy failed"        # wakes dev-b; prints new thread ID
+ants post ops "who owns billing?"              # no @mention -> channel messenger triages
+ants post -f --timeout 10m ops --thread <id> "status?"
+ants channel read ops --limit 10
+```
+
+- **Mentions and triage:** `@ant` wakes mentioned channel members only; `@human` sends an inbox notice to mentioned human members (excluding the author) without waking ants. Human or webhook posts with zero mentions prompt the channel messenger (`--messenger`, else `messenger`, member or not) to post a short `@mention` triage reply (1 turn). Agent posts with zero mentions wake nobody.
+- **Threads, owners and creators:** omitting `--thread` starts a thread named after the post ID. A human starter, first human poster, or webhook `owner` becomes thread `owner`. An ant starting a thread (`post_channel` or `ants post`) becomes its `creator` (ownerless until a human posts); spin-off messages via `send_message` carry `origin_thread` and propagate `creator` across `ants_links` (see [Credentials](#credentials)).
+- **Turn budget:** each agent post spends 1 turn from the thread's shared budget (minimum turns remaining across later posts on the thread, so fan-out never multiplies turns). Exhausted posts/answers are withheld and escalated (`turn_budget`). Human posts, or an escalation leader's reply (posted to the channel with 7 turns left), renew the budget.
+
+### Channel owners
+
+`--owner ANT` lets that ant call `manage_channel` to add/remove members and set/clear the channel messenger; only humans create/delete channels or change owners. Owner daemons send requests on `ants.chanadm.<channel>.<ant>` (retried every 2s for 10s; 60s TTL) to `ants channel serve` (`ants auth channel-manager` creds, queue-grouped with CAS on `ants_channels`), which checks ownership and roster entries (humans cannot be messenger or owner) and announces changes on `ants.chan.<channel>.channel-manager`.
+
+### Channel delivery and human members
+
+Each ant reads `ants.chan.>` from creation onward via durable consumer `chan-<ant>`, prepending up to 50 unseen thread posts tracked at `<ant>.<thread>.seen` in `ants_sessions`, with the same attempt, ack-after-store and dead-letter guarantees as inboxes. Mentioned human members receive an `Envelope` (`mention: {channel, post[, author]}`) on `ants.inbox.<human>.<sender>` (dedup msg ID `mention.<post>.<human>`, marker `<sender>.mention.<seq>.<human>`), sent by the author's daemon or `ants post`, or relayed by the channel messenger's daemon for verified webhooks.
+
+## Escalations
+
+Unresolved thread conditions — `turn_budget`, `cap`, `notes`, `dead_letter`, `asked` (`escalate` tool), plus single-hop `approval` (see [Tool permissions](#tool-permissions)) — climb the thread's origin chain before falling back to thread `owner`, else daemon `human` (default `human`).
+
+- **Origin chain:** the stuck ant's `escalate_to` (persisted in `ants_chains`), or on ant-created channel threads and verified `origin_thread` spin-offs, level 1 of the `creator` ant's `escalate_to` (both stuck ant and creator marked visited).
+- **Group coordination:** all unvisited ants in `escalate_to` receive an `[ants]` inbox notice on the thread, and thread notes get 8 fresh turns for that level. The first listed ant leads: only the leader may answer the stuck ant (renewing turn budget and spending allowance once per level) or call `escalate`. Non-leaders reply into thread notes and cannot message the stuck ant directly on the thread.
+- **Advancement and reset:** after `escalate_after` (`30m`; `"0"` waits indefinitely) without a leader reply, or if a member gets stuck, escalation climbs to the leader's `escalate_to`. Empty chains, visited leaders or `max_escalation_hops` (default 3) hand off to the human owner. Only a human message on the thread resets escalation to level 0.
+
+## Dead letters
+
+Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
+
+```sh
+ants dead list          # seq, ant, thread, from, deliveries, time, error, text
+ants dead replay 42     # republish original message to its inbox and delete dead letter (human creds)
+ants dead drop 42       # delete dead letter without replaying (human creds)
+ants dead watch         # convert MAX_DELIVERIES advisories into dead letters until Ctrl-C
+```
+
+If NATS errors prevent storing the dead letter on delivery 6, JetStream emits unpersisted advisory `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch` (and `ants inbox --follow`) captures that advisory, writes the dead letter and notifies the thread owner (or default human) directly. Offline leaf daemons note burials in `<home>/buried` and check `deadread-<ant>` on reconnect to avoid duplicates.
+
+## Webhooks
+
+`ants webhook serve` listens on plain HTTP (`127.0.0.1:8424` by default, behind a TLS reverse proxy) and turns `POST <path>/<webhook>` requests into new inbox or channel threads using per-webhook NATS credentials (`~/.ants/webhooks.toml` or `--config FILE`):
+
+```toml
+listen = "127.0.0.1:8424"                # overridden by --listen
+path = "/hooks"                          # POST /hooks/<name>
+nats = "nats://127.0.0.1:4222"           # overridden by --nats / ANTS_NATS_URL
+js_domain = "hub"                        # overridden by --js-domain / ANTS_JS_DOMAIN
+
+[[webhook]]
+name = "github"
+creds = "~/.config/ants/auth/github.creds"    # ants auth user github --webhook --to dev-a
+auth = "hmac-sha256"                          # signature_header defaults to X-Hub-Signature-256 (sha256=<hex>)
+secret_file = "~/.ants/github.secret"         # mode 0600 (owner-readable only); or secret_env = "VAR"
+id = "header:X-GitHub-Delivery"               # or "json:/pointer"; default "body-sha256"
+ant = "dev-a"
+owner = "alice"                               # optional human owner for replies and escalations
+text = "GitHub {header:X-GitHub-Event} on {json:/repository/full_name}\n\n{body}"
+
+[[webhook]]
+name = "alerts"                               # ants auth user alerts --webhook --channel ops
+creds = "alerts.creds"
+auth = "bearer"                               # Authorization: Bearer <secret>
+secret_env = "ANTS_ALERTS_TOKEN"
+id = "json:/alert/id"
+channel = "ops"
+mention = ["dev-a"]                           # optional; or broadcast = true for all current members
+```
+
+- **Auth and limits:** `hmac-sha256` and `bearer` check secrets in constant time (`401` on failure). Max body `256 KiB` (`413`), timeout `15s`, max `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store immediately; nothing buffers locally). Bad JSON/ID returns `400`, non-UTF-8 `{body}` `415`, unknown hook `404`, non-`POST` `405`.
+- **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 2m `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
+- **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 
 ## Credentials
 
-On a shared hub, each ant and each human connects as its own NATS user, with its own NKey/JWT credentials. Each user
-may publish only to the subjects its role, ant or human, allows (see `Permissions::for_user` in `ants-proto`).
-
-A message from `<from>` to `<to>` goes on `ants.inbox.<to>.<from>`, and an ant's credentials publish only on
-`ants.inbox.*.<ant>`, so the subject proves the sender. Daemons, `ants ask --wait` and `ants inbox` check the
-envelope's `from` and `to` against the subject: a daemon dead-letters a mismatch without its envelope (so it cannot be
-replayed), and the CLI drops it with a warning; `ants watch` marks it forged. The human's credentials may send under
-any sender, to replay dead letters as they were; `ants dead replay` replays only a message to the ant that buried
-it. Messages left on the older `ants.inbox.<to>` subjects are no longer delivered; daemons and `ants inbox` move
-their consumers to the new subjects on start. Credentials issued before must be issued again with `ants auth user`.
-
-Posts to thread notes work the same way: a post by `<from>` to the notes of thread `<thread>` goes on
-`ants.notes.<thread>.<from>`, every credential (a human's too) posts only on `ants.notes.*.<own name>`, and readers
-drop a post whose `from` or thread disagrees with its subject (`ants watch` marks it forged).
-
-Channels work the same way too. A channel is a named group of ants and humans; its id follows user id syntax. A post by
-`<from>` to channel `<channel>` goes on `ants.chan.<channel>.<from>` (kept in the stream), every credential posts only
-on `ants.chan.*.<own name>` (and `ants.out.chan.*.<own name>` in a leaf's outbox), and readers drop a post whose `from` or
-channel disagrees with its subject. A post carries its thread id and the users it @mentions; a top-level post starts
-a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it,
-and its `creator`, the ant whose top-level post started it: readers take the creator of a top-level post from its
-subject-checked sender, ignore a human, a webhook post and the channel manager, and posts without one stay valid.
-Readers take both from the thread's posts kept in the stream (the first one that starts it, the first human's), not from
-what a later post carries. A webhook's post carries `webhook: true`, so it never counts as a human's; daemons honour
-it only from a sender with a webhook marker or a human (see [Webhooks](#webhooks)). A
-channel's members, optional messenger and optional owner ant are a `ChannelEntry` in the KV bucket `ants_channels`,
-under the channel id: only humans and the channel manager write it, ants read it, and readers skip an entry whose
-channel disagrees with its key. An ant asks the channel manager for changes only on `ants.chanadm.*.<ant>`, so the
-subject proves the requester, and the manager answers only on the requester's `_INBOX.<ant>.` (see [Channel
-owners](#channel-owners)). Credentials issued before channel owners lack `ants.chanadm.*.<ant>`: owner ants need
-`ants auth user` and their machines' leaf nodes `ants auth leaf` again. An ant takes
-channel posts through its own consumer `chan-<ant>`, and its daemon reads channels back through `chanread-<ant>`,
-created for each read and deleted after it, one read at a time. The CLI with the ant's credentials (`ants channel
-read`, `ants post --thread`) reads through a free spare of it instead, `chanread-<ant>_1` to `chanread-<ant>_3`, taken
-with a strict create for the read (waiting for one when all are taken) and deleted after it, so it never deletes the
-consumer the daemon or another read is reading through; a spare an interrupted read leaves behind goes after 30 s
-unused. Credentials pin the filter of all of them under `ants.chan.>`, so none reaches an inbox; ant credentials
-issued before the spares need `ants auth user`, and leaf uplinks `ants auth leaf`, again. An ant gets no `STREAM.MSG.GET`, which would expose every
-inbox. A human's credentials read channels back with `STREAM.MSG.GET`, which they already allow, so no credentials
-need issuing again for it. Credentials and streams set up
-before channels need `ants auth user` and `ants init` again.
-
-An ant's credentials publish dead letters only on its own `ants.dead.<ant>` (and `ants.out.dead.<ant>` in a
-leaf's outbox); credentials issued before the outbox took dead letters need `ants auth user` again. An ant reads back
-only its own dead letters, through its consumer `deadread-<ant>`, whose filter credentials pin to `ants.dead.<ant>`;
-credentials issued before then need `ants auth user`, and leaf uplinks `ants auth leaf`, again.
-
-Approval decisions go on `ants.approvals.<ant>.<request id>`, which only humans publish to. An ant hears the
-decisions on its own requests and reads back the one the stream stored with a direct get
-(`$JS.API.DIRECT.GET.ANTS.ants.approvals.<ant>.*`, which returns only the last message on that subject), so it
-reads no one else's; the stream allows direct gets for this. Credentials and streams set up before then need
-`ants auth user`, `ants auth leaf` (leaf uplinks carry the rights of their ants and humans) and `ants init` again.
-
-Humans: a team may have several, each with its own name, credentials and inbox, and all with the same rights. A
-human is the user `human`, or a user listed in the KV bucket `ants_humans` under its id (a `HumanEntry` whose `human`
-field names it); readers skip an entry whose `human` disagrees with its key. `ants auth user NAME --human` issues a human's
-credentials, whatever the name (`Permissions::for_user` with `Role::Human`); without `--human` it issues an
-ant's, except for the name `human`, which always gets a human's. A human's credentials allow what this section
-grants the human: creating and upgrading the stream and the buckets, reading and removing dead letters, sending under
-any sender to replay them, deciding approvals, setting up leaf outboxes and the intake, watching `ants.>`, plus
-writing `ants_humans`. Each human reads its replies only through its own inbox consumer, `inbox-<name>`. Ant
-credentials only read `ants_humans`. The holder of the team directory (`ants auth init`) is the first human and
-issues its own credentials with `ants auth user NAME --human`. A human joins `ants_humans` on its first CLI connection, not when its
-credentials are issued: until then daemons take its messages for an agent's. The CLI acts as the human its credentials
-name (see CLI); daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
-thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
-without one stay valid, and daemons ignore an `owner` that is no human. A webhook's envelope carries `webhook: true`:
-daemons treat its sender as an agent whatever `ants_humans` says, and send a reply to its `owner`, if a human, instead
-of its inbox. Daemons honour `webhook: true` only from a sender whose marker is in `ants_webhooks`
-(`<webhook>.webhook`, which only that webhook's credentials write; see [Webhooks](#webhooks)) or a human, and ignore it
-from any other. An envelope may carry `creator` the same way,
-the ant whose channel post started the thread (see Channels); daemons ignore a `creator` that is a human. A daemon
-takes `owner` and `creator` as a human's or a webhook's envelope carries them (a webhook names no `creator`); from an
-ant, on a thread a channel post started (the first post of any channel whose id is the thread's, among those stored
-within 5 minutes of the time in it), it takes both from the thread's posts as in the channel, and on any other thread
-it keeps `owner` unchecked, as nothing stored names a message thread's owner, and drops `creator` unless the envelope's
-`origin_thread` names a channel thread the sender takes part in or got the link to as `ants_links` records, whose
-creator it takes (see Channels). An envelope carries `origin_thread` only with a `creator`, and envelopes without one
-stay valid. The KV bucket `ants_links` keeps, under `<from>.<channel thread>.<to>`, that `from` sent `to` a message
-carrying `origin_thread` (the value is the message's thread). Only the credentials of `from` write its keys, every
-credential lists the keys of one channel thread through an ordered consumer, and entries expire after 30 days.
-Credentials issued before `ants_links` need `ants auth user` (and `ants auth leaf`) again, and `ants init` creates
-the bucket; until then only an ant taking part in the channel thread passes its creator on. A daemon or
-CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. An envelope to
-a human member of a channel may carry `mention: {channel, post}`, the channel post that @mentioned it, with
-`author` when the messenger relays a webhook's post (see [Human members](#human-members)); a CLI from before
-`mention` shows it as a message from its sender. Credentials issued before `ants_humans` need `ants auth user` again.
-
-Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
-ant's chain in order, whose first ant leads. The KV bucket `ants_chains` keeps it past the roster entry, as a
-`ChainEntry` under the ant id that only the ant's credentials write and every credential reads by key; readers
-skip an entry whose ant disagrees with its key. Credentials issued before `ants_chains` need `ants auth user` (and
-`ants auth leaf`) again, and `ants init` creates the bucket; until then daemons follow chains through the roster only.
-An envelope may carry `escalation`
-(`Escalation` in `ants-proto`): the stuck ant and its thread, the reason (`turn_budget`, `cap`, `notes`,
-`dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the thread's origin chain: the
-stuck ant's own, or the chain of the thread's creator, who leads level 0), the level's leader and the ants visited.
-One level up goes to every ant of the leader's chain not visited yet; an empty chain, a leader already visited, or a
-level past `max_escalation_hops` (default 3) hands it to the thread's owner
-instead. An agent's decision
-on another ant's approval request travels as an envelope's `approval` on `ants.inbox.<requester>.<decider>`, so the
-subject pins the decider and ant credentials need no rights on `ants.approvals.*`; the requester takes it only from
-an ant of its own chain. Envelopes and entries without these fields stay valid.
+`ants auth` manages decentralized NATS NKey/JWT credentials in `~/.config/ants/auth` (`--dir` / `ANTS_AUTH_DIR`; keep `*.nk` seeds private):
 
 ```sh
-ants auth init                         # operator + account keys and server.conf in ~/.config/ants/auth
-ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI
-ants auth user alice --human           # alice.creds: another human, with the same rights
-ants auth user dev-a                   # copy to the machine that runs dev-a
-ants auth user github --webhook --to dev-a   # github.creds: a webhook, sending to dev-a only (see Webhooks)
+ants auth init                                          # writes operator.nk, account.nk, system.nk, server.conf
+ants auth user human --js-domain hub                    # human.creds ("human" always gets Role::Human)
+ants auth user alice --human --js-domain hub            # alice.creds (human role)
+ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
+ants auth user github --webhook --to dev-a --js-domain hub
+ants auth channel-manager --js-domain hub               # channel-manager.creds
 ```
 
-Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with a human's credentials to create the stream and the roster, sessions, attempts, channels, humans, chains and webhooks buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
-Credentials carry their permissions in the CONNECT line, past the 4 KB nats-server allows by default, so `server.conf`
-sets `max_control_line: 16384`; add that line to a `server.conf` written before channels.
-`ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
-nats-server resolves `include` relative to the including file, even for a path that starts with `/`, so copy
-`server.conf` next to the server configuration (or include it by a relative path).
+Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all eight KV buckets. When stream subjects, buckets, direct gets, role permissions or machine members change, re-run `ants init` and re-issue `.creds` (`ants auth user`, `ants auth leaf`, `ants leaf outbox`).
+
+### Wire ACLs and verification invariants
+
+- **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`.
+- **Scoped ant reads:** without `STREAM.MSG.GET`, ant credentials pin consumer filters (`inbox-<ant>`, `chan-<ant>`, `chanread-<ant>[_1..3]`, `notes-<ant>[_1..3]`, `deadread-<ant>`) and restrict direct gets to `ants.approvals.<ant>.*`, `$KV.ants_humans.*`, `$KV.ants_chains.*` and `$KV.ants_webhooks.*.webhook`. Users write only their own keys in `ants_roster`, `ants_chains`, `ants_links` and `ants_webhooks`.
+- **Metadata trust:** daemons accept `owner` only for `human` or entries in `ants_humans`, and honour `webhook: true` only with `<sender>.webhook` in `ants_webhooks` (or from a human). Channel thread `owner` and `creator` come from stored root/human posts in `ANTS`; non-channel `creator` requires `origin_thread` backed by participation or `<from>.<channel_thread>.<to>` links in `ants_links` (max 32 hops).
 
 ### Adding an ant
 
-`ants add` sets up an ant on the machine that runs it, without copying any seed: it generates the ant's
-user NKey there, keeps the seed there and lists the ant in the config file (`--config`, `ANTS_CONFIG`, default
-`~/.ants/config.toml`, created when missing; the text already there stays as it is; a file it creates also serves
-the built-in messenger unless `messenger = false` is added). The flags of `ants daemon`
-(`--workdir`, default the current directory, `--harness`, `--model`, `--whoami`, `--capability`, ...) set up the
-entry; `--nats` and `--js-domain` go into it when they differ from the file's. The credentials go to `--out`, default
-`~/.config/ants/auth/<ant>.creds`; until they are complete the seed waits beside them as `<ant>.nk` (mode
-0600), and running the command again reuses it. Only the machine holding the account key can sign the public key, out
-of band or over NATS:
+`ants add` generates the ant's user NKey on the target machine (keeping `<ant>.nk` at mode `0600` until signed, never copying the seed elsewhere) and appends `[[ant]]` to `config.toml`:
 
 ```sh
-# out of band
-ants add dev-c --workdir ~/src/app --model gpt-5   # on the ant's machine: lists dev-c, prints its public key
-ants auth user dev-c --public-key UABC... --js-domain hub  # where the account key is: prints the JWT
-ants add dev-c --jwt eyJ...                        # on the ant's machine: writes dev-c.creds (or --jwt FILE, --jwt -)
+# Out of band
+ants add dev-c --workdir ~/src/app              # target machine: appends config, prints public key U...
+ants auth user dev-c --public-key U... --js-domain hub   # auth machine: prints signed JWT
+ants add dev-c --jwt eyJ...                     # target machine: writes dev-c.creds (accepts JWT, file or '-')
 
-# over NATS
-ants auth enroll dev-c                                     # where the account key is: enroll-dev-c.creds, valid an hour
-ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds   # on the ant's machine: asks, then waits
-ants enroll approve dev-c --js-domain hub                  # where the account key is: signs and answers
+# Over NATS (direct to hub; leaf uplinks do not carry ants.enroll.*)
+ants auth enroll dev-c                          # auth machine: writes 1h enroll-dev-c.creds
+ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds --hub wss://hub.example/nats
+ants enroll list --nats wss://hub.example/nats  # auth machine: inspect pending requests
+ants enroll approve dev-c --nats wss://hub.example/nats --js-domain hub
 ```
 
-`ants add` checks the JWT it gets: issued to its public key under the ant's name, and signed by its
-issuer (over NATS, by the account that signed the enrollment credentials). An ant already listed takes no flags:
-the command then only completes its credentials, at the `creds` of its entry.
+Restart `ants daemon` after adding an ant, and update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
 
-Enrollment credentials (`ants auth enroll NAME`, `--ttl`, default 1h) expire, and allow only publishing on
-`ants.enroll.<ant>` and subscribing to `ants.enroll.<ant>.reply` (`Permissions::for_enrollment`): they cannot
-ask for another name, hear another's answer, or read any message. An `EnrollRequest` carries the ant, the public
-key and the host name; requests are core NATS and stored nowhere, so `ants add --enroll` repeats its request
-every 5 s until an answer for its key comes, the enrollment credentials expire, or Ctrl-C. `ants enroll` on the
-machine holding the account key connects with credentials it issues itself for ten minutes, allowed only to hear
-`ants.enroll.*` and answer on `ants.enroll.*.reply` (`Permissions::for_enroll_approver`), and listens 6 s for
-requests: `list` prints those heard, `approve NAME` signs the one for NAME (`--public-key` picks among several machines
-asking) with the rights of `ants auth user` and the hub's `--js-domain`, and answers again while the machine keeps
-asking; `reject NAME [--reason TEXT]` refuses every machine asking for NAME, or the one of `--public-key`. Enrollment
-reaches the hub directly: a leaf uplink does not carry `ants.enroll.*`, so on a machine behind a leaf node give
-`ants add --hub URL` the hub's URL, and point `ants enroll --nats` at the hub.
+## Leaf nodes
 
-The running daemon does not read the config file again: restart it (or its service, see Services) to serve the new
-ant. Behind a leaf node, the ant also needs the leaf's uplink credentials and outbox issued again with it
-(`ants auth leaf`, `ants leaf outbox`).
-
-### Leaf nodes
-
-A machine can run its own nats-server as a leaf node of the hub, and point every `ants` process at it. A client on a
-leaf reaches the hub's JetStream only through a JetStream domain: give the hub `jetstream { domain: hub }`, set
-`--js-domain hub` (or `ANTS_JS_DOMAIN=hub`, or `js_domain` in the config file) for every `ants` process, on the hub
-as well, and issue every credential with it:
+Running a local `nats-server` leaf per machine isolates local `ants` processes on `127.0.0.1:4222` and buffers outbound traffic while offline. Configure `jetstream { domain: hub }` and `feature_flags { js_api_reply_v2: true }` on the hub, pass `--js-domain hub` (`ANTS_JS_DOMAIN=hub`) everywhere, and issue leaf credentials scoping all ants, humans and webhooks on that machine:
 
 ```sh
-ants auth user dev-a --js-domain hub
-ants auth leaf macbook --ant dev-a --ant dev-b --human human --human alice --js-domain hub   # leaf-macbook.creds
-ants auth leaf macbook --ant dev-a --webhook github --js-domain hub   # with `ants webhook serve` for github on macbook
+# Auth machine (issue user/webhook .creds first)
+ants auth leaf macbook --ant dev-a --ant messenger --human alice --webhook github --js-domain hub
+
+# Worker machine ("macbook", with server.conf and leaf-macbook.creds in ~/.config/ants/auth)
+ants leaf config macbook --uplink wss://hub.example/nats       # writes ~/.config/ants/leaf.conf
+nats-server -c ~/.config/ants/leaf.conf &
+ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 ```
 
-Credentials issued with `--js-domain` allow the JetStream API both as `$JS.<domain>.API` and as the plain `$JS.API`
-the hub maps it to (the hub checks both); without it they allow only the plain form, which a leaf does not forward.
-`ants auth leaf` issues the credentials of the leaf's uplink (`leafnodes.remotes[].credentials`): they allow what the
-listed ants and humans may do together, and only for a leaf node connection, never a client. List each human
-that runs the CLI on the machine with `--human NAME`, `human` included (`--ant human` also counts as a human), so
-that it gets a human's rights. List each webhook `ants webhook serve` runs on the machine with `--webhook NAME`: the
-uplink also allows what its credentials, `NAME.creds` in the team directory, allow (issue them first). The leaf still checks each local client against its own credentials; the uplink credentials
-bound what crosses to and from the hub. Hub and leaf configuration: [docs/transport.md](docs/transport.md).
+`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. While offline, outbound inbox messages, replies, notes, channel posts, dead letters and `ants_links` entries queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS` and `ants_links` on reconnect (`ants leaf outbox --remove` removes sourcing). `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`, and human `ants ask --wait`/`--follow` polls stored replies every 5s. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
 
-`ants leaf config` writes the leaf's nats-server configuration, `~/.config/ants/leaf.conf` by default: it listens on
-`127.0.0.1:4222` only (the default server of every `ants` process), runs JetStream in the machine's own domain for
-its outbox only (stored next to the configuration, in `jetstream/`), includes the team's `server.conf` and has one
-uplink to the hub:
+### Transport options
 
-```sh
-# on macbook, with server.conf and leaf-macbook.creds copied into ~/.config/ants/auth
-ants leaf config macbook --uplink wss://hub.example.com/nats             # the hub's websocket, behind a proxy
-ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422             # its leafnode port, via devtunnel connect
-                                                                         # or ants bridge connect (below)
-nats-server -c ~/.config/ants/leaf.conf                                  # or as a service, see Services
-```
-
-| Uplink | Reaches |
+| Leaf uplink | Use case |
 |---|---|
-| `nats-leaf://host[:port]` (or `nats://`) | the hub's leafnode port, default 7422, in plain text (a tunnel provides the encryption) |
-| `tls://host[:port]` | the same port with TLS |
-| `ws://host[:port]/path`, `wss://host[:port]/path` | the hub's websocket listener, directly or through a reverse proxy; the leaf asks for `<path>/leafnode` |
+| `wss://host/path` | Standard TLS WebSocket uplink behind a reverse proxy (supports `--proxy` HTTP `CONNECT`). |
+| `tls://host:7422` | Direct TLS connection to the hub leafnode port. |
+| `nats-leaf://127.0.0.1:7422` via `devtunnel connect` | Private Dev Tunnel forwarding the hub leafnode port (`--devtunnel` in `install-units.sh`). |
+| `nats-leaf://127.0.0.1:7422` via `ants bridge connect` | Networks whose proxies block WebSocket; tunnels leaf traffic over plain HTTPS `POST`/long-polled `GET`. |
 
-`--ca-file ca.pem` trusts a private CA (`tls://` and `wss://`), `--proxy http://proxy:3128` goes through an HTTP
-`CONNECT` forward proxy. `--uplink-creds` and `--server-conf` default to `leaf-<machine>.creds` and `server.conf` in
-the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the credentials by absolute path and includes
-`server.conf` by a relative one, as nats-server requires. Switching the uplink changes nothing else on the machine:
-run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
-(`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
+For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. See [docs/transport.md](docs/transport.md#https-fallback-bridge).
 
-While the uplink is down, inbox messages, replies, posts to thread notes and channels, the ants' dead letters and the
-links to channel threads they pass on (`ants_links`, see Channels) wait in the machine's outbox, a stream on the leaf,
-and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
-the human sets it up once per machine, with the leaf connected:
+## Services
+
+`scripts/install-units.sh` renders templates from `contrib/launchd/` (macOS `~/Library/LaunchAgents`) or `contrib/systemd/` (Linux/WSL `~/.config/systemd/user`) with resolved binary paths and current `PATH`, then enables and starts them:
 
 ```sh
-ants leaf outbox macbook --ant dev-a --ant dev-b --human human --human alice   # again when they change
-ants leaf outbox macbook --remove                                              # stop taking from the machine
+scripts/install-units.sh                                           # nats + daemon
+scripts/install-units.sh --devtunnel ants-hub.usw2                 # + devtunnel connect (--devtunnel-token FILE)
+scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds --webhook
+scripts/install-units.sh --out ./rendered-units                    # render only; install nothing
 ```
 
-`ants leaf outbox` then waits up to 10 s for the hub to hear from the outbox, and fails, naming the missing
-`feature_flags { js_api_reply_v2: true }`, if it does not: the setup stays in place and takes effect once the hub has
-the flag. Running it again checks again.
+Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.config/ants/leaf.conf`), `--config FILE` (default `~/.ants/config.toml`), `--no-daemon`, `--channel-manager CREDS`, `--webhook`, `--webhook-config FILE` (default `~/.ants/webhooks.toml`), `--devtunnel TUNNEL`, `--devtunnel-bin PATH`, `--devtunnel-token FILE`, `--out DIR`.
 
-The hub's stream takes from a machine's outbox only what the listed ants and humans may send themselves, and the
-`ants_links` bucket only the links the listed ants passed on, under their own keys, so issue the leaf's uplink
-credentials for the same ants and humans. `ants leaf outbox` admits links once `ants init` created `ants_links`. Whatever needs an answer from the hub at once still
-fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_notes` (its expected sequence
-needs the hub's answer), approvals and replays. A dead letter kept in the outbox gets its notice, and its message
-terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
-Kept on the consumer's extra delivery, with no delivery left, the letter is stored in the hub, its notice sent to the
-thread's owner, else the default human, and its message terminated by the running daemon within 30 seconds of the
-uplink coming back; the notice shares its message id with the one `ants dead watch` sends, so the human gets one.
-Either way the daemon first reads its own dead letters back from the hub (`deadread-<ant>`): a letter of the message
-that landed there already, from the outbox or from `ants dead watch`, however long before, is not stored again, and
-one from `ants dead watch`, which told the human, gets no second notice.
-Machines set up before dead letters (or links) were buffered need `ants leaf outbox` again, and ant credentials issued
-before need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
-whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on
-its subject, so the hub's stream republishes every inbox message it stores to `_INBOX.<recipient>.stored.<sender>`,
-which only the recipient may read: `ants ask --wait`, a waiting `ask_agent` and an ant waiting on its escalation
-chain get it from there too, once each. A reply the hub stores while the uplink is down never comes live on the leaf:
-a human's `ants ask --wait` or `--follow` reads back every 5 s what the hub's stream stored for that human since it
-began waiting, and so shows it once the uplink is back; a daemon gets it from its inbox consumer then and hands it to
-the waiting `ask_agent` or approval request. A stream set up before needs `ants init` again; a daemon warns until then. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
+| Service | macOS (launchd / `~/Library/Logs/ants/`) | Linux & WSL (`systemd --user`) | Installed when |
+|---|---|---|---|
+| NATS (`nats-server`) | `ants.nats` (`nats.log`) | `ants-nats.service` | Always |
+| Ant daemon (`ants daemon`) | `ants.daemon` (`daemon.log`) | `ants-daemon.service` | Default (omit with `--no-daemon`) |
+| Channel manager (`ants channel serve`) | `ants.channels` (`channels.log`) | `ants-channels.service` | `--channel-manager CREDS` |
+| Webhook ingress (`ants webhook serve`) | `ants.webhook` (`webhook.log`) | `ants-webhook.service` | `--webhook` |
+| Dev Tunnel (`devtunnel connect`) | `ants.devtunnel` (`devtunnel.log`) | `ants-devtunnel.service` | `--devtunnel TUNNEL` |
 
-## Transport options
-
-Every `ants` process speaks NATS (`nats://`, `tls://`, `ws://`, `wss://`), with TLS on rustls; a private CA comes in
-through `SSL_CERT_FILE`. With a leaf node per machine, `ants` always uses `nats://127.0.0.1:4222` and only the leaf's
-uplink varies:
-
-| Uplink | When |
-|---|---|
-| `wss://host/path` to the hub's websocket behind a reverse proxy (such as Caddy) | The usual choice; works through an HTTP `CONNECT` forward proxy (`ants leaf config --proxy`). |
-| `wss://` to an anonymous Dev Tunnels HTTPS port | No proxy of its own; NATS credentials are the access control (researched, not verified). A private tunnel cannot be used this way. |
-| `nats-leaf://127.0.0.1:7422` through `devtunnel connect` to the hub's leafnode port | A private tunnel; the tunnel provides the encryption. |
-| `tls://host:7422` | The hub's leafnode port exposed directly with TLS. |
-| `nats-leaf://127.0.0.1:7422` through `ants bridge connect` to `ants bridge serve` | A network that blocks WebSocket; plain HTTPS requests (see below). |
-
-`ants` itself cannot use an HTTP forward proxy (async-nats has no proxy support); a leaf node can, and so can
-`ants bridge connect`. Hub and leaf configuration, reconnect behaviour and the tested paths:
-[docs/transport.md](docs/transport.md).
-
-### HTTPS fallback bridge
-
-Where a proxy blocks WebSocket, `ants bridge` carries the leaf node's uplink in plain HTTPS requests: `POST` for what
-the leaf sends, long-polled `GET` for what it receives, each tagged with its byte offset so that retried requests
-neither lose nor repeat bytes. On the hub, `ants bridge serve` listens on `127.0.0.1:8423` behind the TLS-terminating
-reverse proxy (Caddy: `handle /bridge* { reverse_proxy 127.0.0.1:8423 }`) and connects each session to the hub's
-leafnode port (`--upstream`, default `127.0.0.1:7422`). On the worker, `ants bridge connect` listens on
-`127.0.0.1:7422`, so the leaf's uplink is the same as through `devtunnel connect`:
-
-```sh
-# hub
-export ANTS_BRIDGE_TOKEN=$(openssl rand -hex 32)                     # optional; the same on every worker
-ants bridge serve
-
-# macbook
-ants bridge connect https://hub.example.com/bridge                  # with the same ANTS_BRIDGE_TOKEN
-ants bridge connect https://hub.example.com/bridge --proxy http://user:pw@proxy.corp:3128   # through a forward proxy
-ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
-```
-
-NATS credentials still authenticate the leaf inside the bridged stream; the token (`--token` or `ANTS_BRIDGE_TOKEN`)
-only keeps strangers from opening sessions. `--header 'Name: value'` adds a request header for a gateway in front of
-the hub. `SSL_CERT_FILE` trusts a private CA. Each message costs a round trip, so prefer `wss://` where it works.
-Details: [docs/transport.md](docs/transport.md), "HTTPS fallback bridge".
+- **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux).
+- **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
+- **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
+- **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.
 
 ## Footprint
 
-An idle daemon serving one ant stays under 20 MB resident memory. `scripts/footprint.sh` checks it: it starts a
-throwaway `nats-server -js` and `ants daemon`, samples the daemon's RSS with `ps`, and fails at or above the limit
-(`--max-mb`, default 20). CI runs it on Linux and macOS. `--ask "reply with ok"` also measures one live harness
-session, which runs the real harness.
+`scripts/footprint.sh` starts a temporary `nats-server -js` and `ants daemon`, samples resident memory with `ps`, and fails at or above `--max-mb` (default `20` MB). Pass `--ask "reply with ok"` to measure with one live harness session.
 
 ```sh
-scripts/footprint.sh --port 14722                     # idle
+scripts/footprint.sh --port 14722
 scripts/footprint.sh --port 14722 --ask "reply with ok"
 ```
 
-Measured with ants 0.1.0 (release build), nats-server 2.15.3:
+Measured with `ants` 0.1.0 (release) and `nats-server` 2.15.3:
 
-| | Linux x86_64 | macOS arm64 |
+| Scenario | Linux x86_64 | macOS arm64 |
 |---|---|---|
 | Idle daemon | 5.9 MB | 8.5 MB |
-| Idle daemon with the MCP server | not measured | 10.5 MB (+0.8 MB over 9.7 MB in the same run) |
-| Daemon with one Copilot session | not measured | 10.5 MB (+2.0 MB) |
+| Idle daemon with MCP server | not measured | 10.5 MB |
+| Daemon with one Copilot session | not measured | 10.5 MB |
 | Copilot CLI harness processes | not measured | 255 MB |
-
-## Upgrading from persona naming
-
-Agents were once called personas. The rename to ants keeps no aliases, so every machine is upgraded together, and an
-old and a new binary cannot read each other's roster, chain, human, approval or dead-letter entries. What changed:
-
-- Config file: each `[[persona]]` table is now `[[ant]]`; its keys are unchanged. A file still using `[[persona]]`
-  fails to load as an unknown field.
-- CLI: `ants persona add` is now `ants add`, with the same flags. `--persona` is now `--ant` on `ants daemon`,
-  `ants auth leaf` and `ants leaf outbox`, and the variable `ANTS_PERSONA` is now `ANTS_ANT` (check service
-  environment files and scripts).
-- MCP: the tool `list_personas` is now `list_ants`. Replace `other:list_personas` in each ant's `allow` list, and the
-  old name in any agent instructions.
-- JSON: the field `persona` is now `ant` in roster, chain, approval, dead-letter, enrollment and status messages, and
-  so in `ants roster --json` and `ants tools list --json`. A `HumanEntry` in `ants_humans` names its user in `human`.
-- Unchanged: subjects, consumer names, KV keys, credentials and NATS permissions. No `ants auth user`, `ants auth leaf`
-  or `ants init` is needed.
-
-Stored entries written under the old naming are skipped as unreadable, never deleted automatically:
-
-- Before upgrading, answer pending approvals (`ants approve`) and replay or drop dead letters (`ants dead`) with the
-  old binary. Afterwards old ones are skipped by `ants tools list` and `ants dead list`, cannot be replayed or dropped,
-  and expire with the stream after 30 days.
-- Each daemon rewrites the roster and chain entries of its ants on start. An old roster entry expires on its own; an
-  old chain entry of an ant no longer served counts as no chain until deleted from `ants_chains`.
-- A human registers again on its next connection: run any `ants` command (for example `ants roster`) once with each
-  human's credentials. Until then daemons treat that human's messages as an agent's.
-- Enrollment requests are not stored, but `ants add --enroll` and `ants enroll` need the same version on both ends.
-
-## Upgrading to harness definitions
-
-Harnesses are now definitions in a registry rather than a fixed list (see [Harnesses](#harnesses)):
-
-- `copilot`, `claude` and `antigravity` are built-in definitions with the same commands, arguments, modes and
-  `context` values as before, so files and flags naming them work unchanged.
-- `harness =`, `--harness` and `ants harness check|prompt --harness` take any defined name; a name with no definition
-  fails when the file loads, listing the defined ones.
-- A `[harnesses.NAME]` table with a built-in's name replaces that built-in whole: copy every key it needs from
-  `crates/ants-daemon/src/harnesses.toml`.
-- `ants harness check` and `prompt` default to the config file's top-level `harness`, else `copilot`, and take
-  `--config`.
-- A harness wrapper put on `PATH` under a built-in's name (a `copilot` script, say) still works; a definition with the
-  wrapper's path as `command` now does the same without touching `PATH`.
-
-## Upgrading to tools, notes and unit durations
-
-The command and config grammar changed again without aliases, so every machine is upgraded together. What changed:
-
-- Config file: the top-level `provider` is now `harness`, the default harness of every ant without its own and of the
-  built-in messenger; `provider` fails to load. The built-in messenger is now served by default: a file with only
-  `[[ant]]` tables (a file `ants add` creates, too) serves it unless it sets `messenger = false` or lists an ant named
-  `messenger`. Set `messenger = false` on each machine that must not serve it. An empty file serves the messenger
-  alone; `messenger = false` with no `[[ant]]` fails.
-- Durations take a unit (`90s`, `10m`, `1h30m`, or `0`); a bare number fails. The keys `approval_timeout_secs`,
-  `idle_timeout_secs`, `prompt_timeout_secs` and `escalate_after_secs` are now `approval_timeout`, `idle_timeout`,
-  `prompt_timeout` and `escalate_after`, as strings such as `idle_timeout = "10m"`; the old keys fail to load. The
-  flags of `ants daemon` and `ants add` lose `-secs` the same way (`--idle-timeout 10m`), and `ants auth enroll
-  --ttl-secs` is now `--ttl`.
-- Tool requests: `ants approve` is now `ants tools list` (`--follow`, `--json`), `ants tools show ID`, `ants tools
-  approve ID` (`--always` for allow-always) and `ants tools reject ID`.
-- Thread notes: `ants plan` is now `ants notes`, the MCP tools `read_plan` and `post_plan` are `read_notes` and
-  `post_notes` (update `other:read_plan`/`other:post_plan` in `allow` lists and any agent instructions naming them),
-  the subjects `ants.plan.<thread>.<from>` are `ants.notes.<thread>.<from>` and the consumers `plan-<user>` are
-  `notes-<user>`.
-- Waiting: `ants post --wait` now ends at the first post by someone else; the old streaming is `ants post --follow`.
-  `--timeout` takes a duration and has no default (it was 600 s); `ants ask` gains `--follow` and `--timeout`. A
-  `--wait` that times out exits with status 1.
-- Channels: `ants channel set --no-messenger` is now `--default-messenger`.
-
-Because credentials carry the subjects they allow, after upgrading:
-
-1. Run `ants init` with a human's credentials. It adds `ants.notes.>` to the ANTS stream and keeps `ants.plan.>`, so
-   notes posted before stay stored until the stream's 30-day retention drops them; `ants notes` does not show them.
-2. Issue credentials again: `ants auth user` for every ant and human, `ants auth leaf` for every leaf node, then run
-   `ants leaf outbox` again on each machine so the hub admits `ants.out.notes.*`.
-
-An escalation an older daemon recorded with the reason `plan_room` reads as `unknown`.
 
 ## Development
 
 ```sh
-cargo build --release   # target/release/ants
+cargo build --release
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo deny check        # licenses, advisories, bans, sources; see deny.toml
+cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 ```
 
-Tests that need `nats-server` on PATH skip without it; `ANTS_REQUIRE_TOOLS=1` (as in CI) makes them fail
-instead. `crates/ants/tests/e2e.rs` runs `ants ask --wait` against `ants daemon` on a throwaway nats-server, with the
-test binary itself as a stub ACP harness.
-
-CI (`.github/workflows/ci.yml`) runs formatting, clippy, the tests with nats-server installed, a release build and
-the footprint check on Linux and macOS, and `cargo deny check` on Linux. A dependency with a license outside the
-allow-list in `deny.toml`, a security advisory, a yanked crate or a source other than crates.io fails it.
+Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANTS_REQUIRE_TOOLS=1` is set (as in `.github/workflows/ci.yml`). `crates/ants/tests/e2e.rs` exercises `ants ask --wait` against `ants daemon` using the test binary as a stub ACP harness.
 
 ## Layout
 
-| Path | Role |
+| Path | Purpose |
 |---|---|
-| `crates/ants-proto` | Wire contract: ids, subjects, envelope, turn budget, permissions; no I/O |
-| `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, inbox loop, tool permissions, MCP server |
-| `crates/ants` | The `ants` binary: CLI, `ants daemon`, `ants auth`, `ants leaf`, `ants bridge`, `ants webhook` |
-| `crates/ants-test-support` | Test helpers (dev-only): tools on PATH, a throwaway nats-server |
-| `contrib/` | launchd and systemd unit templates, the agent skill for the CLI |
-| `scripts/` | `install-units.sh` (services), `footprint.sh` (memory check) |
-| `docs/transport.md` | Transport spikes: hub, reverse proxy, leaf nodes, Dev Tunnels |
+| `crates/ants-proto` | Wire contract: IDs, subjects, envelopes, turn budgets, NATS permissions (no I/O) |
+| `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, delivery loop, approvals, escalations, MCP server |
+| `crates/ants` | `ants` binary: CLI, `daemon`, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `mcp` |
+| `crates/ants-test-support` | Dev-only test helpers: `PATH` checks and throwaway `nats-server` |
+| `contrib/` | `launchd` plists, `systemd` user units and CLI agent skill (`contrib/skills/ants/SKILL.md`) |
+| `scripts/` | `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |
+| `docs/transport.md` | Transport reference: hub, reverse proxy, leaf nodes, store-and-forward, HTTPS bridge, Dev Tunnels |
 
-Work and specs are tracked in bd (`.bd/`): `bd ready`, `bd spec list`, `bd spec show <area>`.
+Work items and specifications live in `bd` (`.bd/`): `bd ready`, `bd spec list`, `bd spec show <area>`.

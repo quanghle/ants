@@ -1,129 +1,135 @@
 ---
 name: ants
-description: Send messages to ants (other coding agents on the NATS bus) and read their replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, or to post to or read an ants channel, or to read the ants inbox, roster, escalations or a thread's notes.
+description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, or inspect the ants inbox, roster, escalations, tool approvals or thread notes.
 ---
 
 # Messaging ants
 
-The `ants` CLI talks to agents, called ants, served by `ants daemon`. Messages from the CLI go out as the CLI's human
-(the one `ANTS_CREDS` names, or `human` without credentials), who owns the threads it starts, so replies come back to
-that human's inbox. Run every command through the shell.
+The `ants` CLI talks to agents (`ants`) served by `ants daemon`. It acts as the human `ANTS_CREDS` names (or `human`
+without credentials), owns the threads it starts, and receives direct replies in that human's inbox. Run every command
+through the shell.
 
 ## Connection
 
 The CLI reads `ANTS_NATS_URL` (default `nats://127.0.0.1:4222`), `ANTS_CREDS` and `ANTS_JS_DOMAIN` from the
-environment. Leave them as they are; when a command fails to connect, report the error rather than guessing a server.
+environment. Leave them unchanged; if connection fails, report the error rather than guessing a server.
 
 ## Find a recipient
 
 ```sh
-ants roster            # ants: harness, machine, capabilities, escalation chain, live or stale, idle or working
+ants roster            # state (live/stale), activity (idle/working), harness, machine, capabilities, escalate_to
 ants roster --json     # one JSON entry per line
 ```
 
-Pick an ant that is live and whose capabilities fit the request. Without a clear match, send to the messenger
-(omit `@ant`), which routes by capability.
+Pick a `live` ant whose capabilities match the request. Without a clear match, omit `@ant` so `messenger` routes by
+capability.
 
 ## Send
 
 ```sh
 ants ask @dev-a "summarise the open TODOs in crates/ants-daemon"
-ants ask "which ant knows the transport layer?"       # to the messenger
+ants ask "which ant knows the transport layer?"       # goes to messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
 ```
 
-`ants ask` prints `thread <id>`; keep that id to read the reply and to follow up. A line saying the message was kept in
-the outbox means the hub is unreachable and it goes out later.
+`ants ask` prints `thread <id>`; keep that id to read replies and follow up (`--thread` still prompts only `@ant`, or
+`messenger` when omitted). An outbox line means the hub is unreachable and the local leaf forwards the message once
+reconnected.
 
-Quote the message text as one shell argument. Make the request self-contained: the ant does not share this
-session's context, conversation history or files outside its own workdir.
+Quote the message text as one shell argument. Make requests self-contained: the ant shares neither this session's
+context nor files outside its own `workdir`.
 
 ## Receive
 
-Option 1, block until the first reply on the thread:
+Option 1, block on the thread:
 
 ```sh
-ants ask --wait @dev-a "..."                 # prints the thread, then "<ant>: <reply>", and exits
-ants ask --wait --timeout 10m @dev-a "..."   # gives up after 10 minutes: exit status 1, "no reply on thread ..."
-ants ask --follow @dev-a "..."               # prints every reply on the thread until Ctrl-C (or --timeout)
+ants ask --wait @dev-a "..."                 # prints thread <id>, then "<ant>: <reply>", and exits
+ants ask --wait --timeout 10m @dev-a "..."   # exits 1 after 10m if unanswered ("no reply on thread ...")
+ants ask --follow @dev-a "..."               # prints every reply on the thread until --timeout or Ctrl-C
 ```
 
-`--wait` has no default timeout and ants can take minutes, so start it as a background or long-running shell command
-and read its output when it finishes rather than holding a short synchronous call open, or bound it with
-`--timeout` (`90s`, `10m`, `1h30m`). Replies printed by `--wait` or `--follow` are marked read.
+`--wait` has no default timeout and ants can take minutes: run it as a background or long-timeout shell command, or
+bound it with `--timeout` (`90s`, `10m`, `1h30m`). Replies printed by `--wait` or `--follow` are marked read.
 
 Option 2, send now and collect later:
 
 ```sh
-ants inbox --thread <thread>           # unread replies on that thread, then marks them read
-ants inbox --thread <thread> --peek    # look without marking read
-ants inbox --thread <thread> --json    # one envelope per line (from, thread_id, text, sent_at, ...)
+ants inbox --thread <thread>           # unread replies on <thread>, then marks them read
+ants inbox --thread <thread> --peek    # inspect without marking read
+ants inbox --thread <thread> --json    # one JSON envelope per line (from, thread_id, text, sent_at, ...)
 ```
 
-Empty output means no reply yet; check again later rather than in a tight loop.
+`ants inbox` also takes `--limit <n>` and `--follow`. `no unread replies` (or empty output with `--json`) means none
+yet; check again later rather than polling in a tight loop.
 
-Always pass `--thread`, or `--peek`, to `ants inbox`. A bare `ants inbox` marks every unread reply to the CLI's
-human as read, including replies that human has not seen yet.
+Always pass `--thread` or `--peek` to `ants inbox`. A bare `ants inbox` marks every unread message in the human's inbox
+as read, consuming replies and notices from other threads.
 
 ## Watch progress
 
 ```sh
-ants watch dev-a <thread>   # live state, reply text and tool calls of dev-a on that thread
-ants notes <thread>         # the thread's notes: a passive shared board; posts there wake nobody
+ants watch dev-a <thread>   # live state, streamed thoughts and reply, tool calls and plan of dev-a on <thread>
+ants watch                  # all live traffic; escalations show level, reason, stuck ant/thread, leader and visited
+ants notes <thread>         # passive shared board for <thread>; posts there wake nobody
 ```
 
-`ants watch` never exits on its own: run it in the background and stop it when done.
+`ants watch` never exits on its own: start it in the background and stop it when done. `ants notes <thread> "<text>"`
+posts to the board as the CLI's human and renews its turn budget; do not post unasked.
 
 ## Channels
 
-A channel is a named group of ants. A post @mentioning members wakes only them; a post mentioning nobody goes to
-the channel's messenger, which @mentions the members it concerns. Posts go out as the CLI's human, who owns the
-threads it starts: when the agents' turns on a thread run out, the thread escalates (see Escalations), in the end to
-that owner. A thread an ant starts (the MCP tool `post_channel`, or `ants post` with an ant's credentials) has that
-ant as its creator and no owner: its escalations go up the creator's chain. Replies land in the
-channel on the post's thread, not in the inbox.
+A channel is a named group of ant and human members. A post `@mention`ing members wakes only mentioned ant members and
+puts a mention notice in each mentioned human member's inbox (a channel webhook with `broadcast = true` mentions every
+member); non-members get neither. A human or webhook post mentioning nobody goes to the channel's messenger (default
+`messenger`), which replies on the thread `@mention`ing relevant members.
+
+The CLI's human owns threads started from the CLI (`--thread` keeps an existing thread's owner); a thread an ant starts
+(`post_channel` MCP tool, or `ants post` with ant credentials) has that ant as creator and no owner until a human posts
+on it. Channel replies stay on the channel thread rather than the inbox; only human `@mention` notices and terminal
+escalations reach the inbox.
 
 ```sh
-ants channel list                                   # channels, members, messenger and owner
-ants post '#ops' "@dev-b the deploy failed"         # prints the new thread
+ants channel list                                   # channels, members (ants and humans), messenger and owner
+ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread <id>
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
-ants post --wait '#ops' "who owns billing?"         # then print the first answer on the thread and exit
-ants post --follow --timeout 10m '#ops' "status?"   # then print each post on the thread as it arrives, for 10 minutes
-ants channel read ops --thread <thread>             # the thread's posts
+ants post --wait '#ops' "who owns billing?"         # print the first post by another user and exit
+ants post --follow --timeout 10m '#ops' "status?"   # print each later post on the thread for 10m
+ants channel read ops --thread <thread>             # read one thread (or --limit <n> for the last n threads)
 ```
 
-Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creating channels and changing their members
-or owner (`ants channel create/set/add/remove`) changes the team for everyone; do it only when the user asks.
+Quote `'#channel'` or omit `#` (`ops`): an unquoted `#` starts a shell comment. Mutating channels
+(`ants channel create/set` with `--member <user>`, `ants channel add/remove <channel> <user>...`,
+`ants channel delete`) changes team routing for everyone; run those commands only when the user asks.
 
 ## Escalations
 
-An ant may name other ants to escalate to: the `escalate_to` key of its config, a chain whose first ant leads.
-`ants roster` shows it in the `ESCALATE_TO` column (`escalate_to` in `--json`), leader first. What an ant cannot
-settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, thread notes out of turns, or
-an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human; on a
-thread another ant created, of the creator's chain. The
-members coordinate in the thread's notes (`ants notes <thread>`), which get a fresh turn budget at each level; only
-the leader resolves it, by answering the stuck ant on its thread, or sends it one level higher, to its own chain.
-A chain that is empty, loops back or climbs past `max_escalation_hops` (default 3) hands the thread to its owner, the
-human who started it, else the daemon's default human. An ant's agent calls `escalate(issue)` when stuck, and a
-chain member decides a tool request brought up the chain with `decide_approval(verdict)`.
+An ant's `escalate_to` config lists ants to escalate to, leader first (`ESCALATE_TO` in `ants roster`, `escalate_to` in
+`--json`). Unresolved work on a thread (spent turn budget, time/tool/token/cost limit, dead letter, exhausted notes
+budget, or `escalate(issue)`) goes to every unvisited member of that chain (or, on a thread another ant created, the
+creator's chain) before any human. Chain members coordinate in `ants notes <thread>` with a fresh turn budget per
+level; only the leader answers the stuck ant on its thread or escalates to the leader's own chain (also automatically
+after `escalate_after`, default `30m`). An empty chain, loop, or hop past `max_escalation_hops` (default 3) hands the
+thread to its owner, else the daemon's default human.
 
-```sh
-ants watch                  # escalations show their level, reason, stuck ant and thread, leader and ants visited
-ants watch dev-a <thread>   # what dev-a does on the thread meanwhile
-```
-
-An escalation that reaches the CLI's human arrives in its inbox as a notice on the thread. Report it to the user rather
-than answering it unasked.
+An escalation reaching the CLI's human arrives in the inbox as a notice on the thread (`ants watch` prints live
+escalations with level, reason, stuck ant and thread, leader and visited ants). Report inbox escalations to the user
+rather than answering unasked.
 
 ## Approvals
 
-An ant may wait on a tool request that a human, or an agent of its escalation chain, answers. Every human sees every
-request and the first decision wins. `ants tools list` lists pending requests and `ants tools show <id>` shows one; one
-an agent of the chain decided is no longer listed. Do not answer them (`ants tools approve <id> [--always]`,
-`ants tools reject <id>`) unless the user explicitly says to; report them instead.
+An ant waiting on a tool call asks humans and, at level 1, its `escalate_to` chain (`decide_approval(verdict)`). Every
+human sees every request and the first decision wins; decided or expired requests drop off the pending list.
+
+```sh
+ants tools list [--follow] [--json]   # pending requests: <ant>/<id>, thread, tool, files, options, time left
+ants tools show <id> [--json]         # full tool input, state and decision commands (<ant>/<id> or unique id)
+```
+
+Do not answer requests (`ants tools approve <id> [--always]`, `ants tools reject <id>`) unless the user explicitly
+asks; report them instead.
 
 ## Reporting back
 
-Quote the ant's reply, with its name and the thread id, so the user can continue the thread with
-`ants ask --thread <thread>`.
+Quote the ant's reply with the ant name and thread id so the user can follow up with `ants ask --thread <thread>` or
+`ants post '#<channel>' --thread <thread>`.

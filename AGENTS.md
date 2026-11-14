@@ -5,10 +5,10 @@
 All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 
 - `bd ready` lists unblocked work; `bd claim <id>` takes one under a lease.
-- `bd show <id>` shows the details; `bd close <id> -r "<what was done>"` closes it.
-- Record new work found along the way with `bd create ... --dep discovered-from:<id>`.
+- `bd show <id>` shows details; `bd close <id> -r "<what was done>"` closes it.
+- Record discovered work with `bd create ... --dep discovered-from:<id>`.
 - Specs: `bd spec list`, `bd spec show <area>`. Areas: wire, transport, daemon, harness, memory, cli, efficiency,
-  messenger.
+  messenger, channels, webhooks.
 - Link every piece of work to the requirement it serves (`bd spec link <id> <requirement>`) or mark it
   `bd spec none <id> -r "<why>"`. `bd spec drift` must report 0 problems.
 - A behaviour change that contradicts a requirement goes through `bd spec change`, not a silent edit.
@@ -16,12 +16,13 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 ## Code
 
 - Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-daemon` (NATS + ACP), `ants` (binary),
-  `ants-test-support` (dev-only test helpers: tools on PATH, a throwaway nats-server).
+  `ants-test-support` (dev-only test helpers: tools on PATH, throwaway nats-server).
 - Keep the footprint small: tokio current-thread, minimal features, no per-session helper processes.
 - TLS stays on rustls.
 - A daemon acks a JetStream message only after its effects are stored.
-- Also in the repo: `contrib/` (launchd and systemd units), `scripts/` (`install-units.sh`, `footprint.sh`),
-  `docs/transport.md` (hub, proxy, leaf and tunnel findings), `deny.toml` (dependency policy).
+- Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`install-units.sh`,
+  `footprint.sh`), `docs/transport.md` (hub, proxy, leaf, bridge and tunnel reference), `deny.toml` (dependency
+  policy).
 - Comment only code that needs clarification.
 
 ## Checks
