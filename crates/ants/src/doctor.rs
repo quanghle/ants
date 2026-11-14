@@ -301,7 +301,7 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
         return (checks, None);
     }
     checks.extend(check_hub(&js, identity).await);
-    checks.push(check_consumers(&js, identity).await);
+    checks.extend(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
@@ -488,21 +488,31 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
         .collect()
 }
 
-/// The consumers of the `ANTS` stream against the most it takes ([`consumer_limit`]): past that, creating one fails,
-/// so an ant cannot read its inbox. Warns from four fifths of it.
-async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Check {
+/// The consumers of the `ANTS` stream, and of each bucket every daemon watches ([`hub::Object::watched`]), against the
+/// most each takes ([`consumer_limit`]): past that, creating one fails, so an ant cannot read its inbox, or a daemon
+/// cannot watch the bucket. Warns from four fifths of it. Those whose stream info the credentials do not get are left
+/// out, the stream with a skip.
+async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
     let check = "consumers";
-    if !identity.rights.may_publish(&hub::Object::Stream.info_subject()) {
-        return Check::skip(
-            check,
-            format!("the credentials get no stream info of {STREAM}: run `ants doctor` as a human"),
-        );
+    let objects = std::iter::once(hub::Object::Stream).chain(hub::Object::ALL.into_iter().filter(|o| o.watched()));
+    let (seen, unseen): (Vec<_>, Vec<_>) =
+        objects.partition(|object| identity.rights.may_publish(&object.info_subject()));
+    let mut checks = Vec::new();
+    if unseen.contains(&hub::Object::Stream) {
+        let detail = format!("the credentials get no stream info of {STREAM}: run `ants doctor` as a human");
+        checks.push(Check::skip(check, detail));
     }
-    let info = match js.get_stream(STREAM).await {
-        Ok(stream) => stream.cached_info().clone(),
-        Err(e) => return Check::skip(check, format!("no stream info of {STREAM}: {e}")),
-    };
-    consumers(info.state.consumer_count, consumer_limit(&info.config))
+    let infos = seen.into_iter().map(async |object| (object, js.get_stream(object.stream_name()).await));
+    for (object, info) in futures::future::join_all(infos).await {
+        checks.push(match info {
+            Ok(stream) => {
+                let info = stream.cached_info();
+                consumers(object, info.state.consumer_count, consumer_limit(&info.config))
+            }
+            Err(e) => Check::skip(check, format!("no stream info of {}: {e}", object.stream_name())),
+        });
+    }
+    checks
 }
 
 /// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server 2.15 and
@@ -519,20 +529,25 @@ fn consumer_limit(config: &jetstream::stream::Config) -> Option<usize> {
     ((major, minor) >= (2, 15)).then_some(1000)
 }
 
-fn consumers(count: usize, limit: Option<usize>) -> Check {
+fn consumers(object: hub::Object, count: usize, limit: Option<usize>) -> Check {
     let check = "consumers";
+    let name = object.stream_name();
     let Some(limit) = limit else {
-        return Check::ok(check, format!("{count} on stream {STREAM}, which takes any number"));
+        return Check::ok(check, format!("{count} on stream {name}, which takes any number"));
     };
-    let detail = format!("{count} on stream {STREAM}, which takes {limit}");
+    let detail = format!("{count} on stream {name}, which takes {limit}");
     if count.saturating_mul(5) < limit.saturating_mul(4) {
         return Check::ok(check, detail);
     }
     let raise = match usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
         true => "ants init".to_owned(),
-        false => format!("nats stream edit {STREAM} --max-consumers {}", limit.saturating_mul(2)),
+        false => format!("nats stream edit {name} --max-consumers {}", limit.saturating_mul(2)),
     };
-    Check::warn(check, format!("{detail}: once full, no ant can open a consumer to read its inbox"), vec![raise])
+    let full = match object {
+        hub::Object::Stream => "no ant can open a consumer to read its inbox".to_owned(),
+        _ => format!("no daemon can watch {object}"),
+    };
+    Check::warn(check, format!("{detail}: once full, {full}"), vec![raise])
 }
 
 /// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
@@ -1079,12 +1094,19 @@ mod tests {
         config.max_consumers = hub::MAX_CONSUMERS;
         assert_eq!(consumer_limit(&config), Some(10_000));
 
-        assert_eq!(consumers(799, Some(1000)).status, Status::Ok);
-        let near = consumers(800, Some(1000));
+        let stream = hub::Object::Stream;
+        assert_eq!(consumers(stream, 799, Some(1000)).status, Status::Ok);
+        let near = consumers(stream, 800, Some(1000));
         assert_eq!((near.status, near.fix.as_slice()), (Status::Warn, ["ants init".to_owned()].as_slice()));
-        let full = consumers(9_000, Some(10_000));
+        let full = consumers(stream, 9_000, Some(10_000));
         assert_eq!(full.fix, [format!("nats stream edit {STREAM} --max-consumers 20000")]);
-        assert_eq!(consumers(5_000, None).status, Status::Ok);
+        assert_eq!(consumers(stream, 5_000, None).status, Status::Ok);
+        let humans = consumers(hub::Object::Humans, 900, Some(1000));
+        assert_eq!(
+            humans.detail,
+            "900 on stream KV_ants_humans, which takes 1000: once full, no daemon can watch bucket ants_humans"
+        );
+        assert_eq!(humans.fix, ["ants init"]);
     }
 
     #[tokio::test]

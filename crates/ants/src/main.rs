@@ -2561,9 +2561,15 @@ mod tests {
         })
         .await
         .unwrap();
+        // As created before, with the 1000 consumers nats-server gives a stream by default.
+        h_js.create_key_value(hub::channels_config()).await.unwrap();
         let fixed: Vec<_> = upgrade_hub(&h_js, &h_rights).await.into_iter().map(|f| f.object).collect();
         let seen: Vec<_> = hub::Object::ALL.into_iter().filter(|o| *o != hub::Object::Presence).collect();
-        assert_eq!(fixed, seen, "the old stream upgraded, every bucket a human may look up created");
+        assert_eq!(fixed, seen, "the old stream and bucket upgraded, every bucket a human may look up created");
+        for watched in [hub::Object::Channels, hub::Object::Humans, hub::Object::Roster] {
+            let config = h_js.get_stream(watched.stream_name()).await.unwrap().cached_info().config.clone();
+            assert_eq!(config.max_consumers, hub::MAX_CONSUMERS, "{watched}");
+        }
         assert!(hub::check(&h_js, |s| h_rights.may_publish(s)).await.is_empty());
         assert!(upgrade_hub(&h_js, &h_rights).await.is_empty());
     }
