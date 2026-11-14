@@ -22,17 +22,23 @@ All work and specs live in bd (`.bd/bd.db`). Do not keep TODO lists in markdown.
 - A daemon acks a JetStream message only after its effects are stored.
 - Also in the repo: `contrib/` (launchd and systemd units, agent skill), `scripts/` (`install-units.sh`,
   `footprint.sh`), `docs/transport.md` (hub, proxy, leaf, bridge and tunnel reference), `deny.toml` (dependency
-  policy).
+  policy), `.cargo/config.toml` (7-day dependency cooldown).
 - Comment only code that needs clarification.
 
 ## Checks
 
 Before finishing, as CI (`.github/workflows/ci.yml`) does:
 
-- `cargo fmt`, `cargo clippy --all-targets` (no warnings), `cargo test`.
+- `cargo fmt`, `cargo clippy --all-targets` (no warnings), `cargo test`. CI sets `CARGO_BUILD_WARNINGS=deny`, so
+  any lint warning fails it; `CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets` checks the same locally.
 - Tests needing `nats-server` skip when it is not on PATH; `ANTS_REQUIRE_TOOLS=1` makes them fail instead.
 - `cargo deny check` after changing dependencies. A new license goes into `deny.toml`'s allow-list only if
   permissive.
+- Dependency cooldown: `cargo update` and `cargo add` take only versions published at least 7 days ago, and a
+  manifest requirement on a newer one fails to resolve: require the version `cargo add` picks or the one in
+  `Cargo.lock`. `cargo update -p CRATE` can step a locked version younger than 7 days back down; keep such a
+  downgrade out of a commit unless intended. For a needed newer release (a security fix):
+  `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION`.
 
 ## Docs
 
