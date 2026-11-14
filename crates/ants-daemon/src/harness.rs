@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -67,6 +67,11 @@ pub struct ContextValue {
 impl Harness {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Its executable: a path, or a name looked up on `PATH`.
+    pub fn command(&self) -> &Path {
+        &self.command
     }
 
     /// The command a human runs to sign the harness in, if its definition names one.

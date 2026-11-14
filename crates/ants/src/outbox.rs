@@ -168,11 +168,41 @@ pub async fn sourced(hub: &Context, machine: &Machine, wait: Duration) -> Result
     }
 }
 
+/// Whether the hub's intake hears from a machine's outbox.
 #[derive(Debug, PartialEq)]
-enum Hearing {
+pub enum Hearing {
     Heard,
+    /// Sourced, never heard from yet.
     Silent,
+    /// Not sourced, or failing, for this reason.
     Failed(String),
+}
+
+/// How the hub takes from a machine's outbox ([`sourcing`]).
+#[derive(Debug, PartialEq)]
+pub struct Sourcing {
+    pub hearing: Hearing,
+    /// The members the hub's stream takes nothing from the outbox for.
+    pub unadmitted: Vec<UserId>,
+}
+
+/// Whether the hub's intake sources the outbox of `machine` and has heard from it, and which of `members`, ants and
+/// humans each in its role, the hub's stream takes nothing from it for, as [`admit`] would set it up. Reads the intake's
+/// and the stream's info, which only a human's credentials get; changes nothing.
+pub async fn sourcing(hub: &Context, machine: &Machine, members: &[(UserId, Role)]) -> Result<Sourcing> {
+    let info: serde_json::Value =
+        hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")?;
+    let hearing = hearing(&info, machine);
+    let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
+    let sources = ants.info().await?.config.sources.clone().unwrap_or_default();
+    let unadmitted = admitted_members(machine, members, 0)
+        .into_iter()
+        .filter(|(_, wanted)| {
+            !sources.iter().any(|s| s.name == wanted.name && s.subject_transforms == wanted.subject_transforms)
+        })
+        .map(|(user, _)| user)
+        .collect();
+    Ok(Sourcing { hearing, unadmitted })
 }
 
 /// Whether the intake's source for the outbox of `machine`, in the intake's stream info (`STREAM.INFO`), has heard
@@ -287,13 +317,20 @@ fn outbox_of(source: &Source, machine: &Machine) -> bool {
 /// are. The filters of one stream's sources may not overlap, so when humans run on the machine, the admission of the
 /// first of them by name takes every inbox subject and the others' only their notes and channel posts.
 fn admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<Source> {
+    admitted_members(machine, members, start).into_iter().map(|(_, source)| source).collect()
+}
+
+/// [`admissions`], each with its member.
+fn admitted_members(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<(UserId, Source)> {
     let mut members: Vec<&(UserId, Role)> = members.iter().collect();
     members.sort_by(|(a, _), (b, _)| a.cmp(b));
     members.dedup_by(|(a, _), (b, _)| a == b);
     let inboxes = members.iter().find(|(_, role)| role.is_human()).map(|(human, _)| human);
     members
         .iter()
-        .map(|(user, role)| member_source(machine, user, *role, inboxes.is_none_or(|human| human == user), start))
+        .map(|(user, role)| {
+            (user.clone(), member_source(machine, user, *role, inboxes.is_none_or(|human| human == user), start))
+        })
         .collect()
 }
 
@@ -472,6 +509,10 @@ pub(crate) mod tests {
         let setup = super::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
         admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
         sourced(&h_js, &m1, Duration::from_secs(5)).await.unwrap();
+        let found = sourcing(&h_js, &m1, &on_m1).await.unwrap();
+        assert_eq!(found, Sourcing { hearing: Hearing::Heard, unadmitted: Vec::new() });
+        let more = [on_m1.clone(), vec![(dev_b.clone(), Role::Ant)]].concat();
+        assert_eq!(sourcing(&h_js, &m1, &more).await.unwrap().unadmitted, std::slice::from_ref(&dev_b));
         // Any human on the machine may set it up again.
         let alice_creds = hub.dir().join("alice.creds");
         auth::issue(&team, &alice, Role::Human, Some(&domain), &alice_creds).unwrap();
@@ -781,6 +822,7 @@ pub(crate) mod tests {
         eventually("the leaf reaches the hub", async || admit(&setup, &h_js, &m1, &on_m1).await.is_ok()).await;
         let error = sourced(&h_js, &m1, Duration::from_secs(3)).await.unwrap_err().to_string();
         assert!(error.contains("feature_flags { js_api_reply_v2: true }"), "{error}");
+        assert_eq!(sourcing(&h_js, &m1, &on_m1).await.unwrap().hearing, Hearing::Silent);
     }
 
     #[test]
