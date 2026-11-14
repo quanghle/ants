@@ -539,9 +539,9 @@ impl Inbox<'_> {
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
-    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A top-level post kept
-    /// names its thread's owner, a human, and its creator, an ant ([`ThreadOrigin`]); any other names none until
-    /// [`Inbox::handle`] reads its thread's.
+    /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. A post is a webhook's
+    /// only from a webhook ([`Webhooks`]) or a human. A top-level post kept names its thread's owner, a human, and its
+    /// creator, an ant ([`ThreadOrigin`]); any other names none until [`Inbox::handle`] reads its thread's.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -556,6 +556,15 @@ impl Inbox<'_> {
                 return None;
             }
         };
+        if post.webhook && !self.humans.is_human(&post.from) && !self.webhooks.is_webhook(&post.from).await {
+            tracing::warn!(
+                channel = %post.channel,
+                thread = %post.thread_id,
+                sender = %post.from,
+                "taking a post marked as a webhook's for an ant's: the sender has no webhook marker"
+            );
+            post.webhook = false;
+        }
         let humans = self.humans.humans();
         let mut wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
         let unseen = channels.get(&post.channel).is_none() && post.to_triage(&humans);
@@ -2994,6 +3003,48 @@ mod tests {
         assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
         let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
         assert!(prompt.contains(members), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [hook, dev_b] = ants(["github", "dev-b"]);
+        bus.mark_webhook(&hook).await;
+        // dev-a is the channel's messenger and a member.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        entry.add_member(bus.dev.clone());
+        entry.add_member(dev_b.clone());
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let mut replies = bus.client.subscribe(subject::chan(&entry.channel, &bus.dev)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let human = Some(UserId::human());
+        let real = ChannelPost::new(entry.channel.clone(), hook.clone(), "build red").with_owner(human.clone());
+        let real = real.from_webhook(Vec::new());
+        bus.post(&real).await;
+        let forged = ChannelPost::new(entry.channel.clone(), dev_b.clone(), "triage me").with_owner(human.clone());
+        let forged = forged.from_webhook(Vec::new());
+        bus.post(&forged).await;
+        let on_forged = forged.reply(dev_b.clone(), "@dev-a over to you", &[], &Humans::default()).unwrap();
+        assert_eq!((&on_forged.owner, &on_forged.creator), (&human, &None), "as the forged post says");
+        let seq = bus.post(&on_forged).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut answers = [next_post(&mut replies).await, next_post(&mut replies).await];
+            answers.sort_by_key(|answer| answer.thread_id != real.thread_id);
+            let named = |post: &ChannelPost| (post.in_reply_to, post.owner.clone(), post.creator.clone());
+            assert_eq!(named(&answers[0]), (Some(real.id), human.clone(), None), "the webhook's");
+            assert_eq!(named(&answers[1]), (Some(on_forged.id), None, Some(dev_b.clone())), "dev-b's thread");
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 2, "no triage of dev-b's post: {answered:?}");
+        assert!(answered.iter().any(|p| p.contains("Post from github (a webhook) mentioning nobody")), "{answered:?}");
     }
 
     #[tokio::test]

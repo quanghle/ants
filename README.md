@@ -1003,9 +1003,10 @@ channel = "ops"
   `webhook.<webhook>.<hash>` for 2 minutes.
 - **Marker**: before delivering, and again each day it delivers, `ants webhook serve` puts the webhook's marker,
   `<webhook>.webhook` in `ants_webhooks`. Only the webhook's credentials write it, and daemons honour `webhook: true`
-  on a message only from a sender with a marker there (or a human): from an ant, the message is an ant's, and the
-  answer goes back to its inbox. A webhook served by a CLI from before the marker has its answers sent to its own
-  inbox, which nobody reads, until the CLI is upgraded.
+  on a message or channel post only from a sender with a marker there (or a human): from an ant, the message is an
+  ant's, and the answer goes back to its inbox; the post is an ant's too, so the messenger does not triage it, and a
+  thread it starts has the ant as its `creator` and no owner until a human posts on it. A webhook served by a CLI
+  from before the marker has its answers sent to its own inbox, which nobody reads, until the CLI is upgraded.
 - **Text**: `text` is a template, default `[webhook {webhook}] {id}` and the body. `{body}`, `{id}`, `{webhook}`,
   `{header:Name}` and `{json:/pointer}` (a JSON string unquoted, a missing field empty) are replaced; `{{` and `}}`
   are literal braces. The text is untrusted input for the ant's prompt: give a webhook a destination whose tools
@@ -1109,7 +1110,8 @@ a new thread, named after the post's own id, and a post carries the thread's `ow
 and its `creator`, the ant whose top-level post started it: readers take the creator of a top-level post from its
 subject-checked sender, ignore a human, a webhook post and the channel manager, and posts without one stay valid.
 Readers take both from the thread's posts kept in the stream (the first one that starts it, the first human's), not from
-what a later post carries. A webhook's post carries `webhook: true`, so it never counts as a human's. A
+what a later post carries. A webhook's post carries `webhook: true`, so it never counts as a human's; daemons honour
+it only from a sender with a webhook marker or a human (see [Webhooks](#webhooks)). A
 channel's members, optional messenger and optional owner ant are a `ChannelEntry` in the KV bucket `ants_channels`,
 under the channel id: only humans and the channel manager write it, ants read it, and readers skip an entry whose
 channel disagrees with its key. An ant asks the channel manager for changes only on `ants.chanadm.*.<ant>`, so the
