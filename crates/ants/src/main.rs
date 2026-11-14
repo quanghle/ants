@@ -1449,13 +1449,18 @@ impl<'a> Nats<'a> {
         Ok((client, js))
     }
 
-    /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
+    /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too. A human's
+    /// credentials known to predate batched direct gets read the stream one message at a time from the start.
     async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let name = match &self.device.id {
             Some(device) => format!("{name} {device}"),
             None => name.to_owned(),
         };
-        bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await
+        let (client, js) = bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await?;
+        if self.me.role.is_human() && self.rights.older_than(ants_daemon::reading::BATCHES_SINCE) {
+            ants_daemon::reading::without_batches(&client);
+        }
+        Ok((client, js))
     }
 }
 
