@@ -543,7 +543,8 @@ enum AuthCommand {
         out: Option<PathBuf>,
     },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
-    /// ants and humans on the machine may do and usable only by a leaf node connection.
+    /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
+    /// credentials of its second uplink, which only hears the account updates `ants auth push` sends the hub.
     Leaf {
         /// Machine name, for the credentials' name and file name, and the leaf's JetStream domain: letters, digits,
         /// '-' and '_'.
@@ -565,13 +566,15 @@ enum AuthCommand {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
-        /// Where to write the credentials (default: <dir>/leaf-<machine>.creds).
+        /// Where to write the credentials (default: <dir>/leaf-<machine>.creds); the system account credentials of
+        /// the leaf's second uplink go beside them, as <stem>.system.creds.
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Revoke credentials before they expire: every key issued to NAME (an ant, human or webhook,
     /// `leaf-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
-    /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections.
+    /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections,
+    /// as do the leaf nodes connected to it through a system account uplink.
     Revoke {
         /// Name the credentials carry; every key issued to it is revoked.
         #[arg(required_unless_present = "keys")]
@@ -619,8 +622,8 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Push the team's account, with its revocations, to the server of --nats (the hub), as `ants auth revoke`
-    /// does.
+    /// Push the team's account, with its revocations, to the server of --nats (the hub) and through it to the leaf
+    /// nodes connected with a system account uplink, as `ants auth revoke` does.
     Push {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
@@ -712,6 +715,11 @@ enum LeafCommand {
         /// Uplink credentials from `ants auth leaf` (default: <dir>/leaf-<machine>.creds).
         #[arg(long)]
         uplink_creds: Option<PathBuf>,
+        /// System account credentials from `ants auth leaf`, for a second uplink bringing the account updates
+        /// `ants auth push` sends the hub, revocations included (default: leaf-<machine>.system.creds beside the
+        /// uplink credentials, when there).
+        #[arg(long)]
+        system_creds: Option<PathBuf>,
         /// The team's server.conf from `ants auth init` (default: <dir>/server.conf).
         #[arg(long)]
         server_conf: Option<PathBuf>,
@@ -1014,7 +1022,7 @@ async fn main() -> Result<()> {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
             auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, enroll_approver, domain, &out)?;
-            println!("{}", out.display());
+            println!("{}\n{}", out.display(), auth::leaf_system_creds(&out).display());
             Ok(())
         }
         Command::Auth(AuthCommand::Revoke { name, mut keys, devices, no_push, dir }) => {
@@ -1030,8 +1038,8 @@ async fn main() -> Result<()> {
                 println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
             }
             println!(
-                "{} carries the revocations: copy it to the hub and every leaf node and reload them (SIGHUP), so \
-                 restarts keep them and leaf nodes refuse the revoked users too",
+                "{} carries the revocations: copy it to the hub and reload it (SIGHUP), so a restart keeps them; leaf \
+                 nodes with a system account uplink get them with the push and keep them",
                 dir.join(auth::SERVER_CONF).display()
             );
             if no_push {
@@ -1055,6 +1063,7 @@ async fn main() -> Result<()> {
             machine,
             uplinks,
             uplink_creds,
+            system_creds,
             server_conf,
             dir,
             ca_file,
@@ -1064,6 +1073,14 @@ async fn main() -> Result<()> {
         }) => {
             let dir = team_dir(dir)?;
             let creds = uplink_creds.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
+            let system_creds = system_creds.or_else(|| Some(auth::leaf_system_creds(&creds)).filter(|p| p.is_file()));
+            if system_creds.is_none() {
+                println!(
+                    "no system account credentials at {}: revocations pushed to the hub do not reach this leaf; issue \
+                     them with `ants auth leaf` and run this again",
+                    auth::leaf_system_creds(&creds).display()
+                );
+            }
             let server_conf = server_conf.unwrap_or_else(|| dir.join(auth::SERVER_CONF));
             let out = match out {
                 Some(out) => out,
@@ -1074,6 +1091,7 @@ async fn main() -> Result<()> {
                 hub_domain: domain,
                 uplinks: &uplinks,
                 creds: &creds,
+                system_creds: system_creds.as_deref(),
                 server_conf: &server_conf,
                 ca_file: ca_file.as_deref(),
                 proxy: proxy.as_deref(),
@@ -1175,8 +1193,25 @@ impl<'a> Nats<'a> {
 /// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure.
 async fn push(url: &str, dir: &Path) -> Result<()> {
     match revoke::push(url, dir).await {
-        Ok(server) => {
-            println!("account pushed to server {server} ({url}); connections of revoked credentials are closed");
+        Ok(pushed) => {
+            println!(
+                "account pushed to server {} ({url}); connections of revoked credentials are closed",
+                pushed.server
+            );
+            let applied: Vec<&str> =
+                pushed.others.iter().filter(|(_, error)| error.is_none()).map(|(name, _)| name.as_str()).collect();
+            if !applied.is_empty() {
+                println!("also applied by: {}", applied.join(", "));
+            }
+            for (name, error) in &pushed.others {
+                if let Some(error) = error {
+                    println!("not applied by {name}: {error}");
+                }
+            }
+            println!(
+                "leaf nodes not listed (offline, or with no system account uplink) did not apply it: run `ants auth \
+                 push` again once they are connected"
+            );
             Ok(())
         }
         Err(e) => Err(e.context(format!(
