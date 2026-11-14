@@ -249,6 +249,9 @@ enum ChannelCommand {
         /// Ant that triages the posts of humans that @mention nobody (default: `messenger`).
         #[arg(long, value_parser = channel::parse_ant)]
         messenger: Option<UserId>,
+        /// Ant that owns the channel: it changes the members and the messenger through `ants channel serve`.
+        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant)]
+        owner: Option<UserId>,
     },
     /// Replace the members or the messenger of a channel; what is not given stays.
     Set {
@@ -264,6 +267,12 @@ enum ChannelCommand {
         /// Hand the triage back to the default messenger, the ant `messenger` (triage stays on).
         #[arg(long)]
         default_messenger: bool,
+        /// Ant that owns the channel: it changes the members and the messenger through `ants channel serve`.
+        #[arg(long, value_name = "ANT", value_parser = channel::parse_ant, conflicts_with = "no_owner")]
+        owner: Option<UserId>,
+        /// Leave the channel without an owner.
+        #[arg(long)]
+        no_owner: bool,
     },
     /// Add members to a channel.
     Add {
@@ -283,7 +292,7 @@ enum ChannelCommand {
         #[arg(required = true, num_args = 1.., value_parser = channel::parse_ant)]
         ants: Vec<UserId>,
     },
-    /// List the channels with the members and the messenger of each.
+    /// List the channels with the members, the messenger and the owner of each.
     List,
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
     /// replies on the thread, indented.
@@ -304,6 +313,10 @@ enum ChannelCommand {
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
     },
+    /// Run the channel manager, where no ant runs (on the hub, say), with the credentials of
+    /// `ants auth channel-manager` as --creds: it applies the changes owners ask for, refuses the others, and posts
+    /// each change in its channel.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -396,6 +409,16 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the enrollment credentials (default: <dir>/enroll-<ant>.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Issue the credentials of the channel manager, `ants channel serve`: it hears channel management requests and
+    /// answers each once, reads the roster and the humans, writes the channels and posts in them.
+    ChannelManager {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the credentials (default: <dir>/channel-manager.creds).
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -578,6 +601,7 @@ async fn main() -> Result<()> {
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Post { channel, thread, replies, words } => post(&nats()?, channel, thread, &replies, words).await,
+        Command::Channel(ChannelCommand::Serve) => channel::serve(&cli.nats, cli.creds.as_deref(), domain).await,
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
         Command::Watch { subject, thread } => {
@@ -701,6 +725,13 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
             }
+        }
+        Command::Auth(AuthCommand::ChannelManager { dir, out }) => {
+            let dir = team_dir(dir)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));
+            auth::issue_channel_manager(&dir, domain, &out)?;
+            println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
+            Ok(())
         }
         Command::Auth(AuthCommand::Leaf { machine, ants, humans, dir, out }) => {
             let dir = team_dir(dir)?;
@@ -927,22 +958,25 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let kv = channel::open(&js).await?;
     let humans = humans::load(&js, &nats.me).await;
     match command {
-        ChannelCommand::Create { channel, members, messenger } => {
+        ChannelCommand::Create { channel, members, messenger, owner } => {
             channel::check_not_human(members.iter().chain(&messenger), &humans)?;
+            channel::check_owner_not_human(owner.as_ref(), &humans)?;
             let mut entry = ants_proto::ChannelEntry::new(channel);
             for member in members {
                 entry.add_member(member);
             }
             entry.messenger = messenger;
+            entry.owner = owner;
             channel::create(&kv, &entry).await?;
-            warn_unserved(&js, entry.members.iter().chain(&entry.messenger)).await;
+            warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner)).await;
             println!("created {}", channel::describe(&entry));
         }
-        ChannelCommand::Set { channel, members, messenger, default_messenger } => {
-            if members.is_none() && messenger.is_none() && !default_messenger {
-                bail!("nothing to change: give --member, --messenger or --default-messenger");
+        ChannelCommand::Set { channel, members, messenger, default_messenger, owner, no_owner } => {
+            if members.is_none() && messenger.is_none() && !default_messenger && owner.is_none() && !no_owner {
+                bail!("nothing to change: give --member, --messenger, --default-messenger, --owner or --no-owner");
             }
             channel::check_not_human(members.iter().flatten().chain(&messenger), &humans)?;
+            channel::check_owner_not_human(owner.as_ref(), &humans)?;
             let (entry, ()) = channel::update(&kv, &channel, |entry| {
                 if let Some(members) = &members {
                     entry.members.clear();
@@ -953,9 +987,12 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 if messenger.is_some() || default_messenger {
                     entry.messenger.clone_from(&messenger);
                 }
+                if owner.is_some() || no_owner {
+                    entry.owner.clone_from(&owner);
+                }
             })
             .await?;
-            warn_unserved(&js, members.iter().flatten().chain(&messenger)).await;
+            warn_unserved(&js, members.iter().flatten().chain(&messenger).chain(&owner)).await;
             println!("{}", channel::describe(&entry));
         }
         ChannelCommand::Add { channel, ants } => {
@@ -1011,11 +1048,12 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             channel::delete(&kv, &channel).await?;
             println!("deleted #{channel}; the posts to #{channel} stay in the stream");
         }
+        ChannelCommand::Serve => unreachable!("main runs the channel manager"),
     }
     Ok(())
 }
 
-/// Warn about members and messengers no daemon serves now, rather than refuse them: one may start later.
+/// Warn about members, messengers and owners no daemon serves now, rather than refuse them: one may start later.
 async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, ants: impl IntoIterator<Item = &'a UserId>) {
     let ants: Vec<&UserId> = ants.into_iter().collect();
     if ants.is_empty() {
@@ -1503,6 +1541,19 @@ mod tests {
         assert!(default_messenger && messenger.is_none());
         assert!(parse(&["--default-messenger", "--messenger", "triage"]).is_err());
         assert!(parse(&["--no-messenger"]).is_err());
+    }
+
+    #[test]
+    fn an_owner_is_set_or_cleared_and_never_the_channel_manager() {
+        let parse = |args: &[&str]| Cli::try_parse_from(["ants", "channel", "set", "ops"].iter().chain(args));
+        let Command::Channel(ChannelCommand::Set { owner, no_owner, .. }) =
+            parse(&["--owner", "@lead"]).unwrap().command
+        else {
+            panic!("channel set")
+        };
+        assert_eq!((owner, no_owner), (Some("lead".parse().unwrap()), false));
+        assert!(parse(&["--owner", "lead", "--no-owner"]).is_err());
+        assert!(parse(&["--owner", "channel-manager"]).is_err());
     }
 
     fn thread() -> ThreadId {

@@ -105,7 +105,8 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
 | `ants notes THREAD [TEXT]` | Shows a thread's notes, or posts TEXT to them as the CLI's human, which gives them a fresh turn budget; a post wakes nobody (see [Thread notes](#thread-notes)). Distinct from the execution plan `ants watch <ant>` shows. |
 | `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
-| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`). |
+| `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`), messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`) and owner (`--owner ANT`, or `--no-owner`; see [Channel owners](#channel-owners)). |
+| `ants channel serve` | Runs the channel manager, which applies the changes channel owners ask for, with the credentials of `ants auth channel-manager`; on the hub, say, where no ant runs. |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
 | `ants tools list` / `show ID` / `approve ID` / `reject ID` | Lists pending tool requests (`--follow`, `--json`), shows one, allows it once (`--always`: for the rest of the session) or rejects it; every human sees every request, and the first decision wins, a human's or that of an agent of the ant's chain. |
@@ -115,7 +116,7 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants add NAME` | Lists an ant in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding an ant](#adding-an-ant). |
 | `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants add --enroll`, signs one or refuses it. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME [--human] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` | Issues the team's operator and account, ant or human credentials (or with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, and leaf uplink credentials. |
+| `ants auth init` / `user NAME [--human] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` / `channel-manager` | Issues the team's operator and account, ant or human credentials (or with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, leaf uplink credentials, and the channel manager's credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
 | `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
 | `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
@@ -389,7 +390,10 @@ daemon, `ants daemon --config ~/.ants/config.toml`. Templates are in `contrib/`:
 (`contrib/launchd/ants.nats.plist`, `ants.daemon.plist`), systemd user units on Linux and WSL
 (`contrib/systemd/ants-nats.service`, `ants-daemon.service`). Both restart on failure; the daemon starts after
 nats-server under systemd, and under launchd, which has no start order, it waits until nats-server listens (see Config
-file). The units name files only: credentials stay in the files the config names.
+file). The units name files only: credentials stay in the files the config names. On the hub, or another machine
+where no ant runs, `--channel-manager CREDS` adds the channel manager, `ants channel serve` with the credentials of
+`ants auth channel-manager` (`contrib/launchd/ants.channels.plist`, `contrib/systemd/ants-channels.service`; see
+[Channel owners](#channel-owners)).
 
 Setting up a machine (`macbook`, ants `dev-a` and `dev-b`, hub `wss://hub.example.com/nats` with
 `jetstream { domain: hub }`):
@@ -415,15 +419,15 @@ ants roster
 `--nats-server`), the nats-server configuration (`--nats-conf`, default `~/.config/ants/leaf.conf`; the hub machine
 gives its hub configuration), the daemon config file (`--config`) and the current `PATH`, on which the daemon finds the
 harness and configured tools. It installs them in `~/Library/LaunchAgents` or `~/.config/systemd/user` and (re)starts them.
-`--out DIR` only writes the filled-in units; `--no-daemon` installs nats-server alone. Run it again after moving a
+`--out DIR` only writes the filled-in units; `--no-daemon` leaves the daemon out. Run it again after moving a
 binary or changing `PATH`.
 
 | | macOS (launchd) | Linux, WSL (systemd) |
 |---|---|---|
-| Logs | `~/Library/Logs/ants/nats.log`, `daemon.log` | `journalctl --user -u ants-nats -u ants-daemon` |
+| Logs | `~/Library/Logs/ants/nats.log`, `daemon.log`, `channels.log` | `journalctl --user -u ants-nats -u ants-daemon -u ants-channels` |
 | Switch the uplink | `ants leaf config ...`, then `launchctl kill SIGHUP gui/$(id -u)/ants.nats` | `ants leaf config ...`, then `systemctl --user reload ants-nats` |
 | Restart the daemon | `launchctl kickstart -k gui/$(id -u)/ants.daemon` | `systemctl --user restart ants-daemon` |
-| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`, `ants.devtunnel`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats` (and `ants-devtunnel`), delete the units |
+| Remove | `launchctl bootout gui/$(id -u)/ants.daemon` (and `ants.nats`, `ants.devtunnel`, `ants.channels`), delete the plists | `systemctl --user disable --now ants-daemon ants-nats` (and `ants-devtunnel`, `ants-channels`), delete the units |
 
 On stop the daemon gets SIGTERM and lets prompts in flight finish for up to 120 s; messages cut off are redelivered.
 launchd agents run while the user is logged in. systemd user units outlive the login session only with
@@ -614,6 +618,7 @@ speak as the ant, on the thread the session serves:
 | `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
 | `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
+| `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | Changes a channel the ant owns through the channel manager (see [Channel owners](#channel-owners)): `add` and `remove` list ants (each added one must be in the roster), `messenger` sets the messenger, `clear_messenger` gives back the default one. Returns the changes and the channel, or why the channel manager refused. With only `channel` it shows the channel; with nothing it lists the channels the ant owns. |
 | `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the ant's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
@@ -635,7 +640,8 @@ calling thread; requests without a known token get 401. Harnesses whose ACP `mcp
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the ant's allowlist like
 any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_ants`, `other:route`,
-`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:escalate`, or `other`). Ant credentials
+`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:escalate`, `other:manage_channel`, or
+`other`). Ant credentials
 issued before the MCP tools existed lack the subscription to the ant's own inbox; issue them again with `ants auth
 user`.
 
@@ -731,7 +737,8 @@ ants channel add ops dev-c                     # more members
 ants channel remove ops dev-a
 ants channel set ops --member dev-b,dev-c      # replace the members; --messenger ANT sets the messenger
 ants channel set ops --default-messenger       # the default messenger `messenger` triages again
-ants channel list                              # channels, members and messenger
+ants channel set ops --owner lead              # lead manages the members and the messenger; --no-owner ends that
+ants channel list                              # channels, members, messenger and owner
 ants channel delete ops                        # the posts stay in the stream
 
 ants post '#ops' "@dev-b the deploy failed"    # wakes dev-b only; prints the new thread
@@ -776,11 +783,58 @@ wakes the members it @mentions, or the messenger, and replies come back to the c
 **Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
 them back through the CLI's human's consumer `chanread-<human>`, created for the read and deleted after it, and drops a
 post whose sender or channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and
-messenger are an entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials write:
+messenger are an entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials and the
+channel manager's write (see [Channel owners](#channel-owners)):
 `create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else changed it
 since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a warning (`set`,
 `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning rather than a
-refusal, as their daemon may start later; a human cannot be a member or the messenger.
+refusal, as their daemon may start later; a human cannot be a member, the messenger or the owner.
+
+### Channel owners
+
+A human may make an ant a channel's owner: `ants channel create --owner ANT` or `ants channel set --owner ANT`
+(`--no-owner` takes it back). The owner adds and removes the channel's members and sets or clears its messenger with
+the MCP tool `manage_channel`; only humans change the owner, and humans keep changing every channel with
+`ants channel` as before, owner or not. An owner changes nothing else: who a post wakes, thread owners and
+escalations stay as they are.
+
+| | Members, messenger | Owner | Create, delete |
+|---|---|---|---|
+| Human (`ants channel`) | yes | yes | yes |
+| Owner ant (`manage_channel`) | through the channel manager | no | no |
+| Other ant | no | no | no |
+
+Ants never write `ants_channels`. The owner's daemon sends each change as a request on
+`ants.chanadm.<channel>.<ant>`, which an ant's credentials publish only under its own name, to the channel manager,
+`ants channel serve`. The channel manager reads the channel's entry, refuses the request unless the requesting ant is
+its owner, checks that each ant added as a member or messenger is in the roster and no human, and stores the change
+only if the entry has not changed since it was read, checking the owner again on each retry. It answers only on the
+requester's own reply subjects (`_INBOX.<ant>.`), drops requests older than 60 s, and gives a request it has already
+answered the same answer again. `manage_channel` asks again every 2 s, for 10 s at most; when no channel manager
+answers, it says so, and a human can make the change with `ants channel`. A change applied is announced in the
+channel, on a new thread, by the reserved user `channel-manager` (`ants.chan.<channel>.channel-manager`):
+"lead, the channel's owner, changed #ops: added dev-c." The announcement mentions nobody, so it wakes nobody; members
+see it among a thread's posts. No ant or human may take the name `channel-manager`: `ants add` and `ants auth` refuse
+it.
+
+An owner ant learns of its channels from `manage_channel` without arguments, which lists them, and from the prompt
+of each post in a channel it owns, which ends with a line saying so.
+
+Setting up the channel manager, on one machine where no ant runs, such as the hub:
+
+```sh
+ants auth channel-manager --js-domain hub     # ~/.config/ants/auth/channel-manager.creds
+ants --creds ~/.config/ants/auth/channel-manager.creds channel serve
+scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # or as a service
+```
+
+Several channel managers may run at once: they share the requests (a queue group), and the compare-and-set keeps
+their writes apart. `ants auth channel-manager` credentials allow hearing `ants.chanadm.*.*` and answering each
+request once, reading the roster and `ants_humans`, reading and writing `ants_channels`, and posting on
+`ants.chan.*.channel-manager`, nothing else.
+
+An `ants channel set`, `add` or `remove` of a version before owners rewrites the entry without its `owner`, so the
+channel loses its owner: upgrade every human's CLI before giving channels owners.
 
 ### Channel delivery
 
@@ -891,8 +945,12 @@ Channels work the same way too. A channel is a named group of ants; its id follo
 on `ants.chan.*.<own name>` (and `ants.out.chan.*.<own name>` in a leaf's outbox), and readers drop a post whose `from` or
 channel disagrees with its subject. A post carries its thread id and the ants it @mentions; a top-level post starts
 a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it. A
-channel's members and optional messenger are a `ChannelEntry` in the KV bucket `ants_channels`, under the channel id:
-only humans write it, ants read it, and readers skip an entry whose channel disagrees with its key. An ant takes
+channel's members, optional messenger and optional owner ant are a `ChannelEntry` in the KV bucket `ants_channels`,
+under the channel id: only humans and the channel manager write it, ants read it, and readers skip an entry whose
+channel disagrees with its key. An ant asks the channel manager for changes only on `ants.chanadm.*.<ant>`, so the
+subject proves the requester, and the manager answers only on the requester's `_INBOX.<ant>.` (see [Channel
+owners](#channel-owners)). Credentials issued before channel owners lack `ants.chanadm.*.<ant>`: owner ants need
+`ants auth user` and their machines' leaf nodes `ants auth leaf` again. An ant takes
 channel posts through its own consumer `chan-<ant>` and reads channels back through `chanread-<ant>`;
 credentials pin the filter of both under `ants.chan.>`, so neither reaches an inbox. Credentials and streams set up
 before channels need `ants auth user` and `ants init` again.

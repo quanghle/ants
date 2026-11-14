@@ -189,6 +189,7 @@ async fn serve(config: &Config) -> Result<Served> {
     )
     .await?;
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
+    mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
     let launch = Launch::new(
         config.harness,
         config.workdir.clone(),
@@ -337,6 +338,8 @@ struct Posted {
     post: ChannelPost,
     /// The channel's entry, when the ant is to triage the post as its messenger.
     triage: Option<ChannelEntry>,
+    /// Whether the ant owns the channel.
+    owned: bool,
 }
 
 /// The messages of one thread in hand: one in flight at most, the rest waiting their turn.
@@ -558,9 +561,10 @@ impl Inbox<'_> {
             return None;
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
+        let owned = channels.get(&post.channel).is_some_and(|e| e.owner.as_ref() == Some(self.ant));
         post.owner = post.thread_owner(&humans);
         let envelope = channel::as_envelope(&post, self.ant);
-        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })), resume: None })
+        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage, owned })), resume: None })
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -926,12 +930,20 @@ impl Inbox<'_> {
     async fn channel_prompt(&self, posted: &Posted, read: &Context, humans: &Humans) -> String {
         let post = &posted.post;
         let left = post.turns_left(&read.later, humans).saturating_sub(1);
-        let Some(entry) = &posted.triage else { return channel::prompt(self.ant, post, read, left) };
-        let roster = (self.roster)().await.unwrap_or_else(|e| {
-            tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
-            Vec::new()
-        });
-        channel::triage_prompt(post, entry, &roster, read, left)
+        let mut text = match &posted.triage {
+            None => channel::prompt(self.ant, post, read, left),
+            Some(entry) => {
+                let roster = (self.roster)().await.unwrap_or_else(|e| {
+                    tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
+                    Vec::new()
+                });
+                channel::triage_prompt(post, entry, &roster, read, left)
+            }
+        };
+        if posted.owned {
+            text.push_str(&format!("\n\n{}", channel::owner_note(&post.channel)));
+        }
+        text
     }
 
     /// Store `reply` to `request`, the message at stream sequence `seq`, in the hub's stream or, out of its reach, in
@@ -2412,7 +2424,11 @@ mod tests {
         assert!(first[0].contains("human: deploy friday?\n") && first[0].ends_with("nobody."), "{}", first[0]);
         assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
 
-        // After a restart, only what was posted since shows, without the ant's own reply.
+        // After a restart, only what was posted since shows, without the ant's own reply. Owning the channel now,
+        // the ant is told so.
+        let mut owned: ChannelEntry = serde_json::from_slice(&bus.channels.get("ops").await.unwrap().unwrap()).unwrap();
+        owned.owner = Some(bus.dev.clone());
+        bus.channels.put(owned.key(), serde_json::to_vec(&owned).unwrap().into()).await.unwrap();
         let more = root.reply(UserId::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
         bus.post(&more).await;
         let again = root.reply(UserId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
@@ -2429,6 +2445,7 @@ mod tests {
         let shown = "Earlier posts on the thread not shown before, oldest first:\nhuman: rollback plan is ready\n\n";
         assert!(second.contains(shown), "{second}");
         assert!(!second.contains("deploy friday") && !second.contains("dev-a: "), "{second}");
+        assert!(second.ends_with(&format!("\n\n{}", channel::owner_note(&ops))), "{second}");
     }
 
     #[tokio::test]

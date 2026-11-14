@@ -10,11 +10,13 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use ants_daemon::bus;
+pub use ants_daemon::channel::list;
+use ants_daemon::channel::{Stored, load};
 use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
-use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
+use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::StreamExt as _;
 
 /// How long a reader consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
@@ -28,9 +30,13 @@ pub fn parse_channel(s: &str) -> Result<ChannelId, ants_proto::Error> {
     s.strip_prefix('#').unwrap_or(s).parse()
 }
 
-/// An ant id as given on the command line: `@dev-a` or `dev-a`.
-pub fn parse_ant(s: &str) -> Result<UserId, ants_proto::Error> {
-    s.strip_prefix('@').unwrap_or(s).parse()
+/// An ant id as given on the command line: `@dev-a` or `dev-a`; never the channel manager.
+pub fn parse_ant(s: &str) -> Result<UserId, String> {
+    let ant: UserId = s.strip_prefix('@').unwrap_or(s).parse().map_err(|e: ants_proto::Error| e.to_string())?;
+    if ant == UserId::channel_manager() {
+        return Err(format!("{ant} is the channel manager, not an ant"));
+    }
+    Ok(ant)
 }
 
 /// Members and messengers are ants a daemon serves: `humans` read channels instead.
@@ -40,6 +46,14 @@ pub fn check_not_human<'a>(ants: impl IntoIterator<Item = &'a UserId>, humans: &
             "{human} is a human, so neither a member nor the messenger of a channel; `ants channel read` shows channel \
              posts"
         );
+    }
+    Ok(())
+}
+
+/// A channel's owner is an ant: `humans` override any owner anyway.
+pub fn check_owner_not_human(owner: Option<&UserId>, humans: &Humans) -> Result<()> {
+    if let Some(human) = owner.filter(|o| humans.contains(o)) {
+        bail!("{human} is a human, who needs no ownership: humans change every channel");
     }
     Ok(())
 }
@@ -69,16 +83,18 @@ fn members_label(entry: &ChannelEntry) -> String {
 
 /// One line describing a channel, as `ants channel` prints it after a change.
 pub fn describe(entry: &ChannelEntry) -> String {
-    format!("#{}: members {}; messenger {}", entry.channel, members_label(entry), messenger_label(entry))
+    let owner = entry.owner.as_ref().map(|o| format!("; owner {o}")).unwrap_or_default();
+    format!("#{}: members {}; messenger {}{owner}", entry.channel, members_label(entry), messenger_label(entry))
 }
 
 /// The channels as a table: one row per channel under a header, columns padded to line up.
 pub fn table(entries: &[ChannelEntry]) -> String {
-    let header = ["CHANNEL", "MEMBERS", "MESSENGER"].map(str::to_owned);
-    let rows: Vec<[String; 3]> = std::iter::once(header)
-        .chain(entries.iter().map(|e| [format!("#{}", e.channel), members_label(e), messenger_label(e)]))
+    let header = ["CHANNEL", "MEMBERS", "MESSENGER", "OWNER"].map(str::to_owned);
+    let owner = |e: &ChannelEntry| e.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string);
+    let rows: Vec<[String; 4]> = std::iter::once(header)
+        .chain(entries.iter().map(|e| [format!("#{}", e.channel), members_label(e), messenger_label(e), owner(e)]))
         .collect();
-    let mut widths = [0; 3];
+    let mut widths = [0; 4];
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -108,35 +124,6 @@ pub fn idle_mentions<'a>(post: &'a ChannelPost, entry: Option<&ChannelEntry>, hu
 /// The channels bucket, created if missing (the human's credentials may).
 pub async fn open(js: &jetstream::Context) -> Result<kv::Store> {
     bus::ensure_channels(js).await
-}
-
-/// What is stored under a channel's key.
-enum Stored {
-    Missing,
-    /// An entry for the key's channel, at a revision.
-    Entry(ChannelEntry, u64),
-    /// A malformed entry, or one naming another channel, at a revision: readers skip it.
-    Unreadable(u64),
-}
-
-async fn load(kv: &kv::Store, channel: &ChannelId) -> Result<Stored> {
-    let key = channel.as_str();
-    let Some(found) = kv.entry(key).await.with_context(|| format!("reading channel {channel}"))? else {
-        return Ok(Stored::Missing);
-    };
-    if found.operation != Operation::Put {
-        return Ok(Stored::Missing);
-    }
-    let entry = serde_json::from_slice::<ChannelEntry>(&found.value)
-        .map_err(|e| e.to_string())
-        .and_then(|entry| entry.check_key(key).map(|()| entry).map_err(|e| e.to_string()));
-    match entry {
-        Ok(entry) => Ok(Stored::Entry(entry, found.revision)),
-        Err(error) => {
-            tracing::warn!(key, error, "skipping a channel entry that is malformed or names another channel");
-            Ok(Stored::Unreadable(found.revision))
-        }
-    }
 }
 
 /// The entry of `channel`, None when there is none (or only one readers skip).
@@ -191,29 +178,24 @@ pub async fn update<T>(
     bail!("channel #{channel} kept changing; try again")
 }
 
+/// Run the channel manager until it fails: connect with `creds`, the channel manager's, retrying until the hub
+/// answers, and apply the changes owners ask for ([`ants_daemon::chanadm::serve`]).
+pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&ants_proto::JsDomain>) -> Result<()> {
+    let me = UserId::channel_manager();
+    let connecting = bus::connect_retrying(url, creds, domain, &me, "ants-channel-manager", std::future::pending());
+    let (client, js) = connecting.await?.context("connecting")?;
+    let humans = ants_daemon::humans::Registry::new(UserId::human());
+    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
+    ants_daemon::chanadm::serve(client, js, roster, humans).await
+}
+
 /// Remove a channel; fails when there is none. Its posts stay in the stream.
 pub async fn delete(kv: &kv::Store, channel: &ChannelId) -> Result<()> {
     if matches!(load(kv, channel).await?, Stored::Missing) {
         bail!("no channel #{channel}");
     }
     kv.delete(channel.as_str()).await.with_context(|| format!("deleting channel {channel}"))
-}
-
-/// Every channel, by id. Entries readers skip are left out with a warning.
-pub async fn list(kv: &kv::Store) -> Result<Vec<ChannelEntry>> {
-    let mut keys: Vec<String> = kv.keys().await.context("listing the channels")?.try_collect().await?;
-    keys.sort();
-    let mut entries = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Ok(channel) = key.parse::<ChannelId>() else {
-            tracing::warn!(key, "skipping a channel entry under a key that is no channel id");
-            continue;
-        };
-        if let Stored::Entry(entry, _) = load(kv, &channel).await? {
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
 }
 
 /// A post of `from`, owned by `owner`: a top-level one that starts a thread, or with `thread` one on that thread, in
@@ -464,6 +446,7 @@ mod tests {
         assert_eq!(parse_ant("@dev-a").unwrap(), p("dev-a"));
         assert_eq!(parse_ant("dev-a").unwrap(), p("dev-a"));
         assert!(parse_ant("@").is_err());
+        assert!(parse_ant("channel-manager").is_err());
         let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
         assert!(check_not_human([&p("dev-a"), &UserId::human()], &humans).is_err());
         assert!(check_not_human([&p("alice")], &humans).is_err());
@@ -476,13 +459,15 @@ mod tests {
         busy.add_member(p("dev-a"));
         busy.add_member(p("dev-b"));
         busy.messenger = Some(p("triage"));
+        busy.owner = Some(p("lead"));
         let quiet = ChannelEntry::new("dev".parse().unwrap());
         assert_eq!(
             table(&[quiet.clone(), busy.clone()]),
-            "CHANNEL  MEMBERS      MESSENGER\n#dev     -            messenger (default)\n#ops     dev-a,dev-b  triage"
+            "CHANNEL  MEMBERS      MESSENGER            OWNER\n#dev     -            messenger (default)  -\n\
+             #ops     dev-a,dev-b  triage               lead"
         );
         assert_eq!(describe(&quiet), "#dev: members -; messenger messenger (default)");
-        assert_eq!(describe(&busy), "#ops: members dev-a,dev-b; messenger triage");
+        assert_eq!(describe(&busy), "#ops: members dev-a,dev-b; messenger triage; owner lead");
     }
 
     #[test]

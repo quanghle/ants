@@ -67,9 +67,18 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
+/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take.
+pub fn check_not_reserved(user: &UserId) -> Result<()> {
+    if *user == UserId::channel_manager() {
+        bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
+    }
+    Ok(())
+}
+
 /// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
 pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
     let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
@@ -93,6 +102,7 @@ pub fn issue_leaf(
     if members.is_empty() {
         bail!("a leaf node needs at least one ant or human");
     }
+    members.iter().try_for_each(|(member, _)| check_not_reserved(member))?;
     if js_domain.is_some_and(|domain| domain.as_str() == machine.as_str()) {
         bail!("machine {machine} would take the hub's JetStream domain; name it otherwise");
     }
@@ -105,6 +115,21 @@ pub fn issue_leaf(
     write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
+/// Issue the credentials of the channel manager, `ants channel serve`, for the hub's JetStream domain if it has one,
+/// and write its `.creds` file to `out`: it hears channel management requests and answers each once, reads the roster
+/// and the humans, writes the channels bucket and posts in channels as [`UserId::channel_manager`]
+/// ([`Permissions::for_channel_manager`]).
+pub fn issue_channel_manager(dir: &Path, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let key = KeyPair::new_user();
+    let permissions = Permissions::for_channel_manager().with_js_domain(js_domain);
+    let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
+    let answer_once = json!({ "resp": { "max": 1, "ttl": ttl } });
+    let name = UserId::channel_manager();
+    let jwt = user_jwt(&account, &key.public_key(), name.as_str(), permissions, answer_once, None)?;
+    write_secret(out, &creds(&jwt, &seed(&key)?))
+}
+
 /// Sign the user JWT of `user` in `role` for `public_key`, a user NKey generated on another machine, with the
 /// permissions [`issue`] gives. The seed stays where it was generated; its `.creds` file is the JWT plus that seed.
 pub fn sign_user(
@@ -115,6 +140,7 @@ pub fn sign_user(
     public_key: &str,
 ) -> Result<String> {
     check_user_key(public_key)?;
+    check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let permissions = Permissions::for_user(user, role).with_js_domain(js_domain);
     user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)
@@ -133,6 +159,7 @@ pub fn check_user_key(public_key: &str) -> Result<()> {
 /// only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
 /// expire, in seconds since the epoch.
 pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<u64> {
+    check_not_reserved(ant)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + ttl.as_secs().max(1);
@@ -412,8 +439,13 @@ pub(crate) mod tests {
 
         /// A connection that reports the server errors it gets, such as permission violations.
         async fn watched(&self, user: &UserId) -> (Client, mpsc::UnboundedReceiver<String>) {
+            self.watched_with(&self.creds(user), user).await
+        }
+
+        /// Like [`Server::watched`], with the credentials in `creds`.
+        async fn watched_with(&self, creds: &Path, user: &UserId) -> (Client, mpsc::UnboundedReceiver<String>) {
             let (tx, rx) = mpsc::unbounded_channel();
-            let client = async_nats::ConnectOptions::with_credentials_file(self.creds(user))
+            let client = async_nats::ConnectOptions::with_credentials_file(creds)
                 .await
                 .unwrap()
                 .custom_inbox_prefix(inbox_prefix(user))
@@ -831,6 +863,131 @@ pub(crate) mod tests {
             "without dev-a's own post"
         );
         threads.seen(&ask.thread_id, seq).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them() {
+        use ants_daemon::chanadm;
+        use ants_proto::{ChannelAdminOutcome, ChannelAdminRequest, ChannelOp, Refusal};
+
+        let Some(server) = Server::start() else { return };
+        let (human, dev_a, dev_b, manager) = (UserId::human(), p("dev-a"), p("dev-b"), UserId::channel_manager());
+        let ops: ChannelId = "ops".parse().unwrap();
+        let (h_client, h_js) = server.connect(&human).await;
+        bus::init_stream(&h_js).await.unwrap();
+        let roster = bus::ensure_roster(&h_js, ants_proto::ROSTER_TTL).await.unwrap();
+        let channels = bus::ensure_channels(&h_js).await.unwrap();
+        let mut entry = ChannelEntry::new(ops.clone());
+        entry.owner = Some(dev_a.clone());
+        h_kv_put(&channels, &entry).await;
+        let (_b, b_js) = server.connect(&dev_b).await;
+        let now = chrono::Utc::now();
+        let listed = RosterEntry {
+            ant: dev_b.clone(),
+            machine: "m1".to_owned(),
+            instance: None,
+            harness: "copilot".to_owned(),
+            capabilities: Vec::new(),
+            whoami: None,
+            workdir: None,
+            started_at: now,
+            heartbeat_at: now,
+            activity: None,
+            handling: None,
+            harnesses: None,
+            escalate_to: Vec::new(),
+        };
+        let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
+        b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
+        assert!(roster.get("dev-b").await.unwrap().is_some());
+
+        assert!(issue(&server.dir().join("auth"), &manager, Role::Ant, None, &server.dir().join("x")).is_err());
+        let creds = server.dir().join("channel-manager.creds");
+        issue_channel_manager(&server.dir().join("auth"), None, &creds).unwrap();
+        let (m_client, m_js) = bus::connect(&server.url, Some(&creds), None, &manager, "test").await.unwrap();
+        let humans = ants_daemon::humans::Registry::new(human.clone());
+        let _watching = humans.watch(m_js.clone(), ants_daemon::humans::RETRY);
+        let roster_of = ants_daemon::mcp::jetstream_roster(m_js.clone());
+        let serving = tokio::spawn(chanadm::serve(m_client, m_js, roster_of, humans));
+
+        let mut room = h_client.subscribe(subject::chan_room(&ops)).await.unwrap();
+        let (a_client, a_js) = server.connect(&dev_a).await;
+        let a_admin = chanadm::nats_admin(a_client.clone(), a_js);
+        let ask = |admin: &std::sync::Arc<dyn chanadm::Admin>, ant: &UserId, ops_: Vec<ChannelOp>| {
+            let request = ChannelAdminRequest::new(ops.clone(), ant.clone(), ThreadId::generate(), ops_);
+            let admin = admin.clone();
+            async move { admin.request(request).await.unwrap().expect("an answer").outcome }
+        };
+        let refused = |outcome: ChannelAdminOutcome| match outcome {
+            ChannelAdminOutcome::Refused { refusal } => refusal,
+            applied => panic!("applied: {applied:?}"),
+        };
+
+        // The owner adds an ant in the roster; the change is stored and announced in the channel, mentioning nobody.
+        let add_b = vec![ChannelOp::AddMember { ant: dev_b.clone() }];
+        let first = ChannelAdminRequest::new(ops.clone(), dev_a.clone(), ThreadId::generate(), add_b.clone());
+        let answer = a_admin.request(first.clone()).await.unwrap().expect("an answer");
+        let ChannelAdminOutcome::Applied { entry: applied, changed, .. } = answer.outcome.clone() else {
+            panic!("refused")
+        };
+        assert_eq!(
+            (applied.members.as_slice(), changed.as_slice()),
+            (std::slice::from_ref(&dev_b), ["added dev-b".to_owned()].as_slice())
+        );
+        let stored: ChannelEntry = serde_json::from_slice(&channels.get("ops").await.unwrap().unwrap()).unwrap();
+        assert_eq!(stored, applied);
+        let msg = timeout(WAIT, room.next()).await.unwrap().unwrap();
+        let post: ChannelPost = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!((post.check_subject(&msg.subject), &post.from), (Ok(()), &manager));
+        assert!(
+            post.text.contains("dev-a") && post.text.contains("added dev-b") && post.mentions.is_empty(),
+            "{post:?}"
+        );
+
+        // Ants outside the roster, other ants, and the former owner are refused.
+        let add_c = vec![ChannelOp::AddMember { ant: p("dev-c") }];
+        assert_eq!(refused(ask(&a_admin, &dev_a, add_c).await), Refusal::NotInRoster(p("dev-c")));
+        let (b_client, b_js) = server.connect(&dev_b).await;
+        let b_admin = chanadm::nats_admin(b_client, b_js);
+        let remove_b = vec![ChannelOp::RemoveMember { ant: dev_b.clone() }];
+        assert!(matches!(refused(ask(&b_admin, &dev_b, remove_b.clone()).await), Refusal::NotOwner { .. }));
+        entry = stored;
+        entry.owner = Some(dev_b.clone());
+        h_kv_put(&channels, &entry).await;
+        assert!(matches!(refused(ask(&a_admin, &dev_a, remove_b.clone()).await), Refusal::NotOwner { .. }));
+        assert!(matches!(ask(&b_admin, &dev_b, remove_b).await, ChannelAdminOutcome::Applied { .. }));
+        // A request asked again gets its first answer, not a second change.
+        assert_eq!(a_admin.request(first).await.unwrap(), Some(answer));
+
+        // A request naming another ant's subject is denied, and one asking for the answer elsewhere goes unanswered.
+        let (a_raw, mut errors) = server.watched(&dev_a).await;
+        let foreign = ChannelAdminRequest::new(ops.clone(), dev_b.clone(), ThreadId::generate(), add_b.clone());
+        a_raw.publish(foreign.subject(), serde_json::to_vec(&foreign).unwrap().into()).await.unwrap();
+        assert!(next_violation(&a_raw, &mut errors).await.contains("ants.chanadm.ops.dev-b"));
+        let mut b_inbox = h_client.subscribe(format!("{}.>", inbox_prefix(&dev_b))).await.unwrap();
+        let forged = ChannelAdminRequest::new(ops.clone(), dev_a.clone(), ThreadId::generate(), add_b);
+        let payload = serde_json::to_vec(&forged).unwrap();
+        a_raw
+            .publish_with_reply(forged.subject(), format!("{}.x", inbox_prefix(&dev_b)), payload.into())
+            .await
+            .unwrap();
+        a_raw.flush().await.unwrap();
+        assert!(timeout(Duration::from_millis(500), b_inbox.next()).await.is_err(), "no answer to dev-b's inbox");
+
+        // The channel manager writes the channels bucket only, and posts as itself only.
+        let (m_raw, mut errors) = server.watched_with(&creds, &manager).await;
+        for denied in [subject::chan(&ops, &dev_a), "$KV.ants_roster.dev-a".to_owned(), subject::inbox_of(&dev_a)] {
+            m_raw.publish(denied.clone(), "x".into()).await.unwrap();
+            let v = next_violation(&m_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        }
+        let _sub = m_raw.subscribe(subject::ALL_CHANNELS).await.unwrap();
+        assert!(next_violation(&m_raw, &mut errors).await.contains(subject::ALL_CHANNELS));
+        serving.abort();
+    }
+
+    async fn h_kv_put(kv: &jetstream::kv::Store, entry: &ChannelEntry) {
+        kv.put(entry.key(), serde_json::to_vec(entry).unwrap().into()).await.unwrap();
     }
 
     #[tokio::test]
