@@ -37,8 +37,7 @@ const MAX_UPLINK_JWT: usize = 16 * MAX_CONTROL_LINE as usize - 4 * 1024;
 
 /// The default team directory, `~/.config/ants/auth`.
 pub fn default_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).context("no home directory")?;
-    Ok(Path::new(&home).join(".config/ants/auth"))
+    Ok(std::env::home_dir().context("no home directory")?.join(".config/ants/auth"))
 }
 
 /// Create the operator and account in `dir` and write the `server.conf` that trusts them.

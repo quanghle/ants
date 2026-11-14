@@ -192,7 +192,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading webhook config {}", path.display()))?;
-        let home = std::env::var_os("HOME").map(PathBuf::from).context("no home directory")?;
+        let home = std::env::home_dir().context("no home directory")?;
         let config = Self::parse(&text, &std::path::absolute(path)?, &home, |name| std::env::var(name).ok())?;
         for hook in &config.webhooks {
             hook.check_creds().with_context(|| format!("webhook config {}", path.display()))?;

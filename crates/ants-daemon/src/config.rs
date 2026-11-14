@@ -71,8 +71,7 @@ pub fn default_path() -> Result<PathBuf> {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).context("no home directory")?;
-    Ok(PathBuf::from(home))
+    std::env::home_dir().context("no home directory")
 }
 
 #[derive(Deserialize)]
