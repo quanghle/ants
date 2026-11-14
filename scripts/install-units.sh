@@ -1,13 +1,15 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
 # machine), the ant daemon (`ants daemon --config`), on the hub the channel manager (`ants channel serve`) and the
-# webhook ingress (`ants webhook serve`) and, for an uplink through a private Dev Tunnel, `devtunnel connect`. launchd
-# agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
+# webhook ingress (`ants webhook serve`), for an uplink through a private Dev Tunnel `devtunnel connect` and, on the hub
+# machine, `devtunnel host` of that tunnel. launchd agents on macOS, systemd user units on Linux and WSL; templates in
+# contrib/.
 #
 #   scripts/install-units.sh                         # install nats-server and the daemon and (re)start them
 #   scripts/install-units.sh --devtunnel ants-hub    # and `devtunnel connect ants-hub` for nats-leaf://127.0.0.1:7422
 #   scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # on the hub
 #   scripts/install-units.sh --webhook               # and `ants webhook serve` for ~/.ants/webhooks.toml
+#   scripts/install-units.sh --devtunnel-host ants-hub   # on the hub, and `devtunnel host ants-hub`
 #   scripts/install-units.sh --out DIR               # only write the filled-in units into DIR, for review
 #
 # Options:  --ants PATH              ants binary (default: ants on PATH)
@@ -17,6 +19,7 @@
 #           --no-daemon              no daemon service, on a machine without ants
 #           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
+#           --devtunnel-host TUNNEL  also keep `devtunnel host TUNNEL` running, on the hub machine
 #           --devtunnel-bin PATH     devtunnel binary (default: devtunnel on PATH)
 #           --devtunnel-token FILE   connect with the access token in FILE, read at each start, instead of the CLI
 #                                    login (see docs/transport.md, Dev Tunnels)
@@ -49,6 +52,7 @@ config=$HOME/.ants/config.toml
 daemon=1
 devtunnel=
 tunnel=
+host_tunnel=
 token_file=
 channel_creds=
 webhook=
@@ -64,12 +68,13 @@ while [ $# -gt 0 ]; do
     --no-daemon) daemon=; shift ;;
     --channel-manager) channel_creds=$2; shift 2 ;;
     --devtunnel) tunnel=$2; shift 2 ;;
+    --devtunnel-host) host_tunnel=$2; shift 2 ;;
     --devtunnel-bin) devtunnel=$2; shift 2 ;;
     --devtunnel-token) token_file=$2; shift 2 ;;
     --webhook) webhook=1; shift ;;
     --webhook-config) webhook_config=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h | --help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done
@@ -86,13 +91,17 @@ if [ -n "$daemon$channel_creds$webhook" ]; then
     webhook_config=$(absolute "$webhook_config")
 fi
 [ -z "$channel_creds" ] || channel_creds=$(absolute "$channel_creds")
-if [ -n "$tunnel" ]; then
+if [ -n "$tunnel$host_tunnel" ]; then
     [ -n "$devtunnel" ] || devtunnel=$(command -v devtunnel) || die "devtunnel not found (give --devtunnel-bin)"
     devtunnel=$(absolute "$devtunnel")
     [ -x "$devtunnel" ] || die "no devtunnel binary at $devtunnel"
+else
+    [ -z "$devtunnel" ] || die "--devtunnel-bin needs --devtunnel TUNNEL or --devtunnel-host TUNNEL"
+fi
+if [ -n "$tunnel" ]; then
     [ -z "$token_file" ] || token_file=$(absolute "$token_file")
 else
-    [ -z "$devtunnel$token_file" ] || die "--devtunnel-bin and --devtunnel-token need --devtunnel TUNNEL"
+    [ -z "$token_file" ] || die "--devtunnel-token needs --devtunnel TUNNEL"
 fi
 if [ -z "$out" ]; then
     [ -f "$nats_conf" ] || die "no nats-server configuration at $nats_conf (write one with \`ants leaf config\`)"
@@ -109,13 +118,13 @@ fi
 case "$(uname -s)" in
 Darwin)
     kind=launchd
-    units="${tunnel:+ants.devtunnel.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${webhook:+ ants.webhook.plist}"
+    units="${tunnel:+ants.devtunnel.plist }ants.nats.plist${daemon:+ ants.daemon.plist}${channel_creds:+ ants.channels.plist}${webhook:+ ants.webhook.plist}${host_tunnel:+ ants.devtunnel-host.plist}"
     dest=${out:-$HOME/Library/LaunchAgents}
     logs=$HOME/Library/Logs/ants
     ;;
 Linux)
     kind=systemd
-    units="${tunnel:+ants-devtunnel.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${webhook:+ ants-webhook.service}"
+    units="${tunnel:+ants-devtunnel.service }ants-nats.service${daemon:+ ants-daemon.service}${channel_creds:+ ants-channels.service}${webhook:+ ants-webhook.service}${host_tunnel:+ ants-devtunnel-host.service}"
     dest=${out:-$HOME/.config/systemd/user}
     logs=
     ;;
@@ -148,6 +157,7 @@ for unit in $units; do
         -e "s|@WEBHOOK_CONFIG@|$(escape "$webhook_config")|g" \
         -e "s|@DEVTUNNEL@|$(escape "$devtunnel")|g" \
         -e "s|@TUNNEL@|$(escape "$tunnel")|g" \
+        -e "s|@HOST_TUNNEL@|$(escape "$host_tunnel")|g" \
         -e "s|@TOKEN_FILE@|$(escape "$token_file")|g" \
         -e "s|@CHANNEL_CREDS@|$(escape "$channel_creds")|g" \
         -e "s|@PATH@|$(escape "$PATH")|g" \
@@ -182,8 +192,9 @@ else
     systemctl --user enable $names
     # shellcheck disable=SC2086
     systemctl --user restart $names
-    printf 'started; logs: journalctl --user%s -u ants-nats%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
-        "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}" "${webhook:+ -u ants-webhook}"
+    printf 'started; logs: journalctl --user%s -u ants-nats%s%s%s%s\n' "${tunnel:+ -u ants-devtunnel}" \
+        "${daemon:+ -u ants-daemon}" "${channel_creds:+ -u ants-channels}" "${webhook:+ -u ants-webhook}" \
+        "${host_tunnel:+ -u ants-devtunnel-host}"
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         printf 'to keep them running without a login session: loginctl enable-linger %s\n' "$(id -un)"
     fi

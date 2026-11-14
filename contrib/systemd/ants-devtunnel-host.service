@@ -1,0 +1,19 @@
+# ants: `devtunnel host` of the hub's private Dev Tunnel, on the hub machine, forwarding the tunnel's ports to the hub
+# nats-server (docs/transport.md, "Dev Tunnels").
+# User unit: scripts/install-units.sh --devtunnel-host TUNNEL fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user.
+# The CLI login of the user authorizes hosting (devtunnel user login); after it expires, a new login takes effect at
+# the next restart, at most RestartSec later. Restart covers an exit for any reason, also an expired login.
+
+[Unit]
+Description=ants: devtunnel host for the hub
+Wants=ants-nats.service
+After=ants-nats.service
+
+[Service]
+ExecStart="@DEVTUNNEL@" host "@HOST_TUNNEL@"
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
