@@ -61,6 +61,11 @@ pub const HUMANS_BUCKET: &str = "ants_humans";
 /// start. Unlike the roster's, entries never expire, so a chain can be followed past an ant that is offline. Each
 /// ant writes only its own; every ant and human reads them.
 pub const CHAINS_BUCKET: &str = "ants_chains";
+/// KV bucket of the links to channel threads ants passed on ([`link_key`]): an ant whose message carries a link to a
+/// channel thread ([`Envelope::origin_thread`]) records, under its own keys, that it passed the link on to the
+/// recipient, so a daemon can check the link of a message from an ant that takes no part in that thread. Each ant
+/// writes only its own keys; every ant and human reads them all. Entries expire with the stream's messages.
+pub const LINKS_BUCKET: &str = "ants_links";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
 /// so a retried event is not delivered again, and of each webhook's marker ([`webhook_marker_key`]), which tells
 /// daemons the webhook is one. Each webhook writes and reads only its own keys, ants read only the markers; entries
@@ -562,6 +567,24 @@ pub fn attempt_key(ant: &UserId, seq: u64) -> String {
     format!("{ant}.{seq}")
 }
 
+/// Key in [`LINKS_BUCKET`] of the record that `from` passed the link to channel thread `thread` on to `to`. Keys start
+/// with the ant that passed it on, so its credentials can be confined to its own.
+pub fn link_key(from: &UserId, thread: &ThreadId, to: &UserId) -> String {
+    format!("{from}.{thread}.{to}")
+}
+
+/// Every key in [`LINKS_BUCKET`] of a link to `thread` passed on, whoever passed it on to whom.
+pub fn links_to(thread: &ThreadId) -> String {
+    format!("*.{thread}.*")
+}
+
+/// Who passed a link on to whom, as a [`link_key`] names them, or `None` when the key is no link of `thread`.
+pub fn parse_link_key(key: &str, thread: &ThreadId) -> Option<(UserId, UserId)> {
+    let (from, rest) = key.split_once('.')?;
+    let to = rest.strip_prefix(thread.as_str())?.strip_prefix('.')?;
+    Some((from.parse().ok()?, to.parse().ok()?))
+}
+
 /// JetStream consumer a user reads thread notes through, one thread at a time. Its name is fixed, so its credentials
 /// need not let it pull from other consumers.
 pub fn notes_consumer(user: &UserId) -> String {
@@ -647,13 +670,14 @@ impl Permissions {
     /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
     /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
-    /// its own, reads the channels and humans buckets but never writes them, reads which users are webhooks (their
+    /// its own, lists the links to a channel thread ants passed on but records only its own ([`LINKS_BUCKET`]), reads
+    /// the channels and humans buckets but never writes them, reads which users are webhooks (their
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, may create and upgrade the stream and create the roster, sessions,
-    /// attempts, channels, humans and chains buckets, writes the channels and humans buckets, and reads and removes dead
+    /// attempts, channels, humans, chains and links buckets, writes the channels and humans buckets, and reads and removes dead
     /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
@@ -671,6 +695,7 @@ impl Permissions {
         let channels = kv_stream(CHANNELS_BUCKET);
         let humans = kv_stream(HUMANS_BUCKET);
         let chains = kv_stream(CHAINS_BUCKET);
+        let links = kv_stream(LINKS_BUCKET);
         let webhooks = kv_stream(WEBHOOKS_BUCKET);
         let sessions = kv_stream(SESSIONS_BUCKET);
         let attempts = kv_stream(ATTEMPTS_BUCKET);
@@ -716,6 +741,10 @@ impl Permissions {
             // And single escalation chains.
             format!("$JS.API.STREAM.INFO.{chains}"),
             format!("$JS.API.DIRECT.GET.{chains}.>"),
+            // And the links passed on to a channel thread, through ordered consumers filtering that thread's.
+            format!("$JS.API.STREAM.INFO.{links}"),
+            format!("$JS.API.CONSUMER.CREATE.{links}"),
+            format!("$JS.FC.{links}.>"),
             // And the webhooks' markers, not the events they delivered.
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
@@ -731,6 +760,7 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{channels}"),
                 format!("$JS.API.STREAM.CREATE.{humans}"),
                 format!("$JS.API.STREAM.CREATE.{chains}"),
+                format!("$JS.API.STREAM.CREATE.{links}"),
                 format!("$JS.API.STREAM.INFO.{webhooks}"),
                 format!("$JS.API.STREAM.CREATE.{webhooks}"),
                 // Put and delete of every channel's and every human's entry.
@@ -779,6 +809,8 @@ impl Permissions {
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(user),
                 subject::chain(user),
+                // Put of the links it passed on.
+                format!("$KV.{LINKS_BUCKET}.{user}.>"),
             ]);
             subscribe.extend([
                 subject::ALL_NOTES.to_owned(),
@@ -3431,6 +3463,18 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("in_reply_to"));
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn a_link_key_names_who_passed_the_link_to_its_thread_on_to_whom() {
+        let (thread, other) = (ThreadId::generate(), ThreadId::generate());
+        let key = link_key(&p("dev-a"), &thread, &p("dev-b"));
+        assert!(key.starts_with("dev-a."), "credentials confine an ant to its own keys");
+        assert_eq!(parse_link_key(&key, &thread), Some((p("dev-a"), p("dev-b"))));
+        assert_eq!(parse_link_key(&key, &other), None);
+        for malformed in [format!("dev-a.{thread}"), format!("dev-a.{thread}.dev-b.x"), format!("{thread}.dev-b")] {
+            assert_eq!(parse_link_key(&malformed, &thread), None, "{malformed}");
+        }
     }
 
     #[test]

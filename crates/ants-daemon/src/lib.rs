@@ -13,6 +13,7 @@ pub mod dead;
 pub mod escalation;
 pub mod harness;
 pub mod humans;
+pub mod links;
 pub mod mcp;
 pub mod notes;
 pub mod permission;
