@@ -4,7 +4,8 @@
 //!
 //! A store protects seeds at rest, not from a process running with access to it: a connection keeps the seed it
 //! loaded in memory, to sign the server's challenge again on every reconnect. Errors name what to do and never the
-//! seed. Other platforms have no store here; their credentials keep the seed in the file.
+//! seed; a store locked or not running yet, as before its user logs in, fails with [`Unavailable`], which another
+//! attempt may cure. Other platforms have no store here; their credentials keep the seed in the file.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -23,6 +24,24 @@ pub trait Store: Send + Sync {
     fn set(&self, key: &str, seed: &str) -> Result<()>;
     /// Delete the seed of `key`; nothing to delete is no error.
     fn delete(&self, key: &str) -> Result<()>;
+}
+
+/// The error of a store that is locked or not available yet, as before its user logs in: unlike a seed missing from it,
+/// another attempt may succeed once the store is unlocked.
+#[derive(Debug)]
+pub struct Unavailable(pub String);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// Whether `e` comes of a store that is locked or not available yet ([`Unavailable`]).
+pub fn is_unavailable(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| cause.is::<Unavailable>())
 }
 
 /// The OS credential store of this machine.
@@ -77,7 +96,11 @@ mod keychain {
             -25291 | -25307 => "no keychain is available: log in to the Mac's desktop to open the login keychain",
             _ => "check the login keychain in Keychain Access",
         };
-        anyhow::anyhow!("macOS keychain: {e} ({}): {fix}", e.code())
+        let message = format!("macOS keychain: {e} ({}): {fix}", e.code());
+        match e.code() {
+            -25308 | -25291 | -25307 => super::Unavailable(message).into(),
+            _ => anyhow::anyhow!(message),
+        }
     }
 }
 
@@ -132,7 +155,7 @@ fn secret_tool(args: &[&str], input: Option<&str>) -> Result<Option<String>> {
             Ok(Some(text.trim().to_owned()).filter(|t| !t.is_empty()))
         }
         (false, "") => Ok(None),
-        (false, error) => bail!("Secret Service (secret-tool {}): {error}: {FIX}", args[0]),
+        (false, error) => Err(Unavailable(format!("Secret Service (secret-tool {}): {error}: {FIX}", args[0])).into()),
     }
 }
 
@@ -180,7 +203,7 @@ impl Memory {
 
     fn check(&self) -> Result<()> {
         if self.locked.load(Ordering::SeqCst) {
-            bail!("the credential store is locked: unlock it");
+            return Err(Unavailable("the credential store is locked: unlock it".to_owned()).into());
         }
         Ok(())
     }

@@ -26,6 +26,7 @@ pub mod overflow;
 pub mod owners;
 pub mod permission;
 pub mod pool;
+pub mod ratelimit;
 pub mod reading;
 pub mod roster;
 pub mod schedule;

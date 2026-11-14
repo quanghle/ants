@@ -32,6 +32,7 @@ use crate::notes::{self, NotesStore};
 use crate::overflow::ContextOverflow;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
+use crate::ratelimit::{self, Backoffs, Limited, Throttle};
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
@@ -139,6 +140,15 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
+    if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
+        tracing::warn!(
+            ant = %config.ant,
+            workdir = %config.workdir.display(),
+            max_harnesses = config.max_harnesses,
+            "threads running at once share one git work tree and may clobber each other's edits; \
+             worktrees = true gives each thread its own"
+        );
+    }
     while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
@@ -221,6 +231,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     .await?;
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
     mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
+    mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
     let launch = Launch::new(
         config.harness.clone(),
@@ -306,6 +317,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         progress_every: PROGRESS_EVERY,
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
+        throttle: Throttle::default(),
+        backoffs: ratelimit::BACKOFFS,
     };
     let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
@@ -430,6 +443,14 @@ enum Handled {
     Retry(Retry),
     /// The harness is signed out: the message, as it arrived, waits in hand for it to be signed in.
     SignedOut(Box<InHand>),
+    /// A provider limit: the message, as it arrived, waits in hand for the backoff to pass.
+    Limited(Box<InHand>),
+}
+
+/// What a message handed back waits for, first on its thread.
+enum Wait {
+    SignIn,
+    Limit,
 }
 
 /// The prompt running on each thread, and where to send the human who cancels it.
@@ -500,6 +521,9 @@ struct Inbox<'a> {
     sign_in: SignIn,
     /// How often a signed-out harness is checked.
     sign_in_every: Duration,
+    /// Whether messages wait out a provider limit.
+    throttle: Throttle,
+    backoffs: Backoffs,
 }
 
 impl Inbox<'_> {
@@ -523,7 +547,8 @@ impl Inbox<'_> {
         let shutdown = stop();
         let finishing = self.finish_buried();
         let signing_in = futures::future::Fuse::terminated();
-        tokio::pin!(shutdown, finishing, signing_in);
+        let lifting = futures::future::Fuse::terminated();
+        tokio::pin!(shutdown, finishing, signing_in, lifting);
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             let mut ready = None;
@@ -552,9 +577,12 @@ impl Inbox<'_> {
                     ready = Some(threads.keys().cloned().collect());
                 }
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
+                () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 Some((thread, handled)) = running.next(), if !running.is_empty() => {
-                    if handed_back(&mut threads, &thread, handled) && signing_in.is_terminated() {
-                        signing_in.set(self.signed_in().fuse());
+                    match handed_back(&mut threads, &thread, handled) {
+                        Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
+                        Some(Wait::Limit) if lifting.is_terminated() => lifting.set(self.limit_passed().fuse()),
+                        _ => {}
                     }
                     ready = Some(vec![thread]);
                 }
@@ -585,8 +613,10 @@ impl Inbox<'_> {
                     }
                 }
             }
-            // While the harness is signed out, messages wait in hand: the consumer's limit on them stops deliveries.
-            for thread in ready.into_iter().flatten().filter(|_| !self.sign_in.is_out()) {
+            // While the harness is signed out or a provider limit holds, messages wait in hand: the consumer's limit on
+            // them stops deliveries.
+            let held = self.sign_in.is_out() || self.throttle.is_held();
+            for thread in ready.into_iter().flatten().filter(|_| !held) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread) {
                     running.push(self.handle(incoming, msg));
                 }
@@ -985,7 +1015,7 @@ impl Inbox<'_> {
     }
 
     /// Answer one message. A failed attempt is redelivered after a delay, and the last one becomes a dead letter; one
-    /// the harness failed for want of signing in is no attempt, and is handed back to wait for it.
+    /// the harness failed for want of signing in, or for a provider limit, is no attempt, and is handed back to wait.
     /// Returns its thread, and how handling ended.
     async fn handle(&self, mut incoming: Incoming, msg: jetstream::Message) -> (ThreadId, Handled) {
         let _working = self.workload.working();
@@ -1044,6 +1074,7 @@ impl Inbox<'_> {
         };
         let Err(e) = result else {
             self.sign_in.settled();
+            self.throttle.settled();
             return (thread, Handled::Done);
         };
         if let Some(signed_out) = e.downcast_ref::<SignedOut>() {
@@ -1051,6 +1082,11 @@ impl Inbox<'_> {
             return (thread, Handled::SignedOut(Box::new((arrived, msg))));
         }
         self.sign_in.settled();
+        if let Some(limited) = e.downcast_ref::<Limited>() {
+            self.wait_out_limit(&arrived, limited).await;
+            return (thread, Handled::Limited(Box::new((arrived, msg))));
+        }
+        self.throttle.settled();
         tracing::error!(%thread, error = format!("{e:#}"), "handling message");
         status::state(self.client, self.ant, &thread, State::Failed);
         // A failed last attempt, or an overdue one that failed to send its recorded reply: no delivery follows.
@@ -1123,6 +1159,45 @@ impl Inbox<'_> {
                 }
             }
         }
+    }
+
+    /// Hold the messages, `incoming` having met a provider limit, for the backoff, and show that in the roster entry.
+    /// A rate limit passes quietly; an exhausted quota is told to the thread's owner, else the default human, once
+    /// until a message gets past a limit.
+    async fn wait_out_limit(&self, incoming: &Incoming, limited: &Limited) {
+        let thread = &incoming.envelope.thread_id;
+        status::state(self.client, self.ant, thread, State::Idle);
+        let hold = self.throttle.hit(limited, &self.backoffs);
+        self.workload.set_limited(Some(hold.shown.clone()));
+        let until = hold.shown.until;
+        if !hold.tell {
+            tracing::info!(%thread, error = %limited, %until, "provider limit; messages wait");
+            return;
+        }
+        tracing::warn!(%thread, error = %limited, %until, "provider quota exhausted; messages wait");
+        let machine = roster::machine().await;
+        let post = incoming.post.is_some();
+        let max = self.backoffs.quota.max;
+        let notice =
+            ratelimit::notice(self.ant, &incoming.envelope, post, limited, &hold.shown, &machine, max, self.humans);
+        let id = format!("quota-{}-{}", self.ant, hold.shown.since.timestamp_millis());
+        if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the exhausted quota");
+            self.throttle.untold();
+        }
+    }
+
+    /// Wait until the backoff of the provider limit passes, then clear the roster entry's limit and let the messages
+    /// go on.
+    async fn limit_passed(&self) {
+        while let Some(until) = self.throttle.until() {
+            tokio::time::sleep_until(until).await;
+            if self.throttle.lift() {
+                break;
+            }
+        }
+        tracing::info!("provider limit waited out; trying the waiting messages again");
+        self.workload.set_limited(None);
     }
 
     /// Store `msg` as a dead letter, escalating it up the ant's chain (in the end to the thread's owner, else the
@@ -1376,6 +1451,13 @@ impl Inbox<'_> {
                 self.attempts.forget(seq).await;
                 return Err(e);
             }
+            // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
+            Err(e) if e.is::<Limited>() => {
+                if !cut_off && !worked {
+                    self.attempts.forget(seq).await;
+                }
+                return Err(e);
+            }
             // Not even a new session holds the prompt: no further attempt can, so the owner decides.
             Err(e) if e.is::<ContextOverflow>() => {
                 self.escalate(incoming, &e.to_string(), EscalationReason::ContextWindow, seq, None).await?;
@@ -1617,22 +1699,26 @@ impl Thread {
 
 /// The thread's next message to prompt, unless one is in flight or it waits for a redelivery. Forgets a thread with
 /// nothing left in hand.
-/// Note how handling the message in flight on `thread` ended. Returns whether it waits for the harness to be signed
-/// in, first on its thread.
-fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handled: Handled) -> bool {
+/// Note how handling the message in flight on `thread` ended. Returns what it waits for, first on its thread, if it
+/// was handed back.
+fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handled: Handled) -> Option<Wait> {
     let t = threads.entry(thread.clone()).or_default();
     t.busy = false;
     t.in_flight = None;
     t.retry = None;
     match handled {
-        Handled::Done => false,
+        Handled::Done => None,
         Handled::Retry(retry) => {
             t.retry = Some(retry);
-            false
+            None
         }
         Handled::SignedOut(held) => {
             t.waiting.push_front(*held);
-            true
+            Some(Wait::SignIn)
+        }
+        Handled::Limited(held) => {
+            t.waiting.push_front(*held);
+            Some(Wait::Limit)
         }
     }
 }
@@ -1742,7 +1828,7 @@ async fn nak(msg: &jetstream::Message, delay: Option<Duration>) {
 mod tests {
     use std::sync::Arc;
 
-    use ants_proto::{ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, Role, StatusEvent, StatusUpdate};
+    use ants_proto::{ChannelEntry, ChannelId, DEFAULT_TURN_BUDGET, LimitKind, Role, StatusEvent, StatusUpdate};
     use ants_test_support::{NatsServer as Server, free_port};
     use async_nats::jetstream::consumer::PullConsumer;
     use tokio::sync::Semaphore;
@@ -1860,6 +1946,7 @@ mod tests {
                 version: None,
                 perms: None,
                 signed_out: None,
+                limited: None,
             };
             roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
         }
@@ -1936,6 +2023,14 @@ mod tests {
                 progress_every,
                 sign_in: SignIn::default(),
                 sign_in_every: Duration::from_millis(300),
+                throttle: Throttle::default(),
+                backoffs: Backoffs {
+                    rate_limit: ratelimit::Backoff {
+                        first: Duration::from_millis(100),
+                        max: Duration::from_millis(300),
+                    },
+                    quota: ratelimit::Backoff { first: Duration::from_millis(200), max: Duration::from_millis(400) },
+                },
             };
             let stop = || {
                 let ctrl_c = ctrl_c.clone();
@@ -2232,6 +2327,73 @@ mod tests {
         let mut answered = log.lock().unwrap().answered.clone();
         answered.sort();
         assert_eq!(answered, ["a", "b", "c", "d"]);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn messages_wait_unspent_through_a_provider_rate_limit() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        log.lock().unwrap().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let (_, seq) = bus.send(&t1, "a").await;
+        bus.send(&t1, "b").await;
+        bus.send(&t2, "c").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            until("prompts tried again", || log.lock().unwrap().prompted >= 4).await;
+            let shown = bus.workload.limited().expect("the roster shows the limit");
+            assert_eq!(shown.kind, LimitKind::RateLimit);
+            assert!(shown.until > shown.since);
+            assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "a rate limit tells nobody");
+            assert!(!bus.marked(seq).await, "no attempt is recorded");
+            assert_eq!(bus.consumer().await.num_redelivered, 0);
+
+            log.lock().unwrap().limited = None;
+            let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
+            answered.push(next_reply(&mut replies).await);
+            answered.sort_by_key(|(_, text)| text.clone());
+            let expected = [(t1.clone(), "a"), (t1.clone(), "b"), (t2.clone(), "c")].map(|(t, s)| (t, s.to_owned()));
+            assert_eq!(answered, expected, "answered unwarned: no attempt started");
+            until("the limit cleared", || bus.workload.limited().is_none()).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        log.lock().unwrap().limited = Some("You've hit your usage limit. Upgrade to get more.".to_owned());
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let thread = ThreadId::generate();
+        let (_, seq) = bus.send(&thread, "a").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let notice = next_envelope(&mut replies).await;
+            assert_eq!(notice.thread_id, thread);
+            assert!(notice.text.contains("harness test on") && notice.text.contains("out of quota"), "{notice:?}");
+            assert!(notice.text.contains("spending no attempts"), "{}", notice.text);
+            assert_eq!(bus.workload.limited().map(|l| l.kind), Some(LimitKind::Quota));
+            until("prompts tried again", || log.lock().unwrap().prompted >= 3).await;
+            assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
+            assert!(!bus.marked(seq).await, "no attempt is recorded");
+            assert_eq!(bus.consumer().await.num_redelivered, 0);
+
+            log.lock().unwrap().limited = None;
+            assert_eq!(next_reply(&mut replies).await, (thread.clone(), "a".to_owned()));
+            until("the limit cleared", || bus.workload.limited().is_none()).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert_eq!(log.lock().unwrap().answered, ["a"]);
         assert!(dead::list(&bus.stream).await.unwrap().is_empty());
         assert_eq!(bus.unacked().await, 0);
     }
@@ -4057,6 +4219,7 @@ mod tests {
             version: None,
             perms: None,
             signed_out: None,
+            limited: None,
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
         let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

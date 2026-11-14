@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant};
-use ants_daemon::creds::{self, Expiry, Kind, VersionStatus};
+use ants_daemon::creds::{self, Expiry, Kind, Seed, VersionStatus};
 use ants_daemon::harness::{self, DEFAULT_HARNESS, Harnesses, Readiness};
+use ants_daemon::keystore::{self, Store};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;
@@ -99,8 +100,8 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, each ant's credentials and harness, the hub's account
-/// resolver, the leaf node and outbox, and the installed services.
+/// buckets, the versions of ants running across the team, each ant's credentials, harness and workdir, the hub's
+/// account resolver, the leaf node and outbox, and the installed services.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -121,6 +122,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
     checks.extend(reached);
     checks.extend(ants_checked);
+    checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.push(resolver);
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
@@ -177,7 +179,9 @@ fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<I
     });
     match read {
         Ok(identity) => {
-            checks.push(check_creds(check, path, identity.finding.as_ref()?, now));
+            let finding = identity.finding.as_ref()?;
+            checks.push(check_creds(check, path, finding, now));
+            checks.extend(check_key("credentials key", path, finding.renew(), keystore::os()));
             Some(identity)
         }
         Err(e) => {
@@ -245,6 +249,25 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
     Check::new(check, status, detail, finding.renew())
 }
 
+/// The check of the seed that the credentials at `path` keep in `store` in their place, when they name a stored key:
+/// that the store answers, holds it, and that it is the key of their user JWT. `issue` has them issued again. Never
+/// shows the seed.
+fn check_key(check: &str, path: &Path, issue: Vec<String>, store: &dyn Store) -> Option<Check> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let Some(Seed::Stored(key)) = creds::seed_of(&text) else { return None };
+    Some(match creds::load(path, store) {
+        Ok(_) => Check::ok(check, format!("{key} ({}): its seed is in the OS credential store", path.display())),
+        Err(e) if keystore::is_unavailable(&e) => {
+            let fix = "unlock the OS credential store (log in), then check again; services started before then wait                        for it";
+            Check::fail(check, format!("{e:#}"), vec![fix.to_owned()])
+        }
+        Err(e) => {
+            let restore = "restore the seed from a backup of the OS credential store, or issue the credentials again:";
+            Check::fail(check, format!("{e:#}"), std::iter::once(restore.to_owned()).chain(issue).collect())
+        }
+    })
+}
+
 /// Connect, then check JetStream and the hub's stream and buckets.
 async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) -> (Vec<Check>, Option<Connected>) {
     let Some(identity) = identity else {
@@ -272,10 +295,12 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.push(answered);
     if !reached {
         checks.push(Check::skip("hub", "JetStream does not answer"));
+        checks.push(Check::skip("consumers", "JetStream does not answer"));
         checks.push(Check::skip("versions", "JetStream does not answer"));
         return (checks, None);
     }
     checks.extend(check_hub(&js, identity).await);
+    checks.push(check_consumers(&js, identity).await);
     checks.push(check_versions(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
@@ -289,8 +314,7 @@ async fn connect(url: &str, creds: Option<&Path>, user: &UserId) -> Result<async
         .custom_inbox_prefix(ants_proto::inbox_prefix(user))
         .event_callback(|_| async {});
     if let Some(path) = creds {
-        options = bus::authenticate(options, path, ants_daemon::keystore::os())
-            .map_err(|e| Unreached::Other(format!("{e:#}")))?;
+        options = bus::authenticate(options, path, keystore::os()).map_err(|e| Unreached::NoKey(format!("{e:#}")))?;
     }
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, options.connect(url)).await {
         Ok(Ok(client)) => Ok(client),
@@ -312,6 +336,8 @@ enum Unreached {
     Refused(String),
     /// No server answered.
     Unreachable(String),
+    /// The credentials' seed could not be read.
+    NoKey(String),
     Other(String),
 }
 
@@ -344,6 +370,7 @@ fn unreached(setup: &Setup, identity: &Identity, through_leaf: Option<&Leaf>, e:
             }
             None => Check::fail(check, format!("{url} does not answer: {e}"), vec![set_nats]),
         },
+        Unreached::NoKey(e) => Check::skip(check, format!("no seed to connect with: {e}")),
         Unreached::Other(e) => Check::fail(check, format!("connecting to {url}: {e}"), vec![set_nats]),
     }
 }
@@ -458,6 +485,53 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
             }
         })
         .collect()
+}
+
+/// The consumers of the `ANTS` stream against the most it takes ([`consumer_limit`]): past that, creating one fails,
+/// so an ant cannot read its inbox. Warns from four fifths of it.
+async fn check_consumers(js: &jetstream::Context, identity: &Identity) -> Check {
+    let check = "consumers";
+    if !identity.rights.may_publish(&hub::Object::Stream.info_subject()) {
+        return Check::skip(
+            check,
+            format!("the credentials get no stream info of {STREAM}: run `ants doctor` as a human"),
+        );
+    }
+    let info = match js.get_stream(STREAM).await {
+        Ok(stream) => stream.cached_info().clone(),
+        Err(e) => return Check::skip(check, format!("no stream info of {STREAM}: {e}")),
+    };
+    consumers(info.state.consumer_count, consumer_limit(&info.config))
+}
+
+/// The most consumers a stream configured as `config` takes: its `max_consumers`, else the 1000 nats-server 2.15 and
+/// later give a stream by default (`default_max_consumers` in its configuration may change that); None for no limit.
+fn consumer_limit(config: &jetstream::stream::Config) -> Option<usize> {
+    if let Ok(max) = usize::try_from(config.max_consumers)
+        && max > 0
+    {
+        return Some(max);
+    }
+    let version = config.metadata.get("_nats.ver")?;
+    let mut parts = version.split(['.', '-']).map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next()?, parts.next()?);
+    ((major, minor) >= (2, 15)).then_some(1000)
+}
+
+fn consumers(count: usize, limit: Option<usize>) -> Check {
+    let check = "consumers";
+    let Some(limit) = limit else {
+        return Check::ok(check, format!("{count} on stream {STREAM}, which takes any number"));
+    };
+    let detail = format!("{count} on stream {STREAM}, which takes {limit}");
+    if count.saturating_mul(5) < limit.saturating_mul(4) {
+        return Check::ok(check, detail);
+    }
+    let raise = match usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
+        true => "ants init".to_owned(),
+        false => format!("nats stream edit {STREAM} --max-consumers {}", limit.saturating_mul(2)),
+    };
+    Check::warn(check, format!("{detail}: once full, no ant can open a consumer to read its inbox"), vec![raise])
 }
 
 /// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
@@ -602,6 +676,9 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
     let mut checks = Vec::new();
     for (ant, index) in ants.iter().zip(picked) {
         checks.push(check_ant_creds(ant, now));
+        if let Some(path) = &ant.creds {
+            checks.extend(check_key(&format!("ant {} key", ant.name), path, vec![issue(ant)], keystore::os()));
+        }
         let check = format!("ant {} harness", ant.name);
         let (handshake, installed) = match index {
             _ if !setup.harnesses => {
@@ -636,12 +713,18 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
     checks
 }
 
+/// The commands issuing the credentials of `ant` again.
+fn issue(ant: &Ant) -> String {
+    let name = &ant.name;
+    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
+    format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
+}
+
 /// An ant's credentials: an ant's of its name, issued for the JetStream domain it uses.
 fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     let check = format!("ant {} credentials", ant.name);
     let name = &ant.name;
-    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
-    let issue = format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}");
+    let issue = issue(ant);
     let Some(path) = &ant.creds else {
         return Check::skip(check, "none in the config file: the ant connects as no one");
     };
@@ -660,6 +743,26 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
         return Check::fail(check, detail, vec![issue]);
     }
     check_creds(&check, path, &finding, now)
+}
+
+/// A warning for each ant whose threads run at once in one git work tree, where they may clobber each other's edits.
+fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
+    ants.iter()
+        .filter(|ant| ants_daemon::worktrees::shares_git_workdir(&ant.workdir, ant.max_harnesses, ant.worktrees))
+        .map(|ant| {
+            let detail = format!(
+                "up to {} threads at once edit the git work tree of {}",
+                ant.max_harnesses,
+                ant.workdir.display()
+            );
+            let fix = format!(
+                "worktrees = true in the [[ant]] named {} of {}, giving each thread its own git worktree",
+                ant.name,
+                config.display()
+            );
+            Check::warn(format!("ant {} workdir", ant.name), detail, vec![fix])
+        })
+        .collect()
 }
 
 /// The machine's leaf node, as `ants leaf config` wrote its configuration.
@@ -963,6 +1066,26 @@ mod tests {
         assert!(hub[0].detail.contains("presence not checked"), "{}", hub[0]);
     }
 
+    #[test]
+    fn consumers_warn_near_the_limit_the_hub_enforces() {
+        let mut config = jetstream::stream::Config::default();
+        assert_eq!(consumer_limit(&config), None, "no limit before nats-server 2.15");
+        config.metadata.insert("_nats.ver".to_owned(), "2.14.9".to_owned());
+        assert_eq!(consumer_limit(&config), None);
+        config.metadata.insert("_nats.ver".to_owned(), "2.15.0-beta.1".to_owned());
+        config.max_consumers = -1;
+        assert_eq!(consumer_limit(&config), Some(1000), "-1 leaves the default");
+        config.max_consumers = hub::MAX_CONSUMERS;
+        assert_eq!(consumer_limit(&config), Some(10_000));
+
+        assert_eq!(consumers(799, Some(1000)).status, Status::Ok);
+        let near = consumers(800, Some(1000));
+        assert_eq!((near.status, near.fix.as_slice()), (Status::Warn, ["ants init".to_owned()].as_slice()));
+        let full = consumers(9_000, Some(10_000));
+        assert_eq!(full.fix, [format!("nats stream edit {STREAM} --max-consumers 20000")]);
+        assert_eq!(consumers(5_000, None).status, Status::Ok);
+    }
+
     #[tokio::test]
     async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
         let Some(server) = Server::start() else { return };
@@ -1066,6 +1189,30 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn ants_sharing_a_git_workdir_without_worktrees_are_warned() {
+        let dir = ants_test_support::scratch_dir("doctor-shared-workdir").canonicalize().unwrap();
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "messenger = false\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
+             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\n",
+        )
+        .unwrap();
+        let loaded = config::load(&config).unwrap();
+        let checks = check_shared_workdirs(&loaded.ants, &config);
+        assert_eq!(
+            checks.iter().map(|c| (c.check.as_str(), c.status)).collect::<Vec<_>>(),
+            [("ant dev-a workdir", Status::Warn)]
+        );
+        let fix = format!("worktrees = true in the [[ant]] named dev-a of {}", config.display());
+        assert!(checks[0].fix[0].starts_with(&fix), "{}", checks[0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
         let dir = ants_test_support::scratch_dir("doctor-leaf").canonicalize().unwrap();
@@ -1160,6 +1307,41 @@ mod tests {
             let none = Setup { team: hub.dir().join("no-team"), ..other };
             assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
         }
+    }
+
+    #[test]
+    fn the_key_check_finds_a_stored_seed_locked_missing_or_of_another_key() {
+        let dir = ants_test_support::scratch_dir("doctor-key");
+        let team = dir.join("team");
+        auth::init(&team).unwrap();
+        let user = nkeys::KeyPair::new_user();
+        let (key, seed) = (user.public_key(), user.seed().unwrap());
+        let jwt = auth::sign_user(&team, &"dev-a".parse().unwrap(), Role::Ant, None, &key).unwrap();
+        let path = dir.join("dev-a.creds");
+        let store = keystore::Memory::default();
+        let check = |store: &keystore::Memory| {
+            let check = check_key("ant dev-a key", &path, vec!["ants add dev-a".to_owned()], store).unwrap();
+            let shown = check.to_string();
+            assert!(!shown.contains(&seed), "{shown}");
+            (check.status, shown)
+        };
+
+        auth::write_creds(&path, &jwt, &user).unwrap();
+        assert!(check_key("ant dev-a key", &path, Vec::new(), &store).is_none(), "the seed is in the file");
+        std::fs::write(&path, creds::stored_text(&jwt, &key)).unwrap();
+        store.set(&key, &seed).unwrap();
+        assert_eq!(check(&store).0, Status::Ok);
+        store.lock(true);
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("locked") && shown.contains("unlock"), "{shown}");
+        store.lock(false);
+        store.set(&key, &auth::seed(&nkeys::KeyPair::new_user()).unwrap()).unwrap();
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("another key") && shown.contains("ants add"), "{shown}");
+        store.delete(&key).unwrap();
+        let (status, shown) = check(&store);
+        assert!(status == Status::Fail && shown.contains("holds no seed") && shown.contains("backup"), "{shown}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

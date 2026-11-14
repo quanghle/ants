@@ -1,12 +1,16 @@
 # The built-in harness definitions. A config file's [harnesses.<name>] table of the same name replaces one whole.
-# `sign_in` is the command a human runs when the harness reports it is not signed in. `context_overflow` lists phrases
-# of its prompt errors that mean the session outgrew the model's context window, besides those every harness shares.
+# `sign_in` is the command a human runs when the harness reports it is not signed in. `rate_limited` and
+# `quota_exhausted` add phrases of the harness's errors that mean a provider rate limit or an exhausted quota to the
+# common ones (HTTP 429/529, "rate limit", "overloaded", "quota exceeded", "usage limit" and the like).
+# `context_overflow` lists phrases of its prompt errors that mean the session outgrew the model's context window,
+# besides those every harness shares.
 
 # GitHub Copilot CLI.
 [harnesses.copilot]
 command = "copilot"
 args = ["--acp"]
 sign_in = "copilot login"
+quota_exhausted = ["premium request", "ai credits"]
 context_overflow = ["model_max_prompt_tokens_exceeded", "prompt token count of"]
 
 [harnesses.copilot.context]
@@ -19,6 +23,7 @@ long_context = { args = ["--context", "long_context"] }
 command = "claude-agent-acp"
 mode = "default"
 sign_in = "claude login"
+quota_exhausted = ["hit your session limit", "hit your weekly limit", "hit your opus limit", "limit reached - resets"]
 context_overflow = ["exceed context limit"]
 
 [harnesses.claude.context]
@@ -33,4 +38,5 @@ command = "agy"
 args = ["acp", "--disable-telemetry"]
 mode = "default"
 sign_in = "agy"
+quota_exhausted = ["daily quota"]
 context_overflow = ["exceeds the maximum number of tokens allowed"]

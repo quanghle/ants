@@ -1,4 +1,4 @@
-//! A human's inbox: the messages to the human in the stream, read by sequence (`STREAM.MSG.GET`), so every device of
+//! A human's inbox: the messages to the human in the stream, read by message gets ([`Reading::Gets`]), so every device of
 //! the human reads all of them, and its [`ReadMarker`] in [`READ_BUCKET`], shared by those devices, which says which
 //! it has read on any of them.
 //!

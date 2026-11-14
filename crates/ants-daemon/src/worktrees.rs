@@ -232,6 +232,18 @@ impl Worktrees {
     }
 }
 
+/// Whether threads of an ant run at once in one git work tree, where they may clobber each other's edits: more than one
+/// harness, no worktree per thread, and the workdir inside a git work tree.
+pub fn shares_git_workdir(workdir: &Path, max_harnesses: usize, worktrees: bool) -> bool {
+    max_harnesses > 1 && !worktrees && in_git_work_tree(workdir)
+}
+
+/// Whether `dir` is inside a git work tree, judged by a `.git` directory or file in it or above it without running
+/// git.
+fn in_git_work_tree(dir: &Path) -> bool {
+    std::path::absolute(dir).is_ok_and(|dir| dir.ancestors().any(|dir| dir.join(".git").exists()))
+}
+
 /// The threads with a directory in `dir`.
 fn threads_in(dir: &Path) -> Vec<ThreadId> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -409,6 +421,21 @@ pub(crate) mod tests {
         run(&dir, &["init", "--quiet"]);
         let worktrees = Worktrees::find(&ant(), &dir, &dir.join(".home")).await.unwrap();
         assert!(worktrees.checkout(&thread("a")).await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_threads_share_a_git_workdir_only_without_worktrees() {
+        let dir = ants_test_support::scratch_dir("worktrees-shared");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        assert!(shares_git_workdir(&dir.join("sub"), 2, false));
+        assert!(!shares_git_workdir(&dir.join("sub"), 2, true));
+        assert!(!shares_git_workdir(&dir.join("sub"), 1, false));
+        std::fs::remove_dir(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: elsewhere").unwrap();
+        assert!(shares_git_workdir(&dir, 4, false), "a worktree's .git is a file");
+        assert!(!shares_git_workdir(Path::new("/"), 4, false));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
