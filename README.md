@@ -45,7 +45,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_links` | File, 30d | Verified `origin_thread` handoffs (`<from>.<thread>.<to>`), from spin-offs and from messages on a thread with a `creator` or `owner`. |
 | KV `ants_owners` | File, 30d | Thread `owner` (`<thread>.<recipient>`) recorded by a human (`ants ask`) or webhook for each ant it messages on the thread; the first record of a key stays: a second is refused, or dropped as a repeat of its `Nats-Msg-Id` (no delete or purge). |
 | KV `ants_webhooks` | File, 7d | Delivered webhook event IDs (`<webhook>.<hash>`) and daily `<webhook>.webhook` markers. |
-| Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment). |
+| Core NATS | Unstored | `ants.status.<ant>.<thread>` (progress), `ants.chanadm.<channel>.<ant>` (owner ops), `ants.enroll.<ant>[.reply]` (enrollment, carried by leaf uplinks). |
 
 User, channel, thread and JetStream domain IDs use 1–64 characters of `a-z`, `0-9` and `-`, starting with a letter or digit (`channel-manager` is reserved). Machine and harness names also allow `_` (machine names allow uppercase ASCII and must differ from `js_domain`). Durations require whole-number units ordered largest first (`s`, `m`, `h`, `d`: `90s`, `10m`, `1h30m`) or `0`; bare non-zero numbers are rejected.
 
@@ -103,10 +103,10 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or delete dead letters; `watch` turns `MAX_DELIVERIES` advisories into dead letters. |
 | `ants init` | Create or update stream `ANTS` and all nine KV buckets (requires human credentials). |
 | `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
-| `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
-| `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
+| `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
+| `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
 | `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
-| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
+| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--enroll-approver` for the account-key machine). |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
@@ -477,14 +477,16 @@ ants add dev-c --workdir ~/src/app              # target machine: appends config
 ants auth user dev-c --public-key U... --js-domain hub   # auth machine: prints signed JWT
 ants add dev-c --jwt eyJ...                     # target machine: writes dev-c.creds (accepts JWT, file or '-')
 
-# Over NATS (direct to hub; leaf uplinks do not carry ants.enroll.*)
+# Over NATS (direct, or through leaf nodes)
 ants auth enroll dev-c                          # auth machine: writes enroll-dev-c.creds, valid 1h (--ttl; 0: no expiry)
-ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds --hub wss://hub.example/nats
-ants enroll list --nats wss://hub.example/nats  # auth machine: inspect pending requests
-ants enroll approve dev-c --nats wss://hub.example/nats --js-domain hub
+ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds   # target machine: waits for approval
+ants enroll list --js-domain hub                # auth machine: inspect pending requests
+ants enroll approve dev-c --js-domain hub
 ```
 
-Reload `ants daemon` (`SIGHUP`, see [Services](#services)) after adding an ant, and update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
+Requests prove the enrollment credentials by signature; `--hub URL` sends them to another server than `--nats`. Behind a leaf node, `ants add --enroll` names the machine's leaf (from `~/.config/ants/leaf.conf` or `--leaf-config FILE`) with a signature by its uplink key, and approval renews the leaf's uplink credentials for the ant and admits it to the outbox sourcing set by `ants leaf outbox`; restart the leaf node afterwards (`SIGHUP` does not reread credentials) and name the ant in later `ants auth leaf` and `ants leaf outbox` runs. `ants enroll` behind a leaf node needs uplink credentials issued with `ants auth leaf --enroll-approver`. Leaf uplink credentials issued before enrollment crossed leaves need `ants auth leaf` once more. See [docs/transport.md](docs/transport.md#enrollment-behind-a-leaf-node).
+
+Reload `ants daemon` (`SIGHUP`, see [Services](#services)) after adding an ant; after `--jwt`, also update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
 
 ## Leaf nodes
 

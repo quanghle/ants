@@ -958,6 +958,12 @@ impl Permissions {
     /// For each pattern of a user's inbox, notes and channel subjects, which has a wildcard before the sender, the
     /// uplink also gets one literal subject of it (`ants.inbox.dev-a.dev-a`): nats-server lets the hub stream's interest
     /// cross the uplink only when it finds such a subject, and the pattern allows it anyway.
+    ///
+    /// The uplink also carries enrollment requests from the machine ([`subject::ALL_ENROLL_REQUESTS`]) and their
+    /// answers to it ([`subject::ALL_ENROLL_REPLIES`]), for an ant new to the machine: never other machines' requests,
+    /// nor answers from the machine, which only the approver gives. A request proves its enrollment credentials by
+    /// signature ([`EnrollRequest::signed`]), so the uplink cannot ask for an ant itself; an answer holds no secret, the
+    /// seed of the key it completes staying on the asking machine.
     pub fn for_leaf<'a>(machine: &Machine, users: impl IntoIterator<Item = (&'a UserId, Role)>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         let mut setup = vec![UserId::human()];
@@ -994,6 +1000,8 @@ impl Permissions {
             format!("{api}.CONSUMER.DELETE.{OUTBOX_STREAM}.>"),
             format!("$JS.FC.{OUTBOX_STREAM}.>"),
         ]);
+        leaf.publish.push(subject::ALL_ENROLL_REQUESTS.to_owned());
+        leaf.subscribe.push(subject::ALL_ENROLL_REPLIES.to_owned());
         leaf
     }
 
@@ -1063,14 +1071,27 @@ impl Permissions {
     }
 
     /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment request and
-    /// answering it.
+    /// answering it, and admitting an ant new to a leaf node into the hub's stream and links bucket from the leaf's
+    /// outbox, as `ants leaf outbox` does, with the replies of its JetStream requests under [`ENROLL_INBOX`].
     pub fn for_enroll_approver() -> Self {
+        let links = kv_stream(LINKS_BUCKET);
         Self {
-            publish: vec![subject::ALL_ENROLL_REPLIES.to_owned()],
-            subscribe: vec![subject::ALL_ENROLL_REQUESTS.to_owned()],
+            publish: vec![
+                subject::ALL_ENROLL_REPLIES.to_owned(),
+                format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+                format!("$JS.API.STREAM.INFO.{STREAM}"),
+                format!("$JS.API.STREAM.UPDATE.{STREAM}"),
+                format!("$JS.API.STREAM.INFO.{links}"),
+                format!("$JS.API.STREAM.UPDATE.{links}"),
+            ],
+            subscribe: vec![subject::ALL_ENROLL_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
         }
     }
 }
+
+/// Reply prefix of the connections of `ants enroll`: its first token starts with `_`, which no user id does, so no
+/// user's own reply inboxes ([`inbox_prefix`]) cover it.
+pub const ENROLL_INBOX: &str = "_INBOX._enroll";
 
 /// The `name` of the user JWT of `ant`'s enrollment credentials.
 pub fn enrollment_user(ant: &UserId) -> String {
@@ -2487,6 +2508,10 @@ impl ApprovalDecision {
 /// A machine asking for the credentials of `ant` on [`subject::enroll`]: the public key of the user NKey it
 /// generated, whose seed stays there. The machine holding the account key signs a user JWT for that key, or refuses,
 /// and answers with an [`EnrollReply`].
+///
+/// The request carries the user JWT of the enrollment credentials it is sent with and their key's `signature` of
+/// [`EnrollRequest::signed`], so the approver takes only requests of a holder of the ant's enrollment credentials,
+/// whatever connection carried them (a leaf node's uplink may carry anyone's).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollRequest {
     pub ant: UserId,
@@ -2495,11 +2520,45 @@ pub struct EnrollRequest {
     /// Host name of the asking machine, as it reports it.
     pub host: String,
     pub sent_at: DateTime<Utc>,
+    /// The user JWT of the enrollment credentials of `ant`.
+    pub enrollment: String,
+    /// Signature of [`EnrollRequest::signed`] by the enrollment credentials' key, base64url without padding.
+    pub signature: String,
+    /// The leaf node the asking machine reaches the hub through, whose uplink the approval extends to the ant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf: Option<EnrollLeaf>,
+}
+
+/// The leaf node of an asking machine ([`EnrollRequest::leaf`]): its machine name, the user JWT of its uplink
+/// credentials, and their key's signature of [`EnrollRequest::signed`], base64url without padding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollLeaf {
+    pub machine: Machine,
+    pub jwt: String,
+    pub signature: String,
 }
 
 impl EnrollRequest {
+    /// A request sent now, to be completed with the enrollment credentials' JWT and signatures.
     pub fn new(ant: UserId, public_key: impl Into<String>, host: impl Into<String>) -> Self {
-        Self { ant, public_key: public_key.into(), host: host.into(), sent_at: Utc::now() }
+        Self {
+            ant,
+            public_key: public_key.into(),
+            host: host.into(),
+            sent_at: Utc::now(),
+            enrollment: String::new(),
+            signature: String::new(),
+            leaf: None,
+        }
+    }
+
+    /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line.
+    pub fn signed(&self) -> Vec<u8> {
+        let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let (machine, leaf) = self.leaf.as_ref().map_or(("", ""), |l| (l.machine.as_str(), l.jwt.as_str()));
+        let fields =
+            ["ants-enroll", self.ant.as_str(), &self.public_key, &sent_at, &self.enrollment, machine, leaf, &self.host];
+        fields.join("\n").into_bytes()
     }
 
     pub fn subject(&self) -> String {
@@ -2519,8 +2578,16 @@ impl EnrollRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum EnrollReply {
-    /// The user JWT of `public_key`, which completes the ant's credentials with the seed kept on its machine.
-    Approved { ant: UserId, public_key: String, jwt: String },
+    /// The user JWT of `public_key`, which completes the ant's credentials with the seed kept on its machine, and
+    /// for a request through a leaf node ([`EnrollRequest::leaf`]) the renewed user JWT of the leaf's uplink key,
+    /// allowing the ant as well.
+    Approved {
+        ant: UserId,
+        public_key: String,
+        jwt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leaf_jwt: Option<String>,
+    },
     /// No credentials for `public_key`, or for any key asking for `ant` when it is `None`.
     Rejected {
         ant: UserId,
@@ -2682,9 +2749,11 @@ mod tests {
         assert_eq!(request.check_subject("ants.enroll.dev-a"), Ok(()));
         assert!(request.check_subject("ants.enroll.dev-b").is_err());
 
-        let approved = EnrollReply::Approved { ant: p("dev-a"), public_key: "UKEY".into(), jwt: "j".into() };
+        let approved =
+            EnrollReply::Approved { ant: p("dev-a"), public_key: "UKEY".into(), jwt: "j".into(), leaf_jwt: None };
         let json = serde_json::to_value(&approved).unwrap();
         assert_eq!(json["outcome"], "approved");
+        assert!(json.get("leaf_jwt").is_none());
         assert_eq!(serde_json::from_value::<EnrollReply>(json).unwrap(), approved);
         assert_eq!(approved.subject(), "ants.enroll.dev-a.reply");
         assert!(approved.answers("UKEY") && !approved.answers("UOTHER"));
@@ -2694,6 +2763,37 @@ mod tests {
         assert!(all.answers("UKEY") && all.answers("UOTHER"));
         let one = EnrollReply::Rejected { ant: p("dev-a"), public_key: Some("UOTHER".into()), reason: None };
         assert!(!one.answers("UKEY"));
+    }
+
+    #[test]
+    fn an_enrollment_request_signs_all_but_its_signatures() {
+        let mut request = EnrollRequest::new(p("dev-a"), "UKEY", "macbook");
+        request.enrollment = "e.j.s".into();
+        let bare = request.signed();
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("\"leaf\""), "{json}");
+        let back: EnrollRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.signed(), bare, "the same bytes after the wire");
+        request.signature = "sig".into();
+        assert_eq!(request.signed(), bare);
+        let leaf = EnrollLeaf { machine: "m1".parse().unwrap(), jwt: "l.j.s".into(), signature: String::new() };
+        request.leaf = Some(leaf.clone());
+        let with_leaf = request.signed();
+        assert_ne!(with_leaf, bare, "the leaf is signed");
+        request.leaf = Some(EnrollLeaf { signature: "other".into(), ..leaf });
+        assert_eq!(request.signed(), with_leaf);
+        for change in [
+            |r: &mut EnrollRequest| r.public_key = "UOTHER".into(),
+            |r: &mut EnrollRequest| r.ant = "dev-b".parse().unwrap(),
+            |r: &mut EnrollRequest| r.host = "other".into(),
+            |r: &mut EnrollRequest| r.enrollment = "x.y.z".into(),
+            |r: &mut EnrollRequest| r.sent_at += chrono::TimeDelta::nanoseconds(1),
+            |r: &mut EnrollRequest| r.leaf.as_mut().unwrap().machine = "m2".parse().unwrap(),
+        ] {
+            let mut changed = request.clone();
+            change(&mut changed);
+            assert_ne!(changed.signed(), with_leaf);
+        }
     }
 
     #[test]
@@ -2749,12 +2849,18 @@ mod tests {
                 "ants.chanadm.dev-a.dev-a",
                 "$JS.S.m1.>",
                 "$JSC.R.m1.*.ANTS_OUT.>",
-                "_INBOX.human.leaf.m1.>"
+                "_INBOX.human.leaf.m1.>",
+                // Asking for a new ant's credentials.
+                "ants.enroll.*",
             ]
         );
-        let extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
+        let mut extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
+        assert_eq!(extra.pop().map(String::as_str), Some("ants.enroll.*.reply"), "hearing the answer");
         assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || s.starts_with("$JS.FC.ANTS_OUT.")), "{extra:?}");
         assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
+        // Never hearing the requests of other machines, nor answering them, without a human (who watches all).
+        assert!(!only_a.subscribe.iter().any(|s| s == subject::ALL_ENROLL_REQUESTS || s == ">" || s == "ants.>"));
+        assert!(!leaf.publish.iter().any(|s| s == subject::ALL_ENROLL_REPLIES || s == ">" || s == "ants.>"));
     }
 
     #[test]

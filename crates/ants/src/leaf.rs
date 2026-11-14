@@ -53,6 +53,20 @@ pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
     fs::write(&out, text).with_context(|| format!("writing {}", out.display()))
 }
 
+/// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write`] writes it.
+pub fn read_uplink(path: &Path) -> Result<(Machine, PathBuf)> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let value = |key: &str| -> Result<String> {
+        let line = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
+            .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
+        serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
+    };
+    let machine = value("server_name")?.parse().with_context(|| format!("{}: server_name", path.display()))?;
+    Ok((machine, PathBuf::from(value("credentials")?)))
+}
+
 /// The configuration of `leaf`, for a file in `dir`.
 fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     let dir = normalize(dir)?;
@@ -337,7 +351,7 @@ mod tests {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], false, None, &creds).unwrap();
         (dir, creds)
     }
 
@@ -371,6 +385,9 @@ mod tests {
         let store = normalize(&dir).unwrap().join("jetstream");
         let js = format!("jetstream {{\n  domain: \"m1\"\n  store_dir: {}\n", quote(&store.to_string_lossy()));
         assert!(text.contains(&js), "{text}");
+        let conf = dir.join("leaf.conf");
+        write(&leaf(&wss, &creds, &server_conf), &conf).unwrap();
+        assert_eq!(read_uplink(&conf).unwrap(), (M1.clone(), normalize(&creds).unwrap()), "as `ants add` reads it");
         let hub: JsDomain = "m1".parse().unwrap();
         let taken = Leaf { hub_domain: Some(&hub), ..leaf(&wss, &creds, &server_conf) };
         assert!(err(taken).contains("hub's JetStream domain"));
@@ -446,7 +463,7 @@ mod tests {
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], false, Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);

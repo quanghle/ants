@@ -99,6 +99,51 @@ pub async fn admit(
     Ok(())
 }
 
+/// Admit `ant`, new to `machine`, into the hub's stream from the machine's outbox, and into the links bucket once
+/// `ants init` created it, as [`admit`] would with the ant listed too, leaving the other admissions as they are; for
+/// `ants enroll approve`, which connects through `hub` with [`Permissions::for_enroll_approver`]. Returns false,
+/// changing nothing, when the hub's intake does not source the machine's outbox (`ants leaf outbox` never ran for it).
+///
+/// [`Permissions::for_enroll_approver`]: ants_proto::Permissions::for_enroll_approver
+pub async fn admit_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result<bool> {
+    let mut intake = match hub.get_stream(INTAKE_STREAM).await {
+        Ok(intake) => intake,
+        Err(e) if not_found(&e) => return Ok(false),
+        Err(e) => return Err(e).context("looking up the hub's intake"),
+    };
+    let info = intake.info().await?;
+    if !info.config.sources.iter().flatten().any(|s| outbox_of(s, machine)) {
+        return Ok(false);
+    }
+    let start = info.state.last_sequence + 1;
+    let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
+    let mut config = ants.info().await?.config.clone();
+    // A human's admission may take every inbox subject of the machine already, which the ant's may not overlap.
+    let every_inbox = machine.admitted(&UserId::human(), Role::Human, true).swap_remove(0).0;
+    let sources = config.sources.get_or_insert_default();
+    let inbox = !sources
+        .iter()
+        .any(|s| from_machine(s, machine) && s.subject_transforms.iter().any(|t| t.source == every_inbox));
+    if add_source(sources, member_source(machine, ant, Role::Ant, inbox, start)) {
+        hub.update_stream(&config).await.context("admitting the ant into the hub's stream")?;
+    }
+    if let Some(mut config) = bucket_config(hub, LINKS_BUCKET).await?
+        && add_source(config.sources.get_or_insert_default(), link_source(machine, ant, start))
+    {
+        hub.update_stream(&config).await.context("admitting the ant into the links bucket")?;
+    }
+    Ok(true)
+}
+
+/// Add `source` to `sources` unless one with the same subject transforms is there; whether it was added.
+fn add_source(sources: &mut Vec<Source>, source: Source) -> bool {
+    let there = sources.iter().any(|s| s.name == source.name && s.subject_transforms == source.subject_transforms);
+    if !there {
+        sources.push(source);
+    }
+    !there
+}
+
 /// Wait up to `wait` for the hub's intake to hear from the outbox of `machine`, which the hub then sources.
 ///
 /// Sourcing an outbox needs nats-server's `js_api_reply_v2` feature flag on the hub ([`Machine::source_replies`]):
@@ -248,17 +293,22 @@ fn admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<
     let inboxes = members.iter().find(|(_, role)| role.is_human()).map(|(human, _)| human);
     members
         .iter()
-        .map(|(user, role)| Source {
-            name: INTAKE_STREAM.to_owned(),
-            start_sequence: Some(start),
-            subject_transforms: machine
-                .admitted(user, *role, inboxes.is_none_or(|human| human == user))
-                .into_iter()
-                .map(|(source, destination)| SubjectTransform { source, destination })
-                .collect(),
-            ..Default::default()
-        })
+        .map(|(user, role)| member_source(machine, user, *role, inboxes.is_none_or(|human| human == user), start))
         .collect()
+}
+
+/// The hub stream's source for `user` in `role` on `machine`, with its inbox subjects if `inbox`.
+fn member_source(machine: &Machine, user: &UserId, role: Role, inbox: bool, start: u64) -> Source {
+    Source {
+        name: INTAKE_STREAM.to_owned(),
+        start_sequence: Some(start),
+        subject_transforms: machine
+            .admitted(user, role, inbox)
+            .into_iter()
+            .map(|(source, destination)| SubjectTransform { source, destination })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 /// The links bucket's sources for `machine`: one per ant, taking only the links it passed on.
@@ -266,17 +316,17 @@ fn link_admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) ->
     let mut ants: Vec<&UserId> = members.iter().filter(|(_, role)| !role.is_human()).map(|(ant, _)| ant).collect();
     ants.sort();
     ants.dedup();
-    ants.into_iter()
-        .map(|ant| {
-            let (source, destination) = machine.admitted_links(ant);
-            Source {
-                name: INTAKE_STREAM.to_owned(),
-                start_sequence: Some(start),
-                subject_transforms: vec![SubjectTransform { source, destination }],
-                ..Default::default()
-            }
-        })
-        .collect()
+    ants.into_iter().map(|ant| link_source(machine, ant, start)).collect()
+}
+
+fn link_source(machine: &Machine, ant: &UserId, start: u64) -> Source {
+    let (source, destination) = machine.admitted_links(ant);
+    Source {
+        name: INTAKE_STREAM.to_owned(),
+        start_sequence: Some(start),
+        subject_transforms: vec![SubjectTransform { source, destination }],
+        ..Default::default()
+    }
 }
 
 /// The owners bucket's source for `machine`, when a human runs on it: the owners its humans record.
@@ -300,7 +350,7 @@ fn from_machine(source: &Source, machine: &Machine) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::process::Command;
 
     use ants_daemon::{bus, links, notes};
@@ -313,11 +363,11 @@ mod tests {
     use crate::humans::Me;
     use crate::{auth, channel, leaf};
 
-    fn free_port() -> u16 {
+    pub(crate) fn free_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    pub(crate) async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
         for _ in 0..600 {
             if check().await {
                 return;
@@ -372,7 +422,7 @@ mod tests {
         // The CLI runs on m1 too.
         let alice: UserId = "alice".parse().unwrap();
         let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
-        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);
         let listen = format!("127.0.0.1:{}", free_port());
         let configure = |dir: &Path, port: u16| {
@@ -575,7 +625,7 @@ mod tests {
 
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
-        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
         let server_conf = team.join(auth::SERVER_CONF);
         let listen = format!("127.0.0.1:{}", free_port());
         let configure = |dir: &Path, port: u16| {
@@ -676,7 +726,7 @@ mod tests {
         assert_eq!(quiet, (true, true, true, true), "each once, live or read back");
     }
 
-    fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
+    pub(crate) fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
         NatsServer::spawn_with(|dir| {
             auth::init(&dir.join("auth")).unwrap();
             format!(
@@ -705,7 +755,7 @@ mod tests {
         bus::init_stream(&h_js).await.unwrap();
         let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &m1, &on_m1, &[], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
         let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
         let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
         let _leaf_node = NatsServer::spawn_with(|dir| {

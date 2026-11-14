@@ -94,7 +94,8 @@ pub fn issue_with(dir: &Path, user: &UserId, permissions: Permissions, out: &Pat
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
 /// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
-/// machine ([`webhook_permissions`]), and connect only as a leaf node, not as a client.
+/// machine ([`webhook_permissions`]), plus with `enroll_approver` what `ants enroll` on the machine needs
+/// ([`Permissions::for_enroll_approver`]), and connect only as a leaf node, not as a client.
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -103,6 +104,7 @@ pub fn issue_leaf(
     machine: &Machine,
     members: &[(UserId, Role)],
     webhooks: &[UserId],
+    enroll_approver: bool,
     js_domain: Option<&JsDomain>,
     out: &Path,
 ) -> Result<()> {
@@ -118,19 +120,121 @@ pub fn issue_leaf(
     let roles = members.iter().map(|(member, role)| (member, *role));
     let mut permissions = Permissions::for_leaf(machine, roles);
     for webhook in webhooks {
-        let Permissions { publish, subscribe } = webhook_permissions(dir, webhook)?;
-        for (all, new) in [(&mut permissions.publish, publish), (&mut permissions.subscribe, subscribe)] {
-            all.extend(new);
-        }
+        merge(&mut permissions, webhook_permissions(dir, webhook)?);
+    }
+    if enroll_approver {
+        merge(&mut permissions, Permissions::for_enroll_approver());
     }
     let mut permissions = permissions.with_js_domain(js_domain);
+    dedup(&mut permissions);
+    let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
+    let jwt = user_jwt(&account, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
+}
+
+const LEAF_CONNECTIONS: [&str; 2] = ["LEAFNODE", "LEAFNODE_WS"];
+
+/// The `name` of the uplink user of `machine`'s leaf node.
+fn leaf_user(machine: &Machine) -> String {
+    format!("leaf-{machine}")
+}
+
+/// Add `more` to `permissions`, keeping each subject once, in the order first seen.
+fn merge(permissions: &mut Permissions, more: Permissions) {
+    permissions.publish.extend(more.publish);
+    permissions.subscribe.extend(more.subscribe);
+    dedup(permissions);
+}
+
+fn dedup(permissions: &mut Permissions) {
     for all in [&mut permissions.publish, &mut permissions.subscribe] {
         let mut seen = std::collections::HashSet::new();
         all.retain(|s| seen.insert(s.clone()));
     }
-    let only_leaf = json!({ "allowed_connection_types": ["LEAFNODE", "LEAFNODE_WS"] });
-    let jwt = user_jwt(&account, &user.public_key(), &format!("leaf-{machine}"), permissions, only_leaf, None)?;
-    write_secret(out, &creds(&jwt, &seed(&user)?))
+}
+
+/// The publish and subscribe allow lists of a user JWT's claims.
+fn allowed(claims: &Value) -> Permissions {
+    let list = |kind: &str| -> Vec<String> {
+        let list = claims["nats"][kind]["allow"].as_array().map(Vec::as_slice).unwrap_or_default();
+        list.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()
+    };
+    Permissions { publish: list("pub"), subscribe: list("sub") }
+}
+
+/// Check that `jwt` is the uplink user JWT of `machine`'s leaf node ([`issue_leaf`]), issued by `account` and not
+/// expired; returns its claims. Only a leaf node may connect with it, so an ant or human named `leaf-<machine>` does
+/// not pass.
+pub fn check_leaf(account: &str, jwt: &str, machine: &Machine) -> Result<Claims> {
+    leaf_claims(account, jwt, machine).map(|(claims, _)| claims)
+}
+
+fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, Value)> {
+    let (claims, body) = verified_body(jwt)?;
+    if claims.iss != account {
+        bail!("issued by {}, not by the team's account {account}", claims.iss);
+    }
+    if claims.name != leaf_user(machine) {
+        bail!("issued to {}, not to the leaf node of {machine}", claims.name);
+    }
+    let types = body["nats"]["allowed_connection_types"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if types.is_empty() || !types.iter().all(|t| t.as_str().is_some_and(|t| LEAF_CONNECTIONS.contains(&t))) {
+        bail!("not the uplink credentials of a leaf node");
+    }
+    if claims.exp.is_some_and(|exp| exp <= now().unwrap_or(u64::MAX)) {
+        bail!("expired");
+    }
+    Ok((claims, body))
+}
+
+/// Renew `jwt`, the uplink user JWT of `machine`'s leaf node issued from the account key in `dir`, for the same key,
+/// allowing `more` besides what it allows. Everything else in it stays as it is.
+pub fn extend_leaf(dir: &Path, jwt: &str, machine: &Machine, more: Permissions) -> Result<String> {
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let (claims, body) = leaf_claims(&account.public_key(), jwt, machine)
+        .with_context(|| format!("the uplink credentials of {machine}"))?;
+    let mut permissions = allowed(&body);
+    merge(&mut permissions, more);
+    let mut nats = body["nats"].clone();
+    nats["pub"]["allow"] = json!(permissions.publish);
+    nats["sub"]["allow"] = json!(permissions.subscribe);
+    self::jwt(&account, &claims.sub, &claims.name, nats, claims.exp)
+}
+
+/// Whether the user JWT `jwt` is for the key of `other` and allows everything `other` allows.
+pub fn allows_all(jwt: &str, other: &str) -> Result<bool> {
+    let ((claims, body), (other_claims, other_body)) = (verified_body(jwt)?, verified_body(other)?);
+    let (have, need) = (allowed(&body), allowed(&other_body));
+    let covers = |have: &[String], need: &[String]| need.iter().all(|s| have.contains(s));
+    Ok(claims.sub == other_claims.sub
+        && covers(&have.publish, &need.publish)
+        && covers(&have.subscribe, &need.subscribe))
+}
+
+/// The public key of the team's account in `dir`, which signs every user JWT.
+pub fn account_key(dir: &Path) -> Result<String> {
+    Ok(load(&dir.join(ACCOUNT_SEED))?.public_key())
+}
+
+/// The user JWT and key of the `.creds` file at `path`.
+pub fn read_creds(path: &Path) -> Result<(String, KeyPair)> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let jwt = creds_jwt(&text).with_context(|| format!("no user JWT in {}", path.display()))?;
+    let seed = creds_seed(&text).with_context(|| format!("no seed in {}", path.display()))?;
+    let key = KeyPair::from_seed(seed).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    Ok((jwt.to_owned(), key))
+}
+
+/// The signature of `data` by `key`, base64url without padding.
+pub fn sign(key: &KeyPair, data: &[u8]) -> Result<String> {
+    Ok(BASE64URL_NOPAD.encode(&key.sign(data).map_err(|e| anyhow!("signing: {e}"))?))
+}
+
+/// Check that `signature`, from [`sign`], is the signature of `data` by the key `public_key`.
+pub fn check_signature(public_key: &str, data: &[u8], signature: &str) -> Result<()> {
+    let key = KeyPair::from_public_key(public_key).map_err(|e| anyhow!("public key {public_key}: {e}"))?;
+    let signature = BASE64URL_NOPAD.decode(signature.as_bytes()).context("a signature that is not base64url")?;
+    key.verify(data, &signature).map_err(|_| anyhow!("not signed by {public_key}"))
 }
 
 /// The permissions of the credentials of `webhook` in `dir`, `<webhook>.creds` as `ants auth user WEBHOOK --webhook`
@@ -152,11 +256,7 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
     if claims.name != webhook.as_str() {
         bail!("{} are {}'s, not {webhook}'s", path.display(), claims.name);
     }
-    let allowed = |kind: &str| -> Vec<String> {
-        let list = body["nats"][kind]["allow"].as_array().map(Vec::as_slice).unwrap_or_default();
-        list.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()
-    };
-    let permissions = Permissions { publish: allowed("pub"), subscribe: allowed("sub") };
+    let permissions = allowed(&body);
     if permissions.subscribe != [format!("{}.>", ants_proto::inbox_prefix(webhook))] {
         bail!("{} are no webhook's: issue them with `ants auth user {webhook} --webhook`", path.display());
     }
@@ -225,13 +325,14 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
 }
 
 /// The text of short-lived credentials for `ants enroll`, which hear enrollment requests and answer them
-/// ([`Permissions::for_enroll_approver`]), issued afresh from the account key of each run.
-pub fn approver_creds(dir: &Path) -> Result<String> {
+/// ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
+/// account key of each run.
+pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + APPROVER_TTL.as_secs();
-    let jwt =
-        user_jwt(&account, &user.public_key(), "enroll", Permissions::for_enroll_approver(), json!({}), Some(exp))?;
+    let permissions = Permissions::for_enroll_approver().with_js_domain(js_domain);
+    let jwt = user_jwt(&account, &user.public_key(), "enroll", permissions, json!({}), Some(exp))?;
     Ok(creds(&jwt, &seed(&user)?))
 }
 
@@ -1593,13 +1694,13 @@ pub(crate) mod tests {
         let leaf_creds = hub.dir().join("leaf-m1.creds");
         let m1: Machine = "m1".parse().unwrap();
         let on_m1 = members(std::slice::from_ref(&dev_a), &[]);
-        let missing = issue_leaf(&team, &m1, &on_m1, &[p("ci")], Some(&domain), &leaf_creds).unwrap_err();
+        let missing = issue_leaf(&team, &m1, &on_m1, &[p("ci")], false, Some(&domain), &leaf_creds).unwrap_err();
         assert!(format!("{missing:#}").contains("ants auth user ci --webhook"), "{missing:#}");
         issue(&team, &p("dev-c"), Role::Ant, Some(&domain), &team.join("dev-c.creds")).unwrap();
-        let ant = issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], Some(&domain), &leaf_creds).unwrap_err();
+        let ant = issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], false, Some(&domain), &leaf_creds).unwrap_err();
         assert!(format!("{ant:#}").contains("no webhook's"), "{ant:#}");
-        issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), None, &leaf_creds).unwrap();
-        issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), Some(&domain), &leaf_creds).unwrap();
+        issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), false, None, &leaf_creds).unwrap();
+        issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), false, Some(&domain), &leaf_creds).unwrap();
         assert!(
             async_nats::ConnectOptions::with_credentials_file(&leaf_creds)
                 .await
