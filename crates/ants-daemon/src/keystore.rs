@@ -151,12 +151,11 @@ mod secret_service {
             Self { program: "secret-tool".into(), timeout: TIMEOUT }
         }
 
-        /// Whether an entry for `key` exists, locked or not. The search prints an unlocked entry's seed, which goes
-        /// no further than this.
+        /// Whether an entry for `key` exists, locked or not: the search lists each entry matching, a locked one
+        /// without its secret. It prints an unlocked entry's seed, which goes no further than this.
         fn stored(&self, key: &str) -> Result<bool> {
             let found = self.run(&["search", "service", SERVICE, "account", key], None)?;
-            let line = format!("attribute.account = {key}");
-            Ok(found.is_some_and(|out| out.lines().any(|l| l.trim() == line)))
+            Ok(found.is_some_and(|out| !out.trim().is_empty()))
         }
 
         /// Run `secret-tool` with `args`, writing `input` (a seed) to its standard input, never to its arguments. Its
@@ -296,8 +295,8 @@ mod secret_service {
             // As secret-tool does: lookup and clear fail silently, search lists the entry without its secret.
             let (tool, dir) = fake(
                 r#"case "$1" in
-  search) printf '[/1]\nlabel = ants NKey seed\nattribute.account = %s\n' "$5"
-          echo 'secret-tool: Cannot get secret of a locked object' >&2 ;;
+  search) printf '[/1]\nlabel = ants NKey seed %s\nschema = org.freedesktop.Secret.Generic\n' "$5"
+          printf 'secret-tool: Cannot get secret of a locked object\nattribute.account = %s\n' "$5" >&2 ;;
   *) exit 1 ;;
 esac"#,
             );

@@ -258,7 +258,8 @@ fn check_key(check: &str, path: &Path, issue: Vec<String>, store: &dyn Store) ->
     Some(match creds::load(path, store) {
         Ok(_) => Check::ok(check, format!("{key} ({}): its seed is in the OS credential store", path.display())),
         Err(e) if keystore::is_unavailable(&e) => {
-            let fix = "unlock the OS credential store (log in), then check again; services started before then wait                        for it";
+            let fix =
+                "unlock the OS credential store (log in), then check again; services started before then wait for it";
             Check::fail(check, format!("{e:#}"), vec![fix.to_owned()])
         }
         Err(e) => {
