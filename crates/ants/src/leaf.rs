@@ -53,6 +53,20 @@ pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
     fs::write(&out, text).with_context(|| format!("writing {}", out.display()))
 }
 
+/// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write`] writes it.
+pub fn read_uplink(path: &Path) -> Result<(Machine, PathBuf)> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let value = |key: &str| -> Result<String> {
+        let line = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
+            .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
+        serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
+    };
+    let machine = value("server_name")?.parse().with_context(|| format!("{}: server_name", path.display()))?;
+    Ok((machine, PathBuf::from(value("credentials")?)))
+}
+
 /// The configuration of `leaf`, for a file in `dir`.
 fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     let dir = normalize(dir)?;
@@ -337,7 +351,7 @@ mod tests {
         let dir = scratch_dir("leaf-team");
         auth::init(&dir).unwrap();
         let creds = dir.join("leaf-m1.creds");
-        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], None, &creds).unwrap();
+        auth::issue_leaf(&dir, &M1, &[("dev-a".parse().unwrap(), Role::Ant)], &[], false, None, &creds).unwrap();
         (dir, creds)
     }
 
@@ -371,6 +385,9 @@ mod tests {
         let store = normalize(&dir).unwrap().join("jetstream");
         let js = format!("jetstream {{\n  domain: \"m1\"\n  store_dir: {}\n", quote(&store.to_string_lossy()));
         assert!(text.contains(&js), "{text}");
+        let conf = dir.join("leaf.conf");
+        write(&leaf(&wss, &creds, &server_conf), &conf).unwrap();
+        assert_eq!(read_uplink(&conf).unwrap(), (M1.clone(), normalize(&creds).unwrap()), "as `ants add` reads it");
         let hub: JsDomain = "m1".parse().unwrap();
         let taken = Leaf { hub_domain: Some(&hub), ..leaf(&wss, &creds, &server_conf) };
         assert!(err(taken).contains("hub's JetStream domain"));
@@ -408,9 +425,9 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    async fn reaches_hub_stream(js: &jetstream::Context, expected: bool) -> bool {
+    async fn reaches_hub_stream(js: &jetstream::Context, user: &UserId, expected: bool) -> bool {
         for _ in 0..50 {
-            if bus::ensure_stream(js).await.is_ok() == expected {
+            if bus::open_stream(js, user).await.is_ok() == expected {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -446,7 +463,7 @@ mod tests {
         let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
         bus::init_stream(&h_js).await.unwrap();
         let leaf_creds = hub.dir().join("leaf-m1.creds");
-        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], Some(&domain), &leaf_creds).unwrap();
+        auth::issue_leaf(&team, &M1, &[(dev_a.clone(), Role::Ant)], &[], false, Some(&domain), &leaf_creds).unwrap();
 
         // The leaf's file includes the hub's server.conf from another directory, by a relative path.
         let server_conf = team.join(auth::SERVER_CONF);
@@ -465,7 +482,7 @@ mod tests {
         let (_a, mut a_js) =
             bus::connect(&leaf_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
         a_js.set_timeout(Duration::from_secs(1));
-        assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over nats-leaf://");
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over nats-leaf://");
         // Only dev-a is on the leaf, so the uplink allows no inbox, notes or channel subject without a wildcard before
         // the sender. The hub's stream interest crosses all the same: the leaf has no outbox to fall back on.
         let to_human = Envelope::new(dev_a.clone(), human.clone(), "hi");
@@ -495,10 +512,10 @@ mod tests {
             assert!(status.success());
         };
         reload(format!("nats-leaf://127.0.0.1:{dead_port}"));
-        assert!(reaches_hub_stream(&a_js, false).await, "the old uplink outlived the reload");
+        assert!(reaches_hub_stream(&a_js, &dev_a, false).await, "the old uplink outlived the reload");
         reload(format!("ws://127.0.0.1:{ws_port}/nats"));
-        assert!(reaches_hub_stream(&a_js, true).await, "no hub stream over ws://");
-        let stream = bus::ensure_stream(&a_js).await.unwrap();
+        assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "no hub stream over ws://");
+        let stream = bus::open_stream(&a_js, &dev_a).await.unwrap();
         bus::inbox_consumer(&stream, &dev_a, Duration::from_secs(5), 5, 2).await.unwrap();
     }
 }

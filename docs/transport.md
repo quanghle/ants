@@ -77,7 +77,7 @@ Clients connect to `wss://hub.example.com/nats` (`/nats`); leaves configured wit
 - Every `ants` command accepts `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`), and `--js-domain` (`ANTS_JS_DOMAIN`). Client URLs (`--nats`, `--hub`, `nats` in the daemon and webhook configs) carrying a user and password or a token are refused before connecting, as async-nats would connect without them; authentication uses `.creds` files. Leaf uplink URLs go to nats-server and are not checked.
 - `tls://` and `wss://` use `rustls` with platform root certificates. `SSL_CERT_FILE=/path/to/ca.pem` replaces the root store on direct client connections and `ants bridge connect`. Behind a local leaf, clients use `nats://127.0.0.1:4222` and private CA trust goes in `ants leaf config --ca-file`.
 - Direct clients preserve URL paths and query strings on WebSocket upgrades, send no custom HTTP headers, and ignore `HTTPS_PROXY` and `HTTP_PROXY`. HTTP `CONNECT` proxies require a local leaf node or `ants bridge connect`.
-- `ants add --enroll` and `ants enroll` use core NATS subjects (`ants.enroll.*`), which leaf uplinks exclude. Pass `--hub <hub-url>` to `ants add` on a leaf machine and `--nats <hub-url>` to `ants enroll` on the signing machine.
+- `ants add --enroll` and `ants enroll` use core NATS subjects (`ants.enroll.*`). Leaf uplinks carry a machine's requests up and their answers down (see [Enrollment behind a leaf node](#enrollment-behind-a-leaf-node)); `ants enroll` on a machine behind a leaf needs that leaf's uplink issued with `--enroll-approver`, or `--nats <hub-url>`. `ants add --hub <url>` sends the request to another server than `--nats`.
 
 ## Leaf nodes
 
@@ -137,7 +137,26 @@ ants auth leaf macbook --ant dev-a --webhook github --js-domain hub
 
 - Sets `allowed_connection_types: ["LEAFNODE", "LEAFNODE_WS"]`, rejecting client connections.
 - Grants the union of listed `--ant`, `--human` (`--ant human` also counts as human), and `--webhook` permissions (read from `<webhook>.creds`), plus outbox sourcing subjects (`$JS.<machine>.API.*.ANTS_OUT`, `$JS.S.<machine>.>`, `$JSC.R.<machine>.*.ANTS_OUT.>`, `_INBOX.<human>.leaf.<machine>.>`) and literal subject anchors (such as `ants.inbox.dev-a.dev-a`) so hub wildcard stream interest crosses the uplink.
-- Excludes `ants.out.>`. Local clients still authenticate individually against `server.conf`; the leaf filters traffic to uplink bounds so unauthorized local clients cannot drop the uplink. Reissue `leaf-<machine>.creds` whenever machine users or webhooks change.
+- Carries enrollment requests up (publish `ants.enroll.*`) and their answers down (subscribe `ants.enroll.*.reply`), never other machines' requests or answers from the machine.
+- With `--enroll-approver`, for the machine holding the account key, also carries what `ants enroll` needs: every request down, answers up, and the admission of a new ant into `ANTS` and `ants_links` (stream info and update, replies under `_INBOX._enroll`).
+- Excludes `ants.out.>`. Local clients still authenticate individually against `server.conf`; the leaf filters traffic to uplink bounds so unauthorized local clients cannot drop the uplink. Reissue `leaf-<machine>.creds` whenever machine users or webhooks change; an enrollment through the leaf renews them itself (below). Uplink credentials issued before enrollment crossed leaves lack `ants.enroll.*`: issue them once more.
+
+### Enrollment behind a leaf node
+
+```sh
+ants auth enroll dev-c                                   # account-key machine
+ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds   # leaf machine, through its leaf node
+ants enroll approve dev-c --js-domain hub                # account-key machine
+launchctl kickstart -k gui/$(id -u)/ants.nats            # leaf machine (Linux: systemctl --user restart ants-nats)
+```
+
+- `ants add --enroll` reads the machine's `leaf.conf` (`--leaf-config FILE`, default `~/.config/ants/leaf.conf` when present) for its `server_name` and uplink credentials, and names the leaf in the request, signed with the uplink key. Each repeat of the request reads the uplink credentials again.
+- Every request carries the user JWT of its enrollment credentials and a signature by their key over the request (ant, public key, host, time, enrollment JWT, leaf machine and uplink JWT). `ants enroll` ignores requests whose enrollment credentials are not the team account's for that ant, expired, revoked (`ants auth revoke`) or unproven, and requests naming a leaf whose uplink JWT is not the team account's `leaf-<machine>` leaf-only user, is revoked or whose signature fails; a revoked uplink key is never renewed, as a JWT signed after its revocation would pass. A leaf thus cannot ask for an ant without its enrollment credentials, nor name another machine's leaf.
+- Approval of a request naming a leaf:
+  - re-signs the leaf's uplink JWT for the same key, adding the ant's permissions (`Permissions::for_leaf` for the ant alone) to what it already allows, and sends it with the ant's JWT (`leaf_jwt`);
+  - when `ANTS_IN` sources the machine's outbox, adds the ant's admission to `ANTS` (without its inbox subjects when a human's admission takes every inbox of the machine) and to `ants_links`, starting after the current `ANTS_IN` entries, before answering.
+- The asking machine checks the renewed JWT (team account, leaf key, `leaf-<machine>`) and writes it into the uplink credentials file, unless that file changed meanwhile to allow something the renewal lacks. `nats-server` reads the file at each connect but does not reconnect on `SIGHUP` for new contents, so restart the leaf node; local clients reconnect.
+- A rogue leaf may hear answers to its machine's requests: they hold only public JWTs, useless without the seeds that stay on the asking machine. Later `ants auth leaf` and `ants leaf outbox` runs replace the lists, so name the enrolled ant in them too.
 
 ## Store and forward
 
@@ -162,7 +181,8 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Unsequenced notes (`ants notes <thread> TEXT`), channel posts (`ants post`, daemon replies), passed links (`ants_links`) | Buffered in `ANTS_OUT` and sourced into `ANTS` or `ants_links` on reconnect. |
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates past 2 min. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
-| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), enrollment (`ants.enroll.*`), `ants cancel` of a prompt on another machine (`ants.cancel.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
+| Sequenced `post_notes`, tool approvals (`ants.approvals.*`), channel admin (`ants.chanadm.*`), `ants cancel` of a prompt on another machine (`ants.cancel.*`) | Fail immediately; require live hub coordination or optimistic concurrency. |
+| Enrollment (`ants.enroll.*`) | `ants add --enroll` keeps repeating its request until the uplink is back and an answer comes or the enrollment credentials expire. |
 | KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
 | Owner records (`ants_owners`, from `ants ask`) | Buffered in `ANTS_OUT` ahead of the message and sourced into `ants_owners` on reconnect; a second record of a thread and ant is dropped as a repeat. `ANTS` and `ants_owners` source apart, so a daemon holds a human's message sourced from an outbox (`Nats-Stream-Source`) up to 10 s until its thread's owner is recorded for the ant. Webhooks reach the hub directly and record no owner in an outbox. |
 
@@ -267,7 +287,7 @@ Stopping `devtunnel connect` leaves the hub-side socket from `devtunnel host` to
 | Client and leaf `PING` | `20s` (2 missed drops) | Detects silent links (sleep, dead tunnel) in ~60 s and keeps 60 s idle-timeout proxies open. |
 | Hub `ping_interval` | `30s` (default `2m`) | Reaps dead client, leaf, and `devtunnel host` sockets promptly. |
 | Reconnect backoff | Unlimited; client `4s`, leaf `1–2s` | Reconnects across proxy restarts, tunnel drops, and `SIGHUP` switches; core subscribers miss offline traffic, durable consumers resume. |
-| Daemon startup retry | `1s` doubling to `30s` | `ants daemon` and `ants channel serve` retry unreachable NATS TCP/DNS and `ANTS` stream info until the leaf uplink joins; bad URLs, TLS errors, bad `.creds`, and permission violations fail immediately (as do other CLI commands). |
+| Daemon startup retry | `1s` doubling to `30s` | `ants daemon` and `ants channel serve` retry unreachable NATS TCP/DNS and unanswered JetStream requests (the info of the user's own inbox consumer) until the leaf uplink joins; bad URLs, TLS errors, bad `.creds`, and permission violations fail immediately (as do other CLI commands). |
 | Progress ack and `ack_wait` | `20s` progress / `60s` `ack_wait` | Daemons renew in-hand messages every 20 s; silent links or crashes hold at most one message per pull slot for up to 60 s before redelivery (in-hand duplicates are ignored). |
 | Roster heartbeat / TTL | `10s` refresh / `30s` TTL (`20s` stale) | Disconnected daemons expire within 30 s and reappear within 10 s of reconnect. |
 | Retention and deduplication | `30d` streams/KV; `2m` dup window (`ants_owners` 30 d) | `ANTS`, `ANTS_OUT`, `ANTS_IN`, `ants_sessions`, `ants_attempts`, `ants_links` and `ants_owners` retain 30 d (`ants_webhooks` 7 d). Outbox messages land after live traffic (up to ~2 min source backoff); timed-out publishes that reached the hub and replay after 2 min store twice. |

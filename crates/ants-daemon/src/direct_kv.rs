@@ -2,17 +2,21 @@
 //! (`STREAM.INFO`) on opening, and credentials allowing that allow listing every subject of the stream, which is every
 //! key of the bucket. So an ant reads and writes its own keys of [`ants_proto::SESSIONS_BUCKET`] and
 //! [`ants_proto::ATTEMPTS_BUCKET`], and reads [`ants_proto::OWNERS_BUCKET`], through a [`DirectKv`], and its credentials
-//! allow no stream info of these buckets.
+//! allow no stream info of these buckets. A webhook reads and records the events it delivered, under its own keys of
+//! [`ants_proto::WEBHOOKS_BUCKET`], the same way.
 
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
+use async_nats::jetstream::context::{PublishError, PublishErrorKind};
 use async_nats::jetstream::stream::{DirectGetErrorKind, Stream};
 use async_nats::{HeaderMap, StatusCode};
 
 /// The header marking a KV delete or purge, and its values.
 const KV_OPERATION: &str = "KV-Operation";
 const DELETED: [&str; 2] = ["DEL", "PURGE"];
+/// The header making the stream refuse a message unless the last on its subject has the given sequence (0: none).
+const EXPECTED_LAST_SUBJECT_SEQUENCE: &str = "Nats-Expected-Last-Subject-Sequence";
 
 /// A KV bucket of history 1 that allows direct gets, as [`crate::bus`] creates them.
 #[derive(Clone)]
@@ -66,8 +70,7 @@ impl DirectKv {
             }
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
         };
-        let deleted = msg.headers.get(KV_OPERATION).is_some_and(|op| DELETED.contains(&op.as_str()));
-        Ok(if deleted { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) })
+        Ok(if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) })
     }
 
     /// Store `value` under `key`, once JetStream has it.
@@ -88,6 +91,34 @@ impl DirectKv {
         Ok(())
     }
 
+    /// Store `value` under `key` unless it has a value, as `kv::Store::create` does: the stream refuses the put when the
+    /// key's last message is not the one expected, none or its delete marker. Whether it stored the value.
+    pub async fn create(&self, key: impl AsRef<str>, value: impl Into<Vec<u8>>) -> Result<bool> {
+        let key = key.as_ref();
+        let value = value.into();
+        match self.put_expecting(key, value.clone(), 0).await {
+            Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => {}
+            stored => return stored.map(|()| true).with_context(|| format!("storing {key}")),
+        }
+        let deleted = match self.stream.direct_get_last_for_subject(self.subject(key)).await {
+            Ok(msg) if is_deleted(&msg.headers) => msg.sequence,
+            Ok(_) => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("reading {key}")),
+        };
+        match self.put_expecting(key, value, deleted).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("storing {key}")),
+        }
+    }
+
+    async fn put_expecting(&self, key: &str, value: Vec<u8>, last: u64) -> Result<(), PublishError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, last.to_string().as_str());
+        self.js.publish_with_headers(self.put_subject(key), headers, value.into()).await?.await?;
+        Ok(())
+    }
+
     /// Delete `key`, leaving a delete marker, as `kv::Store::delete` does.
     pub async fn delete(&self, key: impl AsRef<str>) -> Result<()> {
         let key = key.as_ref();
@@ -105,4 +136,8 @@ impl DirectKv {
     fn put_subject(&self, key: &str) -> String {
         format!("{}{}", self.api, self.subject(key))
     }
+}
+
+fn is_deleted(headers: &HeaderMap) -> bool {
+    headers.get(KV_OPERATION).is_some_and(|op| DELETED.contains(&op.as_str()))
 }

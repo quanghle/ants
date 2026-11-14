@@ -181,7 +181,7 @@ mod tests {
 
         // Within the stream's duplicate window, its Nats-Msg-Id keeps it once even if the bucket forgot it.
         let (_, own) = bus::connect(&server.url, Some(&creds), None, &nightly, "test").await.unwrap();
-        let seen = own.get_key_value(WEBHOOKS_BUCKET).await.unwrap();
+        let seen = ants_daemon::direct_kv::DirectKv::new(&own, None, WEBHOOKS_BUCKET).await.unwrap();
         seen.delete(webhook_seen_key(&nightly, "1800000000")).await.unwrap();
         assert!(fire(&b, &schedule, due).await.unwrap().duplicate);
 

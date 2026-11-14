@@ -94,6 +94,36 @@ pub async fn read_back_messages(
     read
 }
 
+/// The stream sequence of the last message stored, read as `reading` says. An ant's credentials get no stream info
+/// (it lists every subject stored), so its reader, or a spare of it, filtering `filter` is created to start after the
+/// last message, and the sequence it delivered up to is that one's.
+pub async fn last_sequence(js: &jetstream::Context, reader: &str, reading: Reading, filter: &str) -> Result<u64> {
+    let config = consumer::pull::Config {
+        filter_subject: filter.to_owned(),
+        deliver_policy: consumer::DeliverPolicy::New,
+        ack_policy: consumer::AckPolicy::None,
+        inactive_threshold: INACTIVE,
+        ..Default::default()
+    };
+    let (name, consumer) = match reading {
+        Reading::Gets => {
+            let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+            return Ok(stream.cached_info().state.last_sequence);
+        }
+        Reading::Consumer => {
+            let _ = js.delete_consumer_from_stream(reader, STREAM).await;
+            let config = consumer::pull::Config { name: Some(reader.to_owned()), ..config };
+            (reader.to_owned(), js.create_consumer_on_stream(config, STREAM).await?)
+        }
+        Reading::Spare => take_spare(js, reader, config).await?,
+    };
+    let last = consumer.cached_info().delivered.stream_sequence;
+    if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
+        tracing::debug!(error = %e, consumer = name, "deleting the reader");
+    }
+    Ok(last)
+}
+
 /// The first free spare of `reader`, created with `config`. A strict create fails on a spare that exists with another
 /// configuration, and the description makes this read's its own, so no two reads ever share a spare. When all are
 /// taken, they are tried again until one left behind by an interrupted read is gone.

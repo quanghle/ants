@@ -14,7 +14,7 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
-use async_nats::jetstream::context::{GetStreamErrorKind, PublishErrorKind, RequestErrorKind};
+use async_nats::jetstream::context::{ConsumerInfoErrorKind, PublishErrorKind};
 use async_nats::jetstream::{self, kv, stream};
 use async_nats::{ConnectErrorKind, Event};
 use futures::{Stream, StreamExt as _};
@@ -58,9 +58,12 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// starts the daemon first: a refused, timed-out or unresolved connection is retried for as long as it takes, after
 /// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. Once connected it
 /// waits the same way for JetStream to answer, as a leaf node that listens before its uplink has joined the hub
-/// answers JetStream requests with no responders or not at all. What another attempt cannot cure fails at once: an
-/// unreadable credentials file, a malformed URL or one carrying a user and password ([`check_url`]), credentials the server rejects, a TLS error, a JetStream request the
-/// credentials do not permit. None when `stop` completes first.
+/// answers JetStream requests with no responders or not at all. JetStream answers when it looks up the info of the
+/// user's own inbox consumer ([`ants_proto::inbox_consumer`]) in the `ANTS` stream, found or not, which every user's
+/// credentials allow: none but a human's get the stream's info, which lists every subject stored. What another attempt
+/// cannot cure fails at once: an unreadable credentials file, a malformed URL or one carrying a user and password
+/// ([`check_url`]), credentials the server rejects, a TLS error, a JetStream request the credentials do not permit.
+/// None when `stop` completes first.
 pub async fn connect_retrying(
     url: &str,
     creds: Option<&Path>,
@@ -98,18 +101,30 @@ pub async fn connect_retrying(
             }
         };
         let js = jetstream(client.clone(), js_domain);
+        let stream = js.get_stream_no_info(STREAM).await.context("naming the ANTS stream")?;
         let mut delay = RETRY_FIRST;
         loop {
             let reached = tokio::select! {
                 biased;
                 Some(e) = denied.recv() => return Err(anyhow::anyhow!(e)).context("reaching JetStream"),
-                reached = js.get_stream(STREAM) => reached,
+                reached = stream.consumer_info(ants_proto::inbox_consumer(user)) => reached,
             };
             match reached {
                 Ok(_) => return Ok((client, js)),
-                // JetStream answered, if only that the stream is missing; creating it is up to the caller.
-                Err(e) if matches!(e.kind(), GetStreamErrorKind::JetStream(_)) => return Ok((client, js)),
-                Err(e) if jetstream_not_answering(&e) => {
+                // JetStream answered, if only that the consumer or the stream is missing; creating them is up to the
+                // caller.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ConsumerInfoErrorKind::NotFound
+                            | ConsumerInfoErrorKind::StreamNotFound
+                            | ConsumerInfoErrorKind::Offline
+                            | ConsumerInfoErrorKind::JetStream(_)
+                    ) =>
+                {
+                    return Ok((client, js));
+                }
+                Err(e) if matches!(e.kind(), ConsumerInfoErrorKind::TimedOut | ConsumerInfoErrorKind::NoResponders) => {
                     tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "JetStream not reachable yet");
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(RETRY_MAX);
@@ -149,14 +164,6 @@ fn log_event(event: Event) {
 /// Whether the server may answer a later attempt: it is not listening yet, or not reachable.
 fn worth_retrying(e: &async_nats::ConnectError) -> bool {
     matches!(e.kind(), ConnectErrorKind::Io | ConnectErrorKind::TimedOut | ConnectErrorKind::Dns)
-}
-
-/// Whether a JetStream request got no answer: nothing serves it (yet), or the answer did not come in time.
-fn jetstream_not_answering(e: &jetstream::context::GetStreamError) -> bool {
-    e.kind() == GetStreamErrorKind::Request
-        && std::error::Error::source(e)
-            .and_then(|source| source.downcast_ref::<jetstream::context::RequestError>())
-            .is_some_and(|e| matches!(e.kind(), RequestErrorKind::TimedOut | RequestErrorKind::NoResponders))
 }
 
 /// Fail when `url`, or one in a comma-separated list, carries a user and password (or a token): async-nats would
@@ -239,7 +246,26 @@ pub async fn ensure_roster(js: &jetstream::Context, ttl: Duration) -> Result<kv:
     .context("creating the roster bucket (with credentials, `ants init` as the human creates it)")
 }
 
-/// Create the `ANTS` stream, or return it as it is. Only the human's credentials may create it. A stream from an older
+/// The `ANTS` stream for `user`, without its info, which no ant's or webhook's credentials allow: with a subjects
+/// filter it lists every subject stored, so who messages whom. Whether it exists shows in the info of the user's own
+/// inbox consumer, found or not; a missing stream is created when the credentials allow it (no credentials, or a
+/// human's), as [`ensure_stream`] does, and otherwise the error says `ants init` creates it.
+pub async fn open_stream(js: &jetstream::Context, user: &UserId) -> Result<stream::Stream<()>> {
+    let stream = js.get_stream_no_info(STREAM).await.context("naming the ANTS stream")?;
+    match stream.consumer_info(ants_proto::inbox_consumer(user)).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == ConsumerInfoErrorKind::NotFound => {}
+        Err(e) if e.kind() == ConsumerInfoErrorKind::StreamNotFound => {
+            js.create_stream(stream_config())
+                .await
+                .context("creating the ANTS stream (with credentials, `ants init` as the human creates it)")?;
+        }
+        Err(e) => return Err(e).context("looking up the ANTS stream"),
+    }
+    Ok(stream)
+}
+
+/// Create the `ANTS` stream, or return it as it is, with its info: only the human's credentials allow both. A stream from an older
 /// version that lacks some of [`STREAM_SUBJECTS`], direct gets or the republishing of inbox messages is returned with a
 /// warning: [`init_stream`] upgrades it.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
@@ -415,8 +441,8 @@ async fn create_kept(js: &jetstream::Context, bucket: &str) -> Result<kv::Store>
 /// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings
 /// changed (such as the filter of a consumer from before inbox subjects named the sender). At most `max_ack_pending`
 /// messages are in hand at once.
-pub async fn inbox_consumer(
-    stream: &stream::Stream,
+pub async fn inbox_consumer<I>(
+    stream: &stream::Stream<I>,
     ant: &UserId,
     ack_wait: Duration,
     max_deliver: i64,
@@ -441,8 +467,8 @@ pub async fn inbox_consumer(
 /// Messages from the durable consumer `chan-<ant>` of every channel post, with the settings of
 /// [`inbox_consumer`]; the daemon picks out the posts meant for the ant. A new consumer starts with the posts
 /// stored from then on, so a first start does not answer a channel's history.
-pub async fn chan_consumer(
-    stream: &stream::Stream,
+pub async fn chan_consumer<I>(
+    stream: &stream::Stream<I>,
     ant: &UserId,
     ack_wait: Duration,
     max_deliver: i64,
@@ -636,12 +662,9 @@ async fn stored_after(
     after: &mut Option<u64>,
 ) -> Vec<async_nats::Message> {
     let Some(last) = *after else {
-        match js.get_stream_no_info(STREAM).await {
-            Ok(stream) => match stream.get_info().await {
-                Ok(info) => *after = Some(info.state.last_sequence),
-                Err(e) => tracing::debug!(error = %e, "cannot read back the inbox yet"),
-            },
-            Err(e) => tracing::debug!(error = %e, "cannot read back the inbox yet"),
+        match reading::last_sequence(js, reader, reading, filter).await {
+            Ok(last) => *after = Some(last),
+            Err(e) => tracing::debug!(error = format!("{e:#}"), "cannot read back the inbox yet"),
         }
         return Vec::new();
     };

@@ -12,6 +12,7 @@ use nkeys::KeyPair;
 
 use crate::auth;
 use crate::enroll;
+use crate::leaf;
 use crate::serve::AntOptions;
 
 /// The server `--nats` defaults to.
@@ -36,10 +37,13 @@ pub struct AddArgs {
     /// `ants enroll approve NAME` on the machine holding the account key.
     #[arg(long, value_name = "CREDS")]
     pub enroll: Option<PathBuf>,
-    /// Server to send the enrollment request to, when --nats is a leaf node that does not carry it to the hub
-    /// (default: --nats).
+    /// Server to send the enrollment request to (default: --nats, the machine's leaf node or the hub).
     #[arg(long, value_name = "URL", requires = "enroll")]
     pub hub: Option<String>,
+    /// Configuration of the machine's leaf node, from `ants leaf config` (default: ~/.config/ants/leaf.conf, when it
+    /// exists): the approval also renews its uplink credentials to carry the ant.
+    #[arg(long, value_name = "FILE", requires = "enroll")]
+    pub leaf_config: Option<PathBuf>,
     #[command(flatten)]
     pub options: AntOptions,
 }
@@ -75,6 +79,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
 
     let user = user_key(&out)?;
     let public_key = user.public_key();
+    let mut uplink = None;
     let jwt = match (&args.jwt, &args.enroll) {
         (Some(jwt), _) => {
             let jwt = read_jwt(jwt)?;
@@ -83,11 +88,19 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         }
         (None, Some(enrollment)) => {
             let url = args.hub.as_deref().unwrap_or(nats);
-            eprintln!("asking for the credentials of {name} ({public_key}); approve with `ants enroll approve {name}`");
+            let leaf = leaf_node(args.leaf_config.as_deref())?;
+            let through = leaf.as_ref().map(|l| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
+            eprintln!(
+                "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
+            );
             let stop = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            Some(enroll::request(url, enrollment, name, &user, ENROLL_REPEAT, stop).await?)
+            let approval = enroll::request(url, enrollment, name, &user, leaf.as_ref(), ENROLL_REPEAT, stop).await?;
+            if let (Some(leaf), Some(renewed)) = (leaf, approval.leaf_jwt) {
+                uplink = Some((renew_uplink(&leaf, &renewed)?, leaf));
+            }
+            Some(approval.jwt)
         }
         (None, None) => None,
     };
@@ -105,11 +118,32 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     match jwt {
         Some(_) => {
             println!("credentials of {name} in {}", out.display());
+            match &uplink {
+                Some((true, leaf)) => println!(
+                    "uplink credentials of {} renewed in {} to carry {name}: restart the leaf node to use them \
+                     (macOS: launchctl kickstart -k gui/$(id -u)/ants.nats, Linux: systemctl --user restart \
+                     ants-nats; SIGHUP does not read them again). List {name} too when running `ants auth leaf {}` \
+                     or `ants leaf outbox {}` again",
+                    leaf.machine,
+                    leaf.creds.display(),
+                    leaf.machine,
+                    leaf.machine
+                ),
+                Some((false, leaf)) => println!(
+                    "{} changed while waiting and were left as they are: add {name} to the uplink with \
+                     `ants auth leaf {} --ant ...` on the machine holding the account key",
+                    leaf.creds.display(),
+                    leaf.machine
+                ),
+                None => println!(
+                    "behind a leaf node the request did not name (--leaf-config), add {name} to the uplink: \
+                     `ants auth leaf MACHINE --ant ...` on the machine holding the account key, then \
+                     `ants leaf outbox MACHINE --ant ...`"
+                ),
+            }
             println!(
                 "serve it: reload `ants daemon` with SIGHUP, or its service (macOS: launchctl kill SIGHUP \
-                 gui/$(id -u)/ants.daemon, Linux: systemctl --user reload ants-daemon); the ants it serves carry on\n\
-                 behind a leaf node, add {name} to the uplink: `ants auth leaf MACHINE --ant ...` on the machine \
-                 holding the account key, then `ants leaf outbox MACHINE --ant ...`"
+                 gui/$(id -u)/ants.daemon, Linux: systemctl --user reload ants-daemon); the ants it serves carry on"
             );
         }
         None => println!(
@@ -141,6 +175,33 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
     }
     p.clone().into_config(nats, &summary.harnesses)?;
     config::entry(&p)
+}
+
+/// The machine's leaf node, from the configuration at `path`, or at ~/.config/ants/leaf.conf when it exists.
+fn leaf_node(path: Option<&Path>) -> Result<Option<enroll::Leaf>> {
+    let path = match path {
+        Some(path) => path.to_owned(),
+        None => {
+            let default = auth::default_dir()?.with_file_name("leaf.conf");
+            if !default.exists() {
+                return Ok(None);
+            }
+            default
+        }
+    };
+    let (machine, creds) = leaf::read_uplink(&path)?;
+    Ok(Some(enroll::Leaf { machine, creds }))
+}
+
+/// Replace the JWT of the uplink credentials of `leaf` by `renewed`, unless it would drop something they allow (they
+/// changed while the request waited). Returns whether it replaced it.
+fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
+    let (current, key) = auth::read_creds(&leaf.creds)?;
+    if !auth::allows_all(renewed, &current)? {
+        return Ok(false);
+    }
+    auth::write_creds(&leaf.creds, renewed, &key)?;
+    Ok(true)
 }
 
 /// Where the seed waits for its JWT: beside the credentials, as `<name>.nk`.

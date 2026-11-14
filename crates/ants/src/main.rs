@@ -558,6 +558,10 @@ enum AuthCommand {
         /// <dir>/<WEBHOOK>.creds from `ants auth user WEBHOOK --webhook`, allow.
         #[arg(long = "webhook", value_name = "WEBHOOK")]
         webhooks: Vec<UserId>,
+        /// The machine holds the account key and runs `ants enroll` through its leaf node: the uplink also carries
+        /// every enrollment request, the answers to them and the admission of a new ant into the hub's stream.
+        #[arg(long)]
+        enroll_approver: bool,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -970,17 +974,28 @@ async fn main() -> Result<()> {
             let dir = |dir| team_dir(dir);
             match command {
                 EnrollCommand::List { dir: d } => {
-                    enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?.list().await
+                    enroll::Approver::connect(&cli.nats, &dir(d)?, domain, enroll::LISTEN).await?.list().await
                 }
                 EnrollCommand::Approve { ant, public_key, dir: d } => {
                     let dir = dir(d)?;
-                    let approver = enroll::Approver::connect(&cli.nats, &dir, enroll::LISTEN).await?;
-                    let key = approver.approve(&dir, &ant, public_key.as_deref(), domain).await?;
-                    println!("{ant} approved for {key}");
+                    let approver = enroll::Approver::connect(&cli.nats, &dir, domain, enroll::LISTEN).await?;
+                    let approved = approver.approve(&dir, &ant, public_key.as_deref()).await?;
+                    println!("{ant} approved for {}", approved.public_key);
+                    if let Some(leaf) = &approved.leaf {
+                        println!("the uplink credentials of {} renewed to carry {ant}", leaf.machine);
+                        match leaf.outbox {
+                            true => {
+                                println!("the hub's stream takes {ant}'s messages from the outbox of {}", leaf.machine)
+                            }
+                            false => {
+                                println!("{} has no outbox (`ants leaf outbox`) to admit {ant} from", leaf.machine)
+                            }
+                        }
+                    }
                     Ok(())
                 }
                 EnrollCommand::Reject { ant, public_key, reason, dir: d } => {
-                    let approver = enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?;
+                    let approver = enroll::Approver::connect(&cli.nats, &dir(d)?, domain, enroll::LISTEN).await?;
                     for key in approver.reject(&ant, public_key.as_deref(), reason.as_deref()).await? {
                         println!("{ant} rejected for {key}");
                     }
@@ -995,10 +1010,10 @@ async fn main() -> Result<()> {
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Leaf { machine, ants, humans, webhooks, dir, out }) => {
+        Command::Auth(AuthCommand::Leaf { machine, ants, humans, webhooks, enroll_approver, dir, out }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("leaf-{machine}.creds")));
-            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, domain, &out)?;
+            auth::issue_leaf(&dir, &machine, &auth::members(&ants, &humans), &webhooks, enroll_approver, domain, &out)?;
             println!("{}", out.display());
             Ok(())
         }

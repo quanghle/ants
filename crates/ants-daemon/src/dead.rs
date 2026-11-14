@@ -593,7 +593,7 @@ fn post_notice(ant: &UserId, post: &ChannelPost, dead: &DeadLetter, humans: &Reg
 }
 
 /// Every dead letter in the stream, oldest first, with its stream sequence. Needs the human's credentials.
-pub async fn list(stream: &stream::Stream) -> Result<Vec<(u64, DeadLetter)>> {
+pub async fn list<I>(stream: &stream::Stream<I>) -> Result<Vec<(u64, DeadLetter)>> {
     let mut letters = Vec::new();
     let mut from = 1;
     loop {
@@ -611,7 +611,7 @@ pub async fn list(stream: &stream::Stream) -> Result<Vec<(u64, DeadLetter)>> {
 }
 
 /// The dead letter at stream sequence `seq`.
-pub async fn get(stream: &stream::Stream, seq: u64) -> Result<DeadLetter> {
+pub async fn get<I>(stream: &stream::Stream<I>, seq: u64) -> Result<DeadLetter> {
     let msg = stream.get_raw_message(seq).await.with_context(|| format!("reading message {seq}"))?;
     if !msg.subject.starts_with("ants.dead.") {
         bail!("message {seq} is on {}, not a dead letter", msg.subject);
