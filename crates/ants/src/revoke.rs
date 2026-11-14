@@ -517,6 +517,9 @@ pub struct Pushed {
     /// Other servers that answered, mostly leaf nodes connected to it through a system account uplink, each with the
     /// error it gave, if any.
     pub others: Vec<(String, Option<String>)>,
+    /// Whether the server pushed to keeps the accounts pushed to it across restarts ([`keeps_accounts`]); none when
+    /// it did not tell.
+    pub kept: Option<bool>,
 }
 
 /// Send the team's account JWT, with its revocations, to the server at `url`, as a user of the system account signed
@@ -525,14 +528,7 @@ pub struct Pushed {
 pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     ants_daemon::bus::check_url(url)?;
     let (account, jwt) = apply(dir)?;
-    let creds = auth::system_creds(dir)?;
-    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
-        .name("ants-auth")
-        .custom_inbox_prefix(PUSH_INBOX)
-        .connection_timeout(PUSH_TIMEOUT)
-        .connect(url);
-    let client = tokio::time::timeout(PUSH_TIMEOUT, connect).await.context("no answer from the server")?;
-    let client = client.context("connecting to NATS")?;
+    let client = connect_system(url, dir).await?;
     let server = client.server_info().server_name;
     let inbox = client.new_inbox();
     let mut answers = client.subscribe(inbox.clone()).await?;
@@ -553,9 +549,41 @@ pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     match pushed {
         None => bail!("no answer from server {server}"),
         Some(Some(error)) => bail!("server {server}: {error}"),
-        Some(None) => Ok(Pushed { server, others }),
+        Some(None) => Ok(Pushed { kept: keeps_accounts(&client).await, server, others }),
     }
 }
+
+/// A connection to the server at `url` as a short-lived user of the team's system account, signed with its key in
+/// `dir`. A refusal leaves an [`async_nats::ConnectError`] in the error's chain.
+pub async fn connect_system(url: &str, dir: &Path) -> Result<async_nats::Client> {
+    ants_daemon::bus::check_url(url)?;
+    let creds = auth::system_creds(dir)?;
+    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+        .name("ants-auth")
+        .custom_inbox_prefix(PUSH_INBOX)
+        .connection_timeout(PUSH_TIMEOUT)
+        .connect(url);
+    let client = tokio::time::timeout(PUSH_TIMEOUT, connect).await.context("no answer from the server")?;
+    client.context("connecting to NATS")
+}
+
+/// Whether the server `client` is connected to, as a system account user, keeps the accounts pushed to it across
+/// restarts: only a `full` resolver answers `$SYS.REQ.CLAIMS.LIST`, which no leaf node's system account uplink may
+/// hear. The `MEMORY` resolver of `server.conf` has none answer it, so a restart brings back the account of the
+/// server's `server.conf`. None without an answer of that server.
+pub async fn keeps_accounts(client: &async_nats::Client) -> Option<bool> {
+    let server = client.server_info().server_name;
+    match client.request(LIST_REQUEST, "".into()).await {
+        Ok(answer) => {
+            let answer: serde_json::Value = serde_json::from_slice(&answer.payload).ok()?;
+            (answer["server"]["name"] == server.as_str() && answer["data"].is_array()).then_some(true)
+        }
+        Err(e) if e.kind() == async_nats::RequestErrorKind::NoResponders => Some(false),
+        Err(_) => None,
+    }
+}
+
+const LIST_REQUEST: &str = "$SYS.REQ.CLAIMS.LIST";
 
 /// The server answering an account update, and the error it gave, if any.
 fn answer(payload: &[u8]) -> (String, Option<String>) {
@@ -734,6 +762,85 @@ mod tests {
         let port = ants_test_support::free_port();
         assert!(push(&format!("nats://127.0.0.1:{port}"), &team).await.is_err());
         assert_eq!(revoked(&team).unwrap().len(), 2);
+    }
+
+    /// A hub whose files outlive its process, to restart it: the team's directory, the hub's own copy of server.conf
+    /// as copied when it was set up, and, with a `full` resolver, the resolver's directory.
+    struct Hub {
+        files: std::path::PathBuf,
+        full: bool,
+    }
+
+    impl Hub {
+        fn new(full: bool) -> Self {
+            let files = ants_test_support::scratch_dir("hub-files");
+            auth::init(&files.join("auth")).unwrap();
+            fs::create_dir(files.join("hub")).unwrap();
+            fs::copy(files.join("auth").join(auth::SERVER_CONF), files.join("hub").join(auth::SERVER_CONF)).unwrap();
+            Self { files, full }
+        }
+
+        fn team(&self) -> std::path::PathBuf {
+            self.files.join("auth")
+        }
+
+        /// None when nats-server is not installed.
+        fn start(&self) -> Option<ants_test_support::NatsServer> {
+            ants_test_support::NatsServer::spawn_with(|_| {
+                // Both directories are in target/test-tmp; includes are relative to the configuration.
+                let files = self.files.file_name().unwrap().to_string_lossy();
+                let resolver = match self.full {
+                    true => format!("resolver {{ type: full, dir: {:?} }}\n", self.files.join("jwt")),
+                    false => String::new(),
+                };
+                format!("include \"../{files}/hub/{}\"\n{resolver}", auth::SERVER_CONF)
+            })
+        }
+    }
+
+    impl Drop for Hub {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.files);
+        }
+    }
+
+    /// Only a hub with a `full` resolver keeps a revocation pushed to it once restarted on the server.conf it had
+    /// before, and says so; a newer server.conf still replaces the account it keeps.
+    #[tokio::test]
+    async fn only_a_hub_with_a_full_resolver_keeps_a_pushed_revocation_across_restarts() {
+        for full in [false, true] {
+            let hub = Hub::new(full);
+            let team = hub.team();
+            let issue = |user: &str| {
+                let out = team.join(format!("{user}.creds"));
+                auth::issue(&team, &user.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
+                out
+            };
+            let (a, b) = (issue("dev-a"), issue("dev-b"));
+            let Some(server) = hub.start() else { return };
+            // A MEMORY resolver skips the update of an account with no connection.
+            let (_b_client, _) = watched(&server.url, &b).await.unwrap();
+            // Account JWTs carry their issue time in seconds, and the later one is kept.
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            revoke(&team, Some("dev-a"), &[]).unwrap();
+            assert_eq!(push(&server.url, &team).await.unwrap().kept, Some(full));
+            assert!(watched(&server.url, &a).await.is_err(), "dev-a's credentials still work");
+
+            drop(server);
+            let server = hub.start().unwrap();
+            assert_eq!(watched(&server.url, &a).await.is_err(), full, "dev-a's revocation kept with full = {full}");
+            assert!(watched(&server.url, &b).await.is_ok(), "dev-b's credentials are refused");
+            if !full {
+                continue;
+            }
+
+            revoke(&team, Some("dev-b"), &[]).unwrap();
+            fs::copy(team.join(auth::SERVER_CONF), hub.files.join("hub").join(auth::SERVER_CONF)).unwrap();
+            drop(server);
+            let server = hub.start().unwrap();
+            assert!(watched(&server.url, &b).await.is_err(), "the newer server.conf's revocation is not applied");
+            assert!(watched(&server.url, &a).await.is_err(), "dev-a's revocation is lost");
+        }
     }
 
     #[tokio::test]

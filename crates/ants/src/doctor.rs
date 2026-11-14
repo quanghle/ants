@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::humans::{Me, Rights};
 use crate::service::{Service, Services, State};
-use crate::{auth, leaf, outbox};
+use crate::{auth, leaf, outbox, revoke};
 
 /// How long a network check may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -92,10 +92,14 @@ pub struct Setup {
     pub leaf_config: PathBuf,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
+    /// The team directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
+    /// pushed accounts.
+    pub team: PathBuf,
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, each ant's credentials and harness, the leaf node and outbox, and the installed services.
+/// buckets, each ant's credentials and harness, the hub's account resolver, the leaf node and outbox, and the installed
+/// services.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -110,9 +114,13 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
             None => vec![Check::skip("ants", "no config file read: no ants to check")],
         }
     };
-    let ((reached, connected), ants_checked) = tokio::join!(reach, ants_checked);
+    let through_leaf =
+        leaf.as_ref().and_then(|l| l.as_ref().ok()).is_some_and(|l| same_address(&setup.nats, &l.listen));
+    let resolver = check_resolver(setup, through_leaf);
+    let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
     checks.extend(reached);
     checks.extend(ants_checked);
+    checks.push(resolver);
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
     checks.extend(check_services(setup, &mut Services::local()));
@@ -438,6 +446,75 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
             }
         })
         .collect()
+}
+
+/// Whether the hub keeps the accounts `ants auth push` sends it across restarts, as only a `full` resolver does
+/// ([`revoke::keeps_accounts`]): asked as a user of the team's system account, which only the machine holding the team
+/// keys can sign.
+async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
+    let check = "hub resolver";
+    let conf = setup.team.join(auth::SERVER_CONF);
+    if !auth::holds_team(&setup.team) {
+        let detail = format!(
+            "no team keys in {}: only the team's system account can ask, so run `ants doctor` where `ants auth` runs",
+            setup.team.display()
+        );
+        return Check::skip(check, detail);
+    }
+    if through_leaf {
+        return Check::skip(check, "the CLI connects to the leaf node: point --nats at the hub to check it");
+    }
+    let client = match tokio::time::timeout(NETWORK_TIMEOUT * 2, revoke::connect_system(&setup.nats, &setup.team)).await
+    {
+        Err(_) => return Check::skip(check, format!("{} does not answer", setup.nats)),
+        Ok(Ok(client)) => client,
+        Ok(Err(e)) => {
+            let refused = e.chain().any(|e| {
+                e.downcast_ref::<async_nats::ConnectError>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                            | async_nats::ConnectErrorKind::Authentication
+                    )
+                })
+            });
+            if !refused {
+                return Check::skip(check, format!("connecting to {} as the system account: {e:#}", setup.nats));
+            }
+            let detail = format!(
+                "{} refuses the team's system account ({e:#}): its server.conf is older than revocations or of \
+                 another team, and `ants auth push` fails",
+                setup.nats
+            );
+            return Check::warn(check, detail, vec![copy_server_conf(&conf, "reload it (SIGHUP)")]);
+        }
+    };
+    let server = client.server_info().server_name;
+    match tokio::time::timeout(NETWORK_TIMEOUT, revoke::keeps_accounts(&client)).await {
+        Ok(Some(true)) => {
+            Check::ok(check, format!("server {server} keeps pushed accounts across restarts (full resolver)"))
+        }
+        Ok(Some(false)) => Check::warn(
+            check,
+            format!(
+                "server {server} keeps pushed accounts in memory only: a restart brings back the account of its \
+                 server.conf, revocations pushed since included, and leaf nodes offline during a push miss it"
+            ),
+            vec![
+                format!(
+                    "add `resolver {{ type: full, dir: \"/ABSOLUTE/DIR\" }}` after `include \"{}\"` in the hub's \
+                     nats-server configuration and restart it (a reload does not switch resolvers)",
+                    auth::SERVER_CONF
+                ),
+                copy_server_conf(&conf, "reload it (SIGHUP) until then"),
+            ],
+        ),
+        _ => Check::skip(check, format!("server {server} did not say how it keeps pushed accounts")),
+    }
+}
+
+fn copy_server_conf(conf: &Path, then: &str) -> String {
+    format!("copy {} next to the hub's nats-server configuration and {then}", conf.display())
 }
 
 /// Each ant's credentials, and, unless told not to, whether its harness is installed and signed in: one handshake per
@@ -801,6 +878,7 @@ mod tests {
             config: server.dir().join("no-config.toml"),
             leaf_config: server.dir().join("no-leaf.conf"),
             harnesses: false,
+            team: server.dir().join("no-team"),
         }
     }
 
@@ -860,6 +938,7 @@ mod tests {
             config: config.clone(),
             leaf_config: dir.join("leaf.conf"),
             harnesses: true,
+            team: dir.join("no-team"),
         };
         let checks = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
         let harness = named(&checks, "ant dev-a harness")[0];
@@ -909,6 +988,7 @@ mod tests {
             config,
             leaf_config: leaf_config.clone(),
             harnesses: false,
+            team: dir.clone(),
         };
 
         let checks = check_leaf(&setup, Leaf::read(&leaf_config), &loaded.ants, None, None, 0).await;
@@ -923,6 +1003,50 @@ mod tests {
         assert!(node.detail.starts_with("nothing listens on 127.0.0.1:1"), "{node}");
         assert_eq!(named(&checks, "outbox")[0].status, Status::Skip, "{checks:#?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With the team keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
+    /// for a hub of another team, which refuses the system account.
+    #[tokio::test]
+    async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory() {
+        for full in [false, true] {
+            let Some(hub) = ants_test_support::NatsServer::spawn_with(|dir| {
+                auth::init(&dir.join("auth")).unwrap();
+                let resolver = match full {
+                    true => format!("resolver {{ type: full, dir: {:?} }}\n", dir.join("jwt")),
+                    false => String::new(),
+                };
+                format!("include \"auth/{}\"\n{resolver}", auth::SERVER_CONF)
+            }) else {
+                return;
+            };
+            let setup = Setup {
+                nats: hub.url.clone(),
+                creds: None,
+                js_domain: None,
+                config: hub.dir().join("no-config.toml"),
+                leaf_config: hub.dir().join("no-leaf.conf"),
+                harnesses: false,
+                team: hub.dir().join("auth"),
+            };
+            let check = check_resolver(&setup, false).await;
+            match full {
+                true => assert_eq!(check.status, Status::Ok, "{check}"),
+                false => {
+                    assert_eq!(check.status, Status::Warn, "{check}");
+                    assert!(check.fix[0].starts_with("add `resolver { type: full"), "{check}");
+                }
+            }
+            assert_eq!(check_resolver(&setup, true).await.status, Status::Skip, "through the leaf node");
+
+            auth::init(&hub.dir().join("other")).unwrap();
+            let other = Setup { team: hub.dir().join("other"), ..setup };
+            let check = check_resolver(&other, false).await;
+            assert_eq!(check.status, Status::Warn, "{check}");
+            assert!(check.detail.contains("refuses the team's system account"), "{check}");
+            let none = Setup { team: hub.dir().join("no-team"), ..other };
+            assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
+        }
     }
 
     #[test]
