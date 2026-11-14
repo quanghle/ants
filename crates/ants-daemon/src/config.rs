@@ -367,6 +367,7 @@ impl Ant {
             },
             ant: self.name,
             defer_to_others: self.builtin,
+            requester: crate::mcp::Requester::default(),
         })
     }
 

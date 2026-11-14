@@ -240,7 +240,7 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
 
 /// The configuration of the machine's leaf node, at `path`, or at ~/.config/ants/leaf.conf when it exists, and the
 /// node.
-fn leaf_node(path: Option<&Path>) -> Result<Option<(PathBuf, enroll::Leaf)>> {
+pub(crate) fn leaf_node(path: Option<&Path>) -> Result<Option<(PathBuf, enroll::Leaf)>> {
     let path = match path {
         Some(path) => path.to_owned(),
         None => {
@@ -257,7 +257,7 @@ fn leaf_node(path: Option<&Path>) -> Result<Option<(PathBuf, enroll::Leaf)>> {
 
 /// Replace the JWT of the uplink credentials of `leaf` by `renewed`, unless it would drop something they allow (they
 /// changed while the request waited). Returns whether it replaced it.
-fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
+pub(crate) fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
     let (current, key) = auth::read_creds(&leaf.creds)?;
     if !auth::allows_all(renewed, &current)? {
         return Ok(false);
@@ -267,7 +267,7 @@ fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
 }
 
 /// Where the seed waits for its JWT: beside the credentials, as `<name>.nk`.
-fn seed_path(creds: &Path) -> PathBuf {
+pub(crate) fn seed_path(creds: &Path) -> PathBuf {
     creds.with_extension("nk")
 }
 

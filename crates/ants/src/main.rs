@@ -12,6 +12,7 @@ mod humans;
 mod inbox;
 mod keys;
 mod leaf;
+mod manager;
 mod members;
 mod notify;
 mod outbox;
@@ -1113,8 +1114,16 @@ async fn run() -> Result<()> {
             let default_path = ants_daemon::config::default_path()?;
             let served = || {
                 let listed = serve::ants(&args, &default_path)?;
-                let configs =
+                let mut configs =
                     serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
+                if let Some((managers, path)) = &listed.managers {
+                    for config in configs.iter_mut().filter(|c| managers.contains(&c.ant)) {
+                        let (nats, creds, js_domain) =
+                            (config.nats_url.clone(), config.creds.clone(), config.js_domain.clone());
+                        let manager = manager::Manager::new(path.clone(), nats, creds, js_domain)?;
+                        config.requester = ants_daemon::mcp::Requester(Some(manager.requester()));
+                    }
+                }
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
                 Ok(serve::Served { configs, schedules, metrics: listed.metrics })
             };

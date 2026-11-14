@@ -443,15 +443,17 @@ pub struct Signed {
     pub leaf_jwt: Option<String>,
 }
 
-/// Ask, as `manager` with its connection `client` and the credentials at `creds`, for ant `name` from `template` with
-/// the settings `request` (JSON), for the public key of `user`, through the machine's `leaf` node if it has one:
+/// Ask, over the manager's connection `client`, as the manager its credentials' user JWT `jwt` and key `key` name, for
+/// ant `name` from `template` with the settings `request` (JSON), for the public key of `user`, through the machine's
+/// `leaf` node if it has one:
 /// repeat the request every `repeat` until an answer for the key arrives or `until` passes. Returns the ant's user
 /// JWT of an approval, checked to be the account's for that key and ant, and the leaf's renewed uplink JWT, checked
 /// likewise; a refusal is an error carrying the signer's reason.
 #[allow(clippy::too_many_arguments)]
 pub async fn ask(
     client: &async_nats::Client,
-    creds: &Path,
+    jwt: &str,
+    key: &KeyPair,
     template: &str,
     request: &str,
     reason: &str,
@@ -462,8 +464,7 @@ pub async fn ask(
     repeat: Duration,
     until: DateTime<Utc>,
 ) -> Result<Signed> {
-    let (jwt, key) = auth::read_creds(creds)?;
-    let claims = auth::verified(&jwt).with_context(|| format!("the manager's credentials {}", creds.display()))?;
+    let claims = auth::verified(jwt).context("the manager's credentials")?;
     let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
     let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
     let public_key = user.public_key();
@@ -479,7 +480,7 @@ pub async fn ask(
         host,
         until,
     );
-    asking.credentials = jwt;
+    asking.credentials = jwt.to_owned();
     let mut uplink: Option<KeyPair> = None;
     let mut repeats = tokio::time::interval(repeat);
     let left = (until - Utc::now()).to_std().unwrap_or_default();
@@ -495,7 +496,7 @@ pub async fn ask(
                     asking.leaf.as_mut().expect("the leaf just set").signature = signature;
                     uplink = Some(key);
                 }
-                asking.signature = auth::sign(&key, &asking.signed())?;
+                asking.signature = auth::sign(key, &asking.signed())?;
                 client.publish(asking.subject(), serde_json::to_vec(&asking)?.into()).await?;
                 client.flush().await?;
             }
@@ -629,20 +630,9 @@ mod tests {
         async fn ask(&self, name: &str, request: &str, user: &KeyPair) -> Result<Signed> {
             let until = Utc::now() + WAIT;
             let thread = ThreadId::generate();
-            ask(
-                &self.client,
-                &self.creds,
-                "worker",
-                request,
-                "more hands",
-                &thread,
-                &p(name),
-                user,
-                None,
-                REPEAT,
-                until,
-            )
-            .await
+            let (jwt, key) = auth::read_creds(&self.creds).unwrap();
+            let (template, reason) = ("worker", "more hands");
+            ask(&self.client, &jwt, &key, template, request, reason, &thread, &p(name), user, None, REPEAT, until).await
         }
     }
 
