@@ -1608,7 +1608,7 @@ pub(crate) mod tests {
             before: u64::MAX,
         };
         assert_eq!(
-            read.history().await,
+            read.history()(ants_daemon::history::DEFAULT_BUDGET).await,
             "[ants] The thread's history, read back from ants, oldest first:\n\ndev-b to dev-a:\nstatus?\n\n\
              dev-a to dev-b:\ngreen\n\ndev-b in the thread notes:\nnoted\n\ndev-b in channel ops:\nshipped\n\n\
              [ants] End of the thread's history."
