@@ -136,6 +136,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "jiff",
  "nkeys",
  "ring",
  "rustls-native-certs",
