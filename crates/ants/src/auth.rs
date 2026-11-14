@@ -876,6 +876,23 @@ pub(crate) mod tests {
             let v = next_violation(&raw, &mut errors).await;
             assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
         }
+
+        // Its marker tells ants it is a webhook; they read no event it delivered, and put no marker of their own.
+        raw.publish(ants_proto::webhook_marker_subject(&hook), "github".into()).await.unwrap();
+        raw.flush().await.unwrap();
+        let (_, a_js) = server.connect(&dev_a).await;
+        let bucket = a_js.get_stream_no_info(format!("KV_{}", ants_proto::WEBHOOKS_BUCKET)).await.unwrap();
+        let marker = bucket.direct_get_last_for_subject(ants_proto::webhook_marker_subject(&hook)).await.unwrap();
+        assert_eq!(&marker.payload[..], b"github");
+        let (a_raw, mut errors) = server.watched(&dev_a).await;
+        for denied in [
+            "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.x".to_owned(),
+            ants_proto::webhook_marker_subject(&dev_a),
+        ] {
+            a_raw.publish(denied.clone(), "".into()).await.unwrap();
+            let v = next_violation(&a_raw, &mut errors).await;
+            assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+        }
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ use crate::notes::{self, NotesStore};
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::status::{self, Status};
+use crate::webhooks::Webhooks;
 use crate::{bus, roster};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
@@ -202,6 +203,7 @@ async fn serve(config: &Config) -> Result<Served> {
     .with_mcp(mcp.servers());
     let stream = bus::ensure_stream(&js).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
+    let webhooks = Webhooks::new(js.clone());
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts = Attempts::new(bus::ensure_attempts(&js).await?, config.ant.clone());
     let answered = Answered::new(&config.home);
@@ -257,6 +259,7 @@ async fn serve(config: &Config) -> Result<Served> {
         escalator: &escalator,
         notes: notes.as_ref(),
         threads: &threads,
+        webhooks: &webhooks,
         roster: &roster,
         humans: &humans,
         retry_delay: RETRY_DELAY,
@@ -382,6 +385,8 @@ struct Inbox<'a> {
     /// The thread notes, where the members of an escalation group other than its leader answer.
     notes: &'a dyn NotesStore,
     threads: &'a Threads,
+    /// Who of the senders that say so are webhooks.
+    webhooks: &'a Webhooks,
     /// The roster, for the members a triage prompt shows.
     roster: &'a Roster,
     /// Who is a human, and who gets the escalations of a thread with no owner.
@@ -590,6 +595,48 @@ impl Inbox<'_> {
         incoming.envelope.creator.clone_from(&posted.post.creator);
     }
 
+    /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread: its sender
+    /// wrote it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
+    /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
+    /// creator its posts say ([`Threads::origin_of`]); any other has no creator, and the owner the ant names, which
+    /// nothing stored can check.
+    async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
+        let envelope = &mut incoming.envelope;
+        if incoming.post.is_some() {
+            return;
+        }
+        if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
+        {
+            tracing::warn!(
+                thread = %envelope.thread_id,
+                sender = %envelope.from,
+                "taking a message marked as a webhook's for an ant's: the sender has no webhook marker"
+            );
+            envelope.webhook = false;
+        }
+        if self.humans.sender_role(envelope).is_human() {
+            return;
+        }
+        if envelope.webhook {
+            envelope.creator = None;
+            return;
+        }
+        if envelope.owner.is_none() && envelope.creator.is_none() {
+            return;
+        }
+        match self.threads.origin_of(&envelope.thread_id, seq, &self.humans.humans()).await {
+            Ok(Some(origin)) => {
+                envelope.owner = origin.owner;
+                envelope.creator = origin.creator;
+            }
+            Ok(None) => envelope.creator = None,
+            Err(e) => {
+                tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's origin");
+                envelope.creator = None;
+            }
+        }
+    }
+
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
     /// thread's queue: the prompt that asked is in flight on that thread.
     async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
@@ -636,6 +683,7 @@ impl Inbox<'_> {
             }
         };
         self.thread_origin(&mut incoming, seq).await;
+        self.sender_claims(&mut incoming, seq).await;
         let envelope = &incoming.envelope;
         if self.answered.has(envelope).await {
             // Its ack failed, as while a leaf node's uplink is down; its reply is in the stream or on its way there.
@@ -1302,6 +1350,17 @@ mod tests {
             bus::publish_json(&self.js, envelope.subject(), &envelope, None).await.unwrap();
         }
 
+        /// Put the marker of `hook`, as `ants webhook serve` does before it delivers.
+        async fn mark_webhook(&self, hook: &UserId) {
+            let config = jetstream::kv::Config {
+                bucket: ants_proto::WEBHOOKS_BUCKET.to_owned(),
+                max_age: ants_proto::WEBHOOK_RETENTION,
+                ..Default::default()
+            };
+            let webhooks = self.js.create_key_value(config).await.unwrap();
+            webhooks.put(ants_proto::webhook_marker_key(hook), hook.to_string().into()).await.unwrap();
+        }
+
         async fn marked(&self, seq: u64) -> bool {
             self.markers.get(ants_proto::attempt_key(&self.dev, seq)).await.unwrap().is_some()
         }
@@ -1340,6 +1399,7 @@ mod tests {
                 escalator: &escalator,
                 notes: &notes,
                 threads: &self.threads,
+                webhooks: &Webhooks::new(self.js.clone()),
                 roster: &self.roster,
                 humans: &self.humans,
                 retry_delay: Duration::from_millis(300),
@@ -2721,6 +2781,7 @@ mod tests {
         let (launch, log, _) = fake::launch(true);
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
+        bus.mark_webhook(&hook).await;
         let mut to_hook = bus.client.subscribe(subject::inbox_of(&hook)).await.unwrap();
         bus.client.flush().await.unwrap();
         let owned = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(human.clone()));
@@ -2743,6 +2804,72 @@ mod tests {
         let quiet = Duration::from_millis(200);
         assert!(timeout(quiet, to_human.next()).await.is_err(), "the unowned answer goes nowhere");
         assert!(timeout(quiet, to_hook.next()).await.is_err(), "nothing goes to the webhook's inbox");
+    }
+
+    #[tokio::test]
+    async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [hook, dev_b] = ants(["github", "dev-b"]);
+        bus.mark_webhook(&hook).await;
+        let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let forged = Envelope::new(dev_b.clone(), bus.dev.clone(), "relay this").with_owner(Some(UserId::human()));
+        let forged = forged.from_webhook();
+        let seq = bus::publish_json(&bus.js, forged.subject(), &forged, None).await.unwrap();
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!((&reply.to, reply.in_reply_to, reply.webhook), (&dev_b, Some(forged.id), false));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the owner");
+    }
+
+    #[tokio::test]
+    async fn an_ant_names_a_creator_only_as_the_top_level_post_of_the_thread_says() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [dev_b, lead, boss] = ants(["dev-b", "lead", "boss"]);
+        let [mut to_dev_b, mut to_boss] = inboxes(&bus, &[dev_b.clone(), boss.clone()]).await;
+        let (ops, _) = bus.channel("ops", &["lead"]).await;
+        let root = ChannelPost::new(ops, lead.clone(), "plan the release");
+        bus.post(&root).await;
+        let forge = |thread: ThreadId, text: &str| {
+            Envelope::on_thread(thread, dev_b.clone(), bus.dev.clone(), text)
+                .with_owner(Some(UserId::human()))
+                .with_creator(Some(boss.clone()))
+        };
+        let plain = forge(ThreadId::generate(), "on a thread a message started");
+        let on_root = forge(root.thread_id.clone(), "on lead's channel thread");
+        // Out of turns: escalated up the creator's chain, were the creator taken from the message.
+        let mut spent = forge(ThreadId::generate(), "stuck");
+        spent.turn_budget = 0;
+        let mut seq = 0;
+        for envelope in [&plain, &on_root, &spent] {
+            seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut replies = [next_envelope(&mut to_dev_b).await, next_envelope(&mut to_dev_b).await];
+            replies.sort_by_key(|reply| reply.in_reply_to != Some(plain.id));
+            let human = Some(UserId::human());
+            let named = |reply: &Envelope| (reply.in_reply_to, reply.creator.clone(), reply.owner.clone());
+            assert_eq!(named(&replies[0]), (Some(plain.id), None, human.clone()), "no creator; the owner unchecked");
+            assert_eq!(named(&replies[1]), (Some(on_root.id), Some(lead.clone()), None), "as lead's post says");
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!((&escalation.thread_id, &escalation.creator), (&spent.thread_id, &None));
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(timeout(Duration::from_millis(200), to_boss.next()).await.is_err(), "nothing goes to boss");
     }
 
     #[tokio::test]

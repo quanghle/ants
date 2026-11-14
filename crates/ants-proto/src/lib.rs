@@ -62,8 +62,9 @@ pub const HUMANS_BUCKET: &str = "ants_humans";
 /// ant writes only its own; every ant and human reads them.
 pub const CHAINS_BUCKET: &str = "ants_chains";
 /// KV bucket of the events each webhook delivered, keyed `<webhook>.<hash of the event id>` ([`webhook_seen_key`]),
-/// so a retried event is not delivered again. Each webhook writes and reads only its own keys; entries expire after
-/// [`WEBHOOK_RETENTION`].
+/// so a retried event is not delivered again, and of each webhook's marker ([`webhook_marker_key`]), which tells
+/// daemons the webhook is one. Each webhook writes and reads only its own keys, ants read only the markers; entries
+/// expire after [`WEBHOOK_RETENTION`].
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -579,6 +580,21 @@ pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
     format!("{webhook}.{hash}")
 }
 
+/// Key of the marker of `webhook` in [`WEBHOOKS_BUCKET`], which `ants webhook serve` puts before it delivers and
+/// renews while it does. Only the webhook's credentials write it, so a daemon honours [`Envelope::webhook`] only
+/// from a sender whose marker is there.
+pub fn webhook_marker_key(webhook: &UserId) -> String {
+    format!("{webhook}.{WEBHOOK_MARKER}")
+}
+
+/// Last token of [`webhook_marker_key`]; event keys end in hex digits.
+const WEBHOOK_MARKER: &str = "webhook";
+
+/// The subject of the marker of `webhook` ([`webhook_marker_key`]) in the stream of [`WEBHOOKS_BUCKET`].
+pub fn webhook_marker_subject(webhook: &UserId) -> String {
+    format!("$KV.{WEBHOOKS_BUCKET}.{}", webhook_marker_key(webhook))
+}
+
 /// JetStream stream backing a KV bucket.
 fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
@@ -617,7 +633,8 @@ impl Permissions {
     /// through its own notes consumer), every channel (live, and from the stream through its own channel consumer and
     /// reader), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
     /// to find ants by capability but writes only its own entry, reads every escalation chain by key but writes only
-    /// its own, reads the channels and humans buckets but never writes them, asks the channel manager for changes to
+    /// its own, reads the channels and humans buckets but never writes them, reads which users are webhooks (their
+    /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
@@ -685,6 +702,8 @@ impl Permissions {
             // And single escalation chains.
             format!("$JS.API.STREAM.INFO.{chains}"),
             format!("$JS.API.DIRECT.GET.{chains}.>"),
+            // And the webhooks' markers, not the events they delivered.
+            format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(user))];
         if role.is_human() {
@@ -1123,11 +1142,15 @@ pub struct Envelope {
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
-    /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it.
+    /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it. A
+    /// daemon takes it from a human, a webhook ([`Envelope::webhook`]) or, on a channel thread whose creator it names,
+    /// the thread's posts ([`ThreadOrigin`]); from an ant otherwise as it says, which no daemon can check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
     /// The ant whose top-level channel post started the thread ([`ChannelPost::thread_creator`]), kept like `owner`.
-    /// Its escalate_to is the thread's origin chain ([`Escalation::new_from`]); a creator that is a human is none.
+    /// Its escalate_to is the thread's origin chain ([`Escalation::new_from`]); a creator that is a human is none. A
+    /// daemon takes it from an ant or a webhook only as the thread's top-level post kept in the stream says
+    /// ([`ThreadOrigin`]): on a thread no channel post started, there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
     /// The escalation the message carries up a chain, or answers. Never copied by [`Envelope::reply`] or
@@ -1140,7 +1163,9 @@ pub struct Envelope {
     pub approval: Option<Box<ApprovalDecision>>,
     /// A webhook's message, as `ants webhook serve` marks it: its sender is no human, whatever the humans bucket says,
     /// and an answer to it goes to the thread's owner, if any, not to the webhook's inbox, which nobody reads
-    /// ([`Envelope::sender_role`]). It is the sender's claim, which only takes rights away.
+    /// ([`Envelope::sender_role`]). A daemon takes it only from a sender whose marker is in [`WEBHOOKS_BUCKET`]
+    /// ([`webhook_marker_key`]), which only a webhook's credentials write: from any other it is cleared, so no ant
+    /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     pub sent_at: DateTime<Utc>,

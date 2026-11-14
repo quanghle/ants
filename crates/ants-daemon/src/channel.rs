@@ -280,12 +280,12 @@ impl<'a> Collect<'a> {
 
 /// Takes the posts of a channel, read in stream order.
 trait Sink {
-    /// Take the post at stream sequence `seq`; a break ends the read.
-    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()>;
+    /// Take the post at stream sequence `seq`, stored at `stored`; a break ends the read.
+    fn take(&mut self, seq: u64, stored: SystemTime, post: ChannelPost) -> ControlFlow<()>;
 }
 
 impl Sink for Collect<'_> {
-    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()> {
+    fn take(&mut self, seq: u64, _: SystemTime, post: ChannelPost) -> ControlFlow<()> {
         self.push(seq, post);
         ControlFlow::Continue(())
     }
@@ -300,7 +300,7 @@ struct Origin<'a> {
 }
 
 impl Sink for Origin<'_> {
-    fn take(&mut self, seq: u64, post: ChannelPost) -> ControlFlow<()> {
+    fn take(&mut self, seq: u64, _: SystemTime, post: ChannelPost) -> ControlFlow<()> {
         if seq > self.upto {
             return ControlFlow::Break(());
         }
@@ -308,6 +308,28 @@ impl Sink for Origin<'_> {
             self.origin.push(&post, self.humans);
         }
         if self.origin.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    }
+}
+
+/// Finds the channel of the top-level post that starts `thread`, among the posts of every channel stored up to stream
+/// sequence `upto` and before `until`.
+struct Root<'a> {
+    thread: &'a ThreadId,
+    upto: u64,
+    until: SystemTime,
+    channel: Option<ChannelId>,
+}
+
+impl Sink for Root<'_> {
+    fn take(&mut self, seq: u64, stored: SystemTime, post: ChannelPost) -> ControlFlow<()> {
+        if seq > self.upto || stored > self.until {
+            return ControlFlow::Break(());
+        }
+        if post.thread_id == *self.thread && post.starts_thread() {
+            self.channel = Some(post.channel);
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     }
 }
 
@@ -407,11 +429,48 @@ pub struct Threads {
     reading: tokio::sync::Mutex<()>,
     /// The origins of threads read so far, with the stream sequence each read reached.
     origins: Mutex<HashMap<(ChannelId, ThreadId), (ThreadOrigin, u64)>>,
+    /// The channel whose top-level post started each thread looked up so far ([`Threads::origin_of`]); None for a
+    /// thread no channel post started.
+    roots: Mutex<HashMap<ThreadId, Option<ChannelId>>>,
 }
 
 impl Threads {
     pub fn new(js: jetstream::Context, ant: UserId, sessions: kv::Store) -> Self {
-        Self { js, ant, seen: sessions, reading: tokio::sync::Mutex::new(()), origins: Mutex::default() }
+        Self {
+            js,
+            ant,
+            seen: sessions,
+            reading: tokio::sync::Mutex::new(()),
+            origins: Mutex::default(),
+            roots: Mutex::default(),
+        }
+    }
+
+    /// The origin of `thread`, at stream sequence `seq`, when a top-level channel post stored before `seq` started it
+    /// ([`Threads::origin`]); None when none did, as for a thread a message started. The top-level post is the first
+    /// post of any channel whose id is the thread's, among those stored within [`CLOCK_SLACK`] of the time in it.
+    pub async fn origin_of(&self, thread: &ThreadId, seq: u64, humans: &Humans) -> Result<Option<ThreadOrigin>> {
+        let Some(start) = thread_start(thread) else { return Ok(None) };
+        let cached = self.roots.lock().expect("roots").get(thread).cloned();
+        let channel = match cached {
+            Some(channel) => channel,
+            None => {
+                let mut root = Root { thread, upto: seq, until: start + 2 * CLOCK_SLACK, channel: None };
+                let from = consumer::DeliverPolicy::ByStartTime { start_time: start.into() };
+                self.scan(subject::ALL_CHANNELS, from, &mut root)
+                    .await
+                    .with_context(|| format!("looking for the top-level post of thread {thread}"))?;
+                let mut roots = self.roots.lock().expect("roots");
+                if roots.len() >= MAX_ORIGINS {
+                    roots.clear();
+                }
+                roots.insert(thread.clone(), root.channel.clone());
+                root.channel
+            }
+        };
+        let Some(channel) = channel else { return Ok(None) };
+        let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
+        self.origin(&on_thread, seq, humans).await.map(Some)
     }
 
     /// The origin of the thread of `post`, at stream sequence `seq`: who started it, as the posts stored on it up to
@@ -429,7 +488,7 @@ impl Threads {
             None => (ThreadOrigin::default(), from_start(&post.thread_id)),
         };
         let mut fold = Origin { thread: &post.thread_id, humans, upto: seq, origin };
-        self.scan(&post.channel, start, &mut fold)
+        self.scan(&subject::chan_room(&post.channel), start, &mut fold)
             .await
             .with_context(|| format!("reading the origin of thread {} of #{}", post.thread_id, post.channel))?;
         let mut origins = self.origins.lock().expect("origins");
@@ -453,21 +512,21 @@ impl Threads {
             Some(Some(seen)) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seen + 1 },
             Some(None) => from_start(&post.thread_id),
         };
-        self.scan(&post.channel, start, &mut collect)
+        self.scan(&subject::chan_room(&post.channel), start, &mut collect)
             .await
             .with_context(|| format!("reading thread {} of #{}", post.thread_id, post.channel))?;
         Ok(collect.done())
     }
 
-    /// Read the posts of `channel` from `start` into `sink`, up to the last one stored as the read starts.
-    async fn scan(&self, channel: &ChannelId, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<()> {
+    /// Read the channel posts on `filter` from `start` into `sink`, up to the last one stored as the read starts.
+    async fn scan(&self, filter: &str, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<()> {
         let _one = self.reading.lock().await;
         let name = chan_reader(&self.ant);
         // A consumer left by an interrupted read would carry on where it stopped.
         let _ = self.js.delete_consumer_from_stream(&name, STREAM).await;
         let config = consumer::pull::Config {
             name: Some(name.clone()),
-            filter_subject: subject::chan_room(channel),
+            filter_subject: filter.to_owned(),
             deliver_policy: start,
             ack_policy: consumer::AckPolicy::None,
             inactive_threshold: INACTIVE,
@@ -507,13 +566,13 @@ async fn read(consumer: &consumer::PullConsumer, sink: &mut impl Sink) -> Result
             let msg = msg.map_err(|e| anyhow::anyhow!(e))?;
             got += 1;
             let Ok(info) = msg.info() else { continue };
-            let seq = info.stream_sequence;
+            let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
             let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
                 .map_err(|e| e.to_string())
                 .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
             match post {
                 Ok(post) => {
-                    if sink.take(seq, post).is_break() {
+                    if sink.take(seq, stored, post).is_break() {
                         return Ok(());
                     }
                 }

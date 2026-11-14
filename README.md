@@ -336,7 +336,9 @@ leader and the ants visited so far, and an agent's approval decision in place of
 The daemon tells humans by the KV bucket
 `ants_humans` (see Credentials): it reads the bucket at start and watches it, and while the bucket does not exist it
 looks again every 30 s, knowing only `human` and the default human meanwhile. Only a human owns a thread: the daemon
-ignores an `owner` that is no human, as an ant may name any, and neither escalates to it nor passes it on. A reply
+ignores an `owner` that is no human, as an ant may name any, and neither escalates to it nor passes it on. On a
+thread a channel post started, it takes an ant's message's `owner` and `creator` from the thread's posts, as in the
+channel; on any other thread, it keeps the `owner` an ant's message names, unchecked, and drops its `creator`. A reply
 to any human spends no turn, a message from any human renews the thread's allowance, and `send_message` to a human
 spends no turn either; `ask_agent` refuses a human.
 
@@ -835,7 +837,9 @@ thread's posts kept in the stream, not from what a later post says, so no ant ca
 thread too, with the MCP tool `post_channel` or `ants post` under its own credentials, in a channel it is a member or
 the messenger of: the thread has no owner until a human posts on it, and the ant is its `creator`, which every later
 post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
-post, whatever that post or a later one says, and never a human, a webhook or the channel manager. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
+post, whatever that post or a later one says, and never a human, a webhook or the channel manager. A daemon takes the
+`owner` and `creator` of a message an ant sends on the thread from the thread's posts too, and drops the `creator` of
+an ant's message on any other thread: a message started that thread, or the ant made the `creator` up. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
 Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
 on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
 `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
@@ -997,6 +1001,11 @@ channel = "ops"
 - **Retries** deliver nothing new for 7 days: the event's id is kept in the KV bucket `ants_webhooks` (`ants init`
   creates it) under the webhook's name, and the stream also drops a repeated `Nats-Msg-Id`
   `webhook.<webhook>.<hash>` for 2 minutes.
+- **Marker**: before delivering, and again each day it delivers, `ants webhook serve` puts the webhook's marker,
+  `<webhook>.webhook` in `ants_webhooks`. Only the webhook's credentials write it, and daemons honour `webhook: true`
+  on a message only from a sender with a marker there (or a human): from an ant, the message is an ant's, and the
+  answer goes back to its inbox. A webhook served by a CLI from before the marker has its answers sent to its own
+  inbox, which nobody reads, until the CLI is upgraded.
 - **Text**: `text` is a template, default `[webhook {webhook}] {id}` and the body. `{body}`, `{id}`, `{webhook}`,
   `{header:Name}` and `{json:/pointer}` (a JSON string unquoted, a missing field empty) are replaced; `{{` and `}}`
   are literal braces. The text is untrusted input for the ant's prompt: give a webhook a destination whose tools
@@ -1014,7 +1023,10 @@ Credentials: `ants auth user NAME --webhook` with `--to ANT` or `--channel CHANN
 those keys and its channels' entries (for `broadcast`), and writes neither channels nor humans. The name `human` is
 refused; `ants webhook serve` refuses credentials naming another user, a human's, or ones without the configured
 destination. A webhook joins no roster and needs no `ants_humans` entry. Its messages and posts carry `webhook: true`,
-so readers never take them for a human's, even when a human goes by the same name.
+so readers never take them for a human's, even when a human goes by the same name. Ant credentials read the webhooks'
+markers by direct get (`$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.*.webhook`), none of their events;
+ants' credentials and leaf uplinks issued before the marker lack it, and need `ants auth user` and `ants auth leaf`
+again: until then their daemons send no answer to a webhook's `owner`.
 
 Behind a leaf node, issue the leaf's uplink with the webhook too, `ants auth leaf MACHINE --webhook NAME`, after its
 credentials (see [Leaf nodes](#leaf-nodes)). Events cross to the hub as they arrive, without the leaf's outbox: while
@@ -1132,8 +1144,14 @@ name (see CLI); daemons read the bucket (see Escalations). An envelope may carry
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
 without one stay valid, and daemons ignore an `owner` that is no human. A webhook's envelope carries `webhook: true`:
 daemons treat its sender as an agent whatever `ants_humans` says, and send a reply to its `owner`, if a human, instead
-of its inbox. An envelope may carry `creator` the same way,
-the ant whose channel post started the thread (see Channels); daemons ignore a `creator` that is a human. A daemon or
+of its inbox. Daemons honour `webhook: true` only from a sender whose marker is in `ants_webhooks`
+(`<webhook>.webhook`, which only that webhook's credentials write; see [Webhooks](#webhooks)) or a human, and ignore it
+from any other. An envelope may carry `creator` the same way,
+the ant whose channel post started the thread (see Channels); daemons ignore a `creator` that is a human. A daemon
+takes `owner` and `creator` as a human's or a webhook's envelope carries them (a webhook names no `creator`); from an
+ant, on a thread a channel post started (the first post of any channel whose id is the thread's, among those stored
+within 5 minutes of the time in it), it takes both from the thread's posts as in the channel, and on any other thread
+it drops `creator` and keeps `owner` unchecked, as nothing stored names a message thread's owner. A daemon or
 CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. Credentials
 issued before `ants_humans` need `ants auth user` again.
 

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use ants_daemon::bus;
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject, webhook_seen_key,
+    WEBHOOK_RETENTION, WEBHOOKS_BUCKET, subject, webhook_marker_key, webhook_seen_key,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -61,6 +61,8 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const ID_HASH_LEN: usize = 32;
 /// Least time between two warnings about rejected requests of one webhook.
 const WARN_EVERY: Duration = Duration::from_secs(60);
+/// How often a webhook that delivers puts its marker again, well within [`WEBHOOK_RETENTION`].
+const MARK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `~/.ants/webhooks.toml`.
 pub fn default_path() -> Result<PathBuf> {
@@ -75,7 +77,8 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<kv::Store> {
     }
     js.create_key_value(kv::Config {
         bucket: WEBHOOKS_BUCKET.to_owned(),
-        description: "Events each webhook delivered, so retries deliver nothing new".to_owned(),
+        description: "Events each webhook delivered, so retries deliver nothing new, and the webhooks' markers"
+            .to_owned(),
         history: 1,
         max_age: WEBHOOK_RETENTION,
         storage: stream::StorageType::File,
@@ -486,6 +489,8 @@ struct Hook {
     config: Webhook,
     bus: OnceCell<Bus>,
     last_warned: Mutex<Option<Instant>>,
+    /// When the webhook last put its marker.
+    marked: Mutex<Option<Instant>>,
 }
 
 struct Server {
@@ -499,7 +504,7 @@ struct Server {
 /// as itself; until it is connected, its requests answer 503.
 pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
     let hooks = config.webhooks.into_iter().map(|config| {
-        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default() };
+        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default(), marked: Mutex::default() };
         (hook.config.name.to_string(), Arc::new(hook))
     });
     let server = Arc::new(Server {
@@ -658,6 +663,7 @@ impl Hook {
         if let Some(seen) = self.seen(bus, &key).await? {
             return Ok(accepted(StatusCode::OK, Some(&seen.thread), true));
         }
+        self.mark(bus).await?;
         let (subject, payload, thread) = match &hook.destination {
             Destination::Ant(ant) => {
                 let message = Envelope::new(hook.name.clone(), ant.clone(), event.text)
@@ -698,6 +704,21 @@ impl Hook {
         }
         tracing::info!(webhook = %hook.name, thread = %thread, "event delivered");
         Ok(accepted(StatusCode::ACCEPTED, Some(&thread), false))
+    }
+
+    /// Put the webhook's marker ([`webhook_marker_key`]), unless put in the last [`MARK_EVERY`]: without it, daemons
+    /// take the webhook's messages for an ant's, and answer it in its own inbox.
+    async fn mark(&self, bus: &Bus) -> Result<()> {
+        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < MARK_EVERY) {
+            return Ok(());
+        }
+        let name = &self.config.name;
+        bus.seen
+            .put(webhook_marker_key(name), name.to_string().into())
+            .await
+            .context("putting the webhook's marker")?;
+        *self.marked.lock().unwrap() = Some(Instant::now());
+        Ok(())
     }
 
     async fn seen(&self, bus: &Bus, key: &str) -> Result<Option<Seen>> {
@@ -1036,6 +1057,8 @@ mod tests {
         assert_eq!((&message.from, &message.to, message.thread_id.as_str()), (&github, &p("dev-a"), thread.as_str()));
         assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
         assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
+        let marker = seen.get(webhook_marker_key(&github)).await.unwrap();
+        assert_eq!(marker.as_deref(), Some(&b"github"[..]), "daemons take its messages as a webhook's");
     }
 
     #[tokio::test]
