@@ -81,14 +81,7 @@ pub fn jetstream_outbox(js: async_nats::jetstream::Context) -> Outbox {
     Arc::new(move |envelope| {
         let js = js.clone();
         Box::pin(async move {
-            if let Err(e) = links::pass_on(&js, &envelope).await {
-                tracing::warn!(
-                    thread = ?envelope.origin_thread,
-                    to = %envelope.to,
-                    error = format!("{e:#}"),
-                    "recording the link passed on; replies and messages from the recipient lose the thread's creator"
-                );
-            }
+            links::passing_on(&js, &envelope).await;
             bus::publish(&js, &envelope).await.map(drop)
         })
     })
@@ -420,10 +413,10 @@ impl Hub {
     async fn post_notes(&self, thread: &ThreadId, text: String) -> Result<String, String> {
         let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
-            let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone());
+            let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone(), e.origin_thread.clone());
             (e.turn_budget, owner, self.humans.owner_of(e), carried)
         });
-        let (budget, (owner, creator), human, carried) =
+        let (budget, (owner, creator, origin_thread), human, carried) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let notes = self.notes.read(thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
@@ -448,7 +441,8 @@ impl Hub {
                 ),
             )
             .with_owner(owner.clone())
-            .with_creator(creator.clone());
+            .with_creator(creator.clone())
+            .with_origin_thread(origin_thread.clone());
             let Some(escalator) = &self.escalator else {
                 tracing::info!(%thread, %human, "thread notes out of turns; handing the thread to its owner");
                 self.send(&notice).await.map_err(|e| {

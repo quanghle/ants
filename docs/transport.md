@@ -260,6 +260,10 @@ server restarts):
    publish itself (`ants.in.<machine>.ants.out.inbox.*.<user>`, `...notes.*.<user>`, `...chan.*.<user>` and, for an
    ant, `...dead.<ant>`; a human's `inbox.>`), and transforms
    it back to the usual subject. The rest stays in the intake, where only the human can read it.
+3. The KV bucket `ants_links` sources from `ANTS_IN` too, for each ant listed for a machine, only the links that ant
+   passed on (`ants.in.<machine>.ants.out.links.<ant>.*.*`), transformed to its own keys
+   (`$KV.ants_links.<ant>.<channel thread>.<recipient>`). `ants leaf outbox` sets this up once `ants init` created
+   the bucket.
 
 Source filters of one stream must not overlap, so when a human is on a machine its `inbox.>` covers the other
 users' inbox subjects there, and they get only their notes and channel subjects. Every message keeps its `Nats-Msg-Id` (the
@@ -280,7 +284,10 @@ machine's outbox"); a daemon logs a warning. Everything else needs the hub at on
 - Approvals: a request waits for a human's decision, read from the hub, until it expires. A buffered request would
   reach the human after the asker had given up on it.
 - KV (sessions, roster, attempt markers, escalation chains): a bucket keeps the last value per key, so a buffered put
-  landing late could overwrite a newer one. A daemon puts its roster heartbeat every 10 seconds, so the roster is
+  landing late could overwrite a newer one. Links passed on (`ants_links`) are the exception: a key only says that a
+  link was passed on, never deleted, so a late put takes nothing back. A daemon records the link before sending the
+  message that passes it on, in the hub's bucket or, out of its reach, as `ants.out.links.<sender>.<channel
+  thread>.<recipient>` in the outbox (ants-wjd1), so the link lands with the message. A daemon puts its roster heartbeat every 10 seconds, so the roster is
   current again soon after the uplink is back, and a daemon gets no messages to work on meanwhile.
 - Dead letters a human writes (`ants dead watch`, `ants inbox --follow`): they come from the hub's max-deliveries
   advisories and stream, so the hub is up whenever they are written.

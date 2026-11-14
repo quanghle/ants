@@ -851,15 +851,17 @@ replies and messages on or from that thread: a daemon takes the `creator` of an 
 post started from the channel thread it links to, only when the sender is a member or the messenger of that thread's
 channel and has a post on the thread or was woken by one there, or when an ant that does passed the link on to the
 sender, directly or through other ants. Each daemon records the links its ants pass on (a message from them carrying
-`origin_thread`) in the KV bucket `ants_links`, under `<sender>.<channel thread>.<recipient>`, keys only the sender's
-credentials write; the receiving daemon follows these records back from the sender, through at most 32 ants, to one
+`origin_thread`, escalations and their notices included) in the KV bucket `ants_links`, under
+`<sender>.<channel thread>.<recipient>`, keys only the sender's credentials write, before sending the message; the
+receiving daemon follows these records back from the sender, through at most 32 ants, to one
 taking part in the thread. Otherwise it drops the `creator`: a message started that thread, or the ant made the
 `creator` or the link up. So an ant woken on the thread passes its creator on to the ants it messages from there, and
 they to the ants they message in turn, while no ant outside the thread can claim a link no linked ant passed on
-to it. A link recorded expires after 30 days. A message sent while the machine's uplink is down records no link, and
-while `ants_links` does not exist (`ants init` creates it) only an ant taking part in the thread passes its creator
-on. An escalation on
-a thread an ant created goes up the creator's chain, whichever ant gets stuck (see Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
+to it. A link recorded expires after 30 days. While the machine's uplink is down, the machine's outbox keeps the
+link, as it keeps the message (see Leaf nodes), and while `ants_links` does not exist (`ants init` creates it) only an
+ant taking part in the thread passes its creator on. An escalation on
+a thread an ant created goes up the creator's chain, whichever ant gets stuck (see Escalations), and on a thread spun
+off it, the escalation links back to it too, so chain members answering or escalating further keep the creator. `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
 on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
 `ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
 
@@ -1348,8 +1350,9 @@ the team directory (`--dir`, `ANTS_AUTH_DIR`); the configuration names the crede
 run `ants leaf config` again with the new `--uplink` (it rewrites the whole file) and send the running leaf `SIGHUP`
 (`systemctl --user reload ants-nats`, `launchctl kill SIGHUP gui/$(id -u)/ants.nats`); local clients stay connected.
 
-While the uplink is down, inbox messages, replies, posts to thread notes and channels and the ants' dead letters wait in the
-machine's outbox, a stream on the leaf, and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
+While the uplink is down, inbox messages, replies, posts to thread notes and channels, the ants' dead letters and the
+links to channel threads they pass on (`ants_links`, see Channels) wait in the machine's outbox, a stream on the leaf,
+and the hub takes them once the uplink is back. The hub needs `feature_flags { js_api_reply_v2: true }` for that, and
 the human sets it up once per machine, with the leaf connected:
 
 ```sh
@@ -1361,8 +1364,9 @@ ants leaf outbox macbook --remove                                              #
 `feature_flags { js_api_reply_v2: true }`, if it does not: the setup stays in place and takes effect once the hub has
 the flag. Running it again checks again.
 
-The hub's stream takes from a machine's outbox only what the listed ants and humans may send themselves, so issue
-the leaf's uplink credentials for the same ants and humans. Whatever needs an answer from the hub at once still
+The hub's stream takes from a machine's outbox only what the listed ants and humans may send themselves, and the
+`ants_links` bucket only the links the listed ants passed on, under their own keys, so issue the leaf's uplink
+credentials for the same ants and humans. `ants leaf outbox` admits links once `ants init` created `ants_links`. Whatever needs an answer from the hub at once still
 fails while the uplink is down: inbox consumers and acks, sessions and the roster, `post_notes` (its expected sequence
 needs the hub's answer), approvals and replays. A dead letter kept in the outbox gets its notice, and its message
 terminated, on the message's next delivery after the uplink is back; the daemon notes it in `<home>/buried` meanwhile.
@@ -1372,8 +1376,8 @@ uplink coming back; the notice shares its message id with the one `ants dead wat
 Either way the daemon first reads its own dead letters back from the hub (`deadread-<ant>`): a letter of the message
 that landed there already, from the outbox or from `ants dead watch`, however long before, is not stored again, and
 one from `ants dead watch`, which told the human, gets no second notice.
-Machines set up before dead letters were buffered need `ants leaf outbox` again, and ant credentials issued before
-need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
+Machines set up before dead letters (or links) were buffered need `ants leaf outbox` again, and ant credentials issued
+before need `ants auth user` again. A message sent while the uplink is down lands after what reached the hub meanwhile; a reply
 whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on
 its subject, so the hub's stream republishes every inbox message it stores to `_INBOX.<recipient>.stored.<sender>`,
 which only the recipient may read: `ants ask --wait`, a waiting `ask_agent` and an ant waiting on its escalation

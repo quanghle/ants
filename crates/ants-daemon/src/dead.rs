@@ -566,7 +566,8 @@ fn notice(ant: &UserId, envelope: &Envelope, dead: &DeadLetter, dead_seq: u64, h
         ),
     )
     .with_owner(owner)
-    .with_creator(humans.ant_creator(envelope.creator.as_ref()));
+    .with_creator(humans.ant_creator(envelope.creator.as_ref()))
+    .with_origin_thread(envelope.origin_thread.clone());
     notice.in_reply_to = Some(envelope.id);
     notice
 }

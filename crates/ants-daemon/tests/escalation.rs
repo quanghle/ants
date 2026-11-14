@@ -167,3 +167,37 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_roster_through_the_cha
     let level = climbed.escalation.as_deref().expect("the escalation");
     assert_eq!((level.level, &level.leader), (2, &ant("boss")));
 }
+
+#[tokio::test]
+async fn an_escalation_on_a_thread_spun_off_a_channel_thread_passes_the_link_on() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
+    bus::ensure_stream(&js).await.unwrap();
+    let sessions = bus::ensure_sessions(&js).await.unwrap();
+    bus::ensure_links(&js).await.unwrap();
+    let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    client.flush().await.unwrap();
+    // lead created the channel thread; dev-a got stuck on a thread spun off it.
+    let (channel_thread, thread) = (ThreadId::generate(), ThreadId::generate());
+    let notice = Envelope::on_thread(channel_thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.")
+        .with_creator(Some(ant("lead")))
+        .spun_off(thread.clone());
+    let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
+
+    let escalator = escalator(&js, &sessions);
+    let escalated = escalator.escalate(stuck).await.unwrap();
+    assert_eq!(escalated, Escalated::Chain { level: 1, leader: ant("boss"), to: vec![ant("boss")] });
+    let linked = |e: &Envelope| (e.thread_id.clone(), e.creator.clone(), e.origin_thread.clone());
+    let expected = (thread.clone(), Some(ant("lead")), Some(channel_thread.clone()));
+    assert_eq!(linked(&next(&mut to_boss).await), expected);
+    let passed = ants_daemon::links::passed_on(&js, &channel_thread).await.unwrap();
+    assert!(passed.contains(&(ant("dev-a"), ant("boss"))), "{passed:?}");
+
+    // Past the deadline, boss's chain loops back to dev-a: the human's notice keeps the link the escalation kept.
+    let notice = tokio::select! {
+        notice = next(&mut to_human) => notice,
+        () = escalator.deadlines() => unreachable!(),
+    };
+    assert_eq!(linked(&notice), expected);
+}
