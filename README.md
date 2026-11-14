@@ -113,7 +113,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants tools approve ID [--always]` / `reject ID` | Allow once, allow for the session (`--always`, if offered), or reject a tool request. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or delete dead letters; `watch` turns `MAX_DELIVERIES` advisories into dead letters. |
 | `ants init` | Create or update stream `ANTS` and all eleven KV buckets (requires human credentials; other commands with human credentials do the same on connecting). |
-| `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
+| `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`); `--metrics` serves health and metrics (see [Monitoring](#monitoring)). |
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
 | `ants harness check` / `prompt TEXT` | Check the harness is installed and signed in (ACP handshake and `session/new` in the current directory; names the sign-in command when signed out) or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
@@ -154,6 +154,7 @@ A check that cannot run, such as one needing a file that does not exist or right
 | `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`), else the config file's `[cli]` or top-level `js_domain` |
 | `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`, `spend`); the global connection defaults | `~/.ants/config.toml` |
 | `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
+| `ANTS_METRICS` | `--metrics` (`ants daemon`) | Address for `/healthz` and `/metrics`, else the config file's `metrics`; off by default (see [Monitoring](#monitoring)) |
 | `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
 | `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
 | `ANTS_MCP_TOKEN` | `--token` (`ants mcp`) | Per-thread session token passed automatically by `ants daemon` |
@@ -199,6 +200,7 @@ messenger = true                           # default: serve built-in messenger u
 nats = "wss://hub.example/nats"            # default NATS URL for ants without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
+metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off); see Monitoring
 
 [cli]                                      # the CLI's connection where no flag or environment variable sets it
 creds = "~/.config/ants/auth/alice.creds"  # the human's credentials (an ant's never apply)
@@ -492,6 +494,7 @@ If NATS errors prevent storing the dead letter on delivery 6, JetStream emits un
 
 ```toml
 listen = "127.0.0.1:8424"                # overridden by --listen
+metrics = "127.0.0.1:9465"               # serve /healthz and /metrics (default: off); overridden by --metrics
 path = "/hooks"                          # POST /hooks/<name>
 nats = "nats://127.0.0.1:4222"           # overridden by --nats / ANTS_NATS_URL
 js_domain = "hub"                        # overridden by --js-domain / ANTS_JS_DOMAIN
@@ -706,7 +709,7 @@ ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 | `nats-leaf://127.0.0.1:7422` via `devtunnel connect` | Private Dev Tunnel forwarding the hub leafnode port (`--devtunnel` in `install-units.sh` on workers, `--devtunnel-host` on the hub). |
 | `nats-leaf://127.0.0.1:7422` via `ants bridge connect` | Networks whose proxies block WebSocket; tunnels leaf traffic over plain HTTPS `POST`/long-polled `GET` (`--bridge URL` in `install-units.sh` on workers, `--bridge-serve` on the hub). |
 
-For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN` or `--token-file FILE`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. Run both as services with `scripts/install-units.sh --bridge-serve` on the hub and `--bridge URL` on the worker (see [Services](#services)). See [docs/transport.md](docs/transport.md#https-fallback-bridge).
+For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN` or `--token-file FILE`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. Either end takes `--metrics ADDR` (see [Monitoring](#monitoring)). Run both as services with `scripts/install-units.sh --bridge-serve` on the hub and `--bridge URL` on the worker (see [Services](#services)). See [docs/transport.md](docs/transport.md#https-fallback-bridge).
 
 ## Services
 
@@ -743,13 +746,45 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.
 
+## Monitoring
+
+`ants daemon`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` serve health and metrics over plain HTTP when given an address: `--metrics ADDR` (`ANTS_METRICS` for the daemon), or `metrics` in the daemon's or the webhooks' config file. It is off by default. The address is meant to be loopback: any other address is served too, with a warning, as the endpoints have no authentication. A daemon reads the address at start; a reload (`SIGHUP`) does not move it.
+
+- `GET /healthz`: `200 ok` when healthy, else `503`. A daemon is healthy while it serves at least one ant and every ant it serves is connected to NATS; the webhook ingress while every webhook and human is connected; a bridge while it runs.
+- `GET /metrics`: the Prometheus text format (`text/plain; version=0.0.4`). Other paths answer `404`, other methods `405`.
+
+| Metric | Type | Labels | From |
+|---|---|---|---|
+| `ants_nats_connected` | gauge | `ant` (daemon), `user` (webhook) | Whether the NATS connection is up (1) or not (0) |
+| `ants_harnesses` | gauge | `ant` | Harness processes alive |
+| `ants_messages_in_hand` | gauge | `ant` | Messages being handled: prompting, or waiting for their thread or a harness |
+| `ants_prompts_in_flight` | gauge | `ant` | Prompts running in a harness |
+| `ants_prompts_total` | counter | `ant` | Prompts started |
+| `ants_retries_total` | counter | `ant` | Messages handed back for redelivery after a failure |
+| `ants_dead_letters_total` | counter | `ant` | Messages buried as dead letters |
+| `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Tokens, and cost in the harness's currency (usually USD), the harnesses reported (see [Spend report](#spend-report)) |
+| `ants_webhook_requests_in_flight` | gauge | | Webhook requests being answered |
+| `ants_webhook_events_total` | counter | `webhook`, `outcome` | Requests to a webhook: `delivered`, `duplicate`, `refused` (4xx) or `failed` (503) |
+| `ants_bridge_sessions`, `ants_bridge_sessions_total` | gauge, counter | | Bridge sessions open, and opened |
+| `ants_bridge_failures_total` | counter | | Upstream unreachable (`serve`), or a session not opened or broken (`connect`) |
+| `ants_bridge_bytes_total` | counter | `direction` (`up`, `down`) | Bytes carried towards the hub's upstream, and back |
+
+A daemon's counters start at zero when it starts; an ant's series appear while it is served.
+
+```sh
+ants daemon --metrics 127.0.0.1:9464 &
+curl -s http://127.0.0.1:9464/healthz
+curl -s http://127.0.0.1:9464/metrics
+```
+
 ## Footprint
 
-`scripts/footprint.sh` starts a temporary `nats-server -js` and `ants daemon`, samples resident memory with `ps`, and fails at or above `--max-mb` (default `20` MB). Pass `--ask "reply with ok"` to measure with one live harness session.
+`scripts/footprint.sh` starts a temporary `nats-server -js` and `ants daemon`, samples resident memory with `ps`, and fails at or above `--max-mb` (default `20` MB). Pass `--ask "reply with ok"` to measure with one live harness session, or `--metrics 127.0.0.1:9464` to measure with health and metrics served and scraped before each sample (about 0.3 MB more on macOS arm64).
 
 ```sh
 scripts/footprint.sh --port 14722
 scripts/footprint.sh --port 14722 --ask "reply with ok"
+scripts/footprint.sh --port 14722 --metrics 127.0.0.1:9464
 ```
 
 Measured with `ants` 0.1.0 (release) and `nats-server` 2.15.3:

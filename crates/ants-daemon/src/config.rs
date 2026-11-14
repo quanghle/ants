@@ -6,6 +6,7 @@
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
+//! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
 //! creds = "~/.config/ants/auth/alice.creds"
@@ -41,6 +42,7 @@
 //! ant named `messenger`; an empty file is a complete one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -87,6 +89,8 @@ struct File {
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
+    /// Where to serve health and metrics ([`crate::metrics`]).
+    metrics: Option<SocketAddr>,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant")]
@@ -363,6 +367,8 @@ pub struct Loaded {
     /// The harnesses the ants may name.
     pub harnesses: Harnesses,
     pub schedules: Vec<Schedule>,
+    /// Where to serve health and metrics, if anywhere.
+    pub metrics: Option<SocketAddr>,
 }
 
 /// Read and check the config file at `path`: its ants, the harnesses they may name, and its schedules.
@@ -452,7 +458,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         schedules.push(schedule);
     }
-    Ok(Loaded { ants, harnesses, schedules })
+    Ok(Loaded { ants, harnesses, schedules, metrics: file.metrics })
 }
 
 /// The built-in harnesses with the file's `definitions`, their commands given as paths resolved like other paths.
@@ -903,6 +909,15 @@ Review changes for correctness."""
         assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
         let err = parse_here("human = \"Not A Name\"").unwrap_err();
         assert!(format!("{err:#}").contains("human"), "{err:#}");
+    }
+
+    #[test]
+    fn metrics_are_off_unless_an_address_is_given() {
+        assert_eq!(parse_all("").unwrap().metrics, None);
+        let loaded = parse_all("metrics = \"127.0.0.1:9464\"").unwrap();
+        assert_eq!(loaded.metrics, Some("127.0.0.1:9464".parse().unwrap()));
+        let err = format!("{:#}", parse_all("metrics = \"localhost\"").unwrap_err());
+        assert!(err.contains("metrics"), "{err}");
     }
 
     #[test]

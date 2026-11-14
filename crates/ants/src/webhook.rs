@@ -18,11 +18,14 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ants_daemon::direct_kv::DirectKv;
+use ants_daemon::metrics::{self, Exposition, Kind};
 use ants_daemon::schedule::Mentions;
 use ants_daemon::{bus, owners};
 use ants_proto::{
@@ -94,6 +97,7 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Sto
 #[serde(deny_unknown_fields)]
 struct File {
     listen: Option<String>,
+    metrics: Option<SocketAddr>,
     path: Option<String>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
@@ -135,6 +139,8 @@ enum AuthKind {
 /// The config file of `ants webhook serve`, checked.
 pub struct Config {
     pub listen: Option<String>,
+    /// Where to serve health and metrics, if anywhere.
+    pub metrics: Option<SocketAddr>,
     /// Requests go to `<path>/<webhook>`.
     pub path: String,
     pub nats: Option<String>,
@@ -261,7 +267,8 @@ impl Config {
             }
             (None, Some(_)) => bail!("webhook config {shown}: the action secret needs public_url"),
         };
-        Ok(Self { listen: file.listen, path, nats: file.nats, js_domain: file.js_domain, webhooks, humans, links })
+        let (listen, metrics, nats, js_domain) = (file.listen, file.metrics, file.nats, file.js_domain);
+        Ok(Self { listen, metrics, path, nats, js_domain, webhooks, humans, links })
     }
 }
 
@@ -555,6 +562,16 @@ struct Hook {
     config: Webhook,
     bus: OnceCell<Bus>,
     last_warned: Mutex<Option<Instant>>,
+    outcomes: Outcomes,
+}
+
+/// How a webhook's requests ended, for the metrics.
+#[derive(Default)]
+struct Outcomes {
+    delivered: AtomicU64,
+    duplicate: AtomicU64,
+    refused: AtomicU64,
+    failed: AtomicU64,
 }
 
 struct Server {
@@ -564,14 +581,16 @@ struct Server {
     /// Answers approval links, at `<path>/_approval`.
     answers: Option<notify::Answers>,
     in_flight: Arc<Semaphore>,
+    humans: Vec<Arc<notify::Notified>>,
 }
 
 /// Serve the webhooks of `config` on `listener`, and notify its humans, until a webhook's or a human's credentials
-/// fail. Each webhook and human connects to `nats` as itself; until it is connected, its requests answer 503.
+/// fail. Each webhook and human connects to `nats` as itself; until it is connected, its requests answer 503. Health
+/// and metrics are served on `config.metrics`, if given.
 pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
     bus::check_url(nats)?;
     let hooks = config.webhooks.into_iter().map(|config| {
-        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default() };
+        let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default(), outcomes: Outcomes::default() };
         (hook.config.name.to_string(), Arc::new(hook))
     });
     let humans: Vec<_> = config.humans.into_iter().map(|human| Arc::new(notify::Notified::new(human))).collect();
@@ -585,7 +604,12 @@ pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, lis
         hooks: hooks.collect(),
         answers,
         in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+        humans: humans.clone(),
     });
+    let _metrics = match config.metrics {
+        Some(addr) => Some(metrics::start(addr, server.clone()).await?),
+        None => None,
+    };
     let mut tasks = JoinSet::new();
     let (failed_tx, mut failed) = mpsc::unbounded_channel();
     for hook in server.hooks.values() {
@@ -764,23 +788,86 @@ impl Server {
             }
             return Ok(answers.answer(&parts.method, parts.uri.query()).await);
         }
-        let hook = name.and_then(|name| self.hooks.get(name));
-        let refused = match hook {
-            None => Some(Refusal(StatusCode::NOT_FOUND, "no such webhook".to_owned())),
-            Some(_) if parts.method != Method::POST => {
-                Some(Refusal(StatusCode::METHOD_NOT_ALLOWED, "webhooks take POST only".to_owned()))
+        let Some(hook) = name.and_then(|name| self.hooks.get(name)) else {
+            let _ = read_body(body, false).await;
+            return refuse(StatusCode::NOT_FOUND, "no such webhook");
+        };
+        let outcome = hook.take(parts, body).await;
+        hook.outcomes.count(&outcome);
+        outcome
+    }
+}
+
+/// Healthy while every webhook and human is connected to the hub.
+impl metrics::Source for Server {
+    fn healthy(&self) -> bool {
+        self.hooks.values().all(|hook| hook.connected()) && self.humans.iter().all(|human| human.connected())
+    }
+
+    fn render(&self, out: &mut Exposition) {
+        let mut hooks: Vec<_> = self.hooks.values().collect();
+        hooks.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+        out.family("ants_nats_connected", Kind::Gauge, "Whether the user's connection to NATS is up (1) or not (0).");
+        for hook in &hooks {
+            out.sample("ants_nats_connected", &[("user", hook.config.name.as_str())], metrics::flag(hook.connected()));
+        }
+        for human in &self.humans {
+            let name = human.config.name.as_str();
+            out.sample("ants_nats_connected", &[("user", name)], metrics::flag(human.connected()));
+        }
+        let in_flight = MAX_IN_FLIGHT - self.in_flight.available_permits();
+        out.single("ants_webhook_requests_in_flight", Kind::Gauge, "Requests being answered.", in_flight as f64);
+        out.family(
+            "ants_webhook_events_total",
+            Kind::Counter,
+            "Requests to a webhook: delivered, duplicate (delivered before), refused (4xx) or failed (503).",
+        );
+        for hook in &hooks {
+            let o = &hook.outcomes;
+            for (outcome, n) in [
+                ("delivered", &o.delivered),
+                ("duplicate", &o.duplicate),
+                ("refused", &o.refused),
+                ("failed", &o.failed),
+            ] {
+                let labels = [("webhook", hook.config.name.as_str()), ("outcome", outcome)];
+                out.sample("ants_webhook_events_total", &labels, n.load(Ordering::Relaxed) as f64);
             }
-            Some(hook) if !hook.config.authorized_before_body(&parts.headers) => {
-                hook.warn_rejected();
-                Some(Refusal(StatusCode::UNAUTHORIZED, "missing or wrong token".to_owned()))
-            }
-            Some(_) => None,
+        }
+    }
+}
+
+impl Outcomes {
+    fn count(&self, outcome: &Result<Response<Full<Bytes>>, Refusal>) {
+        let counter = match outcome {
+            Ok(response) if response.status() == StatusCode::OK => &self.duplicate,
+            Ok(_) => &self.delivered,
+            Err(Refusal(StatusCode::SERVICE_UNAVAILABLE, _)) => &self.failed,
+            Err(_) => &self.refused,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Hook {
+    fn connected(&self) -> bool {
+        self.bus.get().is_some_and(|bus| metrics::connected(&bus.client))
+    }
+
+    /// Take a request to this webhook: check it, and deliver its event.
+    async fn take(&self, parts: hyper::http::request::Parts, body: Incoming) -> Result<Response<Full<Bytes>>, Refusal> {
+        let refused = if parts.method != Method::POST {
+            Some(Refusal(StatusCode::METHOD_NOT_ALLOWED, "webhooks take POST only".to_owned()))
+        } else if !self.config.authorized_before_body(&parts.headers) {
+            self.warn_rejected();
+            Some(Refusal(StatusCode::UNAUTHORIZED, "missing or wrong token".to_owned()))
+        } else {
+            None
         };
         let body = read_body(body, refused.is_none()).await;
         if let Some(refused) = refused {
             return Err(refused);
         }
-        let hook = hook.expect("refused without a webhook");
         let body = match body {
             Ok(Some(body)) => body,
             Ok(None) => {
@@ -788,17 +875,17 @@ impl Server {
             }
             Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}")),
         };
-        if !hook.config.authorized(&parts.headers, &body) {
-            hook.warn_rejected();
+        if !self.config.authorized(&parts.headers, &body) {
+            self.warn_rejected();
             return refuse(StatusCode::UNAUTHORIZED, "missing or wrong signature");
         }
-        let event = hook.config.event(&parts.headers, &body)?;
-        let Some(bus) = hook.bus.get() else { return refuse(StatusCode::SERVICE_UNAVAILABLE, "not connected yet") };
-        if bus.client.connection_state() != async_nats::connection::State::Connected {
+        let event = self.config.event(&parts.headers, &body)?;
+        let Some(bus) = self.bus.get() else { return refuse(StatusCode::SERVICE_UNAVAILABLE, "not connected yet") };
+        if !metrics::connected(&bus.client) {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the hub is not reachable");
         }
-        hook.deliver(bus, event).await.map_err(|e| {
-            tracing::warn!(webhook = %hook.config.name, error = format!("{e:#}"), "delivering an event");
+        self.deliver(bus, event).await.map_err(|e| {
+            tracing::warn!(webhook = %self.config.name, error = format!("{e:#}"), "delivering an event");
             Refusal(StatusCode::SERVICE_UNAVAILABLE, "the hub did not store the event".to_owned())
         })
     }
@@ -1230,7 +1317,8 @@ pub(crate) mod tests {
     async fn a_channel_webhook_mentions_nobody_the_listed_or_the_members() {
         let Some((server, js, secret)) = hub().await else { return };
         let ops: ChannelId = "ops".parse().unwrap();
-        let mut config = String::new();
+        let metrics: SocketAddr = format!("127.0.0.1:{}", ants_test_support::free_port()).parse().unwrap();
+        let mut config = format!("metrics = \"{metrics}\"\n");
         for (name, mentions) in
             [("news", ""), ("alerts", "mention = [\"dev-b\", \"carol\"]"), ("ci", "broadcast = true")]
         {
@@ -1251,6 +1339,17 @@ pub(crate) mod tests {
             let answer = deliver(addr, &format!("/hooks/{name}"), &token, b"@dev-a the build is red").await;
             assert_eq!(answer.status, 202, "{name}: {}", answer.body);
         }
+        assert_eq!(request(metrics, "GET", "/healthz", &[], b"").await.status, 200);
+        let exposition = request(metrics, "GET", "/metrics", &[], b"").await.body;
+        for line in [
+            "ants_nats_connected{user=\"ci\"} 1",
+            "ants_webhook_events_total{webhook=\"news\",outcome=\"delivered\"} 1",
+            "ants_webhook_events_total{webhook=\"news\",outcome=\"refused\"} 2",
+            "ants_webhook_events_total{webhook=\"alerts\",outcome=\"refused\"} 0",
+            "ants_webhook_requests_in_flight 0",
+        ] {
+            assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
+        }
         let mentions = |name: &str| {
             let (js, subject) = (js.clone(), subject::chan(&ops, &p(name)));
             async move {
@@ -1269,11 +1368,9 @@ pub(crate) mod tests {
     async fn without_the_hub_an_event_is_refused_for_a_retry() {
         let dir = ants_test_support::scratch_dir("webhook-down");
         let path = dir.join("webhooks.toml");
-        std::fs::write(
-            &path,
-            format!("{HOOK}ant = \"dev-a\"\n").replace("secret_env = \"HOOK_SECRET\"", "secret_file = \"s\""),
-        )
-        .unwrap();
+        let metrics: SocketAddr = format!("127.0.0.1:{}", ants_test_support::free_port()).parse().unwrap();
+        let hook = format!("{HOOK}ant = \"dev-a\"\n").replace("secret_env = \"HOOK_SECRET\"", "secret_file = \"s\"");
+        std::fs::write(&path, format!("metrics = \"{metrics}\"\n{hook}")).unwrap();
         std::fs::write(dir.join("s"), "s3cret").unwrap();
         #[cfg(unix)]
         {
@@ -1286,6 +1383,16 @@ pub(crate) mod tests {
         let down = request(addr, "POST", "/hooks/github", &[("Authorization", "Bearer s3cret")], b"x").await;
         assert_eq!(down.status, 503);
         assert!(down.headers.contains(&format!("retry-after: {RETRY_AFTER}")), "{}", down.headers);
+        let health = request(metrics, "GET", "/healthz", &[], b"").await;
+        assert_eq!(health.status, 503, "{}", health.body);
+        let exposition = request(metrics, "GET", "/metrics", &[], b"").await.body;
+        for line in [
+            "ants_nats_connected{user=\"github\"} 0",
+            "ants_webhook_events_total{webhook=\"github\",outcome=\"failed\"} 1",
+            "ants_webhook_events_total{webhook=\"github\",outcome=\"refused\"} 1",
+        ] {
+            assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
+        }
     }
 
     /// A notification service on loopback that takes every `POST`, handing over its path and JSON body.
