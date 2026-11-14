@@ -8,7 +8,7 @@
 //! What a thread spent since a human's last message on it is kept in the KV bucket `ants_sessions` under
 //! `<ant>.<thread>.spend`, and what the ant spent in a UTC day under `<ant>.day.<YYYY-MM-DD>`, so both
 //! survive harness and daemon restarts. A message from any human gives the thread a fresh allowance; the ant's
-//! allowance comes back at 00:00 UTC.
+//! allowance comes back at 00:00 UTC. Spend is kept whether or not the ant has caps, for `ants spend` to report.
 //!
 //! The thread's escalation ([`Pending`]) is kept with its spend, so its level survives restarts too, and the threads
 //! whose escalation has a deadline under `<ant>.escalations.deadlines`.
@@ -28,15 +28,19 @@ use crate::direct_kv::DirectKv;
 use crate::harness::Spend;
 
 /// Spend caps; None is no cap.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Caps {
     /// Tokens a thread may spend between messages from a human.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_tokens: Option<u64>,
     /// Cost a thread may spend between messages from a human, in the harness's unit (USD for Claude).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_cost: Option<f64>,
     /// Tokens the ant may spend in a UTC day.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_tokens: Option<u64>,
     /// Cost the ant may spend in a UTC day.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_cost: Option<f64>,
 }
 
@@ -100,10 +104,38 @@ impl Pending {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct DaySpend {
-    tokens: u64,
-    cost: f64,
+/// Tokens and cost spent: by the ant in a UTC day, or by a thread since a human's last message on it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Spent {
+    pub tokens: u64,
+    pub cost: f64,
+}
+
+impl std::ops::AddAssign for Spent {
+    fn add_assign(&mut self, other: Self) {
+        self.tokens += other.tokens;
+        self.cost += other.cost;
+    }
+}
+
+/// What `ant` spent on `day` (`YYYY-MM-DD`, UTC), read from [`ants_proto::SESSIONS_BUCKET`]; None when nothing is
+/// stored.
+pub async fn day_spent(kv: &DirectKv, ant: &UserId, day: &str) -> Result<Option<Spent>> {
+    read(kv, daily_spend_key(ant, day)).await
+}
+
+/// What `ant` spent on `thread` since a human's last message on it, read from [`ants_proto::SESSIONS_BUCKET`]; None
+/// when nothing is stored.
+pub async fn thread_spent(kv: &DirectKv, ant: &UserId, thread: &ThreadId) -> Result<Option<Spent>> {
+    let spent: Option<ThreadSpend> = read(kv, thread_spend_key(ant, thread)).await?;
+    Ok(spent.map(|s| Spent { tokens: s.tokens, cost: s.cost }))
+}
+
+async fn read<T: for<'de> Deserialize<'de>>(kv: &DirectKv, key: String) -> Result<Option<T>> {
+    match kv.get(&key).await? {
+        Some(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}"))?)),
+        None => Ok(None),
+    }
 }
 
 #[derive(Clone)]
@@ -144,7 +176,7 @@ pub struct Ledger {
     ant: UserId,
     store: Store,
     /// The ant's spend of the day it is for; held while it is read or stored, so updates do not cross.
-    day: tokio::sync::Mutex<Option<(String, DaySpend)>>,
+    day: tokio::sync::Mutex<Option<(String, Spent)>>,
     /// The escalation deadlines by thread, once read; held while a thread's spend is read and stored.
     threads: tokio::sync::Mutex<Option<BTreeMap<ThreadId, i64>>>,
 }
@@ -298,10 +330,8 @@ impl Ledger {
         Ok(self.check(&spent, daily))
     }
 
+    /// Counted whether or not the ant has caps, so `ants spend` reports it.
     async fn record_on(&self, thread: &ThreadId, spend: &Spend, today: &str) -> Result<Option<String>> {
-        if !self.caps.any() {
-            return Ok(None);
-        }
         let (spent, tokens, cost) = self
             .update(thread, |spent| {
                 let (tokens, cost) = match spend {
@@ -326,7 +356,7 @@ impl Ledger {
     }
 
     /// The ant's spend on `today`, read from the store when the day held is another one.
-    async fn load_day<'a>(&self, day: &'a mut Option<(String, DaySpend)>, today: &str) -> Result<&'a mut DaySpend> {
+    async fn load_day<'a>(&self, day: &'a mut Option<(String, Spent)>, today: &str) -> Result<&'a mut Spent> {
         if day.as_ref().is_none_or(|(d, _)| d != today) {
             let spent = self.store.get(daily_spend_key(&self.ant, today)).await?;
             *day = Some((today.to_owned(), spent));
@@ -334,7 +364,7 @@ impl Ledger {
         Ok(&mut day.as_mut().expect("loaded").1)
     }
 
-    fn check(&self, thread: &ThreadSpend, day: &DaySpend) -> Option<String> {
+    fn check(&self, thread: &ThreadSpend, day: &Spent) -> Option<String> {
         let caps = &self.caps;
         let since = "since a human's last message";
         let resets = "today; resets at 00:00 UTC";
@@ -407,6 +437,18 @@ mod tests {
         let reached = ledger.record_on(&t, &cost("s2", 0.3), DAY).await.unwrap().expect("a new session adds it all");
         assert!(reached.starts_with("Thread cost cap reached (1.05 of 1.00"), "{reached}");
         assert_eq!(ledger.reached_on(&thread(2), DAY).await.unwrap(), None, "other threads have their own");
+    }
+
+    #[tokio::test]
+    async fn spend_is_kept_without_caps() {
+        let store = Store::Memory(Arc::default());
+        let ledger = Ledger::with_store(store.clone(), ant(), Caps::default());
+        assert_eq!(ledger.record_on(&thread(1), &Spend::Tokens(70), DAY).await.unwrap(), None);
+        assert_eq!(ledger.record_on(&thread(1), &cost("s1", 0.5), DAY).await.unwrap(), None);
+        let day: Spent = store.get(daily_spend_key(&ant(), DAY)).await.unwrap();
+        assert_eq!(day, Spent { tokens: 70, cost: 0.5 });
+        let spent: ThreadSpend = store.get(thread_spend_key(&ant(), &thread(1))).await.unwrap();
+        assert_eq!((spent.tokens, spent.cost), (70, 0.5));
     }
 
     #[tokio::test]
