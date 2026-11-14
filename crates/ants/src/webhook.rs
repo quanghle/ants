@@ -1430,4 +1430,109 @@ pub(crate) mod tests {
         assert!(body["message"].as_str().unwrap().starts_with("which database?"), "{body}");
         assert!(body.get("actions").is_none());
     }
+    /// The topics of the next `n` notifications, with their titles, sorted.
+    async fn topics(posts: &mut mpsc::UnboundedReceiver<(String, Value)>, n: usize) -> Vec<(String, String)> {
+        let mut got = Vec::new();
+        for _ in 0..n {
+            let (_, body) = next(posts).await;
+            got.push((body["topic"].as_str().unwrap().to_owned(), body["title"].as_str().unwrap().to_owned()));
+        }
+        got.sort();
+        got
+    }
+
+    #[tokio::test]
+    async fn a_device_following_what_a_notice_is_about_gets_no_push_and_the_others_do() {
+        use crate::presence::{self, tests::device};
+        use ants_proto::Following;
+
+        let Some((server, _, _)) = hub().await else { return };
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let creds = server.creds_as(&alice, ants_proto::Role::Human);
+        let (laptop, laptop_id) = device(&server, &alice, "laptop").await;
+        let (_, phone_id) = device(&server, &alice, "phone").await;
+        let (sink, mut posts) = sink().await;
+        let config = server.dir().join("webhooks.toml");
+        let target = |topic: &str, device: String| {
+            format!("[[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"{topic}\"\n{device}")
+        };
+        std::fs::write(
+            &config,
+            format!(
+                "[[human]]\nname = \"alice\"\ncreds = {creds:?}\n{}{}{}",
+                target("laptop", format!("device = \"{laptop_id}\"\n")),
+                target("phone", format!("device = \"{phone_id}\"\n")),
+                target("any", String::new()),
+            ),
+        )
+        .unwrap();
+        let (_ingress, _) = start(&config, &server.url).await;
+        let stream = laptop.get_stream(STREAM).await.unwrap();
+        for _ in 0..100 {
+            if stream.consumer_info(&ants_proto::notify_consumer(&alice)).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (_, ant) = server.connect(&dev_a).await;
+        let escalate = async |text: &str| {
+            let thread = ThreadId::generate();
+            let escalation = ants_proto::Escalation::new(dev_a.clone(), thread, ants_proto::EscalationReason::Asked);
+            let escalated = Envelope::new(dev_a.clone(), alice.clone(), text).with_escalation(Some(escalation));
+            ant.publish(escalated.subject(), serde_json::to_vec(&escalated).unwrap().into())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+        };
+        let ask = async || {
+            let tool = ants_proto::ToolCall { kind: "execute".into(), title: "make".into(), ..Default::default() };
+            let options = vec![ants_proto::Verdict::AllowOnce];
+            let asked = ants_proto::ApprovalRequest::new(
+                dev_a.clone(),
+                ThreadId::generate(),
+                tool,
+                options,
+                Duration::from_secs(600),
+            );
+            ant.publish(asked.subject(), serde_json::to_vec(&asked).unwrap().into()).await.unwrap().await.unwrap();
+        };
+        let pair = |topic: &str, title: &str| (topic.to_owned(), title.to_owned());
+        let (escalated, asked) = ("dev-a escalates: asked on dev-a", "dev-a asks to run a tool");
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let following =
+            presence::while_following(&laptop, None, &alice, Some(laptop_id), Following::Inbox, async move {
+                _ = stop_rx.await;
+            });
+        let check = async {
+            let present = presence::Present::new(&laptop, None).await.unwrap();
+            for _ in 0..50 {
+                if !present.following(&alice, [laptop_id], Following::Inbox).await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            escalate("which database?").await;
+            assert_eq!(
+                topics(&mut posts, 2).await,
+                [pair("any", escalated), pair("phone", escalated)],
+                "the laptop shows the escalation in its inbox"
+            );
+            ask().await;
+            assert_eq!(
+                topics(&mut posts, 3).await,
+                [pair("any", asked), pair("laptop", asked), pair("phone", asked)],
+                "the laptop follows no tool requests"
+            );
+            stop_tx.send(()).unwrap();
+        };
+        tokio::join!(following, check);
+        escalate("and now?").await;
+        assert_eq!(
+            topics(&mut posts, 3).await,
+            [pair("any", escalated), pair("laptop", escalated), pair("phone", escalated)],
+            "the laptop stopped following"
+        );
+    }
 }

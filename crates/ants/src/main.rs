@@ -4,16 +4,19 @@ mod add;
 mod auth;
 mod bridge;
 mod channel;
+mod defaults;
 mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
 mod notify;
 mod outbox;
+mod presence;
 mod revoke;
 mod roster;
 mod scheduler;
 mod serve;
+mod service;
 mod spend;
 mod thread;
 mod tools;
@@ -27,8 +30,8 @@ use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, hub, notes, owners};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
-    Envelope, Escalation, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId,
-    Verdict, subject,
+    Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId,
+    UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -38,17 +41,20 @@ use futures::StreamExt as _;
 #[command(name = "ants", version, about = "Agent teams messaging over NATS")]
 struct Cli {
     /// NATS server: nats://, tls://, ws:// or wss://. Point it at the local leaf node where there is one.
+    /// Unset, the config file's `[cli]` or top-level `nats` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
     /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
+    /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`.
     /// A human's also bring the hub's stream and buckets up to date on connecting, as `ants init` does.
     #[arg(long, global = true, env = "ANTS_CREDS")]
     creds: Option<PathBuf>,
 
     /// JetStream domain of the hub (its `jetstream { domain }`), needed to reach JetStream from a leaf node without
     /// JetStream. Set it for every ants process, and when issuing credentials with `ants auth`.
+    /// Unset, the config file's `[cli]` or top-level `js_domain` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     js_domain: Option<JsDomain>,
 
@@ -167,8 +173,8 @@ enum Command {
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
     /// behind it on the thread still run. Needs a human's credentials.
     Cancel { ant: UserId, thread: ThreadId },
-    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks and
-    /// read buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
+    /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
+    /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
     /// republishing of inbox messages, the owners bucket's duplicate window), keeping the rest of their settings. Needs
     /// a human's credentials. Every other command run with them does the same on connecting.
     Init,
@@ -183,7 +189,8 @@ enum Command {
     Daemon(Box<serve::DaemonArgs>),
     /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
-    /// key to sign; run again with --jwt or --enroll to complete the credentials. Reload the daemon (SIGHUP) to serve the ant.
+    /// key to sign; run again with --jwt or --enroll to complete the credentials. Completed credentials reload the
+    /// daemon service of the config file to serve the ant, when it runs (scripts/install-units.sh).
     Add(Box<add::AddArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
     /// list them, approve or reject one.
@@ -800,7 +807,7 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
+    let cli = defaults::parse()?;
     let domain = cli.js_domain.as_ref();
     let nats = || Nats::new(&cli.nats, cli.creds.as_deref(), domain);
     match cli.command {
@@ -843,7 +850,7 @@ async fn main() -> Result<()> {
             }
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
@@ -854,7 +861,8 @@ async fn main() -> Result<()> {
                 ants_proto::LINKS_BUCKET,
                 ants_proto::OWNERS_BUCKET,
                 ants_proto::WEBHOOKS_BUCKET,
-                ants_proto::READ_BUCKET
+                ants_proto::READ_BUCKET,
+                ants_proto::PRESENCE_BUCKET
             );
             Ok(())
         }
@@ -1515,8 +1523,19 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
             }
             std::future::pending::<()>().await
         };
+        let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });
+        // Following one thread shows no escalation on the others, so only following them all counts as reading.
+        let followed = async {
+            match select.thread {
+                None => {
+                    let device = nats.device.id;
+                    presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed).await
+                }
+                Some(_) => followed.await,
+            }
+        };
         tokio::select! {
-            followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
+            followed = followed => followed?,
             () = watch => {}
         }
     }
@@ -2119,8 +2138,9 @@ mod tests {
         .await
         .unwrap();
         let fixed: Vec<_> = upgrade_hub(&h_js, &h_rights).await.into_iter().map(|f| f.object).collect();
-        assert_eq!(fixed, hub::Object::ALL, "the old stream upgraded, every bucket created");
-        assert!(hub::check(&h_js, |_| true).await.is_empty());
+        let seen: Vec<_> = hub::Object::ALL.into_iter().filter(|o| *o != hub::Object::Presence).collect();
+        assert_eq!(fixed, seen, "the old stream upgraded, every bucket a human may look up created");
+        assert!(hub::check(&h_js, |s| h_rights.may_publish(s)).await.is_empty());
         assert!(upgrade_hub(&h_js, &h_rights).await.is_empty());
     }
 

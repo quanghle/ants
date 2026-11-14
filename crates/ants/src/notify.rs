@@ -8,6 +8,10 @@
 //! decided or expired, or an escalation older than [`ESCALATION_MAX_AGE`], is skipped; a sink that fails is logged
 //! and the others still get the notice.
 //!
+//! A sink may be the push target of one device of the human (`device`): it gets no notice of what that device follows
+//! as it comes, the human's inbox for an escalation and the tool requests for an approval, while the device's
+//! [`ants_proto::Presence`] says it follows it ([`Present`]). A sink of no device gets every notice.
+//!
 //! With `public_url` and an action secret, an approval notice carries one link per verdict the request offers: the
 //! request's ant, id and stream sequence, the verdict, the human and the request's expiry, signed with HMAC-SHA256
 //! ([`Links`]). `GET` on a link only shows the request and a button that `POST`s to it, so a link preview decides
@@ -21,7 +25,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{ApprovalRequest, Envelope, JsDomain, STREAM, UserId, Uuid, Verdict, notify_consumer, subject};
+use ants_proto::{
+    ApprovalRequest, DeviceId, Envelope, Following, JsDomain, STREAM, UserId, Uuid, Verdict, notify_consumer, subject,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, stream::Stream};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -39,6 +45,7 @@ use tokio::sync::OnceCell;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 
+use crate::presence::Present;
 use crate::tools;
 
 /// Where approval links point, under the config's `path`. A webhook name starts with a letter or digit, so no
@@ -91,6 +98,8 @@ struct SinkEntry {
     chat: Option<String>,
     secret_env: Option<String>,
     secret_file: Option<PathBuf>,
+    /// The device of the human whose push target the sink is: none while that device follows what a notice is about.
+    device: Option<DeviceId>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +117,23 @@ pub struct Human {
     /// The ants whose tool requests are notified: `None` for none, an empty list for every ant.
     approvals: Option<Vec<UserId>>,
     escalations: bool,
-    sinks: Vec<Sink>,
+    sinks: Vec<Target>,
+}
+
+/// A sink, and the device of the human it is the push target of, if any. A sink of no device gets every notice.
+#[derive(PartialEq, Eq)]
+struct Target {
+    device: Option<DeviceId>,
+    sink: Sink,
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.device {
+            Some(device) => write!(f, "{} of device {device}", self.sink.label()),
+            None => f.write_str(&self.sink.label()),
+        }
+    }
 }
 
 /// Where a human's notices go. Its secrets are never logged: [`Sink::label`] names it.
@@ -154,7 +179,11 @@ impl Human {
             .notify
             .into_iter()
             .enumerate()
-            .map(|(i, sink)| Sink::from_entry(sink, resolve, env).with_context(|| format!("notify #{}", i + 1)))
+            .map(|(i, sink)| {
+                let device = sink.device;
+                let sink = Sink::from_entry(sink, resolve, env).with_context(|| format!("notify #{}", i + 1))?;
+                Ok(Target { device, sink })
+            })
             .collect::<Result<Vec<_>>>()?;
         let creds = entry.creds.as_deref().map(resolve);
         Ok(Self { name: entry.name, creds, approvals, escalations: entry.escalations, sinks })
@@ -173,7 +202,19 @@ impl Human {
                 path.display()
             );
         }
+        if self.devices().next().is_some() && !crate::humans::may_publish(&claims, &subject::presence_of(name)) {
+            bail!(
+                "credentials {} predate presence, which sinks of a device need; issue them again with `ants auth \
+                 user {name} --human`",
+                path.display()
+            );
+        }
         Ok(())
+    }
+
+    /// The devices that sinks are push targets of.
+    fn devices(&self) -> impl Iterator<Item = DeviceId> {
+        self.sinks.iter().filter_map(|t| t.device)
     }
 
     /// The consumer's subjects: tool requests and the human's inbox, as configured.
@@ -573,9 +614,11 @@ async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> 
     bail!("answered {status}: {}", answer.trim())
 }
 
-/// Send `notice` to every sink of `human` at once; a failure is logged, never fatal.
-async fn send(human: &Human, notice: &Notice) {
-    let sends = human.sinks.iter().map(|sink| async move {
+/// Send `notice` to every sink of `human` at once, but those of the devices `away` leaves out; a failure is logged,
+/// never fatal.
+async fn send(human: &Human, notice: &Notice, away: impl Fn(&DeviceId) -> bool) {
+    let targets = human.sinks.iter().filter(|t| t.device.as_ref().is_none_or(&away));
+    let sends = targets.map(|Target { sink, .. }| async move {
         let (url, bearer, body) = sink.request(notice);
         let sent = tokio::time::timeout(SEND_TIMEOUT, post_json(&url, bearer, &body)).await;
         match sent {
@@ -594,6 +637,7 @@ struct HumanBus {
     client: async_nats::Client,
     js: jetstream::Context,
     stream: Stream,
+    present: Present,
 }
 
 /// A human of the config, and its connection once made.
@@ -647,7 +691,14 @@ pub async fn run(
             }
         }
     };
-    let _ = human.bus.set(HumanBus { client, js, stream });
+    // Through a leaf node, a direct get of a missing bucket goes unanswered rather than finding none.
+    if human.config.devices().next().is_some()
+        && let Err(e) = crate::presence::ensure_bucket(&js).await
+    {
+        tracing::warn!(human = %name, "sinks of a device get every notice: {e:#}");
+    }
+    let present = Present::new(&js, js_domain.as_ref()).await?;
+    let _ = human.bus.set(HumanBus { client, js, stream, present });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut delay = Duration::from_secs(1);
@@ -704,7 +755,8 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
 async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject: &str, payload: &[u8], seq: u64) {
     let config = &human.config;
     let now = Utc::now();
-    let notice = if subject.starts_with(subject::inbox_of(&config.name).trim_end_matches('*')) {
+    let escalation = subject.starts_with(subject::inbox_of(&config.name).trim_end_matches('*'));
+    let notice = if escalation {
         match serde_json::from_slice::<Envelope>(payload) {
             Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {
                 escalation_notice(&envelope)
@@ -731,9 +783,13 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
             }
         }
     };
-    if let Some(notice) = notice {
-        send(config, &notice).await;
+    let Some(notice) = notice else { return };
+    let what = if escalation { Following::Inbox } else { Following::Approvals };
+    let reading = bus.present.following(&config.name, config.devices(), what).await;
+    if !reading.is_empty() {
+        tracing::debug!(human = %config.name, devices = ?reading, what = what.as_str(), "skipping devices reading");
     }
+    send(config, &notice, |device| !reading.contains(device)).await;
 }
 
 /// Whether the message of id `id`, a UUIDv7 stamped when sent, is younger than [`ESCALATION_MAX_AGE`].
@@ -935,10 +991,11 @@ mod tests {
 
     #[test]
     fn a_human_has_sinks_and_what_to_be_notified_of() {
+        let phone = DeviceId::generate();
         let alice = human(&format!(
             "name = \"alice\"\ncreds = \"alice.creds\"\nants = [\"dev-a\"]\n{NTFY_SINK}\
              [[notify]]\nkind = \"slack\"\nsecret_env = \"SLACK_URL\"\n\
-             [[notify]]\nkind = \"telegram\"\nchat = \"-10042\"\nsecret_env = \"BOT_TOKEN\"\n"
+             [[notify]]\nkind = \"telegram\"\nchat = \"-10042\"\nsecret_env = \"BOT_TOKEN\"\ndevice = \"{phone}\"\n"
         ))
         .unwrap();
         assert_eq!(alice.creds.as_deref(), Some(Path::new("/etc/ants/alice.creds")));
@@ -947,14 +1004,19 @@ mod tests {
         let ntfy = Sink::Ntfy { url: NTFY.to_owned(), topic: "alice-ants".to_owned(), token: None };
         let slack = Sink::Slack { url: "https://hooks.slack.com/services/T0/B0/xyz".to_owned() };
         let telegram = Sink::Telegram { api: TELEGRAM.to_owned(), token: "123:abc".to_owned(), chat: "-10042".into() };
-        assert_eq!(alice.sinks, [ntfy, slack, telegram]);
-        assert_eq!(format!("{:?}", alice.sinks), "[ntfy topic alice-ants, slack, telegram chat -10042]");
+        let sinks: Vec<_> = alice.sinks.iter().map(|t| &t.sink).collect();
+        assert_eq!(sinks, [&ntfy, &slack, &telegram]);
+        assert_eq!(alice.devices().collect::<Vec<_>>(), [phone], "telegram is the phone's push target");
+        assert_eq!(
+            format!("{:?}", alice.sinks),
+            format!("[ntfy topic alice-ants, slack, telegram chat -10042 of device {phone}]")
+        );
 
         let quiet =
             human(&format!("name = \"bob\"\napprovals = false\n{NTFY_SINK}url = \"http://ntfy.lan/\"\n")).unwrap();
         assert_eq!(quiet.subjects(), ["ants.inbox.bob.*"]);
         assert!(!quiet.wants_request_of(&p("dev-a")));
-        assert!(matches!(&quiet.sinks[0], Sink::Ntfy { url, .. } if url == "http://ntfy.lan"));
+        assert!(matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan"));
         let every = human(&format!("name = \"bob\"\nescalations = false\n{NTFY_SINK}")).unwrap();
         assert_eq!(every.subjects(), ["ants.approvals.*"]);
         assert!(every.wants_request_of(&p("dev-b")));
@@ -970,6 +1032,7 @@ mod tests {
             (format!("name = \"bob\"\n{NTFY_SINK}url = \"ftp://x\"\n"), "expected https://host"),
             (format!("name = \"bob\"\n{NTFY_SINK}url = \"https://u:p@x\"\n"), "no user, password or query"),
             (format!("name = \"bob\"\n{NTFY_SINK}secret_env = \"UNSET\"\n"), "UNSET is not set"),
+            (format!("name = \"bob\"\n{NTFY_SINK}device = \"phone\"\n"), "device"),
             ("name = \"bob\"\n[[notify]]\nkind = \"slack\"\n".to_owned(), "slack needs its incoming webhook URL"),
             (
                 "name = \"bob\"\n[[notify]]\nkind = \"slack\"\nurl = \"https://hooks.slack.com/x\"\n".to_owned(),

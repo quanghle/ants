@@ -2,14 +2,17 @@
 //! expects it. [`check`] compares the hub's objects with them and [`apply`] creates what is missing and upgrades what
 //! is out of date, changing only the settings `ants init` owns: the rest of a stream's configuration, such as the
 //! sources `ants leaf outbox` adds, stays as it is.
+//!
+//! An object whose stream info the credentials do not get, as the presence bucket for every human's, cannot be
+//! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings.
 
 use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, READ_BUCKET,
-    ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
+    PRESENCE_TTL, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
+    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -32,11 +35,12 @@ pub enum Object {
     Owners,
     Webhooks,
     Read,
+    Presence,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -48,6 +52,7 @@ impl Object {
         Self::Owners,
         Self::Webhooks,
         Self::Read,
+        Self::Presence,
     ];
 
     /// The bucket's name; None for the stream.
@@ -64,6 +69,7 @@ impl Object {
             Self::Owners => OWNERS_BUCKET,
             Self::Webhooks => WEBHOOKS_BUCKET,
             Self::Read => READ_BUCKET,
+            Self::Presence => PRESENCE_BUCKET,
         })
     }
 
@@ -93,6 +99,7 @@ impl Object {
             Self::Chains => Spec::Bucket(Box::new(chains_config())),
             Self::Webhooks => Spec::Bucket(Box::new(webhooks_config())),
             Self::Read => Spec::Bucket(Box::new(read_config())),
+            Self::Presence => Spec::Bucket(Box::new(presence_config())),
         }
     }
 
@@ -111,7 +118,7 @@ impl Object {
             Ok(stream) => {
                 let mut config = stream.cached_info().config.clone();
                 let drift = self.upgrade(&mut config);
-                (!drift.is_empty()).then(|| Problem::Outdated { drift, upgraded: Box::new(config) })
+                (!drift.is_empty()).then_some(Problem::Outdated { drift })
             }
             Err(e) if not_found(&e) => Some(Problem::Missing),
             Err(e) => Some(Problem::Unchecked(e.to_string())),
@@ -174,10 +181,9 @@ impl fmt::Display for Drift {
 #[derive(Debug, Clone)]
 pub enum Problem {
     Missing,
-    /// It lacks `drift`; `upgraded` is its configuration with that fixed and everything else kept.
+    /// It lacks `drift`.
     Outdated {
         drift: Vec<Drift>,
-        upgraded: Box<stream::Config>,
     },
     /// Its stream info could not be had, for this reason.
     Unchecked(String),
@@ -241,13 +247,19 @@ pub async fn check(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Vec<F
     futures::future::join_all(checks).await.into_iter().flatten().collect()
 }
 
-/// Fix what `finding` found: create the missing object, or update its configuration to the upgraded one.
+/// Fix what `finding` found: create the missing object, or upgrade its configuration. The upgrade starts from the
+/// configuration read again just before, so a change made since the check, such as a source `ants leaf outbox` added,
+/// is kept; one made between that read and the update, a round trip later, would be lost.
 pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
     let object = finding.object;
     match &finding.problem {
         Problem::Missing => object.create(js).await,
-        Problem::Outdated { upgraded, .. } => {
-            js.update_stream(upgraded.as_ref()).await.with_context(|| format!("upgrading {object}"))?;
+        Problem::Outdated { .. } => {
+            let stream = js.get_stream(object.stream_name()).await.with_context(|| format!("looking up {object}"))?;
+            let mut config = stream.cached_info().config.clone();
+            if !object.upgrade(&mut config).is_empty() {
+                js.update_stream(&config).await.with_context(|| format!("upgrading {object}"))?;
+            }
             Ok(())
         }
         Problem::Unchecked(e) => bail!("{object} could not be checked: {e}"),
@@ -255,12 +267,16 @@ pub async fn apply(js: &jetstream::Context, finding: &Finding) -> Result<()> {
 }
 
 /// `ants init`: check every object and fix each one found missing or out of date, failing at once when `may` says
-/// the credentials may not (by JetStream API subject), as denied requests would only time out. Returns what it fixed.
+/// the credentials may not (by JetStream API subject), as denied requests would only time out. An object whose stream
+/// info they do not get is created all the same, which changes nothing if it is there with the same settings. Returns
+/// what it fixed among the objects checked.
 pub async fn init(js: &jetstream::Context, may: impl Fn(&str) -> bool) -> Result<Vec<Finding>> {
-    let unseen: Vec<String> =
-        Object::ALL.into_iter().filter(|object| !may(&object.info_subject())).map(|o| o.to_string()).collect();
-    if !unseen.is_empty() {
-        bail!("the credentials may not look up {}", unseen.join(", "));
+    for object in Object::ALL.into_iter().filter(|object| !may(&object.info_subject())) {
+        let unseen = Finding { object, problem: Problem::Missing };
+        if let Some(denied) = unseen.rights().into_iter().find(|subject| !may(subject)) {
+            bail!("the credentials may neither look up nor create {object} ({denied})");
+        }
+        object.create(js).await?;
     }
     let findings = check(js, &may).await;
     for finding in &findings {
@@ -371,6 +387,19 @@ pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
 }
 
+/// Where the devices of humans read ([`PRESENCE_BUCKET`]), whose entries expire [`PRESENCE_TTL`] after their last put.
+pub fn presence_config() -> kv::Config {
+    kv::Config {
+        bucket: PRESENCE_BUCKET.to_owned(),
+        description: "Devices of humans following their inbox or the tool requests, refreshed while they do".to_owned(),
+        history: 1,
+        max_age: PRESENCE_TTL,
+        // Entries are rebuilt by the next heartbeat, so they need not survive a server restart.
+        storage: stream::StorageType::Memory,
+        ..Default::default()
+    }
+}
+
 /// The webhooks bucket ([`WEBHOOKS_BUCKET`]), whose records expire after [`WEBHOOK_RETENTION`].
 pub fn webhooks_config() -> kv::Config {
     kv::Config {
@@ -427,16 +456,24 @@ mod tests {
         let missing: Vec<_> = Object::ALL.into_iter().map(|o| (o, None)).collect();
         assert_eq!(problems(&check(&js, |_| true).await), missing);
         assert!(check(&js, |s| s == Object::Read.info_subject()).await.iter().all(|f| f.object == Object::Read));
-        let unseen = init(&js, |s| s != Object::Read.info_subject()).await.unwrap_err();
-        assert_eq!(unseen.to_string(), "the credentials may not look up bucket ants_read");
+        let read_create = "$JS.API.STREAM.CREATE.KV_ants_read";
+        let unseen = init(&js, |s| s != Object::Read.info_subject() && s != read_create).await.unwrap_err();
+        assert_eq!(
+            unseen.to_string(),
+            format!("the credentials may neither look up nor create bucket ants_read ({read_create})")
+        );
         assert_eq!(check(&js, |_| true).await.len(), Object::ALL.len(), "nothing created");
-        let denied = init(&js, |s| s != "$JS.API.STREAM.CREATE.KV_ants_read").await.unwrap_err();
+        let denied = init(&js, |s| s != read_create).await.unwrap_err();
         assert_eq!(
             denied.to_string(),
-            "bucket ants_read is missing, and the credentials may not fix it ($JS.API.STREAM.CREATE.KV_ants_read)"
+            format!("bucket ants_read is missing, and the credentials may not fix it ({read_create})")
         );
-        assert_eq!(problems(&check(&js, |_| true).await), [(Object::Read, None)], "the rest is created");
-        assert_eq!(problems(&init(&js, |_| true).await.unwrap()), [(Object::Read, None)]);
+        let left = [(Object::Read, None), (Object::Presence, None)];
+        assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
+        // As a human's credentials, which get no stream info of the presence bucket but may create it.
+        let human = |s: &str| s != Object::Presence.info_subject();
+        assert_eq!(problems(&init(&js, human).await.unwrap()), [(Object::Read, None)]);
+        assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there and up to date");
         for bucket in Object::ALL.into_iter().filter_map(Object::bucket).filter(|b| *b != OWNERS_BUCKET) {
             js.get_key_value(bucket).await.unwrap();
