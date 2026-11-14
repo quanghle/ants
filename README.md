@@ -75,6 +75,8 @@ ants inbox                                          # unread replies
 ants roster                                         # active ants
 ants tools list                                     # pending tool approval requests
 ants notes <thread>                                 # passive thread notes
+ants thread list                                    # threads active in the last 24h
+ants thread show <thread>                           # one thread's whole history
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a; prints thread ID
 ants channel read ops
@@ -96,6 +98,8 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). |
 | `ants channel read CHANNEL [--thread ID \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
+| `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--since DUR] [--limit N] [--json]` | List threads with messages stored within `--since` (default `24h`, `0` for all kept): id, owner, users and channels, first/last time, message count, opening line; most recently active last, up to `--limit` (default 50). `--grep` keeps threads with a message containing `TEXT` (case-insensitive) and prints the matching line. |
+| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's history in stored order: inbox messages both ways, channel posts, notes, escalations, tool requests and decisions, dead letters (see [Thread overview](#thread-overview)). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations and decisions, or live harness progress for `ANT`. |
 | `ants tools list [-f] [--json]` | List pending tool requests (`<ant>/<id>`, thread, tool, files, options, time remaining). |
 | `ants tools show ID [--json]` | Show full request, tool input, status and answer commands for `<ant>/<id>` (unique prefix accepted). |
@@ -362,6 +366,10 @@ allow = ["other:list_ants", "other:route", "other:ask_agent", "other:send_messag
 Thread notes (`ants.notes.<thread>.<from>`) provide one passive shared board per thread for multi-agent coordination, separate from live execution plans (`ants watch <ant>`) and wake-on-post [Channels](#channels). Posting wakes nobody; agents inspect notes only via `read_notes`.
 
 Agent posts spend 1 turn from the lower of the active message's budget and the last note's remaining turns, serialized with `Nats-Expected-Last-Subject-Sequence` (losers re-read and retry). Spending the final turn escalates the thread (`notes`) and blocks further agent note posts until a human runs `ants notes <thread> TEXT` (8 fresh turns) or an escalation climbs a chain level. Daemons read via ephemeral consumer `notes-<ant>`; CLI runs with ant credentials use spare consumers `notes-<ant>_1..3`; humans read directly via `STREAM.MSG.GET`.
+
+## Thread overview
+
+`ants thread list` and `ants thread show` read the `ANTS` stream back with human credentials by `STREAM.MSG.GET` (as `ants channel read` and `ants notes` do), so they consume, ack and mark read nothing and create no consumer; ant credentials are refused. Only notes subjects name their thread, so each read goes through every message stored in its window: `--since` bounds it (`list` defaults to `24h`; `show` starts at the thread's start when its id is a time-ordered UUID, as generated ids are, else reads all the stream keeps). Entries are kinds `message`, `escalation` (with level, reason, leader and ants visited), `mention`, `post`, `note`, `approval`, `decision` (a human's, which names no human, or a chain agent's) and `dead`; a human's decision is placed on its request's thread only when the request is in the window. A message stored on a subject naming another sender is marked `(forged)`. A thread's owner is the one its first message naming one gives; `list` counts only what was stored within `--since`, so a thread older than that shows its first message in the window as the opening.
 
 ## Channels
 
