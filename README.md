@@ -327,10 +327,10 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | Tool | Description |
 |---|---|
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
-| `ask_agent(to, text, timeout_secs?)` | Ask an ant on the current thread and wait for its reply (default 300s, max 1800s; refuses humans). |
+| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
 | `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity). |
-| `route(capability, text, wait?, timeout_secs?)` | Pick a peer with `capability` (`live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
+| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (`live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
 | `post_notes(text)` | Append to the current thread's notes (1 turn; wakes nobody). |
 | `read_notes(thread?)` | Read up to 50 notes posts (oldest first) and turns left on the current or named thread (0 turns). |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
