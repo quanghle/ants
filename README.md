@@ -114,7 +114,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
-| `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
+| `ants harness check` / `prompt TEXT` | Check the harness is installed and signed in (ACP handshake and `session/new` in the current directory; names the sign-in command when signed out) or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
 | `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`, `--label LABEL` for a human's device; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--enroll-approver` for the account-key machine). |
 | `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`, or only the human's `--device DEVICE`), rewrite `server.conf` and push the account to the `--nats` server (`--no-push` to skip); list revoked keys; push the account again. |
 | `ants auth devices HUMAN [--json]` / `rename HUMAN DEVICE LABEL` | List a human's devices (id, label, key, issue time, revoked); relabel one. `DEVICE` is an id, a key, or a label no other device of the human has. |
@@ -237,13 +237,13 @@ Flag and file precedence on `ants daemon`:
 
 ## Harnesses
 
-A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode and valid `context` options. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
+A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode, valid `context` options and the command that signs it in. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
 
 | Name | Command | Forced ACP mode | Sign-in |
 |---|---|---|---|
 | `copilot` (default) | `copilot --acp` | none | `copilot login` |
 | `claude` | `claude-agent-acp` (`npm install -g @agentclientprotocol/claude-agent-acp`) | `default` | `claude login` or `ANTHROPIC_API_KEY` |
-| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` / `agy acp --login` or Gemini API key |
+| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` (or `agy acp --login`) or Gemini API key |
 
 Add new harnesses or replace a built-in whole under `[harnesses.NAME]`:
 
@@ -253,6 +253,7 @@ command = "~/.local/bin/custom-acp"            # path if containing '/', else re
 args = ["--stdio", "--log-level", "warn"]
 env = { CUSTOM_ACP_TELEMETRY = "off" }         # layered: daemon env < harness env < ant env < --env
 mode = "default"                               # session fails if harness lacks this mode
+sign_in = "custom-acp login"                   # named when the harness reports it is signed out
 
 [harnesses.custom-acp.context]
 default = {}
@@ -266,12 +267,24 @@ Codex runs through its ACP adapter as a custom definition (`npm install -g @agen
 [harnesses.codex]
 command = "codex-acp"
 mode = "read-only"                             # default `agent` lets Codex's auto-reviewer approve actions
+sign_in = "codex-acp login"
 # env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }  # sign in with the API key from the environment
 ```
 
 - **Claude Code:** forced to `default` mode (`auto` approves tools internally). Built-in read-only tools/commands (`Read`, `Grep`, `ls`, `echo`) and `~/.claude/settings.json` / `.claude/settings*.json` rules still run unasked; loads `CLAUDE.md` and hooks.
 - **Codex:** `read-only` asks before edits, network access and commands that need to leave Codex's read-only sandbox; commands that only read run in that sandbox unasked (`workspace-write` also edits the workdir unasked, `agent-full-access` never asks). Reports MCP tool calls as `execute` titled `mcp.<server>.<tool>` (matched by `other:` rules). Loads `~/.codex/config.toml` and `AGENTS.md`.
 - **Antigravity CLI:** forced to `default` mode (`agentMode` `auto` runs edits/commands unasked). Workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` rules still apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain sign-in requires services to run as the signed-in OS user (logs: `~/.gemini/antigravity-cli/log/`).
+
+### Sign-in
+
+A harness is signed out when it answers `session/new`, `session/load` or a prompt with ACP's `auth_required` error (`-32000`), or when its error or stderr says so in so many words (`No authentication information found`, `not logged in`, `please run /login` and the like; a proxy's or an MCP server's authentication does not count). The daemon then:
+
+- holds the message in hand, with progress acks, first on its thread: the attempt is not counted (its `ants_attempts` marker is cleared unless the prompt had already streamed work, so the retry carries no cut-off warning), its delivery count does not grow, and no message is dead-lettered for it;
+- starts no further prompts; messages already delivered wait their turn, and once `max_harnesses × 2` are in hand the consumer delivers no more;
+- tells the thread's owner, else the default human, once per signed-out period, on the thread, with the sign-in command (`sign_in`, else the terminal auth method the harness offers in its `initialize` response) and the machine to run it on; the notice goes to the human directly, not up the ant's chain;
+- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it) and answers the held messages once one succeeds. The next sign-out after a message got past sign-in tells the human again.
+
+Stopping the daemon while signed out hands the held messages back, each counting one more delivery. `ants harness check` runs the same handshake on demand.
 
 ### Model, reasoning effort and context
 
@@ -439,7 +452,7 @@ Unresolved thread conditions — `turn_budget`, `cap`, `notes`, `dead_letter`, `
 
 ## Dead letters
 
-Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
+Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`); a harness that is signed out spends none (see [Sign-in](#sign-in)). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
 
 ```sh
 ants dead list          # seq, ant, thread, from, deliveries, time, error, text

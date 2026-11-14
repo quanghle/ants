@@ -93,6 +93,11 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// How the pool starts harnesses.
+    pub fn launch(&self) -> &Launch {
+        &self.launch
+    }
+
     /// At most `max_live` harnesses (at least one); each stops after `idle_after` without a prompt. Sessions are
     /// looked up in `store` when a thread's harness starts, so only live threads are held in memory.
     pub fn new(launch: Launch, store: SessionStore, max_live: usize, idle_after: Duration) -> Self {
@@ -346,6 +351,9 @@ pub(crate) mod fake {
         pub doomed: usize,
         pub doomed_failed: usize,
         flaky_failed: Vec<String>,
+        /// While set, opening a session or prompting fails with ACP's `auth_required`, as a harness that is not
+        /// signed in does.
+        pub signed_out: bool,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
@@ -353,6 +361,7 @@ pub(crate) mod fake {
     /// the word `doomed` waits for a permit too, then fails, every time. Words in
     /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
+    /// While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed in.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -386,6 +395,9 @@ pub(crate) mod fake {
                     .on_receive_request(
                         async move |new: NewSessionRequest, responder, _cx| {
                             let mut log = on_new.lock().unwrap();
+                            if log.signed_out {
+                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
+                            }
                             log.new_sessions += 1;
                             log.cwds.push(new.cwd);
                             responder.respond(NewSessionResponse::new(format!("s{}", log.new_sessions)))
@@ -395,6 +407,9 @@ pub(crate) mod fake {
                     .on_receive_request(
                         async move |load: LoadSessionRequest, responder, cx| {
                             let mut log = on_load.lock().unwrap();
+                            if log.signed_out {
+                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
+                            }
                             log.loaded.push(load.session_id.to_string());
                             log.cwds.push(load.cwd.clone());
                             drop(log);
@@ -406,7 +421,12 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| {
-                            on_prompt.lock().unwrap().prompted += 1;
+                            let mut log = on_prompt.lock().unwrap();
+                            if log.signed_out {
+                                return responder.respond_with_error(agent_client_protocol::Error::auth_required());
+                            }
+                            log.prompted += 1;
+                            drop(log);
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
                             let (text, gate, sender, log, cancels) =
                                 (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
