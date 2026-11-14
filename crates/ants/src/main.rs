@@ -5,6 +5,7 @@ mod auth;
 mod bridge;
 mod channel;
 mod defaults;
+mod doctor;
 mod enroll;
 mod humans;
 mod inbox;
@@ -208,6 +209,24 @@ enum Command {
     /// Talk to a harness directly, without NATS.
     #[command(subcommand)]
     Harness(HarnessCommand),
+    /// Check the machine's ants setup end to end: the config file, credentials, the server and JetStream, the hub's
+    /// stream and buckets, each ant's harness, the leaf node and its outbox, and the installed services. Prints one
+    /// line per check (ok, warn, fail or skip) with the command fixing each warning or failure, and exits with status
+    /// 1 when one fails. Changes nothing.
+    Doctor {
+        /// Config file of the machine's ants (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
+        /// Leaf node configuration (default: the one `ants leaf config` writes, ~/.config/ants/leaf.conf).
+        #[arg(long)]
+        leaf_config: Option<PathBuf>,
+        /// Skip starting each ant's harness for an ACP handshake, which may take up to a minute.
+        #[arg(long)]
+        no_harness: bool,
+        /// Print one JSON object per check.
+        #[arg(long)]
+        json: bool,
+    },
     /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -921,6 +940,34 @@ async fn main() -> Result<()> {
             let reply = harness::prompt_once(&launch, &words.join(" ")).await?;
             println!("{reply}");
             Ok(())
+        }
+        Command::Doctor { config, leaf_config, no_harness, json } => {
+            let setup = doctor::Setup {
+                nats: cli.nats.clone(),
+                creds: cli.creds.clone(),
+                js_domain: cli.js_domain.clone(),
+                config: match config {
+                    Some(path) => path,
+                    None => ants_daemon::config::default_path()?,
+                },
+                leaf_config: match leaf_config {
+                    Some(path) => path,
+                    None => auth::default_dir()?.with_file_name("leaf.conf"),
+                },
+                harnesses: !no_harness,
+            };
+            let checks = doctor::run(&setup).await;
+            for check in &checks {
+                match json {
+                    true => println!("{}", serde_json::to_string(check)?),
+                    false => println!("{check}"),
+                }
+            }
+            let failed = checks.iter().filter(|c| c.status == doctor::Status::Fail).count();
+            match failed {
+                0 => Ok(()),
+                _ => anyhow::bail!("{failed} of {} checks failed", checks.len()),
+            }
         }
         Command::Auth(AuthCommand::Init { dir }) => {
             let dir = team_dir(dir)?;

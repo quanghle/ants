@@ -63,15 +63,24 @@ pub fn write(leaf: &Leaf, out: &Path) -> Result<()> {
 /// The machine name and uplink credentials of the leaf node configuration at `path`, as [`write`] writes it.
 pub fn read_uplink(path: &Path) -> Result<(Machine, PathBuf)> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let value = |key: &str| -> Result<String> {
-        let line = text
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
-            .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
-        serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
-    };
-    let machine = value("server_name")?.parse().with_context(|| format!("{}: server_name", path.display()))?;
-    Ok((machine, PathBuf::from(value("credentials")?)))
+    let machine =
+        value(&text, path, "server_name")?.parse().with_context(|| format!("{}: server_name", path.display()))?;
+    Ok((machine, PathBuf::from(value(&text, path, "credentials")?)))
+}
+
+/// The address the leaf node of the configuration at `path`, as [`write`] writes it, listens on for local clients.
+pub fn read_listen(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    value(&text, path, "listen")
+}
+
+/// The quoted value of the first `key: "..."` line of `text`, the configuration at `path`.
+fn value(text: &str, path: &Path, key: &str) -> Result<String> {
+    let line = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key)?.trim_start().strip_prefix(':'))
+        .with_context(|| format!("{}: no {key} (written by `ants leaf config`?)", path.display()))?;
+    serde_json::from_str(line.trim()).with_context(|| format!("{}: unreadable {key}", path.display()))
 }
 
 /// The configuration of `leaf`, for a file in `dir`.

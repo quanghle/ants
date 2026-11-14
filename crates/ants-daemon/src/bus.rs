@@ -102,29 +102,16 @@ pub async fn connect_retrying(
             }
         };
         let js = jetstream(client.clone(), js_domain);
-        let stream = js.get_stream_no_info(STREAM).await.context("naming the ANTS stream")?;
         let mut delay = RETRY_FIRST;
         loop {
             let reached = tokio::select! {
                 biased;
                 Some(e) = denied.recv() => return Err(anyhow::anyhow!(e)).context("reaching JetStream"),
-                reached = stream.consumer_info(ants_proto::inbox_consumer(user)) => reached,
+                reached = reach_jetstream(&js, user) => reached,
             };
             match reached {
-                Ok(_) => return Ok((client, js)),
-                // JetStream answered, if only that the consumer or the stream is missing; creating them is up to the
-                // caller.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ConsumerInfoErrorKind::NotFound
-                            | ConsumerInfoErrorKind::StreamNotFound
-                            | ConsumerInfoErrorKind::Offline
-                            | ConsumerInfoErrorKind::JetStream(_)
-                    ) =>
-                {
-                    return Ok((client, js));
-                }
+                // Creating the consumer or the stream it found missing is up to the caller.
+                Ok(()) => return Ok((client, js)),
                 Err(e) if matches!(e.kind(), ConsumerInfoErrorKind::TimedOut | ConsumerInfoErrorKind::NoResponders) => {
                     tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "JetStream not reachable yet");
                     tokio::time::sleep(delay).await;
@@ -137,6 +124,31 @@ pub async fn connect_retrying(
     tokio::select! {
         connected = attempts => connected.map(Some),
         () = stop => Ok(None),
+    }
+}
+
+/// Ask JetStream for the info of `user`'s own inbox consumer ([`ants_proto::inbox_consumer`]) in the `ANTS` stream,
+/// which every user's credentials allow: Ok when JetStream answered, if only that the consumer or the stream is
+/// missing, the error otherwise, such as no responders or a timeout when no JetStream answers in the domain of `js`.
+pub async fn reach_jetstream(
+    js: &jetstream::Context,
+    user: &UserId,
+) -> std::result::Result<(), async_nats::jetstream::context::ConsumerInfoError> {
+    let stream = js.get_stream_no_info(STREAM).await.expect("naming a stream makes no request");
+    match stream.consumer_info(ants_proto::inbox_consumer(user)).await {
+        Ok(_) => Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                ConsumerInfoErrorKind::NotFound
+                    | ConsumerInfoErrorKind::StreamNotFound
+                    | ConsumerInfoErrorKind::Offline
+                    | ConsumerInfoErrorKind::JetStream(_)
+            ) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 

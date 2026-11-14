@@ -1,0 +1,951 @@
+//! `ants doctor`: check a machine's ants setup end to end, reporting each check with the command that fixes it.
+//!
+//! It changes nothing: the hub's stream and buckets are compared with what this version expects ([`hub::check`]),
+//! not brought up to date as the first connection of other commands does, and only the requests the credentials
+//! allow are made, so none just times out. Every network check has a timeout; a harness handshake has its own.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use ants_daemon::config::{self, Ant};
+use ants_daemon::creds::{self, Expiry, Kind, VersionStatus};
+use ants_daemon::harness::{self, DEFAULT_HARNESS, Harnesses, Readiness};
+use ants_daemon::{Launch, PermissionPolicy, bus, hub};
+use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
+use async_nats::jetstream;
+use serde::Serialize;
+
+use crate::humans::{Me, Rights};
+use crate::service::{Service, Services, State};
+use crate::{auth, leaf, outbox};
+
+/// How long a network check may take.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Ok,
+    Warn,
+    Fail,
+    /// The check could not run, for the reason its detail gives.
+    Skip,
+}
+
+/// The outcome of one check, with the commands fixing a warning or a failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub check: String,
+    pub status: Status,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fix: Vec<String>,
+}
+
+impl Check {
+    fn new(check: impl Into<String>, status: Status, detail: impl Into<String>, fix: Vec<String>) -> Self {
+        Self { check: check.into(), status, detail: detail.into(), fix }
+    }
+
+    fn ok(check: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(check, Status::Ok, detail, Vec::new())
+    }
+
+    fn skip(check: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(check, Status::Skip, detail, Vec::new())
+    }
+
+    fn warn(check: impl Into<String>, detail: impl Into<String>, fix: Vec<String>) -> Self {
+        Self::new(check, Status::Warn, detail, fix)
+    }
+
+    fn fail(check: impl Into<String>, detail: impl Into<String>, fix: Vec<String>) -> Self {
+        Self::new(check, Status::Fail, detail, fix)
+    }
+}
+
+impl fmt::Display for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = match self.status {
+            Status::Ok => "ok",
+            Status::Warn => "warn",
+            Status::Fail => "fail",
+            Status::Skip => "skip",
+        };
+        write!(f, "{status:<5} {}: {}", self.check, self.detail)?;
+        for fix in &self.fix {
+            write!(f, "\n      fix: {fix}")?;
+        }
+        Ok(())
+    }
+}
+
+/// What to check: the connection the CLI resolved, and the machine's files.
+pub struct Setup {
+    pub nats: String,
+    pub creds: Option<PathBuf>,
+    pub js_domain: Option<JsDomain>,
+    /// The config file of the machine's ants.
+    pub config: PathBuf,
+    /// The leaf node configuration of `ants leaf config`.
+    pub leaf_config: PathBuf,
+    /// Whether to start each harness for an ACP handshake.
+    pub harnesses: bool,
+}
+
+/// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
+/// buckets, each ant's credentials and harness, the leaf node and outbox, and the installed services.
+pub async fn run(setup: &Setup) -> Vec<Check> {
+    let now = auth::now().unwrap_or_default();
+    let mut checks = Vec::new();
+    let loaded = check_config(&setup.config, &mut checks);
+    let identity = check_cli_creds(setup, now, &mut checks);
+    let leaf = Leaf::read(&setup.leaf_config);
+    let ants = loaded.as_ref().map(|l| l.ants.as_slice()).unwrap_or_default();
+    let reach = reach(setup, identity.as_ref(), leaf.as_ref().and_then(|l| l.as_ref().ok()));
+    let ants_checked = async {
+        match &loaded {
+            Some(loaded) => check_ants(&loaded.ants, &loaded.harnesses, setup, now).await,
+            None => vec![Check::skip("ants", "no config file read: no ants to check")],
+        }
+    };
+    let ((reached, connected), ants_checked) = tokio::join!(reach, ants_checked);
+    checks.extend(reached);
+    checks.extend(ants_checked);
+    let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
+    checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
+    checks.extend(check_services(setup, &mut Services::local()));
+    checks
+}
+
+/// Who the CLI connects as.
+struct Identity {
+    me: Me,
+    rights: Rights,
+    /// None without credentials.
+    finding: Option<creds::Finding>,
+}
+
+/// A connection to the server, as [`Identity`].
+struct Connected {
+    js: jetstream::Context,
+    rights: Rights,
+}
+
+fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> {
+    if !path.exists() {
+        checks.push(Check::skip("config", format!("no config file at {}: no ants on this machine", path.display())));
+        return None;
+    }
+    match config::load(path) {
+        Ok(loaded) => {
+            let names: Vec<&str> = loaded.ants.iter().map(|ant| ant.name.as_str()).collect();
+            checks.push(Check::ok("config", format!("{} lists {}", path.display(), names.join(", "))));
+            Some(loaded)
+        }
+        Err(e) => {
+            let fix = format!("correct {}; `ants daemon --config {0}` refuses it as it is", path.display());
+            checks.push(Check::fail("config", format!("{e:#}"), vec![fix]));
+            None
+        }
+    }
+}
+
+fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) -> Option<Identity> {
+    let check = "credentials";
+    let Some(path) = &setup.creds else {
+        checks.push(Check::skip(check, "none set (--creds, ANTS_CREDS or `creds` in [cli]): connecting as no one"));
+        let me = Me::from_creds(None).ok()?;
+        return Some(Identity { me, rights: Rights::from_creds(None).ok()?, finding: None });
+    };
+    let read = creds::check(path).and_then(|finding| {
+        Ok(Identity {
+            me: Me::from_creds(Some(path))?,
+            rights: Rights::from_creds(Some(path))?,
+            finding: Some(finding),
+        })
+    });
+    match read {
+        Ok(identity) => {
+            checks.push(check_creds(check, path, identity.finding.as_ref()?, now));
+            Some(identity)
+        }
+        Err(e) => {
+            let fix = format!(
+                "ants auth user HUMAN --human on the machine holding the team keys, then name the file in `creds` of \
+                 [cli] in {}",
+                setup.config.display()
+            );
+            checks.push(Check::fail(check, format!("{e:#}"), vec![fix]));
+            None
+        }
+    }
+}
+
+/// The check of credentials at `path`: their holder, permissions version and expiry ([`creds::Finding`]), failing
+/// once expired and warning as [`creds::Finding::warnings`] does, with the commands renewing them.
+fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> Check {
+    let version = match finding.version {
+        Some(version) => format!("permissions version {version}"),
+        None => "no permissions version".to_owned(),
+    };
+    let at = |exp: Option<u64>| exp.map(creds::time).unwrap_or_default();
+    let mut problems = Vec::new();
+    match finding.version_status() {
+        VersionStatus::Current => {}
+        VersionStatus::Outdated => problems.push(format!(
+            "{version}, older than version {PERMISSIONS_VERSION} of this ants: requests their role allows now may be \
+             refused"
+        )),
+        VersionStatus::Newer => {
+            let detail = format!("{version}, newer than version {PERMISSIONS_VERSION} of this ants");
+            return Check::warn(
+                check,
+                format!("{} ({}): {detail}", finding.holder(), path.display()),
+                vec!["upgrade ants".to_owned()],
+            );
+        }
+    }
+    let expiry = finding.expiry(now);
+    match expiry {
+        Expiry::Expired => problems.push(format!("expired at {}", at(finding.expires_at))),
+        Expiry::Soon if !matches!(finding.kind, Kind::Enrollment { .. }) => {
+            problems.push(format!("expire at {}", at(finding.expires_at)))
+        }
+        _ => {}
+    }
+    let holder = format!("{} ({})", finding.holder(), path.display());
+    if problems.is_empty() {
+        let expires = match finding.expires_at {
+            Some(exp) => format!("expiring at {}", creds::time(exp)),
+            None => "never expiring".to_owned(),
+        };
+        return Check::ok(check, format!("{holder}: {version}, {expires}"));
+    }
+    let detail = format!("{holder}: {}; renew them on the machine holding the team keys", problems.join("; "));
+    let status = if expiry == Expiry::Expired { Status::Fail } else { Status::Warn };
+    Check::new(check, status, detail, finding.renew())
+}
+
+/// Connect, then check JetStream and the hub's stream and buckets.
+async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) -> (Vec<Check>, Option<Connected>) {
+    let Some(identity) = identity else {
+        return (vec![Check::skip("server", "no credentials to connect with")], None);
+    };
+    let me = &identity.me;
+    let through_leaf = leaf.filter(|leaf| same_address(&setup.nats, &leaf.listen));
+    let client = match connect(&setup.nats, setup.creds.as_deref(), &me.id).await {
+        Ok(client) => client,
+        Err(e) => return (vec![unreached(setup, identity, through_leaf, e)], None),
+    };
+    let info = client.server_info();
+    let via = if through_leaf.is_some() { "the leaf node " } else { "" };
+    let mut checks = vec![Check::ok(
+        "server",
+        format!(
+            "connected to {via}{} (server {}, nats-server {}) as {}",
+            setup.nats, info.server_name, info.version, me.id
+        ),
+    )];
+    let mut js = bus::jetstream(client, setup.js_domain.as_ref());
+    js.set_timeout(NETWORK_TIMEOUT);
+    let answered = check_jetstream(setup, identity, &js, leaf, through_leaf.is_some()).await;
+    let reached = answered.status == Status::Ok;
+    checks.push(answered);
+    if !reached {
+        checks.push(Check::skip("hub", "JetStream does not answer"));
+        return (checks, None);
+    }
+    checks.extend(check_hub(&js, identity).await);
+    (checks, Some(Connected { js, rights: identity.rights.clone() }))
+}
+
+/// Connect to `url` with `creds` as `user`, as the CLI does, within [`NETWORK_TIMEOUT`].
+async fn connect(url: &str, creds: Option<&Path>, user: &UserId) -> Result<async_nats::Client, Unreached> {
+    bus::check_url(url).map_err(|e| Unreached::Other(format!("{e:#}")))?;
+    let mut options = async_nats::ConnectOptions::new()
+        .name("ants-doctor")
+        .connection_timeout(NETWORK_TIMEOUT)
+        .custom_inbox_prefix(ants_proto::inbox_prefix(user))
+        .event_callback(|_| async {});
+    if let Some(path) = creds {
+        options = options.credentials_file(path).await.map_err(|e| Unreached::Other(format!("{e}")))?;
+    }
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, options.connect(url)).await {
+        Ok(Ok(client)) => Ok(client),
+        Ok(Err(e)) => Err(match e.kind() {
+            async_nats::ConnectErrorKind::AuthorizationViolation | async_nats::ConnectErrorKind::Authentication => {
+                Unreached::Refused(e.to_string())
+            }
+            async_nats::ConnectErrorKind::Io
+            | async_nats::ConnectErrorKind::TimedOut
+            | async_nats::ConnectErrorKind::Dns => Unreached::Unreachable(e.to_string()),
+            _ => Unreached::Other(e.to_string()),
+        }),
+        Err(_) => Err(Unreached::Unreachable(format!("no connection within {}s", (NETWORK_TIMEOUT * 2).as_secs()))),
+    }
+}
+
+enum Unreached {
+    /// The server refused the credentials.
+    Refused(String),
+    /// No server answered.
+    Unreachable(String),
+    Other(String),
+}
+
+fn unreached(setup: &Setup, identity: &Identity, through_leaf: Option<&Leaf>, e: Unreached) -> Check {
+    let check = "server";
+    let url = &setup.nats;
+    let set_nats = format!(
+        "check that a server runs there, or point --nats, ANTS_NATS_URL or `nats` of [cli] in {} at one",
+        setup.config.display()
+    );
+    match e {
+        Unreached::Refused(e) => {
+            let fix = match &identity.finding {
+                Some(finding) => finding.renew(),
+                None => vec!["ants auth user HUMAN --human, then --creds FILE".to_owned()],
+            };
+            let detail = format!("{url} refused the credentials ({e}): revoked, expired or of another team");
+            Check::fail(check, detail, fix)
+        }
+        Unreached::Unreachable(e) => match through_leaf {
+            Some(leaf) => {
+                let fix = match Services::local().state(Service::Nats, &leaf.path) {
+                    State::Stopped(start) => start,
+                    _ => format!(
+                        "nats-server -c {}, or scripts/install-units.sh to run it as a service",
+                        leaf.path.display()
+                    ),
+                };
+                Check::fail(check, format!("the leaf node at {url} does not answer: {e}"), vec![fix])
+            }
+            None => Check::fail(check, format!("{url} does not answer: {e}"), vec![set_nats]),
+        },
+        Unreached::Other(e) => Check::fail(check, format!("connecting to {url}: {e}"), vec![set_nats]),
+    }
+}
+
+/// Whether JetStream answers in the domain the CLI uses, the hub's: not the leaf node's own, and one the credentials
+/// were issued for.
+async fn check_jetstream(
+    setup: &Setup,
+    identity: &Identity,
+    js: &jetstream::Context,
+    leaf: Option<&Leaf>,
+    through_leaf: bool,
+) -> Check {
+    let check = "jetstream";
+    let domain = setup.js_domain.as_ref();
+    let config = setup.config.display();
+    let issued = identity.finding.as_ref().and_then(|f| f.js_domain.as_ref());
+    let hub_domain = issued.or(leaf.and_then(|l| l.hub_domain.as_ref())).map_or("HUB".to_owned(), |d| d.to_string());
+    let set_domain = format!("--js-domain {hub_domain}, or js_domain = \"{hub_domain}\" in {config}");
+    match (issued, domain, &identity.finding) {
+        (Some(issued), Some(used), _) if issued != used => {
+            let detail = format!("the credentials were issued for JetStream domain {issued}, the CLI uses {used}");
+            return Check::fail(check, detail, vec![set_domain]);
+        }
+        (None, Some(used), Some(finding)) => {
+            let detail = format!("the credentials were issued for no JetStream domain, the CLI uses {used}");
+            let fix = finding.renew().into_iter().take(1).map(|c| format!("{c} --js-domain {used}")).collect();
+            return Check::fail(check, detail, fix);
+        }
+        _ => {}
+    }
+    if let (Some(leaf), true, None) = (leaf, through_leaf, domain) {
+        let detail = format!(
+            "no JetStream domain set: requests reach the leaf node's own JetStream (domain {}), not the hub's",
+            leaf.machine
+        );
+        return Check::fail(check, detail, vec![set_domain]);
+    }
+    let me = &identity.me.id;
+    let rights = &identity.rights;
+    let in_domain = domain.map_or("without a domain".to_owned(), |d| format!("in domain {d}"));
+    let probe = format!("$JS.API.CONSUMER.INFO.{STREAM}.{}", inbox_consumer(me));
+    let account = rights.may_publish("$JS.API.INFO");
+    if !rights.may_publish(&probe) && !account {
+        return Check::skip(check, "the credentials may ask JetStream nothing ants checks with");
+    }
+    if rights.may_publish(&probe)
+        && let Err(e) = bus::reach_jetstream(js, me).await
+    {
+        let fix = match (domain, through_leaf) {
+            (None, _) => set_domain,
+            (Some(_), true) => "check the leaf node's uplink: its log, and `ants doctor` on the hub".to_owned(),
+            (Some(d), false) => format!("check that the server's JetStream runs in domain {d}, or {set_domain}"),
+        };
+        return Check::fail(check, format!("no JetStream answers {in_domain}: {e}"), vec![fix]);
+    }
+    if !account {
+        return Check::ok(check, format!("answers {in_domain}"));
+    }
+    match js.query_account().await {
+        Ok(info) => {
+            let answering = info.domain.filter(|d| !d.is_empty());
+            if let (Some(leaf), Some(answering)) = (leaf, &answering)
+                && answering == leaf.machine.as_str()
+            {
+                let detail =
+                    format!("the leaf node's own JetStream (domain {answering}) answers, not the hub's: {in_domain}");
+                return Check::fail(check, detail, vec![set_domain]);
+            }
+            match answering {
+                Some(answering) if domain.is_none() => {
+                    Check::ok(check, format!("answers {in_domain}, that of domain {answering}"))
+                }
+                _ => Check::ok(check, format!("answers {in_domain}")),
+            }
+        }
+        Err(e) => Check::fail(check, format!("no JetStream answers {in_domain}: {e}"), vec![set_domain]),
+    }
+}
+
+/// The hub's stream and buckets, as [`hub::check`] finds them with the credentials' rights.
+async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
+    let check = "hub";
+    if !identity.me.role.is_human() {
+        return vec![Check::skip(check, "an ant's credentials get no stream info: run `ants doctor` as a human")];
+    }
+    let may = |subject: &str| identity.rights.may_publish(subject);
+    let findings = match tokio::time::timeout(NETWORK_TIMEOUT * 2, hub::check(js, may)).await {
+        Ok(findings) => findings,
+        Err(_) => return vec![Check::warn(check, "no stream info within 10s", vec!["ants init".to_owned()])],
+    };
+    let unseen: Vec<String> =
+        hub::Object::ALL.into_iter().filter(|o| !may(&o.info_subject())).map(|o| o.to_string()).collect();
+    if findings.is_empty() {
+        let checked = hub::Object::ALL.len() - unseen.len();
+        let mut detail = format!("stream {STREAM} and {} buckets up to date", checked.saturating_sub(1));
+        if !unseen.is_empty() {
+            detail += &format!(" ({} not checked: the credentials get no stream info of it)", unseen.join(", "));
+        }
+        return vec![Check::ok(check, detail)];
+    }
+    findings
+        .iter()
+        .map(|finding| {
+            let fix = match finding.rights().iter().all(|s| may(s)) {
+                true => "ants init".to_owned(),
+                false => "ants init with a human's current credentials (`ants auth user NAME --human`)".to_owned(),
+            };
+            match finding.problem {
+                hub::Problem::Unchecked(_) => Check::warn(check, finding.to_string(), vec![fix]),
+                _ => Check::fail(check, finding.to_string(), vec![fix]),
+            }
+        })
+        .collect()
+}
+
+/// Each ant's credentials, and, unless told not to, whether its harness is installed and signed in: one handshake per
+/// harness and environment, all at once.
+async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64) -> Vec<Check> {
+    let config = setup.config.display();
+    // The harness's name, the ant's environment, the harness and its launch.
+    type Started = (String, Vec<(String, String)>, std::sync::Arc<ants_daemon::Harness>, Launch);
+    let mut launches: Vec<Started> = Vec::new();
+    let mut picked = Vec::with_capacity(ants.len());
+    for ant in ants {
+        let name = ant.harness.as_deref().unwrap_or(DEFAULT_HARNESS);
+        let env: Vec<(String, String)> = ant.env.clone().into_iter().collect();
+        let index = match launches.iter().position(|(n, e, ..)| n == name && *e == env) {
+            Some(index) => Some(index),
+            None => harnesses.get(name).ok().map(|harness| {
+                let cwd = Some(ant.workdir.clone())
+                    .filter(|dir| dir.is_dir())
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                let launch =
+                    Launch::new(harness.clone(), cwd, env.clone(), PermissionPolicy::reject_all(), Default::default());
+                launches.push((name.to_owned(), env, harness, launch));
+                launches.len() - 1
+            }),
+        };
+        picked.push(index);
+    }
+    let handshakes = match setup.harnesses {
+        true => futures::future::join_all(launches.iter().map(|(.., launch)| harness::handshake(launch))).await,
+        false => Vec::new(),
+    };
+    let mut checks = Vec::new();
+    for (ant, index) in ants.iter().zip(picked) {
+        checks.push(check_ant_creds(ant, now));
+        let check = format!("ant {} harness", ant.name);
+        let (handshake, installed) = match index {
+            _ if !setup.harnesses => {
+                checks.push(Check::skip(check, "--no-harness"));
+                continue;
+            }
+            Some(index) => (&handshakes[index], &launches[index].2),
+            None => {
+                checks.push(Check::fail(check, "unknown harness", vec![format!("correct {config}")]));
+                continue;
+            }
+        };
+        let harness = &handshake.harness;
+        let recheck = format!("ants harness check --harness {harness} --config {config}");
+        checks.push(match &handshake.readiness {
+            Readiness::Ready { agent } => Check::ok(check, format!("{harness}: {agent}, signed in")),
+            Readiness::Missing => {
+                let command = installed.command().display();
+                let detail = format!("{harness}: {command} is not installed (not found on PATH)");
+                let fix = format!("install {command}, or set the `command` of [harnesses.{harness}] in {config}");
+                Check::fail(check, detail, vec![fix])
+            }
+            Readiness::SignedOut { detail } => {
+                let sign_in = handshake.sign_in.clone().unwrap_or_else(|| format!("sign {harness} in"));
+                Check::fail(check, format!("{harness} is signed out: {detail}"), vec![sign_in, recheck])
+            }
+            Readiness::Failed { detail } => {
+                Check::fail(check, format!("{harness} ACP handshake: {detail}"), vec![recheck])
+            }
+        });
+    }
+    checks
+}
+
+/// An ant's credentials: an ant's of its name, issued for the JetStream domain it uses.
+fn check_ant_creds(ant: &Ant, now: u64) -> Check {
+    let check = format!("ant {} credentials", ant.name);
+    let name = &ant.name;
+    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
+    let issue = format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}");
+    let Some(path) = &ant.creds else {
+        return Check::skip(check, "none in the config file: the ant connects as no one");
+    };
+    let finding = match creds::check(path) {
+        Ok(finding) => finding,
+        Err(e) => return Check::fail(check, format!("{e:#}"), vec![issue]),
+    };
+    if finding.kind != Kind::Ant || finding.name != name.as_str() {
+        let detail = format!("{} are the credentials of {}, not of ant {name}", path.display(), finding.holder());
+        return Check::fail(check, detail, vec![issue]);
+    }
+    if let Some(used) = &ant.js_domain
+        && finding.js_domain.as_ref() != Some(used)
+    {
+        let detail = format!("{} were not issued for JetStream domain {used}, which the ant uses", path.display());
+        return Check::fail(check, detail, vec![issue]);
+    }
+    check_creds(&check, path, &finding, now)
+}
+
+/// The machine's leaf node, as `ants leaf config` wrote its configuration.
+struct Leaf {
+    path: PathBuf,
+    text: String,
+    machine: Machine,
+    uplink: PathBuf,
+    listen: String,
+    /// The hub's JetStream domain, as the uplink credentials carry it.
+    hub_domain: Option<JsDomain>,
+}
+
+impl Leaf {
+    /// None without a configuration at `path`.
+    fn read(path: &Path) -> Option<anyhow::Result<Self>> {
+        if !path.exists() {
+            return None;
+        }
+        Some((|| {
+            let text = std::fs::read_to_string(path)?;
+            let (machine, uplink) = leaf::read_uplink(path)?;
+            let listen = leaf::read_listen(path)?;
+            let hub_domain = creds::check(&uplink).ok().and_then(|f| f.js_domain);
+            Ok(Self { path: path.to_owned(), text, machine, uplink, listen, hub_domain })
+        })())
+    }
+}
+
+/// The leaf node: its configuration, uplink and system account credentials, whether it listens and the CLI connects
+/// to it, and whether the hub takes from its outbox what the machine's ants and humans send.
+async fn check_leaf(
+    setup: &Setup,
+    leaf: Option<anyhow::Result<Leaf>>,
+    ants: &[Ant],
+    human: Option<&Me>,
+    connected: Option<&Connected>,
+    now: u64,
+) -> Vec<Check> {
+    let path = setup.leaf_config.display();
+    let leaf = match leaf {
+        None => return vec![Check::skip("leaf", format!("no leaf node configuration at {path}"))],
+        Some(Err(e)) => {
+            let fix = "ants leaf config MACHINE --uplink URL".to_owned();
+            return vec![Check::fail("leaf", format!("{e:#}"), vec![fix])];
+        }
+        Some(Ok(leaf)) => leaf,
+    };
+    let machine = &leaf.machine;
+    let mut checks = vec![Check::ok("leaf", format!("{path}: machine {machine}, listening on {}", leaf.listen))];
+
+    let uplink = creds::check(&leaf.uplink);
+    let generic =
+        format!("ants auth leaf {machine} --ant ANT... --human HUMAN..., then ants leaf config {machine} ...");
+    let mut members = None;
+    checks.push(match &uplink {
+        Err(e) => Check::fail("leaf uplink", format!("{e:#}"), vec![generic.clone()]),
+        Ok(finding) => match &finding.kind {
+            Kind::Leaf { machine: m, ants: carried, humans, .. } if m == machine => {
+                // The ants and the human connecting through the leaf node, the daemon's default server.
+                let through = |url: Option<&str>| same_address(url.unwrap_or(leaf::DEFAULT_LISTEN), &leaf.listen);
+                let missing: Vec<&UserId> = ants
+                    .iter()
+                    .filter(|ant| through(ant.nats.as_deref()))
+                    .map(|ant| &ant.name)
+                    .chain(human.filter(|_| through(Some(&setup.nats))).map(|me| &me.id))
+                    .filter(|user| !carried.contains(user) && !humans.contains(user))
+                    .collect();
+                members = Some(auth::members(carried, humans));
+                if missing.is_empty() {
+                    check_creds("leaf uplink", &leaf.uplink, finding, now)
+                } else {
+                    let mut renewed = finding.clone();
+                    if let Kind::Leaf { ants, humans, .. } = &mut renewed.kind {
+                        for user in &missing {
+                            match human.is_some_and(|me| &me.id == *user) {
+                                true => humans.push((*user).clone()),
+                                false => ants.push((*user).clone()),
+                            }
+                        }
+                    }
+                    let names: Vec<&str> = missing.iter().map(|u| u.as_str()).collect();
+                    let detail = format!(
+                        "{} carry no rights for {} of this machine: what they send does not cross the uplink",
+                        leaf.uplink.display(),
+                        names.join(", ")
+                    );
+                    Check::fail("leaf uplink", detail, renewed.renew())
+                }
+            }
+            _ => {
+                let detail = format!(
+                    "{} are the credentials of {}, not the uplink of {machine}",
+                    leaf.uplink.display(),
+                    finding.holder()
+                );
+                Check::fail("leaf uplink", detail, vec![generic.clone()])
+            }
+        },
+    });
+
+    let system = auth::leaf_system_creds(&leaf.uplink);
+    let rewrite = format!("ants leaf config {machine} --uplink URL ... (picks up {})", system.display());
+    checks.push(if !system.is_file() {
+        let detail = format!(
+            "no system account credentials at {}: revocations pushed to the hub do not reach this leaf",
+            system.display()
+        );
+        let issue = uplink.as_ref().ok().and_then(|f| f.renew().into_iter().next()).unwrap_or(generic);
+        Check::warn("leaf system uplink", detail, vec![issue, rewrite])
+    } else if !leaf.text.contains(&*system.to_string_lossy()) {
+        let detail =
+            format!("{path} does not use {}: revocations pushed to the hub do not reach this leaf", system.display());
+        Check::warn("leaf system uplink", detail, vec![rewrite])
+    } else {
+        match creds::check(&system) {
+            Ok(finding) if finding.kind == (Kind::LeafSystem { machine: machine.clone() }) => {
+                check_creds("leaf system uplink", &system, &finding, now)
+            }
+            Ok(finding) => Check::fail(
+                "leaf system uplink",
+                format!("{} are the credentials of {}", system.display(), finding.holder()),
+                vec![generic],
+            ),
+            Err(e) => Check::fail("leaf system uplink", format!("{e:#}"), vec![generic]),
+        }
+    });
+
+    let listening = tokio::time::timeout(NETWORK_TIMEOUT, tokio::net::TcpStream::connect(leaf.listen.as_str())).await;
+    checks.push(match listening {
+        Ok(Ok(_)) if same_address(&setup.nats, &leaf.listen) => {
+            Check::ok("leaf node", format!("listening on {}, where the CLI connects", leaf.listen))
+        }
+        Ok(Ok(_)) => Check::warn(
+            "leaf node",
+            format!("listening on {}, but the CLI connects to {}", leaf.listen, setup.nats),
+            vec![format!("nats = \"nats://{}\" in [cli] of {}", leaf.listen, setup.config.display())],
+        ),
+        failed => {
+            let error = match failed {
+                Ok(Err(e)) => e.to_string(),
+                _ => format!("no answer within {}s", NETWORK_TIMEOUT.as_secs()),
+            };
+            let start = match Services::local().state(Service::Nats, &leaf.path) {
+                State::Stopped(start) => start,
+                _ => format!("nats-server -c {path}, or scripts/install-units.sh to run it as a service"),
+            };
+            Check::fail("leaf node", format!("nothing listens on {}: {error}", leaf.listen), vec![start])
+        }
+    });
+
+    checks.push(check_outbox(machine, members.as_deref(), uplink.as_ref().ok(), connected).await);
+    checks
+}
+
+/// Whether the hub sources the outbox of `machine` and takes from it what `members` send ([`outbox::sourcing`]).
+async fn check_outbox(
+    machine: &Machine,
+    members: Option<&[(UserId, ants_proto::Role)]>,
+    uplink: Option<&creds::Finding>,
+    connected: Option<&Connected>,
+) -> Check {
+    let check = "outbox";
+    let Some(connected) = connected else { return Check::skip(check, "the hub is not reached") };
+    let Some(members) = members.filter(|m| !m.is_empty()) else {
+        return Check::skip(check, "the uplink credentials name no ants or humans of the machine");
+    };
+    let rights = &connected.rights;
+    let infos = [format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"), format!("$JS.API.STREAM.INFO.{STREAM}")];
+    if !infos.iter().all(|s| rights.may_publish(s)) {
+        return Check::skip(check, "only a human's credentials get the stream info telling it");
+    }
+    let admit = uplink
+        .and_then(|f| f.renew().into_iter().nth(1))
+        .unwrap_or_else(|| format!("ants leaf outbox {machine} --ant ANT... --human HUMAN..."));
+    let sourcing = tokio::time::timeout(NETWORK_TIMEOUT * 2, outbox::sourcing(&connected.js, machine, members)).await;
+    match sourcing {
+        Err(_) => Check::warn(check, "no stream info within 10s", vec![admit]),
+        Ok(Err(e)) => Check::warn(check, format!("{e:#}"), vec![admit]),
+        Ok(Ok(sourcing)) => match (sourcing.hearing, sourcing.unadmitted.as_slice()) {
+            (outbox::Hearing::Failed(e), _) => {
+                Check::warn(check, format!("the hub does not source the outbox of {machine}: {e}"), vec![admit])
+            }
+            (_, [_, ..]) => {
+                let names: Vec<&str> = sourcing.unadmitted.iter().map(UserId::as_str).collect();
+                let detail = format!(
+                    "the hub's stream takes nothing from the outbox of {machine} for {}: what they send while the \
+                     uplink is down stays there",
+                    names.join(", ")
+                );
+                Check::warn(check, detail, vec![admit])
+            }
+            (outbox::Hearing::Silent, []) => Check::warn(
+                check,
+                format!("the hub sources the outbox of {machine} but has not heard from it"),
+                ["feature_flags { js_api_reply_v2: true } in the hub's nats-server configuration, then restart it"
+                    .to_owned()]
+                .into_iter()
+                .chain(
+                    uplink
+                        .and_then(|f| f.renew().into_iter().next())
+                        .map(|c| format!("{c}, for uplink credentials issued before store and forward")),
+                )
+                .collect(),
+            ),
+            (outbox::Hearing::Heard, []) => {
+                let names: Vec<&str> = members.iter().map(|(user, _)| user.as_str()).collect();
+                Check::ok(check, format!("the hub takes from the outbox of {machine} for {}", names.join(", ")))
+            }
+        },
+    }
+}
+
+/// The daemon service of the config file and the nats-server service of the leaf node configuration, as
+/// scripts/install-units.sh installs them.
+fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
+    let daemon = ("daemon service", Service::Daemon, &setup.config, "--config");
+    let nats = ("leaf node service", Service::Nats, &setup.leaf_config, "--nats-conf");
+    [daemon, nats]
+        .into_iter()
+        .map(|(check, service, file, flag)| {
+            let install = format!("scripts/install-units.sh {flag} {}", file.display());
+            let file_shown = file.display();
+            if !file.exists() {
+                return Check::skip(check, format!("no {file_shown}"));
+            }
+            match services.state(service, file) {
+                State::Unsupported => Check::skip(check, "no service manager ants installs units for here"),
+                State::NotInstalled => Check::warn(check, format!("none installed to run {file_shown}"), vec![install]),
+                State::Other(unit) => {
+                    Check::warn(check, format!("{} runs another file than {file_shown}", unit.display()), vec![install])
+                }
+                State::Stopped(start) => {
+                    Check::fail(check, format!("installed for {file_shown}, not running"), vec![start])
+                }
+                State::Running => Check::ok(check, format!("running {file_shown}")),
+                State::Unknown(command, e) => Check::warn(check, format!("{command}: {e}"), vec![install]),
+            }
+        })
+        .collect()
+}
+
+/// Whether the NATS URL `url` names the host and port `listen`, a loopback address.
+fn same_address(url: &str, listen: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', ',']).next().unwrap_or_default();
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => (host, port),
+        _ => (authority, "4222"),
+    };
+    let loopback = |h: &str| matches!(h, "localhost" | "127.0.0.1" | "[::1]" | "::1");
+    let Some((listen_host, listen_port)) = listen.rsplit_once(':') else { return false };
+    port == listen_port && (host == listen_host || loopback(host) && loopback(listen_host))
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::Role;
+
+    use super::*;
+    use crate::auth::tests::Server;
+
+    fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
+        Setup {
+            nats: server.url.clone(),
+            creds,
+            js_domain: None,
+            config: server.dir().join("no-config.toml"),
+            leaf_config: server.dir().join("no-leaf.conf"),
+            harnesses: false,
+        }
+    }
+
+    fn named<'a>(checks: &'a [Check], name: &str) -> Vec<&'a Check> {
+        checks.iter().filter(|c| c.check == name).collect()
+    }
+
+    #[tokio::test]
+    async fn a_fresh_hub_is_missing_its_stream_until_init() {
+        let Some(server) = Server::start() else { return };
+        let alice = "alice".parse::<UserId>().unwrap();
+        let setup = setup(&server, Some(server.creds_as(&alice, Role::Human)));
+
+        let checks = run(&setup).await;
+        assert_eq!(named(&checks, "server")[0].status, Status::Ok, "{checks:#?}");
+        assert_eq!(named(&checks, "jetstream")[0].status, Status::Ok, "{checks:#?}");
+        let hub = named(&checks, "hub");
+        let stream = hub.iter().find(|c| c.detail == format!("stream {STREAM} is missing")).expect("missing stream");
+        assert_eq!((stream.status, stream.fix.as_slice()), (Status::Fail, ["ants init".to_owned()].as_slice()));
+        assert_eq!(named(&checks, "config")[0].status, Status::Skip);
+        assert_eq!(named(&checks, "leaf")[0].status, Status::Skip);
+
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        let rights = Rights::from_creds(setup.creds.as_deref()).unwrap();
+        hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+        let checks = run(&setup).await;
+        assert!(checks.iter().all(|c| matches!(c.status, Status::Ok | Status::Skip)), "{checks:#?}");
+        let hub = named(&checks, "hub");
+        assert_eq!(hub.len(), 1, "{checks:#?}");
+        assert!(hub[0].detail.contains("presence not checked"), "{}", hub[0]);
+    }
+
+    #[tokio::test]
+    async fn an_ants_credentials_skip_the_hub_check() {
+        let Some(server) = Server::start() else { return };
+        let ant = "dev-a".parse::<UserId>().unwrap();
+        let checks = run(&setup(&server, Some(server.creds_as(&ant, Role::Ant)))).await;
+        assert_eq!(named(&checks, "jetstream")[0].status, Status::Ok, "{checks:#?}");
+        assert_eq!(named(&checks, "hub")[0].status, Status::Skip, "{checks:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_harness_fails_with_its_fix() {
+        let dir = ants_test_support::scratch_dir("doctor-harness").canonicalize().unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"ghost\"\n\
+             [harnesses.ghost]\ncommand = \"/nonexistent-ants-bin/acp\"\n",
+        )
+        .unwrap();
+        let loaded = config::load(&config).unwrap();
+        let setup = Setup {
+            nats: "nats://127.0.0.1:1".to_owned(),
+            creds: None,
+            js_domain: None,
+            config: config.clone(),
+            leaf_config: dir.join("leaf.conf"),
+            harnesses: true,
+        };
+        let checks = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
+        let harness = named(&checks, "ant dev-a harness")[0];
+        assert_eq!(harness.status, Status::Fail, "{checks:#?}");
+        assert!(harness.detail.contains("/nonexistent-ants-bin/acp is not installed"), "{harness}");
+        let fix = format!(
+            "install /nonexistent-ants-bin/acp, or set the `command` of [harnesses.ghost] in {}",
+            config.display()
+        );
+        assert_eq!(harness.fix, [fix]);
+        assert_eq!(named(&checks, "ant dev-a credentials")[0].status, Status::Skip);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
+        let dir = ants_test_support::scratch_dir("doctor-leaf").canonicalize().unwrap();
+        auth::init(&dir).unwrap();
+        let machine: Machine = "m1".parse().unwrap();
+        let uplink = dir.join("leaf-m1.creds");
+        auth::issue_leaf(&dir, &machine, &[("dev-a".parse().unwrap(), Role::Ant)], &[], false, None, &uplink).unwrap();
+        let leaf_config = dir.join("leaf.conf");
+        let uplinks = ["nats-leaf://127.0.0.1:7422".to_owned()];
+        let leaf = leaf::Leaf {
+            machine: &machine,
+            hub_domain: None,
+            uplinks: &uplinks,
+            creds: &uplink,
+            system_creds: None,
+            server_conf: &dir.join(auth::SERVER_CONF),
+            ca_file: None,
+            proxy: None,
+            listen: "127.0.0.1:1",
+        };
+        leaf::write(&leaf, &leaf_config).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "messenger = false\nnats = \"nats://127.0.0.1:1\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n",
+        )
+        .unwrap();
+        let loaded = config::load(&config).unwrap();
+        let setup = Setup {
+            nats: "nats://127.0.0.1:1".to_owned(),
+            creds: None,
+            js_domain: None,
+            config,
+            leaf_config: leaf_config.clone(),
+            harnesses: false,
+        };
+
+        let checks = check_leaf(&setup, Leaf::read(&leaf_config), &loaded.ants, None, None, 0).await;
+        assert_eq!(named(&checks, "leaf")[0].status, Status::Ok, "{checks:#?}");
+        let carried = named(&checks, "leaf uplink")[0];
+        assert_eq!(carried.status, Status::Fail, "{carried}");
+        assert!(carried.detail.contains("no rights for dev-b"), "{carried}");
+        assert!(carried.fix[0].starts_with("ants auth leaf m1") && carried.fix[0].contains("--ant dev-b"), "{carried}");
+        assert_eq!(named(&checks, "leaf system uplink")[0].status, Status::Warn, "{checks:#?}");
+        let node = named(&checks, "leaf node")[0];
+        assert_eq!(node.status, Status::Fail, "{node}");
+        assert!(node.detail.starts_with("nothing listens on 127.0.0.1:1"), "{node}");
+        assert_eq!(named(&checks, "outbox")[0].status, Status::Skip, "{checks:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_check_renders_on_one_line_with_its_fixes_indented() {
+        let check = Check::fail("hub", "stream ANTS is missing", vec!["ants init".to_owned()]);
+        assert_eq!(check.to_string(), "fail  hub: stream ANTS is missing\n      fix: ants init");
+        assert_eq!(Check::ok("server", "connected").to_string(), "ok    server: connected");
+        assert_eq!(
+            serde_json::to_string(&check).unwrap(),
+            r#"{"check":"hub","status":"fail","detail":"stream ANTS is missing","fix":["ants init"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Check::skip("leaf", "none")).unwrap(),
+            r#"{"check":"leaf","status":"skip","detail":"none"}"#
+        );
+    }
+
+    #[test]
+    fn the_cli_targets_the_leaf_by_its_listen_address() {
+        assert!(same_address("nats://127.0.0.1:4222", "127.0.0.1:4222"));
+        assert!(same_address("nats://localhost:4222", "127.0.0.1:4222"));
+        assert!(same_address("127.0.0.1", "127.0.0.1:4222"));
+        assert!(!same_address("nats://127.0.0.1:4223", "127.0.0.1:4222"));
+        assert!(!same_address("wss://hub.example/nats", "127.0.0.1:4222"));
+    }
+}

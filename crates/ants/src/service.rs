@@ -37,6 +37,23 @@ pub enum Action {
     Reload,
     /// Stop and start again.
     Restart,
+    /// Start a service that is not running.
+    Start,
+}
+
+/// Whether a service is installed to run a given file, and whether it runs ([`Services::state`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum State {
+    /// The platform has no service manager ants installs units for.
+    Unsupported,
+    NotInstalled,
+    /// Installed, from this unit file, to run another file.
+    Other(PathBuf),
+    /// Installed and not running; this command starts it.
+    Stopped(String),
+    Running,
+    /// This command, finding where the service runs, failed for this reason.
+    Unknown(String, String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,29 +106,12 @@ impl Services {
 
     /// `action` on the installed `service` running `file`, when it runs; the service of another file is left alone.
     pub fn apply(&mut self, service: Service, action: Action, file: &Path) -> Outcome {
-        let Some(manager) = self.manager else { return Outcome::Unmanaged };
-        let unit_file = match manager {
-            Manager::Launchd => self.home.join("Library/LaunchAgents").join(format!("{}.plist", service.label())),
-            Manager::Systemd => self.home.join(".config/systemd/user").join(format!("{}.service", service.unit())),
+        let (manager, target) = match self.locate(service, file) {
+            Ok(found) => found,
+            Err(State::Unknown(command, e)) => return Outcome::Failed(command, e),
+            Err(_) => return Outcome::Unmanaged,
         };
-        match std::fs::read_to_string(&unit_file) {
-            Ok(text) if runs(manager, &text, file) => {}
-            _ => return Outcome::Unmanaged,
-        }
-        let target = match manager {
-            Manager::Launchd => match self.output(&["id", "-u"]) {
-                Ok(uid) => format!("gui/{}/{}", uid.trim(), service.label()),
-                Err(e) => return Outcome::Failed("id -u".to_owned(), e),
-            },
-            Manager::Systemd => service.unit().to_owned(),
-        };
-        let running = match manager {
-            Manager::Launchd => self
-                .output(&["launchctl", "print", &target])
-                .is_ok_and(|out| out.lines().any(|l| l.starts_with("\tpid = "))),
-            Manager::Systemd => self.output(&["systemctl", "--user", "is-active", "--quiet", &target]).is_ok(),
-        };
-        if !running {
+        if self.running(manager, &target) != Some(true) {
             return Outcome::NotRunning;
         }
         let command = command(manager, action, &target);
@@ -119,6 +119,59 @@ impl Services {
         match self.output(&args) {
             Ok(_) => Outcome::Done(command.join(" ")),
             Err(e) => Outcome::Failed(command.join(" "), e),
+        }
+    }
+
+    /// Whether `service` is installed to run `file`, and whether it runs.
+    pub fn state(&mut self, service: Service, file: &Path) -> State {
+        match self.locate(service, file) {
+            Ok((manager, target)) => match self.running(manager, &target) {
+                Some(true) => State::Running,
+                Some(false) => State::Stopped(command(manager, Action::Start, &target).join(" ")),
+                None => {
+                    let unit = self.unit_file(manager, service);
+                    State::Stopped(format!("launchctl bootstrap {} {}", launchd_domain(&target), unit.display()))
+                }
+            },
+            Err(state) => state,
+        }
+    }
+
+    fn unit_file(&self, manager: Manager, service: Service) -> PathBuf {
+        match manager {
+            Manager::Launchd => self.home.join("Library/LaunchAgents").join(format!("{}.plist", service.label())),
+            Manager::Systemd => self.home.join(".config/systemd/user").join(format!("{}.service", service.unit())),
+        }
+    }
+
+    /// The manager and target (`gui/<uid>/<label>`, or the unit) of `service` installed to run `file`, or the state
+    /// of a service not installed so.
+    fn locate(&mut self, service: Service, file: &Path) -> Result<(Manager, String), State> {
+        let Some(manager) = self.manager else { return Err(State::Unsupported) };
+        let unit_file = self.unit_file(manager, service);
+        match std::fs::read_to_string(&unit_file) {
+            Ok(text) if runs(manager, &text, file) => {}
+            Ok(_) => return Err(State::Other(unit_file)),
+            Err(_) => return Err(State::NotInstalled),
+        }
+        let target = match manager {
+            Manager::Launchd => match self.output(&["id", "-u"]) {
+                Ok(uid) => format!("gui/{}/{}", uid.trim(), service.label()),
+                Err(e) => return Err(State::Unknown("id -u".to_owned(), e)),
+            },
+            Manager::Systemd => service.unit().to_owned(),
+        };
+        Ok((manager, target))
+    }
+
+    /// Whether the service `target` runs; None for a launchd agent not loaded at all.
+    fn running(&mut self, manager: Manager, target: &str) -> Option<bool> {
+        match manager {
+            Manager::Launchd => match self.output(&["launchctl", "print", target]) {
+                Ok(out) => Some(out.lines().any(|l| l.starts_with("\tpid = "))),
+                Err(_) => None,
+            },
+            Manager::Systemd => Some(self.output(&["systemctl", "--user", "is-active", "--quiet", target]).is_ok()),
         }
     }
 
@@ -149,8 +202,15 @@ fn command(manager: Manager, action: Action, target: &str) -> Vec<String> {
         (Manager::Launchd, Action::Restart) => &["launchctl", "kickstart", "-k"],
         (Manager::Systemd, Action::Reload) => &["systemctl", "--user", "reload"],
         (Manager::Systemd, Action::Restart) => &["systemctl", "--user", "restart"],
+        (Manager::Launchd, Action::Start) => &["launchctl", "kickstart"],
+        (Manager::Systemd, Action::Start) => &["systemctl", "--user", "start"],
     };
     args.iter().copied().chain([target]).map(str::to_owned).collect()
+}
+
+/// The launchd domain `gui/<uid>` of the service target `gui/<uid>/<label>`.
+fn launchd_domain(target: &str) -> &str {
+    target.rsplit_once('/').map_or(target, |(domain, _)| domain)
 }
 
 /// Whether the unit file `text`, as install-units.sh fills it in, runs `file`: names it as an argument of its own.
@@ -287,6 +347,36 @@ mod tests {
         let (mut services, log) = fake(Manager::Systemd, &home, |_| failed(""));
         assert_eq!(services.apply(Service::Daemon, Action::Reload, &config), Outcome::NotRunning);
         assert_eq!(log.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn the_state_of_a_service_names_the_command_starting_it() {
+        let home = ants_test_support::scratch_dir("service-state").canonicalize().unwrap();
+        let config = home.join("config.toml");
+        let (mut services, _) = fake(Manager::Systemd, &home, |_| ok(""));
+        assert_eq!(services.state(Service::Daemon, &config), State::NotInstalled);
+        let units = home.join(".config/systemd/user");
+        install(units.join("ants-daemon.service"), "ExecStart=\"/bin/ants\" daemon --config \"/elsewhere.toml\"\n");
+        assert_eq!(services.state(Service::Daemon, &config), State::Other(units.join("ants-daemon.service")));
+        let exec = format!("ExecStart=\"/bin/ants\" daemon --config \"{}\"\n", config.display());
+        install(units.join("ants-daemon.service"), &exec);
+        assert_eq!(services.state(Service::Daemon, &config), State::Running);
+        let (mut services, _) = fake(Manager::Systemd, &home, |_| failed(""));
+        assert_eq!(
+            services.state(Service::Daemon, &config),
+            State::Stopped("systemctl --user start ants-daemon".to_owned())
+        );
+
+        let plist = format!("<array>\n\t<string>/bin/ants</string>\n\t<string>{}</string>\n</array>", config.display());
+        install(home.join("Library/LaunchAgents/ants.daemon.plist"), &plist);
+        let (mut services, _) = fake(Manager::Launchd, &home, |command| match command {
+            "id -u" => ok("501\n"),
+            _ => failed("Could not find service"),
+        });
+        let bootstrap =
+            format!("launchctl bootstrap gui/501 {}", home.join("Library/LaunchAgents/ants.daemon.plist").display());
+        assert_eq!(services.state(Service::Daemon, &config), State::Stopped(bootstrap));
         std::fs::remove_dir_all(&home).unwrap();
     }
 
