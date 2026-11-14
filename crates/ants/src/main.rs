@@ -4,10 +4,12 @@ mod approve;
 mod auth;
 mod bridge;
 mod channel;
+mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
 mod outbox;
+mod persona;
 mod roster;
 mod serve;
 
@@ -147,6 +149,13 @@ enum Command {
     Dead(DeadCommand),
     /// Serve persona inboxes through agent harnesses: those of the config file, or one described by flags.
     Daemon(Box<serve::DaemonArgs>),
+    /// The personas of the machine's config file.
+    #[command(subcommand)]
+    Persona(PersonaCommand),
+    /// Enrollment requests from `ants persona add --enroll`, on the machine holding the account key: list them,
+    /// approve or reject one.
+    #[command(subcommand)]
+    Enroll(EnrollCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
         /// The daemon's MCP socket.
@@ -308,7 +317,27 @@ enum AuthCommand {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
-        /// Where to write the credentials (default: <dir>/<persona>.creds).
+        /// Where to write the credentials (default: <dir>/<persona>.creds), or with --public-key the JWT (default:
+        /// print it).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Sign this public user NKey (U...), from `ants persona add` on the persona's machine, instead of generating
+        /// a key: the JWT, given to `ants persona add --jwt` there, completes the credentials.
+        #[arg(long, value_name = "KEY")]
+        public_key: Option<String>,
+    },
+    /// Issue enrollment credentials for a new persona: they may only ask for the persona's credentials, with
+    /// `ants persona add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
+    /// gives here. They expire after --ttl-secs.
+    Enroll {
+        persona: PersonaId,
+        /// Seconds the enrollment credentials stay valid.
+        #[arg(long, value_name = "SECS", default_value_t = 3600)]
+        ttl_secs: u64,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the enrollment credentials (default: <dir>/enroll-<persona>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -330,6 +359,49 @@ enum AuthCommand {
         /// Where to write the credentials (default: <dir>/leaf-<machine>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PersonaCommand {
+    /// List a persona in the config file and give it credentials: its user NKey is generated here and the seed stays
+    /// here. Without --jwt or --enroll, print the public key for the machine holding the account key to sign; run
+    /// again with --jwt or --enroll to complete the credentials. Restart the daemon to serve the persona.
+    Add(Box<persona::AddArgs>),
+}
+
+#[derive(Subcommand)]
+enum EnrollCommand {
+    /// List the enrollment requests heard, the latest of each persona and key; machines repeat theirs every few
+    /// seconds while they wait.
+    List {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Sign the credentials a persona asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
+    /// it has one, and send them to the asking machine.
+    Approve {
+        persona: PersonaId,
+        /// The asking machine's public key, needed when several ask for the persona.
+        #[arg(long, value_name = "KEY")]
+        public_key: Option<String>,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Refuse the credentials a persona asks for, to every machine asking for it or the one of --public-key.
+    Reject {
+        persona: PersonaId,
+        /// The asking machine's public key.
+        #[arg(long, value_name = "KEY")]
+        public_key: Option<String>,
+        /// Reason shown to the asking machine.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -488,12 +560,62 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { persona, human, dir, out }) => {
+        Command::Auth(AuthCommand::User { persona, human, dir, out, public_key: Some(key) }) => {
+            let jwt = auth::sign_user(&team_dir(dir)?, &persona, auth::role(&persona, human), domain, &key)?;
+            match out {
+                Some(out) => {
+                    std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
+                    println!("{}", out.display());
+                }
+                None => println!("{jwt}"),
+            }
+            Ok(())
+        }
+        Command::Auth(AuthCommand::User { persona, human, dir, out, public_key: None }) => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{persona}.creds")));
             auth::issue(&dir, &persona, auth::role(&persona, human), domain, &out)?;
             println!("{}", out.display());
             Ok(())
+        }
+        Command::Auth(AuthCommand::Enroll { persona, ttl_secs, dir, out }) => {
+            if persona.is_human() {
+                bail!("{persona} is the default human, not a persona");
+            }
+            let dir = team_dir(dir)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(&persona))));
+            let ttl = std::time::Duration::from_secs(ttl_secs);
+            let expires = auth::issue_enrollment(&dir, &persona, ttl, &out)?;
+            let expires = chrono::DateTime::from_timestamp(i64::try_from(expires)?, 0).context("expiry")?;
+            println!(
+                "{}\nvalid until {expires}; on the persona's machine: ants persona add {persona} --enroll FILE ...\n\
+                 then here: ants enroll approve {persona}",
+                out.display()
+            );
+            Ok(())
+        }
+        Command::Persona(PersonaCommand::Add(args)) => persona::add(*args, &cli.nats, domain).await,
+        Command::Enroll(command) => {
+            let dir = |dir| team_dir(dir);
+            match command {
+                EnrollCommand::List { dir: d } => {
+                    enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?.list().await
+                }
+                EnrollCommand::Approve { persona, public_key, dir: d } => {
+                    let dir = dir(d)?;
+                    let approver = enroll::Approver::connect(&cli.nats, &dir, enroll::LISTEN).await?;
+                    let key = approver.approve(&dir, &persona, public_key.as_deref(), domain).await?;
+                    println!("{persona} approved for {key}");
+                    Ok(())
+                }
+                EnrollCommand::Reject { persona, public_key, reason, dir: d } => {
+                    let approver = enroll::Approver::connect(&cli.nats, &dir(d)?, enroll::LISTEN).await?;
+                    for key in approver.reject(&persona, public_key.as_deref(), reason.as_deref()).await? {
+                        println!("{persona} rejected for {key}");
+                    }
+                    Ok(())
+                }
+            }
         }
         Command::Auth(AuthCommand::Leaf { machine, personas, humans, dir, out }) => {
             let dir = team_dir(dir)?;

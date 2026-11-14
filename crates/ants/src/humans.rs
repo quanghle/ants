@@ -47,7 +47,7 @@ impl Me {
     }
 
     fn from_creds_text(text: &str) -> Result<Self> {
-        let jwt = user_jwt(text).context("no user JWT")?;
+        let jwt = crate::auth::creds_jwt(text).context("no user JWT")?;
         let payload = jwt.split('.').nth(1).context("a malformed user JWT")?;
         let payload = BASE64URL_NOPAD
             .decode(payload.trim_end_matches('=').as_bytes())
@@ -62,13 +62,6 @@ impl Me {
         let role = if writes_humans { Role::Human } else { Role::by_default(&id) };
         Ok(Self { id, role })
     }
-}
-
-/// The user JWT of a `.creds` file: the line after the `BEGIN NATS USER JWT` marker.
-fn user_jwt(creds: &str) -> Option<&str> {
-    let mut lines = creds.lines().map(str::trim);
-    lines.find(|line| line.starts_with("---") && line.contains("BEGIN NATS USER JWT"))?;
-    lines.find(|line| !line.is_empty()).filter(|line| !line.starts_with("---"))
 }
 
 /// Register `me` in the humans bucket, creating the bucket when missing, unless its entry is there already: one
