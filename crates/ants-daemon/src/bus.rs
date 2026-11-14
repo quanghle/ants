@@ -475,14 +475,92 @@ const SEEN: usize = 1024;
 /// Messages to `user` as they come, each once, on their inbox subject: published there, and as the hub's stream
 /// stored them ([`subject::stored_inbox`]). A message sourced from a leaf's outbox comes only the second way, and so
 /// does any message while the stream lacks the republishing `ants init` sets up. Subscribed before it returns, so
-/// nothing published after that is missed.
+/// nothing published after that is missed while the connection reaches the hub; [`caught_up_inbox`] also gets what
+/// the hub stored meanwhile.
 pub async fn live_inbox(client: &async_nats::Client, user: &UserId) -> Result<LiveInbox> {
+    inbox(client, user, None).await
+}
+
+/// How often [`caught_up_inbox`] reads back what the hub's stream stored.
+pub const CATCH_UP: Duration = Duration::from_secs(5);
+
+/// Most messages [`caught_up_inbox`] reads back at once.
+const CATCH_UP_BATCH: usize = 100;
+
+/// [`live_inbox`], which also reads back from the hub's stream, every [`CATCH_UP`], the messages stored for `user`
+/// since it was called (or since the hub first answered, when out of its reach then): what the hub stored while this
+/// connection, or the uplink of the leaf node it goes through, was down never comes live. It reads with
+/// `STREAM.MSG.GET`, which only a human's credentials allow.
+pub async fn caught_up_inbox(client: &async_nats::Client, js: &jetstream::Context, user: &UserId) -> Result<LiveInbox> {
+    inbox(client, user, Some(read_back(js.clone(), subject::inbox_of(user)))).await
+}
+
+async fn inbox(client: &async_nats::Client, user: &UserId, read_back: Option<LiveInbox>) -> Result<LiveInbox> {
     let live = client.subscribe(subject::inbox_of(user)).await?;
     let stored = client.subscribe(subject::stored_inbox(user)).await?;
     let user = user.clone();
     let stored = stored.filter_map(move |msg| std::future::ready(as_published(msg, &user)));
+    let mut all: Vec<LiveInbox> = vec![Box::pin(live), Box::pin(stored)];
+    all.extend(read_back);
     let mut seen = Seen::default();
-    Ok(Box::pin(futures::stream::select(live, stored).filter(move |msg| std::future::ready(seen.first(msg)))))
+    Ok(Box::pin(futures::stream::select_all(all).filter(move |msg| std::future::ready(seen.first(msg)))))
+}
+
+/// The messages on `filter` the hub's stream stores from now on, read back every [`CATCH_UP`] until dropped.
+fn read_back(js: jetstream::Context, filter: String) -> LiveInbox {
+    let (found, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut after = None;
+        loop {
+            for msg in stored_after(&js, &filter, &mut after).await {
+                if found.send(msg).is_err() {
+                    return;
+                }
+            }
+            tokio::select! {
+                () = found.closed() => return,
+                () = tokio::time::sleep(CATCH_UP) => {}
+            }
+        }
+    });
+    Box::pin(futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|msg| (msg, rx)) }))
+}
+
+/// The messages on `filter` the hub's stream stored after sequence `after`, which moves past them. Without `after`, it
+/// becomes the stream's last sequence. Out of the hub's reach, none.
+async fn stored_after(js: &jetstream::Context, filter: &str, after: &mut Option<u64>) -> Vec<async_nats::Message> {
+    let Ok(stream) = js.get_stream_no_info(STREAM).await else { return Vec::new() };
+    let Some(mut last) = *after else {
+        match stream.get_info().await {
+            Ok(info) => *after = Some(info.state.last_sequence),
+            Err(e) => tracing::debug!(error = %e, "cannot read back the inbox yet"),
+        }
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    while found.len() < CATCH_UP_BATCH {
+        match stream.get_first_raw_message_by_subject(filter, last + 1).await {
+            Ok(msg) => {
+                last = msg.sequence;
+                found.push(async_nats::Message {
+                    subject: msg.subject,
+                    reply: None,
+                    payload: msg.payload,
+                    headers: Some(msg.headers),
+                    status: None,
+                    description: None,
+                    length: 0,
+                });
+            }
+            Err(e) if e.kind() == stream::RawMessageErrorKind::NoMessageFound => break,
+            Err(e) => {
+                tracing::debug!(error = %e, "reading back the inbox");
+                break;
+            }
+        }
+    }
+    *after = Some(last);
+    found
 }
 
 /// A stored message republished to `user`, back on the inbox subject it was stored under.

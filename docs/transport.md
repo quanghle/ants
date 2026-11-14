@@ -308,6 +308,19 @@ daemon warns and waiters hear only what is published directly. Republishing is a
 message, without a consumer per waiter; a consumer would also have to be created on the hub before each wait and
 needs consumer rights an ant does not have on its inbox.
 
+Nothing republished crosses an uplink that is down, so a waiter on the leaf never hears live what the hub stores
+meanwhile, such as a reply sent from another machine (ants-lsab). A human's `ants ask --wait` or `--follow`
+(`bus::caught_up_inbox`) therefore also reads back, every 5 s, the inbox messages the hub's stream stored for that human
+since it began waiting: the stream's last sequence when it starts (the first time the hub answers), then
+`STREAM.MSG.GET` with `next_by_subj: ants.inbox.<human>.*` from the sequence after the last one read, one message per
+request until none is left (at most 100 a round). The same check by `Nats-Msg-Id` takes each once, so the reply shows
+once the uplink is back (or the CLI's own connection, dropped meanwhile, reconnects). A request the hub does not answer,
+as while the uplink is down, finds nothing and the next round tries again. Only a human's credentials have
+`STREAM.MSG.GET`, which takes any sequence; an ant's cannot read its inbox from the stream except through its inbox
+consumer, so `ants ask --wait` as an ant hears only what comes live. A daemon's waiters need no read-back: the inbox
+consumer delivers the reply once the uplink is back, and the daemon hands it to the waiting `ask_agent` call or
+escalation chain request rather than prompting with it.
+
 Set up, as a human, with the leaf up and connected:
 
 ```sh

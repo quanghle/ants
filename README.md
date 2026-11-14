@@ -1232,7 +1232,10 @@ need `ants auth user` again. A message sent while the uplink is down lands after
 whose request could not be acked may come twice. A message the hub takes from an outbox is stored without being sent on
 its subject, so the hub's stream republishes every inbox message it stores to `_INBOX.<recipient>.stored.<sender>`,
 which only the recipient may read: `ants ask --wait`, a waiting `ask_agent` and an ant waiting on its escalation
-chain get it from there too, once each. A stream set up before needs `ants init` again; a daemon warns until then. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
+chain get it from there too, once each. A reply the hub stores while the uplink is down never comes live on the leaf:
+a human's `ants ask --wait` or `--follow` reads back every 5 s what the hub's stream stored for that human since it
+began waiting, and so shows it once the uplink is back; a daemon gets it from its inbox consumer then and hands it to
+the waiting `ask_agent` or approval request. A stream set up before needs `ants init` again; a daemon warns until then. Details: [docs/transport.md](docs/transport.md), "Store and forward on a leaf node".
 
 ## Transport options
 
