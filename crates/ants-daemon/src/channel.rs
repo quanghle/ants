@@ -16,10 +16,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, Role, RosterEntry, STREAM, ThreadId,
     ThreadOrigin, UserId, Uuid, chan_reader, channel_seen_key, mention_key, subject,
 };
 use anyhow::{Context as _, Result};
+use async_nats::jetstream::response::Response;
 use async_nats::jetstream::{self, consumer, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 
@@ -502,14 +503,16 @@ fn context_text(context: &Context) -> String {
     text
 }
 
-/// Reads channel threads back for an ant and keeps which posts it was shown.
+/// Reads channel threads back for an ant, or for the human's side, and keeps which posts the ant was shown.
 pub struct Threads {
     js: jetstream::Context,
     ant: UserId,
     /// The sessions bucket, under the ant's own keys.
     seen: kv::Store,
-    /// One read at a time: they share the reader's consumer.
-    reading: tokio::sync::Mutex<()>,
+    /// How the reader reads channels back.
+    reading: Reading,
+    /// One read at a time through a consumer: they share the reader's.
+    one_read: tokio::sync::Mutex<()>,
     /// The origins of threads read so far, with the stream sequence each read reached.
     origins: Mutex<HashMap<(ChannelId, ThreadId), (ThreadOrigin, u64)>>,
     /// The channel whose top-level post started each thread looked up so far ([`Threads::origin_of`]); None for a
@@ -527,12 +530,19 @@ impl Threads {
             js: js.clone(),
             ant,
             seen: sessions,
-            reading: tokio::sync::Mutex::new(()),
+            reading: Reading::Consumer,
+            one_read: tokio::sync::Mutex::new(()),
             origins: Mutex::default(),
             roots: Mutex::default(),
             webhooks: Webhooks::new(js),
             parts: Mutex::default(),
         }
+    }
+
+    /// Read channels back as `reading` says; an ant's daemon reads through its reader consumer.
+    pub fn reading(mut self, reading: Reading) -> Self {
+        self.reading = reading;
+        self
     }
 
     /// The origin of `thread`, at stream sequence `seq`, when a top-level channel post stored before `seq` started it
@@ -650,24 +660,18 @@ impl Threads {
 
     /// Read the channel posts on `filter` from `start` into `sink`, up to the last one stored as the read starts.
     async fn scan(&self, filter: &str, start: consumer::DeliverPolicy, sink: &mut impl Sink) -> Result<()> {
-        let _one = self.reading.lock().await;
-        let name = chan_reader(&self.ant);
-        // A consumer left by an interrupted read would carry on where it stopped.
-        let _ = self.js.delete_consumer_from_stream(&name, STREAM).await;
-        let config = consumer::pull::Config {
-            name: Some(name.clone()),
-            filter_subject: filter.to_owned(),
-            deliver_policy: start,
-            ack_policy: consumer::AckPolicy::None,
-            inactive_threshold: INACTIVE,
-            ..Default::default()
+        let _one = match self.reading {
+            Reading::Consumer => Some(self.one_read.lock().await),
+            Reading::Gets => None,
         };
-        let consumer: consumer::PullConsumer = self.js.create_consumer_on_stream(config, STREAM).await?;
-        let read = read(&consumer, sink).await;
-        if let Err(e) = self.js.delete_consumer_from_stream(&name, STREAM).await {
-            tracing::debug!(error = %e, consumer = name, "deleting the channel reader");
-        }
-        read
+        read_back(&self.js, &self.ant, self.reading, filter, start, |seq, stored, subject, post| match post {
+            Ok(post) => sink.take(seq, stored, post),
+            Err(error) => {
+                tracing::debug!(subject, error, "dropping a channel post");
+                ControlFlow::Continue(())
+            }
+        })
+        .await
     }
 
     /// Stream sequence of the last post on `thread` the ant was shown.
@@ -723,32 +727,144 @@ impl Threads {
     }
 }
 
-async fn read(consumer: &consumer::PullConsumer, sink: &mut impl Sink) -> Result<()> {
-    let mut left = consumer.cached_info().num_pending;
-    while left > 0 {
-        let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
-        let mut got = 0;
-        while let Some(msg) = batch.next().await {
-            let msg = msg.map_err(|e| anyhow::anyhow!(e))?;
-            got += 1;
-            let Ok(info) = msg.info() else { continue };
-            let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
-            let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
-                .map_err(|e| e.to_string())
-                .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
-            match post {
-                Ok(post) => {
-                    if sink.take(seq, stored, post).is_break() {
-                        return Ok(());
-                    }
+/// How a user reads channel posts back from the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// Through the user's reader consumer ([`chan_reader`]), created for the read and deleted after it, so one read
+    /// at a time: an ant's, whose credentials may not get stream messages by sequence.
+    Consumer,
+    /// By getting the posts one by one (`STREAM.MSG.GET`), with no consumer, so any number of reads at once: a
+    /// human's.
+    Gets,
+}
+
+impl Reading {
+    /// How credentials in `role` read channels back.
+    pub fn of(role: Role) -> Self {
+        if role.is_human() { Self::Gets } else { Self::Consumer }
+    }
+}
+
+/// Hand the channel posts stored on `filter` from `start` on (all, from a stream sequence or from a time), oldest
+/// first, to `take` until it breaks, up to the last one stored as the read starts, as `reader` reads them
+/// ([`Reading`]). `take` gets each post's stream sequence, the time it was stored and its subject, and the post, or
+/// why the message is none: not one, or a post whose sender or channel disagrees with its subject.
+pub async fn read_back(
+    js: &jetstream::Context,
+    reader: &UserId,
+    reading: Reading,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    take: impl FnMut(u64, SystemTime, &str, Result<ChannelPost, String>) -> ControlFlow<()>,
+) -> Result<()> {
+    match reading {
+        Reading::Consumer => read_through_consumer(js, reader, filter, start, take).await,
+        Reading::Gets => read_by_gets(js, filter, start, take).await,
+    }
+}
+
+fn parse_post(subject: &str, payload: &[u8]) -> Result<ChannelPost, String> {
+    let post = serde_json::from_slice::<ChannelPost>(payload).map_err(|e| e.to_string())?;
+    post.check_subject(subject).map_err(|e| e.to_string())?;
+    Ok(post)
+}
+
+async fn read_through_consumer(
+    js: &jetstream::Context,
+    reader: &UserId,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    mut take: impl FnMut(u64, SystemTime, &str, Result<ChannelPost, String>) -> ControlFlow<()>,
+) -> Result<()> {
+    let name = chan_reader(reader);
+    // A consumer left by an interrupted read would carry on where it stopped.
+    let _ = js.delete_consumer_from_stream(&name, STREAM).await;
+    let config = consumer::pull::Config {
+        name: Some(name.clone()),
+        filter_subject: filter.to_owned(),
+        deliver_policy: start,
+        ack_policy: consumer::AckPolicy::None,
+        inactive_threshold: INACTIVE,
+        ..Default::default()
+    };
+    let consumer: consumer::PullConsumer = js.create_consumer_on_stream(config, STREAM).await?;
+    let read = async {
+        let mut left = consumer.cached_info().num_pending;
+        while left > 0 {
+            let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
+            let mut got = 0;
+            while let Some(msg) = batch.next().await {
+                let msg = msg.map_err(|e| anyhow::anyhow!(e))?;
+                got += 1;
+                let Ok(info) = msg.info() else { continue };
+                let (seq, stored) = (info.stream_sequence, SystemTime::from(info.published));
+                if take(seq, stored, &msg.subject, parse_post(&msg.subject, &msg.payload)).is_break() {
+                    return Ok(());
                 }
-                Err(error) => tracing::debug!(subject = %msg.subject, error, "dropping a channel post"),
             }
+            if got == 0 {
+                break;
+            }
+            left = left.saturating_sub(got);
         }
-        if got == 0 {
+        Ok(())
+    };
+    let read = read.await;
+    if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
+        tracing::debug!(error = %e, consumer = name, "deleting the channel reader");
+    }
+    read
+}
+
+/// A `STREAM.MSG.GET` request for the first message on `next_by_subj` at or after `seq`, or stored at or after
+/// `start_time` (nats-server 2.11 or later).
+#[derive(serde::Serialize)]
+struct NextGet<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    next_by_subj: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_time: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Got {
+    message: jetstream::stream::RawMessage,
+}
+
+async fn read_by_gets(
+    js: &jetstream::Context,
+    filter: &str,
+    start: consumer::DeliverPolicy,
+    mut take: impl FnMut(u64, SystemTime, &str, Result<ChannelPost, String>) -> ControlFlow<()>,
+) -> Result<()> {
+    let (mut seq, mut since) = match start {
+        consumer::DeliverPolicy::All => (1, None),
+        consumer::DeliverPolicy::ByStartSequence { start_sequence } => (start_sequence.max(1), None),
+        consumer::DeliverPolicy::ByStartTime { start_time } => {
+            let time = chrono::DateTime::<chrono::Utc>::from(SystemTime::from(start_time));
+            (0, Some(time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)))
+        }
+        other => anyhow::bail!("reading channel posts from {other:?}"),
+    };
+    let last = js.get_stream(STREAM).await.context("opening the ANTS stream")?.cached_info().state.last_sequence;
+    while seq <= last {
+        let request = NextGet { seq: (seq > 0).then_some(seq), next_by_subj: filter, start_time: since.take() };
+        let got: Response<Got> = js.request(format!("STREAM.MSG.GET.{STREAM}"), &request).await?;
+        let msg = match got {
+            Response::Ok(got) => {
+                jetstream::message::StreamMessage::try_from(got.message).map_err(|e| anyhow::anyhow!(e))?
+            }
+            Response::Err { error } if error.error_code() == jetstream::ErrorCode::NO_MESSAGE_FOUND => break,
+            Response::Err { error } => return Err(error.into()),
+        };
+        if msg.sequence > last {
             break;
         }
-        left = left.saturating_sub(got);
+        if take(msg.sequence, msg.time.into(), &msg.subject, parse_post(&msg.subject, &msg.payload)).is_break() {
+            break;
+        }
+        seq = msg.sequence + 1;
     }
     Ok(())
 }

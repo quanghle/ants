@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attempts::Notes;
 use crate::bus;
-use crate::channel::Threads;
+use crate::channel::{Reading, Threads};
 use crate::daemon::Claims;
 use crate::escalation::{Escalator, Stuck};
 use crate::humans::Registry;
@@ -420,7 +420,8 @@ impl MaxDeliveries {
 
 /// Hear the max-deliveries advisories of the stream's consumers and dead-letter each message an ant's inbox or
 /// channel consumer stopped delivering, as its daemon would have, handing every new dead letter and its sequence to `buried`.
-/// Channel threads are read through the reader consumer of `reader`, the human. Runs until the connection closes.
+/// Channel threads are read as `reader`, the human, by message gets ([`Reading::Gets`]), so no other read of theirs
+/// gets in the way. Runs until the connection closes.
 /// Needs the human's credentials.
 pub async fn watch(
     client: &async_nats::Client,
@@ -436,7 +437,7 @@ pub async fn watch(
     let humans = Registry::default();
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let webhooks = Webhooks::new(js.clone());
-    let threads = Threads::new(js.clone(), reader.clone(), bus::ensure_sessions(js).await?);
+    let threads = Threads::new(js.clone(), reader.clone(), bus::ensure_sessions(js).await?).reading(Reading::Gets);
     let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
     while let Some(msg) = advisories.next().await {
         let advisory = match serde_json::from_slice::<MaxDeliveries>(&msg.payload) {

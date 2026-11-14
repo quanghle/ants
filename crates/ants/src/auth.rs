@@ -417,7 +417,7 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use ants_daemon::bus;
-    use ants_daemon::channel::{Channels, Threads};
+    use ants_daemon::channel::{Channels, Reading, Threads};
     use ants_daemon::daemon::Claims;
     use ants_daemon::dead::{self, Attempt};
     use ants_daemon::humans::Registry;
@@ -1273,7 +1273,8 @@ pub(crate) mod tests {
                 deliveries: 2,
             };
             let (humans, webhooks) = (Registry::default(), Webhooks::new(h_js.clone()));
-            let threads = Threads::new(h_js.clone(), human.clone(), bus::ensure_sessions(&h_js).await.unwrap());
+            let threads = Threads::new(h_js.clone(), human.clone(), bus::ensure_sessions(&h_js).await.unwrap())
+                .reading(Reading::Gets);
             let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
             assert_eq!(dead::bury_undelivered(&h_js, &stream, &advisory, &claims).await.unwrap(), None);
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1316,7 +1317,8 @@ pub(crate) mod tests {
         let post_seq = bus::publish_json(&b_js, post.subject(), &post, None).await.unwrap();
 
         let (humans, webhooks) = (Registry::new(alice.clone()), Webhooks::new(h_js.clone()));
-        let threads = Threads::new(h_js.clone(), alice.clone(), bus::ensure_sessions(&h_js).await.unwrap());
+        let threads = Threads::new(h_js.clone(), alice.clone(), bus::ensure_sessions(&h_js).await.unwrap())
+            .reading(Reading::Gets);
         let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
         for (consumer, seq) in [(ants_proto::inbox_consumer(&dev_a), message_seq), (chan_consumer(&dev_a), post_seq)] {
             let advisory = dead::MaxDeliveries { stream: STREAM.to_owned(), consumer, stream_seq: seq, deliveries: 5 };

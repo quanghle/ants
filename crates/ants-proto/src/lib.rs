@@ -574,8 +574,9 @@ pub fn chan_consumer(ant: &UserId) -> String {
     format!("chan-{ant}")
 }
 
-/// JetStream consumer a user reads a channel (or a thread of it) back through, one read at a time, like
-/// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too.
+/// JetStream consumer an ant reads a channel (or a thread of it) back through, one read at a time, like
+/// [`notes_consumer`]. Its filter is pinned under [`subject::ALL_CHANNELS`] too. A human gets the posts one by one
+/// instead (`STREAM.MSG.GET`), so its reads need no consumer and never get in each other's way.
 pub fn chan_reader(user: &UserId) -> String {
     format!("chanread-{user}")
 }

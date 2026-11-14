@@ -868,10 +868,12 @@ post there wakes nobody, and an ant reads the notes only when asked to. A channe
 wakes the members it @mentions, or the messenger, and replies come back to the channel.
 
 **Where channels live.** Posts go on `ants.chan.<channel>.<from>` and are kept in the stream; `ants channel read` reads
-them back through the CLI's human's consumer `chanread-<human>`, created for the read and deleted after it, and drops a
-post whose sender or channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and
-messenger are an entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials and the
-channel manager's write (see [Channel owners](#channel-owners)):
+them back by fetching the channel's posts one by one (`STREAM.MSG.GET`, with no consumer), so any number of `ants
+channel read`, `ants post --thread`, `ants dead watch` and `ants inbox --follow` read at once without getting in each
+other's way (with an ant's credentials, through the ant's `chanread-<ant>` as below), and drops a post whose sender or
+channel disagrees with its subject (`ants watch` marks such a post forged). A channel's members and messenger are an
+entry in the KV bucket `ants_channels` under the channel id, which only humans' credentials and the channel manager's
+write (see [Channel owners](#channel-owners)):
 `create` fails when the channel exists, and `set`, `add` and `remove` change the entry only if nobody else changed it
 since it was read, retrying otherwise. An entry whose channel disagrees with its key is skipped with a warning (`set`,
 `add` or `remove` rewrites it). Members and messengers that the roster does not list get a warning rather than a
@@ -1161,8 +1163,10 @@ channel disagrees with its key. An ant asks the channel manager for changes only
 subject proves the requester, and the manager answers only on the requester's `_INBOX.<ant>.` (see [Channel
 owners](#channel-owners)). Credentials issued before channel owners lack `ants.chanadm.*.<ant>`: owner ants need
 `ants auth user` and their machines' leaf nodes `ants auth leaf` again. An ant takes
-channel posts through its own consumer `chan-<ant>` and reads channels back through `chanread-<ant>`;
-credentials pin the filter of both under `ants.chan.>`, so neither reaches an inbox. Credentials and streams set up
+channel posts through its own consumer `chan-<ant>` and reads channels back through `chanread-<ant>`, created for each
+read and deleted after it, one read at a time; credentials pin the filter of both under `ants.chan.>`, so neither
+reaches an inbox. A human's credentials read channels back with `STREAM.MSG.GET`, which they already allow, so no
+credentials need issuing again for it. Credentials and streams set up
 before channels need `ants auth user` and `ants init` again.
 
 An ant's credentials publish dead letters only on its own `ants.dead.<ant>` (and `ants.out.dead.<ant>` in a
