@@ -112,6 +112,10 @@ pub struct AntOptions {
     /// Cost the ant may spend in a UTC day (default: no cap).
     #[arg(long)]
     max_daily_cost: Option<f64>,
+    /// Percent of a spend cap past which the thread's owner, else the default human, is warned once (default: 80;
+    /// 0 for never).
+    #[arg(long, value_name = "PERCENT")]
+    spend_warn_percent: Option<u8>,
     /// Tag the ant is good for, listed in its roster entry for routing (repeatable, or comma-separated). Replaces
     /// the file's `capabilities`.
     #[arg(long = "capability", value_name = "TAG", value_delimiter = ',')]
@@ -143,6 +147,7 @@ impl AntOptions {
             || self.max_thread_cost.is_some()
             || self.max_daily_tokens.is_some()
             || self.max_daily_cost.is_some()
+            || self.spend_warn_percent.is_some()
             || !self.capabilities.is_empty()
     }
 
@@ -198,6 +203,9 @@ impl AntOptions {
         p.max_thread_cost = self.max_thread_cost.or(p.max_thread_cost);
         p.max_daily_tokens = self.max_daily_tokens.or(p.max_daily_tokens);
         p.max_daily_cost = self.max_daily_cost.or(p.max_daily_cost);
+        if let Some(percent) = self.spend_warn_percent {
+            p.spend_warn_percent = percent;
+        }
         if !self.capabilities.is_empty() {
             p.capabilities.clone_from(&self.capabilities);
         }
