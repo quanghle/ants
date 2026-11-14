@@ -1,7 +1,8 @@
 //! The user services `scripts/install-units.sh` installs from contrib/: launchd agents on macOS
 //! (`~/Library/LaunchAgents/<label>.plist`, in the domain `gui/<uid>`) and systemd user units on Linux
 //! (`~/.config/systemd/user/<unit>.service`). Reloads or restarts the one running a given file, when it is installed
-//! and running; otherwise says how to do it by hand.
+//! and running; otherwise says how to do it by hand. Installs and starts the nats-server and daemon units for
+//! `ants setup`, rendered from the same templates.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -184,6 +185,165 @@ impl Services {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+/// What a unit runs: the executables, the environment and where launchd agents log.
+pub struct Values {
+    pub ants: PathBuf,
+    pub nats_server: PathBuf,
+    /// The daemon's `PATH`, on which it finds harnesses and tools.
+    pub path: String,
+}
+
+/// What came of [`Services::install`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Installed {
+    /// The unit file was written there and the service started with this command; with a dry run, would be.
+    New(PathBuf, String),
+    /// Installed for the file already; it was not running and this command started it, or with a dry run would.
+    Started(String),
+    /// Installed for the file already, and running.
+    Running,
+    /// This unit file runs another file: left alone.
+    Other(PathBuf),
+    /// The platform has no service manager ants installs units for.
+    Unsupported,
+    /// This command failed, for this reason.
+    Failed(String, String),
+}
+
+/// A launchd agent with no file of its own to run: the log rotation of the other agents.
+const LOGROTATE: &str = "ants.logrotate";
+
+impl Services {
+    /// Install `service` to run `file`, as scripts/install-units.sh does, and start it, unless it is installed for a
+    /// file already: then start it when it is not running, and leave the unit of another file alone. On macOS also
+    /// install the agent rotating the logs, if missing. With `dry_run`, only say what would be done.
+    pub fn install(&mut self, service: Service, file: &Path, values: &Values, dry_run: bool) -> Installed {
+        let Some(manager) = self.manager else { return Installed::Unsupported };
+        let file = std::path::absolute(file).unwrap_or_else(|_| file.to_owned());
+        let installed = match self.locate(service, &file) {
+            Ok((manager, target)) => match self.running(manager, &target) {
+                Some(true) => return Installed::Running,
+                Some(false) => self.started(command(manager, Action::Start, &target), dry_run),
+                None => {
+                    let unit = self.unit_file(manager, service);
+                    let bootstrap = ["launchctl", "bootstrap", launchd_domain(&target), &unit.to_string_lossy()];
+                    self.started(bootstrap.map(str::to_owned).to_vec(), dry_run)
+                }
+            },
+            Err(State::NotInstalled) => {
+                let unit = self.unit_file(manager, service);
+                let text = render(manager, template(manager, service), &file, values, &self.logs());
+                self.write_and_start(manager, &unit, &text, dry_run)
+            }
+            Err(State::Other(unit)) => Installed::Other(unit),
+            Err(State::Unknown(command, e)) => Installed::Failed(command, e),
+            Err(_) => Installed::Unsupported,
+        };
+        if manager == Manager::Launchd && !matches!(installed, Installed::Failed(..)) {
+            let unit = self.home.join("Library/LaunchAgents").join(format!("{LOGROTATE}.plist"));
+            if !unit.exists() {
+                let text = render(
+                    manager,
+                    include_str!("../../../contrib/launchd/ants.logrotate.plist"),
+                    &file,
+                    values,
+                    &self.logs(),
+                );
+                if let Installed::Failed(command, e) = self.write_and_start(manager, &unit, &text, dry_run) {
+                    return Installed::Failed(command, e);
+                }
+            }
+        }
+        installed
+    }
+
+    /// Where launchd agents log.
+    fn logs(&self) -> PathBuf {
+        self.home.join("Library/Logs/ants")
+    }
+
+    fn started(&mut self, command: Vec<String>, dry_run: bool) -> Installed {
+        let shown = command.join(" ");
+        if dry_run {
+            return Installed::Started(shown);
+        }
+        let args: Vec<&str> = command.iter().map(String::as_str).collect();
+        match self.output(&args) {
+            Ok(_) => Installed::Started(shown),
+            Err(e) => Installed::Failed(shown, e),
+        }
+    }
+
+    /// Write `text` to `unit` and start the service it defines: bootstrap a launchd agent, enable a systemd unit.
+    fn write_and_start(&mut self, manager: Manager, unit: &Path, text: &str, dry_run: bool) -> Installed {
+        let commands: Vec<Vec<String>> = match manager {
+            Manager::Launchd => {
+                let domain = match self.output(&["id", "-u"]) {
+                    Ok(uid) => format!("gui/{}", uid.trim()),
+                    Err(e) => return Installed::Failed("id -u".to_owned(), e),
+                };
+                vec![vec!["launchctl".into(), "bootstrap".into(), domain, unit.to_string_lossy().into_owned()]]
+            }
+            Manager::Systemd => {
+                let name = unit.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let reload = ["systemctl", "--user", "daemon-reload"];
+                let enable = ["systemctl", "--user", "enable", "--now", &name];
+                vec![reload.map(str::to_owned).to_vec(), enable.map(str::to_owned).to_vec()]
+            }
+        };
+        let shown = commands.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join(" && ");
+        if dry_run {
+            return Installed::New(unit.to_owned(), shown);
+        }
+        let written = (|| {
+            std::fs::create_dir_all(unit.parent().unwrap_or(Path::new(".")))?;
+            if manager == Manager::Launchd {
+                std::fs::create_dir_all(self.logs())?;
+            }
+            std::fs::write(unit, text)
+        })();
+        if let Err(e) = written {
+            return Installed::Failed(format!("writing {}", unit.display()), e.to_string());
+        }
+        for command in &commands {
+            let args: Vec<&str> = command.iter().map(String::as_str).collect();
+            if let Err(e) = self.output(&args) {
+                return Installed::Failed(command.join(" "), e);
+            }
+        }
+        Installed::New(unit.to_owned(), shown)
+    }
+}
+
+/// The contrib/ template of `service` for `manager`.
+fn template(manager: Manager, service: Service) -> &'static str {
+    match (manager, service) {
+        (Manager::Launchd, Service::Daemon) => include_str!("../../../contrib/launchd/ants.daemon.plist"),
+        (Manager::Launchd, Service::Nats) => include_str!("../../../contrib/launchd/ants.nats.plist"),
+        (Manager::Systemd, Service::Daemon) => include_str!("../../../contrib/systemd/ants-daemon.service"),
+        (Manager::Systemd, Service::Nats) => include_str!("../../../contrib/systemd/ants-nats.service"),
+    }
+}
+
+/// `template` with its placeholders filled in as scripts/install-units.sh fills them, for a unit running `file`
+/// (the daemon's config file, or nats-server's configuration).
+fn render(manager: Manager, template: &str, file: &Path, values: &Values, logs: &Path) -> String {
+    let escape = |value: &str| match manager {
+        Manager::Launchd => value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"),
+        Manager::Systemd => value.replace('%', "%%"),
+    };
+    let file = file.to_string_lossy();
+    let values = [
+        ("@ANTS@", values.ants.to_string_lossy()),
+        ("@NATS_SERVER@", values.nats_server.to_string_lossy()),
+        ("@NATS_CONF@", file.clone()),
+        ("@CONFIG@", file),
+        ("@PATH@", values.path.as_str().into()),
+        ("@LOGS@", logs.to_string_lossy()),
+    ];
+    values.iter().fold(template.to_owned(), |text, (placeholder, value)| text.replace(placeholder, &escape(value)))
 }
 
 /// `outcome` of a failed command, as the start of a message.
@@ -424,6 +584,86 @@ mod tests {
         assert_eq!(read("nats.log"), "short\n");
         assert!(!logs.join("nats.log.1.gz").exists() && !logs.join("notes.txt.1.gz").exists());
         std::fs::remove_dir_all(&logs).unwrap();
+    }
+
+    #[test]
+    fn install_writes_and_starts_a_missing_unit_and_starts_or_keeps_an_installed_one() {
+        let home = ants_test_support::scratch_dir("service-install").canonicalize().unwrap();
+        let config = home.join("a & b/config.toml");
+        let values =
+            Values { ants: "/bin/ants".into(), nats_server: "/bin/nats-server".into(), path: "/bin:/usr/bin".into() };
+        let launchd = |print: &'static str| {
+            fake(Manager::Launchd, &home, move |command| match command {
+                "id -u" => ok("501\n"),
+                c if c.starts_with("launchctl print") => match print {
+                    "" => failed("Could not find service"),
+                    print => ok(print),
+                },
+                _ => ok(""),
+            })
+        };
+        let plist = home.join("Library/LaunchAgents/ants.daemon.plist");
+        let logrotate = home.join("Library/LaunchAgents/ants.logrotate.plist");
+        let (mut services, log) = launchd("");
+        let bootstrap = format!("launchctl bootstrap gui/501 {}", plist.display());
+        assert_eq!(
+            services.install(Service::Daemon, &config, &values, true),
+            Installed::New(plist.clone(), bootstrap.clone())
+        );
+        assert!(!plist.exists() && !logrotate.exists(), "a dry run writes nothing");
+        assert!(log.lock().unwrap().iter().all(|c| !c.starts_with("launchctl bootstrap")), "nor starts anything");
+
+        assert_eq!(
+            services.install(Service::Daemon, &config, &values, false),
+            Installed::New(plist.clone(), bootstrap.clone())
+        );
+        let text = std::fs::read_to_string(&plist).unwrap();
+        assert!(
+            text.contains("<string>/bin/ants</string>") && text.contains("<string>/bin:/usr/bin</string>"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("<string>{}</string>", home.join("a &amp; b/config.toml").display())), "{text}");
+        assert!(["@ANTS@", "@CONFIG@", "@PATH@", "@LOGS@"].iter().all(|p| !text.contains(p)), "filled in: {text}");
+        assert!(
+            std::fs::read_to_string(&logrotate)
+                .unwrap()
+                .contains(&home.join("Library/Logs/ants").display().to_string())
+        );
+        assert!(log.lock().unwrap().contains(&bootstrap));
+        assert!(log.lock().unwrap().contains(&format!("launchctl bootstrap gui/501 {}", logrotate.display())));
+        assert_eq!(services.state(Service::Daemon, &config), State::Stopped(bootstrap), "found as installed");
+
+        let (mut services, log) = launchd("\tstate = not running\n");
+        assert_eq!(
+            services.install(Service::Daemon, &config, &values, false),
+            Installed::Started("launchctl kickstart gui/501/ants.daemon".to_owned())
+        );
+        assert!(!log.lock().unwrap().iter().any(|c| c.starts_with("launchctl bootstrap")), "logrotate kept");
+        let (mut services, _) = launchd("\tpid = 7\n");
+        assert_eq!(services.install(Service::Daemon, &config, &values, false), Installed::Running);
+        assert_eq!(
+            services.install(Service::Daemon, &home.join("other.toml"), &values, false),
+            Installed::Other(plist)
+        );
+
+        let (mut services, log) = fake(Manager::Systemd, &home, |command| match command {
+            c if c.starts_with("systemctl --user is-active") => failed(""),
+            _ => ok(""),
+        });
+        let conf = home.join("100%/nats.conf");
+        let unit = home.join(".config/systemd/user/ants-nats.service");
+        let start = "systemctl --user daemon-reload && systemctl --user enable --now ants-nats.service".to_owned();
+        assert_eq!(services.install(Service::Nats, &conf, &values, false), Installed::New(unit.clone(), start));
+        let text = std::fs::read_to_string(&unit).unwrap();
+        assert!(
+            text.contains(&format!("ExecStart=\"/bin/nats-server\" -c \"{}\"", home.join("100%%/nats.conf").display()))
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["systemctl --user daemon-reload", "systemctl --user enable --now ants-nats.service"]
+        );
+        assert_eq!(services.state(Service::Nats, &conf), State::Stopped("systemctl --user start ants-nats".to_owned()));
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

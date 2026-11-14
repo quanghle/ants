@@ -23,6 +23,7 @@ mod roster;
 mod scheduler;
 mod serve;
 mod service;
+mod setup;
 mod spend;
 mod thread;
 mod tools;
@@ -268,6 +269,12 @@ enum Command {
         #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
         team: Option<PathBuf>,
     },
+    /// Bring up ants on this machine, each step skipped when already done: write a local nats-server configuration
+    /// with JetStream (~/.config/ants/nats.conf) and install its service, run `ants init`, write the config file with
+    /// the messenger and the ant of --ant, check the harness, install the daemon service and the shell completions,
+    /// then run `ants doctor`. Never overwrites a file; one already there is reported and kept. Exits with status 1
+    /// when a step or a check fails.
+    Setup(Box<setup::SetupArgs>),
     /// Print the script registering shell completions of ants for SHELL, or write it where the shell loads it from.
     /// Besides commands and flags, it completes ants, channels, recent threads, pending tool requests and dead
     /// letters, looked up over NATS as the command line being completed would connect, for up to 2 seconds.
@@ -1015,6 +1022,10 @@ async fn run() -> Result<()> {
                 println!("{line}");
             }
             Ok(())
+        }
+        Command::Setup(args) => {
+            let connection = setup::Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
+            Box::pin(setup::run(&args, &connection)).await
         }
         Command::Completions { shell, install } => {
             let shell = match shell.or_else(completions::Shell::login) {
