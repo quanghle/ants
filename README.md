@@ -103,12 +103,12 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 
 | Command | Description |
 |---|---|
-| `ants ask [--thread ID] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
-| `ants inbox [--peek] [--thread ID] [--limit N] [-f] [--json]` | Print unread replies and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread`, the device counts as reading its escalations, see [Notifications](#notifications)). |
+| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
+| `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread`, the device counts as reading its escalations, see [Notifications](#notifications)). |
 | `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`), the ants and permissions versions of their daemons, harnesses, capabilities, `escalate_to` chains and workdirs; below the table, a note when live daemons run mixed versions, and one line per signed-out harness with its sign-in command and machine. |
 | `ants spend [ANT] [--thread ID \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
-| `ants post [--thread ID] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
+| `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). |
 | `ants channel read CHANNEL [--thread ID \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests; it puts the version of ants it runs at `channel-manager.serve` in `ants_webhooks` hourly. |
@@ -136,6 +136,8 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
+
+`THREAD` in `ask`, `inbox`, `post`, `notes`, `thread show` and `cancel` is a whole thread ID (a UUID, used without any lookup), a unique start of one, or `last`. A start matches the threads with messages the CLI human sent or received (inbox both ways, own channel and notes posts) stored in the last 7 days; an exact ID among them wins, and a start matching none or several is refused with those threads listed (ID, latest message time, route and first line). `last` is the thread of the latest such message, however old. Both read the stream by `STREAM.MSG.GET` and need human credentials.
 
 ### Identity and human registration
 

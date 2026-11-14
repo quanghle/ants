@@ -75,10 +75,10 @@ enum Command {
     /// messenger gets it otherwise. With --wait or --follow, print the replies to the CLI's human on the thread and
     /// mark them read.
     Ask {
-        /// Continue an existing thread. The message still prompts only its recipient (@ant, else the
-        /// messenger), not the thread's other ants.
-        #[arg(long)]
-        thread: Option<ThreadId>,
+        /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
+        /// its recipient (@ant, else the messenger), not the thread's other ants.
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
         /// `@ant` (optional), then the message.
@@ -91,9 +91,9 @@ enum Command {
         /// Show without marking read.
         #[arg(long)]
         peek: bool,
-        /// Only replies on this thread; the others stay unread.
-        #[arg(long)]
-        thread: Option<ThreadId>,
+        /// Only replies on this thread (its id, a unique start of one, or `last`); the others stay unread.
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<thread::Pick>,
         /// At most this many replies; the rest stay unread.
         #[arg(long)]
         limit: Option<usize>,
@@ -141,9 +141,10 @@ enum Command {
         /// The channel: `ops` or `'#ops'` (quoted, as shells take an unquoted `#` for a comment).
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Post on an existing thread of the channel instead of starting one; the thread keeps its owner.
-        #[arg(long)]
-        thread: Option<ThreadId>,
+        /// Post on an existing thread of the channel instead of starting one (its id, a unique start of one, or
+        /// `last`); the thread keeps its owner.
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<thread::Pick>,
         #[command(flatten)]
         replies: Replies,
         /// The post; each @ant mention wakes that member.
@@ -157,7 +158,8 @@ enum Command {
     /// Thread notes are a passive board, one per thread: a post wakes nobody, and agents read the notes with
     /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.
     Notes {
-        thread: ThreadId,
+        /// The thread: its id, a unique start of one, or `last`.
+        thread: thread::Pick,
         /// The post. Without it, show the notes.
         #[arg(value_name = "TEXT")]
         text: Vec<String>,
@@ -179,7 +181,11 @@ enum Command {
     /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
     /// behind it on the thread still run. Needs a human's credentials.
-    Cancel { ant: UserId, thread: ThreadId },
+    Cancel {
+        ant: UserId,
+        /// The thread: its id, a unique start of one, or `last`.
+        thread: thread::Pick,
+    },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
     /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
@@ -514,7 +520,8 @@ enum ThreadCommand {
     },
     /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
     Show {
-        thread: ThreadId,
+        /// The thread: its id, a unique start of one, or `last`.
+        thread: thread::Pick,
         /// How far back to read; by default from the thread's start when its id is time-ordered (as generated ids
         /// are), else everything the stream keeps.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
@@ -900,8 +907,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Ask { thread, replies, words } => ask(&nats()?, thread, &replies, words).await,
         Command::Inbox { peek, thread, limit, follow, json } => {
-            let select = inbox::Select { thread, limit, peek };
-            Box::pin(show_inbox(&nats()?, &select, follow, json)).await
+            let select = inbox::Select { thread: None, limit, peek };
+            Box::pin(show_inbox(&nats()?, select, thread, follow, json)).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
         Command::Spend { ant, thread, days, json, config } => {
@@ -925,7 +932,7 @@ async fn main() -> Result<()> {
             thread::list(&nats()?, since, &select, json).await
         }
         Command::Thread(ThreadCommand::Show { thread, since, json }) => {
-            thread::show(&nats()?, &thread, since, json).await
+            thread::show(&nats()?, thread, since, json).await
         }
         Command::Watch { subject, thread } => {
             let filter = watch_filter(&subject, thread.as_ref())?;
@@ -1504,9 +1511,12 @@ fn recipient(mut words: Vec<String>) -> Result<(UserId, String)> {
     Ok((to, words.join(" ")))
 }
 
-async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words: Vec<String>) -> Result<()> {
-    let envelope = ask_envelope(&nats.me, thread, words)?;
+async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, words: Vec<String>) -> Result<()> {
+    // Refuse a message with nothing to send before connecting.
+    recipient(words.clone())?;
     let (client, js) = nats.connect("ants-cli").await?;
+    let thread = thread::resolve(thread, &js, &nats.me).await?;
+    let envelope = ask_envelope(&nats.me, thread, words)?;
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = match replies.wait || replies.follow {
@@ -1572,7 +1582,7 @@ fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, words: Vec<String>) -
 async fn post(
     nats: &Nats<'_>,
     channel: ChannelId,
-    thread: Option<ThreadId>,
+    thread: Option<thread::Pick>,
     replies: &Replies,
     words: Vec<String>,
 ) -> Result<()> {
@@ -1581,6 +1591,7 @@ async fn post(
         bail!("nothing to post");
     }
     let (client, js) = nats.connect("ants-cli").await?;
+    let thread = thread::resolve(thread, &js, &nats.me).await?;
     let humans = humans::load(&js, &nats.me).await;
     let post = channel::compose(&js, &nats.me, &humans, channel, thread, text).await;
     let entry = channel::get(&channel::open(&js).await?, &post.channel).await?;
@@ -1746,7 +1757,13 @@ async fn warn_unserved<'a>(
 const REISSUE_HUMAN: &str = "these credentials predate the read marker every device of a human shares: issue new ones \
                              with `ants auth user NAME --human` (and a leaf's with `ants auth leaf`)";
 
-async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json: bool) -> Result<()> {
+async fn show_inbox(
+    nats: &Nats<'_>,
+    mut select: inbox::Select,
+    thread: Option<thread::Pick>,
+    follow: bool,
+    json: bool,
+) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
@@ -1755,6 +1772,8 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
         bail!("{REISSUE_HUMAN}");
     }
     let (client, js) = nats.connect("ants-inbox").await?;
+    select.thread = thread::resolve(thread, &js, &nats.me).await?;
+    let select = &select;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
     let show = |e: &Envelope| -> Result<()> {
         if json {
@@ -1854,8 +1873,9 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-async fn thread_notes(nats: &Nats<'_>, thread: ThreadId, text: Vec<String>) -> Result<()> {
+async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Vec<String>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
+    let thread = thread.resolve(&js, &nats.me).await?;
     if !text.is_empty() {
         let post = NotesPost::new(thread, nats.me.id.clone(), text.join(" "));
         notes::publish(&js, &post, None).await?;
@@ -1879,12 +1899,13 @@ const CANCEL_WAIT: Duration = Duration::from_secs(5);
 /// same ant that may run it.
 const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
-async fn cancel(nats: &Nats<'_>, ant: UserId, thread: ThreadId) -> Result<()> {
+async fn cancel(nats: &Nats<'_>, ant: UserId, thread: thread::Pick) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human cancels a prompt");
     }
-    let (client, _) = nats.connect("ants-cancel").await?;
+    let (client, js) = nats.connect("ants-cancel").await?;
+    let thread = thread.resolve(&js, &nats.me).await?;
     let request = CancelRequest::new(ant, thread, me.clone());
     let answers = client.subscribe(request.reply_subject()).await?;
     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
@@ -2245,7 +2266,8 @@ mod tests {
     fn notes_shows_without_text_and_posts_with_it() {
         let cli = Cli::try_parse_from(["ants", "notes", "t1", "split", "the", "work"]).unwrap();
         let Command::Notes { thread, text } = cli.command else { panic!("not notes") };
-        assert_eq!((thread.as_str(), text), ("t1", vec!["split".to_owned(), "the".to_owned(), "work".to_owned()]));
+        let words = vec!["split".to_owned(), "the".to_owned(), "work".to_owned()];
+        assert_eq!((thread, text), (thread::Pick::Prefix("t1".to_owned()), words));
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
         assert_matches!(cli.command, Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
