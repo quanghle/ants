@@ -20,6 +20,7 @@ use futures::{Stream, StreamExt as _};
 
 use crate::direct_kv::DirectKv;
 use crate::hub;
+use crate::keystore::{self, Store};
 use crate::reading::{self, Reading};
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
@@ -47,9 +48,20 @@ pub async fn connect(
     user: &UserId,
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
+    connect_with(url, creds, keystore::os(), js_domain, user, name).await
+}
+
+/// [`connect`], reading a seed the credentials file keeps in `store` rather than in itself.
+pub async fn connect_with(
+    url: &str,
+    creds: Option<&Path>,
+    store: &dyn Store,
+    js_domain: Option<&JsDomain>,
+    user: &UserId,
+    name: &str,
+) -> Result<(async_nats::Client, jetstream::Context)> {
     check_url(url)?;
-    let client = options(creds, user, name)
-        .await?
+    let client = options(creds, store, user, name)?
         .connect(url)
         .await
         .with_context(|| format!("connecting to NATS at {}", redacted(url)))?;
@@ -81,7 +93,7 @@ pub async fn connect_retrying(
     check_url(url)?;
     // A denied request just times out; the server's error naming it arrives through the event callback.
     let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
-    let options = options(creds, user, name).await?.event_callback(move |event| {
+    let options = options(creds, keystore::os(), user, name)?.event_callback(move |event| {
         let denied_tx = denied_tx.clone();
         async move {
             if let Event::ServerError(async_nats::ServerError::Other(e)) = &event
@@ -159,7 +171,7 @@ pub async fn reach_jetstream(
 
 /// The options of a connection as `user`, named `name`, with the credentials file `creds`, after warning about what
 /// [`crate::creds::warn`] finds in it.
-async fn options(creds: Option<&Path>, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {
+fn options(creds: Option<&Path>, store: &dyn Store, user: &UserId, name: &str) -> Result<async_nats::ConnectOptions> {
     let options = async_nats::ConnectOptions::new()
         .name(name)
         .ping_interval(PING_INTERVAL)
@@ -168,10 +180,26 @@ async fn options(creds: Option<&Path>, user: &UserId, name: &str) -> Result<asyn
     match creds {
         Some(path) => {
             crate::creds::warn(path);
-            options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))
+            authenticate(options, path, store)
         }
         None => Ok(options),
     }
+}
+
+/// `options` authenticating with the credentials file at `path`: its user JWT, and the server's challenge signed with
+/// its key, read once from the file or from `store` ([`crate::creds::load`]) and kept in memory to sign again on
+/// every reconnect.
+pub fn authenticate(
+    options: async_nats::ConnectOptions,
+    path: &Path,
+    store: &dyn Store,
+) -> Result<async_nats::ConnectOptions> {
+    let (jwt, key) = crate::creds::load(path, store)?;
+    let key = std::sync::Arc::new(key);
+    Ok(options.jwt(jwt, move |nonce| {
+        let key = key.clone();
+        async move { key.sign(&nonce).map_err(async_nats::AuthError::new) }
+    }))
 }
 
 fn log_event(event: Event) {

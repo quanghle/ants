@@ -13,10 +13,13 @@ use ants_proto::{
     ChannelId, DeviceId, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION, PermissionsVersion,
     RENEW_SINCE, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject,
 };
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
+use nkeys::KeyPair;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::keystore::{self, Store};
 
 /// Credentials expiring within this long get a warning.
 pub const EXPIRY_WARNING: Duration = Duration::from_hours(7 * 24);
@@ -370,9 +373,94 @@ fn now() -> Option<u64> {
 
 /// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.
 fn creds_jwt(creds: &str) -> Option<&str> {
+    creds_block(creds, "BEGIN NATS USER JWT")
+}
+
+const SEED_MARKER: &str = "BEGIN USER NKEY SEED";
+const STORED_MARKER: &str = "BEGIN ANTS STORED NKEY";
+
+fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
     let mut lines = creds.lines().map(str::trim);
-    lines.find(|line| line.starts_with("---") && line.contains("BEGIN NATS USER JWT"))?;
+    lines.find(|line| line.starts_with("---") && line.contains(marker))?;
     lines.find(|line| !line.is_empty()).filter(|line| !line.starts_with("---"))
+}
+
+/// Where the NKey seed of a `.creds` file is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seed<'a> {
+    /// In the file, as written by `ants auth` and nats tools.
+    File(&'a str),
+    /// In the OS credential store ([`keystore`]), under this public key.
+    Stored(&'a str),
+}
+
+/// Where the seed of a `.creds` file's text is, if it says.
+pub fn seed_of(creds: &str) -> Option<Seed<'_>> {
+    creds_block(creds, SEED_MARKER).map(Seed::File).or_else(|| creds_block(creds, STORED_MARKER).map(Seed::Stored))
+}
+
+/// The text of a `.creds` file holding `jwt` and `seed`, as nats tools write it.
+pub fn text(jwt: &str, seed: &str) -> String {
+    format!(
+        "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
+         ************************* IMPORTANT *************************\n\
+         NKEY Seed printed below can be used to sign and prove identity.\n\
+         NKEYs are sensitive and should be treated as secrets.\n\n\
+         -----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n\n\
+         *************************************************************\n"
+    )
+}
+
+/// The text of a `.creds` file holding `jwt`, whose seed is in the OS credential store under the public key `key`.
+pub fn stored_text(jwt: &str, key: &str) -> String {
+    format!(
+        "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
+         ************************* IMPORTANT *************************\n\
+         The NKEY seed of this user is not in this file but in the OS credential store,\n\
+         under the service \"{service}\" and the public key below: only ants reads it.\n\
+         `ants keys unstore FILE` moves it back into the file.\n\n\
+         -----BEGIN ANTS STORED NKEY-----\n{key}\n------END ANTS STORED NKEY------\n\n\
+         *************************************************************\n",
+        service = keystore::SERVICE
+    )
+}
+
+/// The user JWT and key of the `.creds` file at `path`, whose seed is in the file or in `store`. A seed stored for
+/// another key than the JWT's, or none, is an error, as is a store that cannot be read; none names the seed.
+pub fn load(path: &Path, store: &dyn Store) -> Result<(String, KeyPair)> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let jwt = creds_jwt(&text).with_context(|| format!("no user JWT in {}", path.display()))?;
+    let key = match seed_of(&text) {
+        Some(Seed::File(seed)) => {
+            KeyPair::from_seed(seed).map_err(|e| anyhow!("the seed in {}: {e}", path.display()))?
+        }
+        Some(Seed::Stored(public)) => {
+            let named = Finding::from_jwt(jwt).with_context(|| format!("credentials {}", path.display()))?.key;
+            if named != public {
+                bail!("{} name the stored key {public}, not the key {named} of their user JWT", path.display());
+            }
+            let seed = store
+                .get(public)
+                .with_context(|| {
+                    format!("reading the seed of {} ({public}) from the OS credential store", path.display())
+                })?
+                .with_context(|| {
+                    format!(
+                        "the OS credential store holds no seed for {public}, which {} name: restore it from a backup \
+                         of the store, or have the credentials issued again",
+                        path.display()
+                    )
+                })?;
+            let key = KeyPair::from_seed(seed.trim())
+                .map_err(|e| anyhow!("the seed stored for {public} ({}): {e}", path.display()))?;
+            if key.public_key() != public {
+                bail!("the OS credential store holds the seed of another key under {public} ({})", path.display());
+            }
+            key
+        }
+        None => bail!("no seed in {}, nor the key of one in the OS credential store", path.display()),
+    };
+    Ok((jwt.to_owned(), key))
 }
 
 /// The kind of credentials named `name` with these permissions; `leaf_only` when only a leaf node may connect with
@@ -454,6 +542,37 @@ mod tests {
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_stored_seed_loads_only_for_the_key_its_jwt_names() {
+        let dir = ants_test_support::scratch_dir("creds-load");
+        let (path, store) = (dir.join("alice.creds"), keystore::Memory::default());
+        let (user, other) = (KeyPair::new_user(), KeyPair::new_user());
+        let (key, seed) = (user.public_key(), user.seed().unwrap());
+        let mut named = claims("alice", &Permissions::for_user(&p("alice"), Role::Human), &[], None);
+        named["sub"] = key.clone().into();
+        let jwt = format!("e30.{}.sig", BASE64URL_NOPAD.encode(named.to_string().as_bytes()));
+        let load = |text: String| {
+            std::fs::write(&path, text).unwrap();
+            load(&path, &store).map(|(jwt, key)| (jwt, key.public_key())).map_err(|e| format!("{e:#}"))
+        };
+
+        assert_eq!(load(text(&jwt, &seed)), Ok((jwt.clone(), key.clone())));
+        let err = load(stored_text(&jwt, &key)).unwrap_err();
+        assert!(err.contains("holds no seed") && err.contains("backup"), "{err}");
+        store.set(&key, &seed).unwrap();
+        assert_eq!(load(stored_text(&jwt, &key)), Ok((jwt.clone(), key.clone())));
+        let err = load(stored_text(&jwt, &other.public_key())).unwrap_err();
+        assert!(err.contains("not the key"), "{err}");
+        store.lock(true);
+        let err = load(stored_text(&jwt, &key)).unwrap_err();
+        assert!(err.contains("locked") && !err.contains(&seed), "{err}");
+        store.lock(false);
+        store.set(&key, &other.seed().unwrap()).unwrap();
+        let err = load(stored_text(&jwt, &key)).unwrap_err();
+        assert!(err.contains("another key"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

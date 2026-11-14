@@ -1,0 +1,343 @@
+//! `ants keys`: moving the NKey seed of a `.creds` file into the OS credential store ([`keystore`]) and back, and
+//! removing credentials from a machine.
+//!
+//! A file whose seed is stored keeps its user JWT and, in place of the seed, the public key it is stored under
+//! ([`creds::stored_text`]); every ants process reads the seed from the store when it connects with the file
+//! ([`creds::load`]). A seed leaves a file only once stored, read back, and proven by authenticating at the server
+//! with the file as it is to be; the file is then replaced at once, and a failure on the way deletes what was stored
+//! and leaves the file as it was. Renewal ([`replace`]) keeps the new seed where the earlier one was.
+//!
+//! Leaf node uplink credentials stay in their file, which nats-server reads; so do the team keys of `ants auth`.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use ants_daemon::bus;
+use ants_daemon::creds::{self, Finding, Kind, Seed};
+use ants_daemon::keystore::{self, Store};
+use anyhow::{Context as _, Result, bail};
+use nkeys::KeyPair;
+
+use crate::auth;
+
+#[derive(clap::Subcommand, Debug)]
+pub enum KeysCommand {
+    /// Move the seed of each credentials file (default: --creds) into the OS credential store: the macOS keychain or
+    /// the Linux Secret Service. The seed leaves the file only once stored, read back and used to authenticate at
+    /// --nats; the file then keeps the user JWT and the stored key's reference. Leaf node uplink credentials, which
+    /// nats-server reads, are refused.
+    Store { files: Vec<PathBuf> },
+    /// Move the seed of each credentials file (default: --creds) back from the OS credential store into the file,
+    /// readable by its owner only, then delete it from the store: for a machine without an unlocked store, or to
+    /// back the seed up.
+    Unstore { files: Vec<PathBuf> },
+    /// Delete each credentials file and the seed it keeps in the OS credential store. The credentials stay valid
+    /// until they expire: revoke them with `ants auth revoke --key KEY` on the machine holding the team keys.
+    Remove { files: Vec<PathBuf> },
+}
+
+/// Run `ants keys` with the global `--nats` and `--creds`.
+pub async fn run(command: KeysCommand, nats: &str, cli_creds: Option<&Path>) -> Result<()> {
+    let store = keystore::os();
+    let files = |files: Vec<PathBuf>| match (files.is_empty(), cli_creds) {
+        (false, _) => Ok(files),
+        (true, Some(creds)) => Ok(vec![creds.to_owned()]),
+        (true, None) => bail!("name the credentials files, or set --creds"),
+    };
+    match command {
+        KeysCommand::Store { files: named } => {
+            for path in files(named)? {
+                match store_seed(&path, store, nats).await? {
+                    Moved::Now(key) => println!("{}: seed moved to the OS credential store, key {key}", path.display()),
+                    Moved::Before(key) => {
+                        println!("{}: seed already in the OS credential store, key {key}", path.display())
+                    }
+                }
+            }
+        }
+        KeysCommand::Unstore { files: named } => {
+            for path in files(named)? {
+                match unstore_seed(&path, store)? {
+                    Moved::Now(key) => println!("{}: seed moved back into the file, key {key}", path.display()),
+                    Moved::Before(key) => println!("{}: seed already in the file, key {key}", path.display()),
+                }
+            }
+        }
+        KeysCommand::Remove { files: named } => {
+            for path in files(named)? {
+                let finding = remove(&path, store)?;
+                println!(
+                    "{} removed; the credentials of {} stay valid until they expire: revoke them with \
+                     `ants auth revoke --key {}` on the machine holding the team keys",
+                    path.display(),
+                    finding.holder(),
+                    finding.key
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where a seed went: moved now, or there before; with its public key.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Moved {
+    Now(String),
+    Before(String),
+}
+
+/// Move the seed of the credentials at `path` into `store`, once stored, read back and used to authenticate at `url`
+/// with the file as it is to be. A failure leaves the file as it was and deletes what it stored.
+pub async fn store_seed(path: &Path, store: &dyn Store, url: &str) -> Result<Moved> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let jwt = auth::creds_jwt(&text).with_context(|| format!("no user JWT in {}", path.display()))?;
+    let seed = match creds::seed_of(&text) {
+        Some(Seed::File(seed)) => seed,
+        Some(Seed::Stored(key)) => {
+            creds::load(path, store)?;
+            return Ok(Moved::Before(key.to_owned()));
+        }
+        None => bail!("no seed in {}", path.display()),
+    };
+    let finding = Finding::from_jwt(jwt).with_context(|| format!("credentials {}", path.display()))?;
+    if matches!(finding.kind, Kind::Leaf { .. } | Kind::LeafSystem { .. }) {
+        bail!(
+            "{} are the uplink credentials of a leaf node, which nats-server reads from the file: their seed stays there",
+            path.display()
+        );
+    }
+    let key =
+        KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("the seed in {}: {e}", path.display()))?.public_key();
+    if key != finding.key {
+        bail!("the seed in {} is not that of the key {} of their user JWT", path.display(), finding.key);
+    }
+    write_stored(path, jwt, &key, seed, store, url)
+        .await
+        .with_context(|| format!("the seed stays in {}", path.display()))?;
+    Ok(Moved::Now(key))
+}
+
+/// Move the seed of the credentials at `path` from `store` back into the file, then delete it from the store.
+pub fn unstore_seed(path: &Path, store: &dyn Store) -> Result<Moved> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let key = match creds::seed_of(&text) {
+        Some(Seed::Stored(key)) => key.to_owned(),
+        Some(Seed::File(seed)) => {
+            let key = KeyPair::from_seed(seed).map_err(|e| anyhow::anyhow!("the seed in {}: {e}", path.display()))?;
+            return Ok(Moved::Before(key.public_key()));
+        }
+        None => bail!("no seed in {}", path.display()),
+    };
+    let (jwt, user) = creds::load(path, store)?;
+    auth::replace_creds(path, &jwt, &user)?;
+    let (_, back) = creds::load(path, store)?;
+    if back.public_key() != key {
+        bail!("{} hold another key than {key} once written", path.display());
+    }
+    if let Err(e) = store.delete(&key) {
+        eprintln!("warning: the seed of {key} stays in the OS credential store too: {e:#}");
+    }
+    Ok(Moved::Now(key))
+}
+
+/// Delete the credentials at `path` and the seed they keep in `store`, if they do; the file stays when the store
+/// cannot delete it. Returns what the credentials were.
+pub fn remove(path: &Path, store: &dyn Store) -> Result<Finding> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let finding = Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))?;
+    if let Some(Seed::Stored(key)) = creds::seed_of(&text) {
+        store.delete(key).with_context(|| format!("deleting the seed of {key}; {} stays", path.display()))?;
+    }
+    fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(finding)
+}
+
+/// Replace the credentials at `path` with `jwt` for the key `user`, keeping its seed where the earlier one is: in the
+/// file at once, as [`auth::replace_creds`] does, or in `store`, once stored, read back and used to authenticate at
+/// `url`, before the earlier seed is deleted from it. A failure leaves the file and the earlier seed as they were.
+pub async fn replace(path: &Path, jwt: &str, user: &KeyPair, store: &dyn Store, url: &str) -> Result<()> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let Some(Seed::Stored(earlier)) = creds::seed_of(&text) else {
+        return auth::replace_creds(path, jwt, user);
+    };
+    let key = user.public_key();
+    write_stored(path, jwt, &key, &auth::seed(user)?, store, url)
+        .await
+        .with_context(|| format!("{} stay as they were", path.display()))?;
+    if earlier != key
+        && let Err(e) = store.delete(earlier)
+    {
+        eprintln!("warning: the earlier seed of {earlier} stays in the OS credential store: {e:#}");
+    }
+    Ok(())
+}
+
+/// Write the credentials of `jwt` for `user` to `path` (as `ants add` completes them), keeping the seed in the OS
+/// credential store when the file there already names it there.
+pub fn write(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
+    let key = user.public_key();
+    match fs::read_to_string(path).ok().as_deref().and_then(creds::seed_of) {
+        Some(Seed::Stored(stored)) if stored == key => auth::replace_secret(path, &creds::stored_text(jwt, &key)),
+        _ => auth::write_creds(path, jwt, user),
+    }
+}
+
+/// Store `seed` for `key` in `store` and check it reads back, then write `path` naming it, once it authenticates at
+/// `url`. A failure deletes the seed when it was not stored before, and leaves `path` as it was.
+async fn write_stored(path: &Path, jwt: &str, key: &str, seed: &str, store: &dyn Store, url: &str) -> Result<()> {
+    let created = match store.get(key).context("reading the OS credential store")? {
+        Some(stored) if stored.trim() == seed => false,
+        Some(_) => bail!("the OS credential store holds another seed for {key}; left as it is"),
+        None => {
+            store.set(key, seed).context("storing the seed in the OS credential store")?;
+            true
+        }
+    };
+    let undo = || {
+        if created && let Err(e) = store.delete(key) {
+            eprintln!("warning: the seed of {key} stays in the OS credential store: {e:#}");
+        }
+    };
+    if !matches!(store.get(key), Ok(Some(stored)) if stored.trim() == seed) {
+        undo();
+        bail!("the OS credential store gave back no seed, or another one, for {key}");
+    }
+    let temporary = beside(path)?;
+    let written = async {
+        auth::write_secret(&temporary, &creds::stored_text(jwt, key))?;
+        authenticate(url, &temporary, store).await?;
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+    }
+    .await;
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+        undo();
+    }
+    written
+}
+
+/// Connect to `url` with the credentials at `path`, reading their seed from `store`, to check the server takes them.
+async fn authenticate(url: &str, path: &Path, store: &dyn Store) -> Result<()> {
+    bus::check_url(url)?;
+    let options = async_nats::ConnectOptions::new().name("ants-keys").event_callback(|_| async {});
+    let client = bus::authenticate(options, path, store)?
+        .connect(url)
+        .await
+        .with_context(|| format!("authenticating at {url} with the stored key"))?;
+    client.flush().await.with_context(|| format!("authenticating at {url} with the stored key"))?;
+    Ok(())
+}
+
+fn beside(path: &Path) -> Result<PathBuf> {
+    let name = path.file_name().with_context(|| format!("{} names no file", path.display()))?;
+    let mut temporary = name.to_owned();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    Ok(path.with_file_name(temporary))
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_daemon::keystore::Memory;
+    use ants_proto::{Machine, Role, UserId};
+
+    use super::*;
+    use crate::auth::tests::Server;
+
+    fn p(s: &str) -> UserId {
+        s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stored_seed_signs_the_challenge_and_moves_back_into_its_file() {
+        let Some(server) = Server::start() else { return };
+        let store = Memory::default();
+        let creds = server.creds_as(&p("alice"), Role::Human);
+        let (jwt, user) = auth::read_creds(&creds).unwrap();
+        let (seed, key) = (auth::seed(&user).unwrap(), user.public_key());
+
+        assert_eq!(store_seed(&creds, &store, &server.url).await.unwrap(), Moved::Now(key.clone()));
+        let text = fs::read_to_string(&creds).unwrap();
+        assert!(text.contains(&jwt) && !text.contains(&seed), "{text}");
+        assert_eq!(creds::seed_of(&text), Some(Seed::Stored(&key)));
+        assert_eq!(store.keys(), std::slice::from_ref(&key));
+        let (client, _) =
+            bus::connect_with(&server.url, Some(&creds), &store, None, &p("alice"), "test").await.unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(store_seed(&creds, &store, &server.url).await.unwrap(), Moved::Before(key.clone()));
+
+        store.lock(true);
+        let err = bus::connect_with(&server.url, Some(&creds), &store, None, &p("alice"), "test").await.unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("locked") && !err.contains(&seed), "{err}");
+        assert!(unstore_seed(&creds, &store).is_err(), "nothing to move back while locked");
+        store.lock(false);
+
+        assert_eq!(unstore_seed(&creds, &store).unwrap(), Moved::Now(key.clone()));
+        assert!(fs::read_to_string(&creds).unwrap().contains(&seed));
+        assert!(store.keys().is_empty());
+        assert_eq!(unstore_seed(&creds, &store).unwrap(), Moved::Before(key));
+        let (client, _) = bus::connect(&server.url, Some(&creds), None, &p("alice"), "test").await.unwrap();
+        client.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_seed_stays_in_its_file_when_the_store_or_the_server_refuses_it() {
+        let Some(server) = Server::start() else { return };
+        let Some(other) = Server::start() else { return };
+        let store = Memory::default();
+        let creds = server.creds_as(&p("dev-a"), Role::Ant);
+        let before = fs::read(&creds).unwrap();
+        let unchanged = || {
+            assert_eq!(fs::read(&creds).unwrap(), before);
+            assert!(store.keys().is_empty());
+            let left: Vec<_> = fs::read_dir(server.dir())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+                .collect();
+            assert!(left.is_empty(), "{left:?}");
+        };
+
+        store.lock(true);
+        let err = format!("{:#}", store_seed(&creds, &store, &server.url).await.unwrap_err());
+        assert!(err.contains("locked") && err.contains("the seed stays in"), "{err}");
+        unchanged();
+        store.lock(false);
+
+        store.refuse_writes(true);
+        let err = format!("{:#}", store_seed(&creds, &store, &server.url).await.unwrap_err());
+        assert!(err.contains("denied"), "{err}");
+        unchanged();
+        store.refuse_writes(false);
+
+        // A server of another team refuses the stored key: what was stored goes.
+        let err = format!("{:#}", store_seed(&creds, &store, &other.url).await.unwrap_err());
+        assert!(err.contains("authenticating"), "{err}");
+        unchanged();
+
+        let uplink = server.dir().join("leaf-m1.creds");
+        let m1: Machine = "m1".parse().unwrap();
+        auth::issue_leaf(&server.dir().join("auth"), &m1, &[(p("dev-a"), Role::Ant)], &[], false, None, &uplink)
+            .unwrap();
+        let err = store_seed(&uplink, &store, &server.url).await.unwrap_err().to_string();
+        assert!(err.contains("nats-server reads"), "{err}");
+        assert!(creds::seed_of(&fs::read_to_string(&uplink).unwrap()).is_some_and(|s| matches!(s, Seed::File(_))));
+    }
+
+    #[tokio::test]
+    async fn removing_stored_credentials_deletes_their_seed_but_revokes_nothing() {
+        let Some(server) = Server::start() else { return };
+        let store = Memory::default();
+        let creds = server.creds_as(&p("bob"), Role::Human);
+        let Moved::Now(key) = store_seed(&creds, &store, &server.url).await.unwrap() else { panic!() };
+
+        store.lock(true);
+        assert!(remove(&creds, &store).is_err());
+        assert!(creds.exists(), "kept while the store cannot delete the seed");
+        store.lock(false);
+
+        let finding = remove(&creds, &store).unwrap();
+        assert_eq!((finding.name.as_str(), finding.key), ("bob", key));
+        assert!(!creds.exists() && store.keys().is_empty());
+    }
+}

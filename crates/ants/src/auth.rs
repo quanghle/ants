@@ -359,13 +359,9 @@ pub fn allows_all(jwt: &str, other: &str) -> Result<bool> {
         && covers(&have.subscribe, &need.subscribe))
 }
 
-/// The user JWT and key of the `.creds` file at `path`.
+/// The user JWT and key of the `.creds` file at `path`, whose seed is in the file or in the OS credential store.
 pub fn read_creds(path: &Path) -> Result<(String, KeyPair)> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let jwt = creds_jwt(&text).with_context(|| format!("no user JWT in {}", path.display()))?;
-    let seed = creds_seed(&text).with_context(|| format!("no seed in {}", path.display()))?;
-    let key = KeyPair::from_seed(seed).map_err(|e| anyhow!("{}: {e}", path.display()))?;
-    Ok((jwt.to_owned(), key))
+    ants_daemon::creds::load(path, ants_daemon::keystore::os())
 }
 
 /// The signature of `data` by `key`, base64url without padding.
@@ -661,11 +657,6 @@ pub fn creds_jwt(creds: &str) -> Option<&str> {
     creds_block(creds, "BEGIN NATS USER JWT")
 }
 
-/// The seed of a `.creds` file's text: the line after the `BEGIN USER NKEY SEED` marker.
-pub fn creds_seed(creds: &str) -> Option<&str> {
-    creds_block(creds, "BEGIN USER NKEY SEED")
-}
-
 fn creds_block<'a>(creds: &'a str, marker: &str) -> Option<&'a str> {
     let mut lines = creds.lines().map(str::trim);
     lines.find(|line| line.starts_with("---") && line.contains(marker))?;
@@ -789,17 +780,10 @@ fn jwt(issuer: &KeyPair, subject: &str, name: &str, nats: Value, exp: Option<u64
 }
 
 fn creds(jwt: &str, seed: &str) -> String {
-    format!(
-        "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
-         ************************* IMPORTANT *************************\n\
-         NKEY Seed printed below can be used to sign and prove identity.\n\
-         NKEYs are sensitive and should be treated as secrets.\n\n\
-         -----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n\n\
-         *************************************************************\n"
-    )
+    ants_daemon::creds::text(jwt, seed)
 }
 
-fn seed(key: &KeyPair) -> Result<String> {
+pub(crate) fn seed(key: &KeyPair) -> Result<String> {
     key.seed().map_err(|e| anyhow!("{e}"))
 }
 
@@ -812,11 +796,17 @@ fn load(path: &Path) -> Result<KeyPair> {
 /// Replace the `.creds` file at `path` with that of `jwt` and the seed of `user` at once: written beside it, readable by
 /// its owner only, then renamed over it, so what reads it finds either the earlier credentials or the new ones.
 pub fn replace_creds(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
+    replace_secret(path, &creds(jwt, &seed(user)?))
+}
+
+/// Replace the file at `path` with `contents` at once: written beside it, readable by its owner only, then renamed
+/// over it.
+pub(crate) fn replace_secret(path: &Path, contents: &str) -> Result<()> {
     let name = path.file_name().with_context(|| format!("{} names no file", path.display()))?;
     let mut temporary = name.to_owned();
     temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = path.with_file_name(temporary);
-    let written = write_secret(&temporary, &creds(jwt, &seed(user)?))
+    let written = write_secret(&temporary, contents)
         .and_then(|()| fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display())));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -825,7 +815,7 @@ pub fn replace_creds(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
 }
 
 /// Write a file only its owner can read, replacing any earlier one.
-fn write_secret(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_secret(path: &Path, contents: &str) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]

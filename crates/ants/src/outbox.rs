@@ -47,8 +47,7 @@ pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &
     let mut options =
         async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox(human));
     if let Some(path) = creds {
-        options =
-            options.credentials_file(path).await.with_context(|| format!("reading credentials {}", path.display()))?;
+        options = ants_daemon::bus::authenticate(options, path, ants_daemon::keystore::os())?;
     }
     options.connect(url).await.with_context(|| format!("connecting to NATS at {url}"))
 }

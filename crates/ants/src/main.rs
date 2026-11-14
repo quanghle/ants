@@ -9,6 +9,7 @@ mod doctor;
 mod enroll;
 mod humans;
 mod inbox;
+mod keys;
 mod leaf;
 mod members;
 mod notify;
@@ -215,6 +216,10 @@ enum Command {
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
     /// Credentials expired, or older than renewal over NATS, are renewed with `ants auth` instead.
     Renew(renew::RenewArgs),
+    /// Keep the NKey seeds of credentials files in the OS credential store (macOS keychain, Linux Secret Service)
+    /// instead of the files, move them back, or remove credentials from the machine.
+    #[command(subcommand)]
+    Keys(keys::KeysCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
         /// The daemon's MCP socket.
@@ -1124,6 +1129,7 @@ async fn main() -> Result<()> {
         }
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
+        Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
         Command::Enroll(command) => {
             let dir = |dir| team_dir(dir);
             match command {

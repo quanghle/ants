@@ -16,6 +16,7 @@ pub mod escalation;
 pub mod harness;
 pub mod hub;
 pub mod humans;
+pub mod keystore;
 pub mod links;
 pub mod mcp;
 pub mod metrics;
