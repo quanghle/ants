@@ -332,8 +332,11 @@ mod tests {
         eventually("the leaf reaches the hub", async || bus::ensure_stream(&a_js).await.is_ok()).await;
         // The human waits for replies as `ants ask --wait` does, off the machine and on it; on it, core NATS also
         // delivers what the hub never got.
-        let (h_leaf, _) = connect(&leaf_node.url, &human).await;
-        let mut waiters = [bus::live_inbox(&h_leaf, &human).await.unwrap(), bus::live_inbox(&h, &human).await.unwrap()];
+        let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
+        let mut waiters = [
+            bus::caught_up_inbox(&h_leaf, &h_leaf_js, &human).await.unwrap(),
+            bus::caught_up_inbox(&h, &h_js, &human).await.unwrap(),
+        ];
         h.flush().await.unwrap();
         h_leaf.flush().await.unwrap();
 
@@ -405,6 +408,21 @@ mod tests {
         for replies in &mut waiters {
             assert!(futures::FutureExt::now_or_never(replies.next()).is_none(), "each once, live or stored");
         }
+
+        // What the hub stores while the uplink is down never comes live on the leaf; its waiter reads it back.
+        reload(dead_port);
+        eventually("the uplink is down again", async || bus::ensure_stream(&a_js).await.is_err()).await;
+        let (_b_hub, b_hub_js) = connect(&hub.url, &dev_b).await;
+        let away = Envelope::new(dev_b.clone(), human.clone(), "away");
+        assert_eq!(bus::publish(&b_hub_js, &away).await.unwrap(), bus::Stored::Hub);
+        assert_eq!(next(&mut waiters[1]).await, away);
+        reload(leaf_port);
+        assert_eq!(next(&mut waiters[0]).await, away, "the waiter on the leaf gets it once the uplink is back");
+        let [on_leaf, on_hub] = &mut waiters;
+        let wait = bus::CATCH_UP * 2;
+        let (on_leaf, on_hub) =
+            tokio::join!(tokio::time::timeout(wait, on_leaf.next()), tokio::time::timeout(wait, on_hub.next()));
+        assert!(on_leaf.is_err() && on_hub.is_err(), "each once, live or read back");
 
         remove(&h_js, &m1).await.unwrap();
         let info = h_js.get_stream(STREAM).await.unwrap().info().await.unwrap().config.clone();
