@@ -5,8 +5,8 @@
 
 [Unit]
 Description=ants: local nats-server (leaf node or hub)
-# Starts after the tunnel its uplink goes through, if installed; the leaf retries the uplink until it is up.
-After=ants-devtunnel.service
+# Starts after the tunnel or bridge its uplink goes through, if installed; the leaf retries the uplink until it is up.
+After=ants-devtunnel.service ants-bridge.service
 
 [Service]
 ExecStart="@NATS_SERVER@" -c "@NATS_CONF@"

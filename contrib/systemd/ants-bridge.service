@@ -1,0 +1,25 @@
+# ants: `ants bridge connect` to the hub's HTTPS fallback bridge, for a leaf whose uplink is nats-leaf://127.0.0.1:7422
+# (docs/transport.md, "HTTPS fallback bridge").
+# User unit: scripts/install-units.sh --bridge URL fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user. Lines marked IF_BRIDGE_TOKEN stay only with --bridge-token FILE, IF_BRIDGE_PROXY only with
+# --bridge-proxy URL, IF_BRIDGE_CA only with --bridge-ca FILE.
+# The bearer token is read from its file at each start, so a new token takes effect at the next restart:
+# systemctl --user restart ants-bridge
+# ants-nats starts after it, so the leaf's uplink finds it listening; the leaf retries the uplink otherwise. Each leaf
+# connection retries the hub for 60 s; Restart covers failures of the bridge itself.
+
+[Unit]
+Description=ants: bridge connect to the hub
+
+[Service]
+ExecStart="@ANTS@" bridge connect \
+@IF_BRIDGE_TOKEN@    --token-file "@BRIDGE_TOKEN@" \
+@IF_BRIDGE_PROXY@    --proxy "@BRIDGE_PROXY@" \
+    "@BRIDGE_URL@"
+Environment=NO_COLOR=1
+@IF_BRIDGE_CA@Environment="SSL_CERT_FILE=@BRIDGE_CA@"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

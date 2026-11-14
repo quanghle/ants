@@ -4,7 +4,8 @@
      scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.nats.plist.
      Reload a new uplink: launchctl kill SIGHUP gui/$(id -u)/ants.nats
      On the hub, the configuration needs `feature_flags { js_api_reply_v2: true }` for leaf outboxes (docs/transport.md, "Hub").
-     launchd has no start order: with an uplink through ants.devtunnel, the leaf retries it until the tunnel is up. -->
+     launchd has no start order: with an uplink through ants.devtunnel or ants.bridge, the leaf retries it until the
+     tunnel or bridge is up. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

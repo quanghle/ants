@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -638,6 +639,19 @@ async fn take_down(http: &mut Http<'_>, path: &str, mut local: OwnedWriteHalf) -
     }
 }
 
+/// The bearer token: `token` (from --token or [`TOKEN_ENV`]), else the content of `file`, trimmed, which must not be
+/// empty.
+pub fn token(token: Option<String>, file: Option<&Path>) -> Result<Option<String>> {
+    let Some(file) = file else { return Ok(token) };
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading the bridge token from {}", file.display()))?;
+    let token = text.trim();
+    if token.is_empty() {
+        bail!("{}: no bridge token in the file", file.display());
+    }
+    Ok(Some(token.to_owned()))
+}
+
 /// `addr` parsed, and checked to be loopback when `local_only`.
 pub fn listen_addr(addr: &str, local_only: bool) -> Result<SocketAddr> {
     let parsed: SocketAddr = addr.parse().with_context(|| format!("--listen {addr}: expected host:port"))?;
@@ -726,6 +740,19 @@ mod tests {
         assert!(Remote::new("wss://hub/bridge", None, &[], None).is_err());
         assert!(Remote::new("https://hub/bridge?x=1", None, &[], None).is_err());
         assert!(Remote::new("https://hub/bridge", None, &["no colon".into()], None).is_err());
+    }
+
+    #[test]
+    fn token_file_is_read_trimmed_and_must_hold_a_token() {
+        let dir = ants_test_support::scratch_dir("bridge-token");
+        let file = dir.join("token");
+        std::fs::write(&file, "s3cret\n").unwrap();
+        assert_eq!(token(None, Some(&file)).unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(token(Some("given".into()), None).unwrap().as_deref(), Some("given"));
+        std::fs::write(&file, " \n").unwrap();
+        assert!(token(None, Some(&file)).is_err());
+        assert!(token(None, Some(&dir.join("missing"))).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A leaf node reaches its hub through `ants bridge connect` and `ants bridge serve` over plain HTTP, both ways,
