@@ -43,13 +43,15 @@ pub async fn request(
         bail!("{} are the credentials of {}, not {name} (`ants auth enroll {ant}`)", creds.display(), enrollment.name);
     }
     let left = match enrollment.exp {
-        Some(exp) => Duration::from_secs(exp.checked_sub(now()?).filter(|left| *left > 0).with_context(|| {
-            format!(
-                "the enrollment credentials {} have expired; issue new ones with `ants auth enroll`",
-                creds.display()
-            )
-        })?),
-        None => Duration::MAX,
+        Some(exp) => {
+            Some(Duration::from_secs(exp.checked_sub(now()?).filter(|left| *left > 0).with_context(|| {
+                format!(
+                    "the enrollment credentials {} have expired; issue new ones with `ants auth enroll`",
+                    creds.display()
+                )
+            })?))
+        }
+        None => None,
     };
     let (client, _) = bus::connect(url, Some(creds), None, ant, "ants-enroll").await?;
     let mut replies = client.subscribe(subject::enroll_reply(ant)).await?;
@@ -57,7 +59,12 @@ pub async fn request(
     let request = EnrollRequest::new(ant.clone(), &public_key, roster::machine().await);
     let payload = serde_json::to_vec(&request)?;
     let mut repeats = tokio::time::interval(repeat);
-    let expiry = tokio::time::sleep(left.min(Duration::from_secs(365 * 24 * 3600)));
+    let expiry = async {
+        match left {
+            Some(left) => tokio::time::sleep(left.min(Duration::from_secs(365 * 24 * 3600))).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::pin!(expiry, stop);
     loop {
         tokio::select! {
@@ -328,7 +335,8 @@ mod tests {
     async fn an_approval_completes_the_credentials_of_the_asking_key() {
         let Some(server) = Server::start() else { return };
         let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
-        let creds = enrollment(&server, &dev_a, Duration::from_secs(60));
+        // With no expiry, as `--ttl 0` issues them.
+        let creds = enrollment(&server, &dev_a, Duration::ZERO);
         let user = KeyPair::new_user();
         let approver = Approver::connect(&server.url, &team, LISTEN).await.unwrap();
 

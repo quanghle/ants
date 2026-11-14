@@ -207,16 +207,19 @@ pub fn check_user_key(public_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Issue the enrollment credentials of `ant`, valid for `ttl`, and write their `.creds` file to `out`: they may
-/// only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]). Returns when they
-/// expire, in seconds since the epoch.
-pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<u64> {
+/// Issue the enrollment credentials of `ant`, valid for `ttl` (zero: with no expiry), and write their `.creds` file
+/// to `out`: they may only ask for the ant's credentials and hear the answer ([`Permissions::for_enrollment`]).
+/// Returns when they expire, in seconds since the epoch.
+pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> Result<Option<u64>> {
     check_not_reserved(ant)?;
+    if !ttl.is_zero() && ttl < Duration::from_secs(1) {
+        bail!("a ttl of {ttl:?} is under a second: give at least 1s, or 0 for no expiry");
+    }
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
-    let exp = now()? + ttl.as_secs().max(1);
+    let exp = if ttl.is_zero() { None } else { Some(now()? + ttl.as_secs()) };
     let name = ants_proto::enrollment_user(ant);
-    let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), Some(exp))?;
+    let jwt = user_jwt(&account, &user.public_key(), &name, Permissions::for_enrollment(ant), json!({}), exp)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
     Ok(exp)
 }
@@ -528,6 +531,24 @@ pub(crate) mod tests {
 
     fn p(s: &str) -> UserId {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn enrollment_credentials_issued_with_a_zero_ttl_never_expire() {
+        let dir = ants_test_support::scratch_dir("enroll-ttl");
+        let (team, out, dev_a) = (dir.join("auth"), dir.join("enroll-dev-a.creds"), p("dev-a"));
+        init(&team).unwrap();
+        let issued = |ttl| {
+            let exp = issue_enrollment(&team, &dev_a, ttl, &out)?;
+            let text = std::fs::read_to_string(&out).unwrap();
+            anyhow::Ok((exp, verified(creds_jwt(&text).unwrap()).unwrap().exp))
+        };
+        assert_eq!(issued(Duration::ZERO).unwrap(), (None, None));
+        let (exp, claimed) = issued(Duration::from_secs(60)).unwrap();
+        assert!(exp.is_some_and(|exp| exp >= now().unwrap() + 59) && claimed == exp, "{exp:?} {claimed:?}");
+        let err = issued(Duration::from_millis(500)).unwrap_err().to_string();
+        assert!(err.contains("under a second"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The server handles operations in order, so the next violation names the first denied one.

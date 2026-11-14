@@ -431,10 +431,10 @@ enum AuthCommand {
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
-    /// gives here. They expire after --ttl.
+    /// gives here. They expire after --ttl, or never with --ttl 0.
     Enroll {
         ant: UserId,
-        /// How long the enrollment credentials stay valid (a duration such as 90s, 10m or 1h).
+        /// How long the enrollment credentials stay valid (a duration such as 90s, 10m or 1h; 0 for no expiry).
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "1h")]
         ttl: std::time::Duration,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
@@ -775,10 +775,15 @@ async fn main() -> Result<()> {
             }
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(&ant))));
-            let expires = auth::issue_enrollment(&dir, &ant, ttl, &out)?;
-            let expires = chrono::DateTime::from_timestamp(i64::try_from(expires)?, 0).context("expiry")?;
+            let expires = match auth::issue_enrollment(&dir, &ant, ttl, &out)? {
+                Some(exp) => {
+                    let exp = chrono::DateTime::from_timestamp(i64::try_from(exp)?, 0).context("expiry")?;
+                    format!("valid until {exp}")
+                }
+                None => "valid with no expiry".to_owned(),
+            };
             println!(
-                "{}\nvalid until {expires}; on the ant's machine: ants add {ant} --enroll FILE ...\n\
+                "{}\n{expires}; on the ant's machine: ants add {ant} --enroll FILE ...\n\
                  then here: ants enroll approve {ant}",
                 out.display()
             );

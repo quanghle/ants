@@ -106,7 +106,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates). |
 | `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
-| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`). |
+| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests. |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
@@ -477,7 +477,7 @@ ants auth user dev-c --public-key U... --js-domain hub   # auth machine: prints 
 ants add dev-c --jwt eyJ...                     # target machine: writes dev-c.creds (accepts JWT, file or '-')
 
 # Over NATS (direct to hub; leaf uplinks do not carry ants.enroll.*)
-ants auth enroll dev-c                          # auth machine: writes 1h enroll-dev-c.creds
+ants auth enroll dev-c                          # auth machine: writes enroll-dev-c.creds, valid 1h (--ttl; 0: no expiry)
 ants add dev-c --workdir ~/src/app --enroll enroll-dev-c.creds --hub wss://hub.example/nats
 ants enroll list --nats wss://hub.example/nats  # auth machine: inspect pending requests
 ants enroll approve dev-c --nats wss://hub.example/nats --js-domain hub
