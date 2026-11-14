@@ -34,7 +34,7 @@ use crate::pool::{Pool, SessionStore};
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
-use crate::worktrees::Worktrees;
+use crate::worktrees::{Branch, Worktrees};
 use crate::{bus, roster};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
@@ -320,7 +320,9 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     tokio::select! {
         () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
         () = escalator.deadlines() => {}
-        () = pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY) => {}
+        () = pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY, async |kept| {
+            tell_kept_branches(&js, &threads, &humans, &config.ant, kept).await;
+        }) => {}
         () = inbox.hear_cancels() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
     }
@@ -1370,7 +1372,10 @@ impl Inbox<'_> {
         let limit_notice =
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
         let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
-        let notice = [limit_notice, cancel_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
+        let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
+            format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
+        });
+        let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
@@ -1618,6 +1623,44 @@ fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
     };
     let cut_off = cut_off.then(|| CUT_OFF.to_owned());
     cut_off.into_iter().chain(late).chain([text.to_owned()]).collect::<Vec<_>>().join("\n\n")
+}
+
+/// Tell the owner of the thread of each branch in `kept`, else the default human of `humans`, that the thread's
+/// worktree was removed and its branch kept for the commits it holds. Failing to is only logged.
+async fn tell_kept_branches(
+    js: &jetstream::Context,
+    threads: &Threads,
+    humans: &Registry,
+    ant: &UserId,
+    kept: Vec<Branch>,
+) {
+    for branch in kept {
+        let thread = &branch.thread;
+        let owner = match threads.owner_for(thread, ant).await {
+            Ok(owner) => humans.human_owner(owner.as_ref()),
+            Err(e) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner");
+                None
+            }
+        };
+        let notice = kept_branch_notice(ant, &branch, owner, humans);
+        if let Err(e) = bus::publish_json(js, notice.subject(), &notice, None).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the thread's kept branch");
+        }
+    }
+}
+
+/// The message on the thread of `branch` that tells `owner`, else the default human of `humans`, that the thread's
+/// worktree was removed and its branch kept.
+fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, humans: &Registry) -> Envelope {
+    let Branch { thread, name, .. } = branch;
+    let text = format!(
+        "[ants] The session of thread {thread} expired and its git worktree was removed; branch {name} is kept, \
+         holding {} not in the repository's HEAD.",
+        branch.commits_text()
+    );
+    let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
+    Envelope::on_thread(thread.clone(), ant.clone(), to, text).with_owner(owner)
 }
 
 /// The message id of `ant`'s reply to `request`: the same for every attempt at it.
@@ -2292,6 +2335,53 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().cancelled, 1);
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reply_names_the_thread_branch_holding_new_commits() {
+        let Some(repo) = crate::worktrees::tests::repo("daemon-branch-ahead") else { return };
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let home = repo.parent().unwrap().join("home");
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let setup = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
+        let worktree = setup.checkout(&t1).await.unwrap();
+        crate::worktrees::tests::commit(&worktree, "work of t1");
+        let (launch, _, _) = fake::launch(true);
+        let worktrees = Worktrees::find(&bus.dev, &repo, &home).await.unwrap();
+        let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 2, IDLE).with_worktrees(worktrees);
+        bus.send(&t1, "one").await;
+        bus.send(&t2, "two").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut texts = HashMap::new();
+            for _ in 0..2 {
+                let reply = next_envelope(&mut replies).await;
+                texts.insert(reply.thread_id, reply.text);
+            }
+            let named = format!("one\n\n[ants] Branch ants/dev-a/{t1} holds 1 commit not in the repository's HEAD.");
+            assert!(texts[&t1].ends_with(&named), "{}", texts[&t1]);
+            assert!(texts[&t2].ends_with("two"), "no commits on its branch: {}", texts[&t2]);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_kept_branch_is_told_to_the_thread_owner_else_the_default_human() {
+        let humans = Registry::new("alice".parse().unwrap());
+        let (ant, thread): (UserId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
+        let branch = Branch { thread: thread.clone(), name: "ants/dev-a/t1".to_owned(), commits: 2 };
+        let notice = kept_branch_notice(&ant, &branch, None, &humans);
+        assert_eq!((notice.to.as_str(), notice.owner.as_ref(), &notice.thread_id), ("alice", None, &thread));
+        assert_eq!(
+            notice.text,
+            "[ants] The session of thread t1 expired and its git worktree was removed; branch ants/dev-a/t1 is kept, \
+             holding 2 commits not in the repository's HEAD."
+        );
+        let notice = kept_branch_notice(&ant, &branch, Some(UserId::human()), &humans);
+        assert_eq!((&notice.to, notice.owner.as_ref()), (&UserId::human(), Some(&UserId::human())));
     }
 
     /// Ask the daemon to cancel the prompt on `thread` until it answers, as the daemon may not listen yet.

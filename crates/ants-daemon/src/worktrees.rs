@@ -6,7 +6,8 @@
 //! The worktree is created on the thread's first prompt, reused whenever its harness starts again (so session/load
 //! sees the same directory) and removed once the thread's session expired from the session store, along with its
 //! branch unless that holds commits not merged into the repository's `HEAD`. Worktrees left behind once the option is
-//! turned off are removed the same way ([`Worktrees::left_behind`]), no new one being created.
+//! turned off are removed the same way ([`Worktrees::left_behind`]), no new one being created. A branch holding such
+//! commits is reported ([`Worktrees::ahead`], [`Pruned::kept`]), so its work is not forgotten.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,33 @@ use std::process::Stdio;
 use ants_proto::{ThreadId, UserId};
 use anyhow::{Context as _, Result, bail};
 use tokio::sync::Mutex;
+
+/// A thread's branch holding commits not in the repository's `HEAD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Branch {
+    pub thread: ThreadId,
+    pub name: String,
+    pub commits: usize,
+}
+
+impl Branch {
+    /// How many commits the branch holds that the repository's `HEAD` does not, in words.
+    pub fn commits_text(&self) -> String {
+        match self.commits {
+            1 => "1 commit".to_owned(),
+            n => format!("{n} commits"),
+        }
+    }
+}
+
+/// What a [`Worktrees::prune`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// How many worktrees were removed.
+    pub removed: usize,
+    /// The branches of the removed worktrees kept for the commits they hold.
+    pub kept: Vec<Branch>,
+}
 
 pub struct Worktrees {
     ant: UserId,
@@ -96,21 +124,46 @@ impl Worktrees {
         Ok(cwd)
     }
 
-    /// Remove the worktree of each thread `expired` tells, one at a time, and return how many were removed. A thread
-    /// whose worktree is being set up waits for the removal to end, and `expired` is asked with no change going on.
-    pub async fn prune(&self, mut expired: impl AsyncFnMut(&ThreadId) -> bool) -> usize {
-        let mut removed = 0;
+    /// Remove the worktree of each thread `expired` tells, one at a time, and tell how many were removed and which
+    /// branches were kept. A thread whose worktree is being set up waits for the removal to end, and `expired` is asked
+    /// with no change going on.
+    pub async fn prune(&self, mut expired: impl AsyncFnMut(&ThreadId) -> bool) -> Pruned {
+        let mut pruned = Pruned::default();
         for thread in self.threads() {
             let _changing = self.changing.lock().await;
             if !expired(&thread).await {
                 continue;
             }
             match self.remove(&thread).await {
-                Ok(()) => removed += 1,
+                Ok(kept) => {
+                    pruned.removed += 1;
+                    pruned.kept.extend(kept);
+                }
                 Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "removing the thread's git worktree"),
             }
         }
-        removed
+        pruned
+    }
+
+    /// The thread's branch, when it holds commits not in the repository's `HEAD`. None too when git fails, as when the
+    /// branch does not exist.
+    pub async fn ahead(&self, thread: &ThreadId) -> Option<Branch> {
+        let name = self.branch(thread);
+        let range = format!("HEAD..refs/heads/{name}");
+        match git(&self.repo, ["rev-list", "--count", &range]).await {
+            Ok(out) => match out.trim().parse() {
+                Ok(0) => None,
+                Ok(commits) => Some(Branch { thread: thread.clone(), name, commits }),
+                Err(e) => {
+                    tracing::debug!(%thread, %name, error = %e, "counting the commits of the thread's branch");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::debug!(%thread, %name, error = format!("{e:#}"), "counting the commits of the thread's branch");
+                None
+            }
+        }
     }
 
     /// The threads with a worktree.
@@ -148,7 +201,9 @@ impl Worktrees {
         Ok(())
     }
 
-    async fn remove(&self, thread: &ThreadId) -> Result<()> {
+    /// Remove the thread's worktree, and its branch unless that holds commits not in the repository's `HEAD`: then the
+    /// branch kept.
+    async fn remove(&self, thread: &ThreadId) -> Result<Option<Branch>> {
         let path = self.path(thread);
         let removed =
             git(&self.repo, [OsStr::new("worktree"), "remove".as_ref(), "--force".as_ref(), path.as_ref()]).await;
@@ -159,12 +214,21 @@ impl Worktrees {
             std::fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
         }
         git(&self.repo, ["worktree", "prune"]).await?;
-        let branch = self.branch(thread);
-        if let Err(e) = git(&self.repo, ["branch", "--delete", "--quiet", &branch]).await {
-            tracing::info!(%thread, %branch, error = format!("{e:#}"), "keeping the thread's branch");
+        let kept = self.ahead(thread).await;
+        match &kept {
+            Some(branch) => {
+                tracing::info!(%thread, branch = branch.name, commits = branch.commits, "keeping the thread's branch")
+            }
+            // Should counting them have failed, git still refuses to delete a branch with commits not merged.
+            None => {
+                let branch = self.branch(thread);
+                if let Err(e) = git(&self.repo, ["branch", "--delete", "--quiet", &branch]).await {
+                    tracing::info!(%thread, %branch, error = format!("{e:#}"), "keeping the thread's branch");
+                }
+            }
         }
         tracing::info!(%thread, worktree = %path.display(), "removed the git worktree of the expired thread");
-        Ok(())
+        Ok(kept)
     }
 }
 
@@ -226,7 +290,7 @@ pub(crate) mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    fn commit(dir: &Path, message: &str) {
+    pub(crate) fn commit(dir: &Path, message: &str) {
         run(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-am", message]);
     }
 
@@ -268,8 +332,12 @@ pub(crate) mod tests {
         }
         std::fs::write(home.join("worktrees/a/sub/file"), "uncommitted").unwrap();
         commit(&home.join("worktrees/b"), "work of b");
-        let removed = worktrees.prune(async |t: &ThreadId| *t != c).await;
-        assert_eq!(removed, 2);
+        let ahead = Branch { thread: b.clone(), name: "ants/dev-a/b".to_owned(), commits: 1 };
+        assert_eq!(worktrees.ahead(&b).await, Some(ahead.clone()));
+        assert_eq!(worktrees.ahead(&a).await, None, "uncommitted work is no commit");
+        assert_eq!(worktrees.ahead(&thread("d")).await, None, "no branch");
+        let pruned = worktrees.prune(async |t: &ThreadId| *t != c).await;
+        assert_eq!(pruned, Pruned { removed: 2, kept: vec![ahead] });
         assert_eq!(worktrees.threads(), std::slice::from_ref(&c));
         let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
         assert_eq!(branches.lines().collect::<Vec<_>>(), ["ants/dev-a/b", "ants/dev-a/c"], "unmerged work is kept");
@@ -298,7 +366,7 @@ pub(crate) mod tests {
         std::fs::rename(&repo, &moved).unwrap();
         run(&moved, &["worktree", "repair", home.join("worktrees/b").to_str().unwrap()]);
         let left = Worktrees::left_behind(&ant(), &home).await.unwrap();
-        assert_eq!(left.prune(async |_: &ThreadId| true).await, 2);
+        assert_eq!(left.prune(async |_: &ThreadId| true).await, Pruned { removed: 2, kept: Vec::new() });
         assert!(left.threads().is_empty());
         assert_eq!(run(&moved, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
         let branches = run(&moved, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
