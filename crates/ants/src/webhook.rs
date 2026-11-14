@@ -212,6 +212,9 @@ impl Config {
         if file.webhooks.is_empty() {
             bail!("webhook config {shown}: no [[webhook]] entries: nothing to serve");
         }
+        if let Some(url) = &file.nats {
+            bus::check_url(url).with_context(|| format!("webhook config {shown}"))?;
+        }
         let mut webhooks: Vec<Webhook> = Vec::with_capacity(file.webhooks.len());
         for entry in file.webhooks {
             let name = entry.name.clone();
@@ -503,6 +506,7 @@ struct Server {
 /// Serve the webhooks of `config` on `listener` until a webhook's credentials fail. Each webhook connects to `nats`
 /// as itself; until it is connected, its requests answer 503.
 pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
+    bus::check_url(nats)?;
     let hooks = config.webhooks.into_iter().map(|config| {
         let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default(), marked: Mutex::default() };
         (hook.config.name.to_string(), Arc::new(hook))
@@ -846,6 +850,8 @@ mod tests {
         assert!(error(&format!("{human}ant = \"dev-a\"\n")).contains("the default human is no webhook"));
         assert!(error(&format!("{HOOK}ant = \"dev-a\"\n{HOOK}ant = \"dev-b\"\n")).contains("listed twice"));
         assert!(error("nats = \"nats://hub:4222\"\n").contains("nothing to serve"));
+        let err = error(&format!("nats = \"nats://dev:secret@hub\"\n{HOOK}ant = \"dev-a\"\n"));
+        assert!(err.contains("NATS URL nats://***@hub") && !err.contains("secret"), "{err}");
     }
 
     #[test]

@@ -127,6 +127,7 @@ impl Approver {
     /// Connect to the server at `url`, signing the credentials with the account key in the team directory `dir`, and
     /// listen for `listen` each time requests are gathered.
     pub async fn connect(url: &str, dir: &Path, listen: Duration) -> Result<Self> {
+        bus::check_url(url)?;
         let creds = auth::approver_creds(dir)?;
         let client = async_nats::ConnectOptions::with_credentials(&creds)?
             .name("ants-enroll")
