@@ -109,7 +109,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
-| `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
+| `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
 
 ### Identity and human registration
@@ -311,6 +311,7 @@ Tool calls requested by a harness are checked against the ant's allowlist (`allo
 Matched calls auto-approve with `allow_once`. Unmatched calls set `waiting_approval`, publish an `ApprovalRequest` on `ants.approvals.<ant>`, and wait `approval_timeout` (default `5m`) for `allow_once`, `allow_always` or `reject` before rejecting:
 
 - **Human decisions:** `ants tools approve|reject <ant>/<id>` stores an `ApprovalDecision` on `ants.approvals.<ant>.<id>` using `Nats-Expected-Last-Subject-Sequence` so the first human answer wins; the daemon verifies the stored decision via direct get.
+- **Off the terminal:** `ants webhook serve` pushes pending requests to each configured human's ntfy, Slack or Telegram, with signed approve/reject links that store the same `ApprovalDecision` (see [Notifications](#notifications)).
 - **Chain decisions:** ants with `escalate_to` also send an `[ants]` notice (`approval` escalation) to every ant in `escalate_to` on the thread. Members handling that notice may call `decide_approval(verdict)` (`ants.inbox.<ant>.<decider>`); `escalate` is refused on approval notices. Earliest stored decision wins (human or chain member), and `ants tools` inspects both.
 
 ```sh
@@ -445,6 +446,48 @@ mention = ["dev-a"]                           # optional; or broadcast = true fo
 - **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 2m `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
 - **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 
+### Notifications
+
+`[[human]]` entries in the same file push tool requests (`ants.approvals.<ant>`) and escalations reaching the human's inbox to phones and chats, so approvals need no terminal running `ants tools list -f` or `ants inbox -f`:
+
+```toml
+public_url = "https://hub.example/hooks"      # what the reverse proxy maps to `path`; enables approve/reject links
+action_secret_file = "~/.ants/action.secret"  # HMAC key of the links, 16+ characters, mode 0600; or action_secret_env
+
+[[human]]
+name = "alice"
+creds = "~/.config/ants/auth/alice.creds"     # ants auth user alice --human
+ants = ["dev-a", "dev-b"]                     # optional: only these ants' tool requests (default: every ant)
+approvals = true                              # tool requests (default true)
+escalations = true                            # escalations reaching alice's inbox (default true)
+
+[[human.notify]]
+kind = "ntfy"
+topic = "alice-ants-7f3k"                     # url defaults to https://ntfy.sh
+secret_file = "~/.ants/ntfy.token"            # optional access token (bearer)
+
+[[human.notify]]
+kind = "slack"
+secret_file = "~/.ants/slack.url"             # the incoming webhook URL, a secret
+
+[[human.notify]]
+kind = "telegram"
+chat = "123456789"                            # chat id; url defaults to https://api.telegram.org
+secret_env = "ANTS_TELEGRAM_TOKEN"            # the bot token
+```
+
+- **One notice per event:** each human is its own NATS user and reads durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so several `ants webhook serve` processes listing the same human share it and each request or escalation is sent once. Requests already decided or expired, unreadable or forged ones, and escalations older than a day are skipped. Sinks run concurrently with a `10s` timeout; failures are logged (never with URLs or tokens) and not retried.
+- **Content:** approval notices carry the ant, tool title and kind, files, an input excerpt, thread, time left and the `ants tools approve|reject <ant>/<id>` commands; escalation notices carry the reason, the stuck ant, the text and the `ants ask --thread` command to answer. Plain messages are not notified.
+- **Approve/reject links:** with `public_url` and the action secret, approval notices carry one link per offered verdict (`Approve`, `Always allow`, `Reject`): `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=`, HMAC-SHA256 over every field, valid until the request expires. `GET` shows the request, its state and a confirm button; `POST` stores the decision with the human's credentials exactly as `ants tools approve|reject` does (first answer wins). Answers: `200` stored or shown, `400` incomplete link, `403` wrong signature, `404` unknown human or request, `405` not `GET`/`POST`, `409` already answered or expired, `410` past expiry, `503` hub unreachable. Without `public_url`, notices carry only the commands. Anyone holding a link can decide that one request, so keep sinks private (ntfy topics are public unless the server requires a token).
+
+| Sink | Notice | Actions |
+|---|---|---|
+| `ntfy` | JSON publish, priority high for tool requests | HTTP action buttons that `POST` the link: one tap decides |
+| `slack` | Incoming webhook, `mrkdwn` section | Link buttons opening the confirm page (Slack may flag them without an app interactivity URL; harmless) |
+| `telegram` | Bot API `sendMessage`, link previews off | Inline URL buttons opening the confirm page |
+
+Human credentials issued before notifications lack the `notify-<human>` consumer permissions: re-issue them with `ants auth user NAME --human`.
+
 ## Credentials
 
 `ants auth` manages decentralized NATS NKey/JWT credentials in `~/.config/ants/auth` (`--dir` / `ANTS_AUTH_DIR`; keep `*.nk` seeds private):
@@ -462,7 +505,7 @@ Copy `server.conf` next to the hub `nats-server` config and add `include "server
 
 ### Wire ACLs and verification invariants
 
-- **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`.
+- **Subject-pinned senders:** ants and webhooks publish only under their own sender token (`ants.inbox.*.<self>`, `ants.notes.*.<self>`, `ants.chan.*.<self>`, `ants.dead.<self>`, `ants.chanadm.*.<self>`, plus `ants.out.*` on leaves). Readers verify payload `from`/target fields against the NATS subject (`ants watch` marks mismatches forged). Only humans publish under arbitrary inbox senders (for `ants dead replay`), write `ants.approvals.<ant>.<id>`, write `ants_humans` and `ants_channels` (alongside `channel-manager`), or call `STREAM.MSG.GET`. Each human may create and read its own notification consumer `notify-<human>` only.
 - **Scoped ant reads:** without `STREAM.MSG.GET`, ant credentials pin consumer filters (`inbox-<ant>[_1..3]`, `chan-<ant>`, `chanread-<ant>[_1..3]`, `notes-<ant>[_1..3]`, `deadread-<ant>`) and restrict direct gets to `ants.approvals.<ant>.*`, their own `$KV.ants_sessions.<ant>.>` and `$KV.ants_attempts.<ant>.>`, `$KV.ants_humans.*`, `$KV.ants_chains.*`, `$KV.ants_owners.>` and `$KV.ants_webhooks.*.webhook`. Users write only their own keys in `ants_roster`, `ants_chains`, `ants_links` and `ants_webhooks`. Only humans and webhooks with an ant destination write `ants_owners`, webhooks only `<thread>.<ant>` keys of those ants (humans also through a leaf outbox), and its stream refuses a second record of a key (`discard_new_per_subject`, deletes and purges denied), but drops one repeating the first's `Nats-Msg-Id` (`owner.<key>`, which every writer sets) within the 30 d retention, so a record sourced from an outbox never stalls the source. `ants init` and `ants leaf outbox` widen the duplicate window of a stream from before.
 - **Private keys:** stream info with a subjects filter lists every key of a bucket, so only human credentials get stream info of `ants_sessions`, `ants_attempts` and `ants_owners` (to create them). Daemons read their own keys there and owners by direct get and write their own keys by plain publish, and webhooks record owners by plain publish, so neither ants nor webhooks can list other ants' thread ids.
 - **Metadata trust:** daemons accept `owner` only for `human` or entries in `ants_humans`, and honour `webhook: true` only with `<sender>.webhook` in `ants_webhooks` (or from a human). Channel thread `owner` and `creator` come from stored root/human posts in `ANTS`; an ant's non-channel `owner` comes from `ants_owners` for its thread or its `origin_thread`, else is dropped: a channel `origin_thread` gives the owner its posts say, under the same participation check as `creator`; a message thread, its own or its `origin_thread`, gives the owner of its `<thread>.<sender>` record, else of the record of an ant `ants_links` traces the sender's link back to; non-channel `creator` requires `origin_thread` backed by participation or `<from>.<thread>.<to>` links in `ants_links` (max 32 hops).

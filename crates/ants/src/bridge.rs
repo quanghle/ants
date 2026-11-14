@@ -450,7 +450,7 @@ impl Remote {
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
-fn tls_connector() -> Result<TlsConnector> {
+pub(crate) fn tls_connector() -> Result<TlsConnector> {
     let mut roots = rustls::RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     let (added, _) = roots.add_parsable_certificates(native.certs);
