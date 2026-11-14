@@ -4,6 +4,7 @@
 //! `stub-adapter` one a config file defines as a harness, it serves ACP on stdio and answers every prompt with
 //! `stub: <prompt>`.
 
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use agent_client_protocol::v1::schema::{
     SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio as AcpStdio};
-use ants_test_support::{NatsServer, scratch_dir};
+use ants_test_support::{NatsServer, free_port, scratch_dir};
 
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
 const WAIT: Duration = Duration::from_secs(60);
@@ -25,8 +26,9 @@ fn main() {
     if Path::new(&me).file_name().is_some_and(|name| name == "copilot" || name == "stub-adapter") {
         return stub_harness();
     }
-    let tests: [(&str, fn()); 5] = [
+    let tests: [(&str, fn()); 6] = [
         ("ask_gets_the_reply_of_a_daemon_harness", ask_gets_the_reply_of_a_daemon_harness),
+        ("a_daemon_exits_once_its_executable_was_replaced", a_daemon_exits_once_its_executable_was_replaced),
         ("custom_whoami_and_tools_reach_the_harness", custom_whoami_and_tools_reach_the_harness),
         ("channels_are_managed_posted_to_and_read", channels_are_managed_posted_to_and_read),
         ("the_builtin_messenger_hands_over_to_a_listed_one", the_builtin_messenger_hands_over_to_a_listed_one),
@@ -68,13 +70,14 @@ fn exercise_daemon(custom_tools: bool) {
 
     let log = std::fs::File::create(dir.join("daemon.log")).unwrap();
     let home = dir.join("home");
+    let metrics = format!("127.0.0.1:{}", free_port());
     let mut command = ants(&["daemon"]);
     if custom_tools {
         let config = dir.join("config.toml");
         std::fs::write(
             &config,
             format!(
-                "messenger = false\n[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
+                "messenger = false\nmetrics = {metrics:?}\n[[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
                  memory = \"Use the notes tool.\"\ntasks = \"Use the ticket tool.\"\n\
@@ -85,6 +88,7 @@ fn exercise_daemon(custom_tools: bool) {
         command.arg("--config").arg(config);
     } else {
         command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(&dir);
+        command.arg("--metrics").arg(&metrics);
     }
     let daemon = command
         .env("PATH", &bin)
@@ -124,6 +128,21 @@ fn exercise_daemon(custom_tools: bool) {
     } else {
         assert!(entry.get("whoami").is_none());
     }
+
+    let (status, health) = get(&metrics, "/healthz");
+    assert_eq!((status, health.as_str()), (200, "ok\n"), "daemon log:\n{}", daemon_log());
+    let (status, exposition) = get(&metrics, "/metrics");
+    assert_eq!(status, 200);
+    for line in [
+        "# TYPE ants_nats_connected gauge",
+        "ants_nats_connected{ant=\"dev-a\"} 1",
+        "# TYPE ants_prompts_total counter",
+        "ants_prompts_total{ant=\"dev-a\"} 1",
+        "ants_prompts_in_flight{ant=\"dev-a\"} 0",
+    ] {
+        assert!(exposition.lines().any(|l| l == line), "{line} in:\n{exposition}");
+    }
+    assert_eq!(get(&metrics, "/nothing").0, 404);
 
     let inbox = run(ants(&["inbox"]));
     assert!(inbox.status.success(), "ants inbox: {}", String::from_utf8_lossy(&inbox.stderr));
@@ -252,6 +271,57 @@ fn channels_are_managed_posted_to_and_read() {
 
 /// A daemon serving the built-in messenger hands it over to a daemon started later with a listed messenger, on the same
 /// machine, and serves it again once that daemon stops.
+/// `cargo install` renames the new executable over the old one: the daemon stops as on SIGTERM and exits with status
+/// 75, which the service units restart on.
+fn a_daemon_exits_once_its_executable_was_replaced() {
+    let Some(server) = NatsServer::start() else { return };
+    let dir = scratch_dir("upgrade");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("copilot")).unwrap();
+    let installed = bin.join("ants");
+    std::fs::copy(ANTS, &installed).unwrap();
+    let log = || std::fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+    let mut daemon = Command::new(&installed);
+    daemon
+        .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--upgrade-check", "1s", "--workdir"])
+        .arg(&dir)
+        .arg("--home")
+        .arg(dir.join("home"))
+        .env_remove("ANTS_CREDS")
+        .env_remove("ANTS_CONFIG")
+        .env_remove("ANTS_UPGRADE_CHECK")
+        .env("PATH", &bin)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap());
+    let mut daemon = Killed(daemon.spawn().unwrap());
+    let start = Instant::now();
+    while !log().contains("serving inbox") {
+        assert!(start.elapsed() < WAIT, "daemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(daemon.0.try_wait().unwrap().is_none(), "exited unreplaced\ndaemon log:\n{}", log());
+
+    let staged = bin.join(".ants-new");
+    std::fs::copy(ANTS, &staged).unwrap();
+    std::fs::rename(&staged, &installed).unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < WAIT, "still running\ndaemon log:\n{}", log());
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(75), "daemon log:\n{}", log());
+    let log = log();
+    assert!(log.contains("the executable was replaced") && log.contains("stopped"), "{log}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn the_builtin_messenger_hands_over_to_a_listed_one() {
     let Some(server) = NatsServer::start() else { return };
     let dir = scratch_dir("handover");
@@ -433,6 +503,17 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
 }
 
 /// Run `command` to completion, killing it after [`WAIT`].
+/// `GET path` on `addr` over a raw connection: the status and body.
+fn get(addr: &str, path: &str) -> (u16, String) {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or_else(|| panic!("GET {path}: {answer:?}"));
+    (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_owned())
+}
+
 fn run(mut command: Command) -> Output {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let start = Instant::now();

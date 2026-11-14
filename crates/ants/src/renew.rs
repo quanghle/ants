@@ -26,8 +26,8 @@ use futures::StreamExt as _;
 use nkeys::KeyPair;
 
 use crate::enroll::Approver;
-use crate::service::{Action, Outcome, Service, Services};
-use crate::{add, auth, leaf};
+use crate::service::{Action, Outcome, Service, Services, failure};
+use crate::{auth, leaf};
 
 #[derive(clap::Args, Debug)]
 pub struct RenewArgs {
@@ -245,7 +245,7 @@ fn reload(path: &Path, config: Option<&Path>, leaf_config: Option<&Path>) -> Res
             Outcome::NotRunning => println!("the daemon service is not running; it uses them once started"),
             outcome => println!(
                 "{}serve {ants} with them: reload `ants daemon` with SIGHUP, or its service ({})",
-                add::failure(outcome),
+                failure(outcome),
                 crate::service::manual(Service::Daemon, Action::Reload)
             ),
         }
@@ -256,7 +256,7 @@ fn reload(path: &Path, config: Option<&Path>, leaf_config: Option<&Path>) -> Res
             Outcome::NotRunning => println!("the leaf node service is not running; it uses them once started"),
             outcome => println!(
                 "{}restart the leaf node to use them ({}); SIGHUP does not read them again",
-                add::failure(outcome),
+                failure(outcome),
                 crate::service::manual(Service::Nats, Action::Restart)
             ),
         }

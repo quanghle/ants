@@ -18,6 +18,9 @@ After=ants-nats.service
 Environment=NO_COLOR=1
 Restart=on-failure
 RestartSec=10
+# A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
+SuccessExitStatus=75
+RestartForceExitStatus=75
 
 [Install]
 WantedBy=default.target

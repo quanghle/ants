@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
 use ants_daemon::roster::{self, Registration, Workload};
-use ants_proto::{Activity, RosterEntry, UserId};
+use ants_proto::{Activity, RosterEntry, SignInNeeded, UserId};
 use ants_test_support::NatsServer as Server;
 use async_nats::jetstream::kv;
 
@@ -32,6 +32,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         handling: None,
         harnesses: None,
         escalate_to: Vec::new(),
+        signed_out: None,
     }
 }
 
@@ -127,6 +128,36 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     assert_eq!(busy.handling, Some(1));
     drop(working);
     wait_activity(&kv, "dev-a", Activity::Idle, Duration::from_secs(5)).await;
+}
+
+/// Poll until `ant`'s entry shows `signed_out`, or fail after `limit`.
+async fn wait_signed_out(kv: &kv::Store, ant: &str, signed_out: Option<&SignInNeeded>, limit: Duration) {
+    let start = Instant::now();
+    loop {
+        let entry = read(kv, ant).await.expect("listed");
+        if entry.signed_out.as_ref() == signed_out {
+            return;
+        }
+        assert!(start.elapsed() < limit, "{ant} not signed out as {signed_out:?} after {limit:?}: {entry:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
+    let Some(server) = Server::start() else { return };
+    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let kv = bus::ensure_roster(&js, Duration::from_secs(30)).await.unwrap();
+    let workload = Arc::new(Workload::default());
+    let beat = Duration::from_secs(60);
+    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone())).await.unwrap();
+    assert_eq!(read(&kv, "dev-a").await.unwrap().signed_out, None);
+
+    let out = SignInNeeded { since: chrono::Utc::now(), sign_in: Some("copilot login".to_owned()) };
+    workload.set_signed_out(Some(out.clone()));
+    wait_signed_out(&kv, "dev-a", Some(&out), Duration::from_secs(5)).await;
+    workload.set_signed_out(None);
+    wait_signed_out(&kv, "dev-a", None, Duration::from_secs(5)).await;
 }
 
 /// The built-in messenger waits while another daemon serves the messenger, on this machine or another, takes over once

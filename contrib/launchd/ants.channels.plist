@@ -5,7 +5,8 @@
      scripts/install-units.sh --channel-manager CREDS fills in the @...@ placeholders and installs it as
      ~/Library/LaunchAgents/ants.channels.plist. Until the hub answers, the channel manager waits, retrying the
      connection; KeepAlive and ThrottleInterval cover other failures, such as a missing channels bucket before
-     `ants init`. -->
+     `ants init`.
+     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

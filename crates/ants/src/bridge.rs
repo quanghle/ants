@@ -21,9 +21,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ants_daemon::metrics::{self, Exposition, Kind};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE64, HEXLOWER};
 use http_body_util::{BodyExt as _, Full, Limited};
@@ -61,6 +63,65 @@ const UPSTREAM_CONNECT: Duration = Duration::from_secs(10);
 const REQUEST: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(4);
 
+/// What either end of the bridge carried, for `--metrics`.
+#[derive(Debug, Default)]
+pub struct Traffic {
+    sessions: AtomicU64,
+    opened: AtomicU64,
+    failed: AtomicU64,
+    up: AtomicU64,
+    down: AtomicU64,
+}
+
+impl Traffic {
+    fn opened(&self) {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        self.sessions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn closed(&self) {
+        self.sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn up(&self, n: usize) {
+        self.up.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    fn down(&self, n: usize) {
+        self.down.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+/// The bridge has no NATS connection of its own: healthy while it runs.
+impl metrics::Source for Traffic {
+    fn healthy(&self) -> bool {
+        true
+    }
+
+    fn render(&self, out: &mut Exposition) {
+        let load = |n: &AtomicU64| n.load(Ordering::Relaxed) as f64;
+        out.single("ants_bridge_sessions", Kind::Gauge, "Bridge sessions open.", load(&self.sessions));
+        out.single("ants_bridge_sessions_total", Kind::Counter, "Bridge sessions opened.", load(&self.opened));
+        out.single(
+            "ants_bridge_failures_total",
+            Kind::Counter,
+            "Sessions that failed: the upstream unreachable (serve), or the session not opened or broken (connect).",
+            load(&self.failed),
+        );
+        out.family(
+            "ants_bridge_bytes_total",
+            Kind::Counter,
+            "Bytes carried, up towards the hub's upstream or down from it.",
+        );
+        out.sample("ants_bridge_bytes_total", &[("direction", "up")], load(&self.up));
+        out.sample("ants_bridge_bytes_total", &[("direction", "down")], load(&self.down));
+    }
+}
+
 // ---- hub side --------------------------------------------------------------------------------------------------
 
 /// `ants bridge serve`: sessions, each a connection to the upstream.
@@ -68,6 +129,7 @@ pub struct Server {
     upstream: String,
     token: Option<String>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    traffic: Arc<Traffic>,
 }
 
 struct Session {
@@ -109,7 +171,13 @@ impl Drop for Session {
 
 impl Server {
     pub fn new(upstream: String, token: Option<String>) -> Self {
-        Self { upstream, token: token.filter(|t| !t.is_empty()), sessions: Mutex::default() }
+        let token = token.filter(|t| !t.is_empty());
+        Self { upstream, token, sessions: Mutex::default(), traffic: Arc::default() }
+    }
+
+    /// What the bridge carries, as it goes.
+    pub fn traffic(&self) -> Arc<Traffic> {
+        self.traffic.clone()
     }
 
     /// Serve requests from `listener` until the process ends.
@@ -162,7 +230,7 @@ impl Server {
                 let Ok(body) = Limited::new(request.into_body(), CHUNK).collect().await else {
                     return reply(StatusCode::PAYLOAD_TOO_LARGE, "body too large or cut off");
                 };
-                session.write(off, &body.to_bytes()).await
+                session.write(off, &body.to_bytes(), &self.traffic).await
             }
             (Method::GET, Some(off)) => session.read(off).await,
             (Method::DELETE, _) => {
@@ -186,13 +254,19 @@ impl Server {
         }
         let stream = match tokio::time::timeout(UPSTREAM_CONNECT, TcpStream::connect(&self.upstream)).await {
             Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => return reply(StatusCode::BAD_GATEWAY, &format!("upstream {}: {e}", self.upstream)),
-            Err(_) => return reply(StatusCode::GATEWAY_TIMEOUT, &format!("upstream {}: timed out", self.upstream)),
+            Ok(Err(e)) => {
+                self.traffic.failed();
+                return reply(StatusCode::BAD_GATEWAY, &format!("upstream {}: {e}", self.upstream));
+            }
+            Err(_) => {
+                self.traffic.failed();
+                return reply(StatusCode::GATEWAY_TIMEOUT, &format!("upstream {}: timed out", self.upstream));
+            }
         };
         let _ = stream.set_nodelay(true);
         let (reader, writer) = stream.into_split();
         let down = Arc::new(Down::default());
-        let reader = tokio::spawn(read_upstream(reader, down.clone())).abort_handle();
+        let reader = tokio::spawn(read_upstream(reader, down.clone(), self.traffic.clone())).abort_handle();
         let session = Session {
             up: tokio::sync::Mutex::new(Up { writer, written: 0 }),
             down,
@@ -201,6 +275,7 @@ impl Server {
         };
         let id = session_id();
         self.sessions.lock().unwrap().insert(id.clone(), Arc::new(session));
+        self.traffic.opened();
         tracing::info!(session = %id, upstream = %self.upstream, "bridge session opened");
         Response::new(Full::new(Bytes::from(id)))
     }
@@ -213,6 +288,7 @@ impl Server {
 
     fn close(&self, id: &str, why: &str) {
         if let Some(session) = self.sessions.lock().unwrap().remove(id) {
+            self.traffic.closed();
             session.close();
             tracing::info!(session = %id, "bridge session {why}");
         }
@@ -240,7 +316,7 @@ impl Session {
         self.down.readable.notify_waiters();
     }
 
-    async fn write(&self, off: u64, body: &[u8]) -> Response<Full<Bytes>> {
+    async fn write(&self, off: u64, body: &[u8], traffic: &Traffic) -> Response<Full<Bytes>> {
         let mut up = self.up.lock().await;
         if off > up.written {
             return reply(StatusCode::CONFLICT, &format!("offset {off} beyond {}", up.written));
@@ -252,6 +328,7 @@ impl Session {
                 return reply(StatusCode::GONE, &format!("upstream closed: {e}"));
             }
             up.written += new.len() as u64;
+            traffic.up(new.len());
         }
         empty(StatusCode::NO_CONTENT)
     }
@@ -292,7 +369,7 @@ impl Session {
 }
 
 /// Reads the upstream into `down` while it has room, until the upstream closes.
-async fn read_upstream(mut reader: OwnedReadHalf, down: Arc<Down>) {
+async fn read_upstream(mut reader: OwnedReadHalf, down: Arc<Down>, traffic: Arc<Traffic>) {
     let mut chunk = vec![0; CHUNK];
     loop {
         loop {
@@ -304,6 +381,7 @@ async fn read_upstream(mut reader: OwnedReadHalf, down: Arc<Down>) {
             room.await;
         }
         let n = reader.read(&mut chunk).await.unwrap_or(0);
+        traffic.down(n);
         let mut state = down.state.lock().unwrap();
         if n == 0 {
             state.eof = true;
@@ -356,6 +434,7 @@ pub struct Remote {
     headers: Vec<(HeaderName, HeaderValue)>,
     /// Proxy-Authorization for a CONNECT proxy, which then is `dial`.
     proxy: Option<Option<String>>,
+    traffic: Arc<Traffic>,
 }
 
 impl Remote {
@@ -402,7 +481,12 @@ impl Remote {
             }
         };
         let base = uri.path().trim_end_matches('/').to_owned();
-        Ok(Self { dial, authority, tls, base, headers: all, proxy })
+        Ok(Self { dial, authority, tls, base, headers: all, proxy, traffic: Arc::default() })
+    }
+
+    /// What the bridge carries, as it goes.
+    pub fn traffic(&self) -> Arc<Traffic> {
+        self.traffic.clone()
     }
 
     async fn connect(&self) -> Result<SendRequest<Full<Bytes>>> {
@@ -440,7 +524,10 @@ impl Remote {
             tokio::spawn(async move {
                 match carry(&remote, stream).await {
                     Ok(()) => tracing::info!(%peer, "bridged connection closed"),
-                    Err(e) => tracing::warn!(%peer, "bridged connection closed: {e:#}"),
+                    Err(e) => {
+                        remote.traffic.failed();
+                        tracing::warn!(%peer, "bridged connection closed: {e:#}");
+                    }
                 }
             });
         }
@@ -598,12 +685,14 @@ async fn carry(remote: &Remote, local: TcpStream) -> Result<()> {
         (status, body) => bail!("opening a session: {status}: {}", String::from_utf8_lossy(&body)),
     };
     tracing::info!(session = %id, "bridge session opened");
+    remote.traffic.opened();
     let path = format!("/s/{id}");
     let (reader, writer) = local.into_split();
     let result = tokio::select! {
         r = send_up(&mut up, &path, reader) => r,
         r = take_down(&mut down, &path, writer) => r,
     };
+    remote.traffic.closed();
     let _ = Http::new(remote).once(&Method::DELETE, &path, &Bytes::new(), Duration::from_secs(5)).await;
     result
 }
@@ -618,7 +707,10 @@ async fn send_up(http: &mut Http<'_>, path: &str, mut local: OwnedReadHalf) -> R
         }
         let chunk = Bytes::copy_from_slice(&buf[..n]);
         match http.retried(Method::POST, &format!("{path}?off={off}"), chunk, REQUEST).await? {
-            (status, _) if status.is_success() => off += n as u64,
+            (status, _) if status.is_success() => {
+                off += n as u64;
+                http.remote.traffic.up(n);
+            }
             (StatusCode::GONE, _) => return Ok(()),
             (status, body) => bail!("sending: {status}: {}", String::from_utf8_lossy(&body)),
         }
@@ -632,6 +724,7 @@ async fn take_down(http: &mut Http<'_>, path: &str, mut local: OwnedWriteHalf) -
             (StatusCode::OK, bytes) => {
                 local.write_all(&bytes).await?;
                 off += bytes.len() as u64;
+                http.remote.traffic.down(bytes.len());
             }
             (StatusCode::GONE, _) => return Ok(()),
             (status, body) => bail!("receiving: {status}: {}", String::from_utf8_lossy(&body)),
@@ -676,8 +769,8 @@ mod tests {
         (listener, port)
     }
 
-    /// A bridge in front of an echo server.
-    async fn echo_bridge(token: Option<&str>) -> u16 {
+    /// A bridge in front of an echo server, and its traffic.
+    async fn echo_bridge(token: Option<&str>) -> (u16, Arc<Traffic>) {
         let (echo, echo_port) = local().await;
         tokio::spawn(async move {
             while let Ok((stream, _)) = echo.accept().await {
@@ -689,13 +782,14 @@ mod tests {
         });
         let (listener, port) = local().await;
         let server = Server::new(format!("127.0.0.1:{echo_port}"), token.map(str::to_owned));
+        let traffic = server.traffic();
         tokio::spawn(server.run(listener));
-        port
+        (port, traffic)
     }
 
     #[tokio::test]
     async fn repeated_requests_neither_lose_nor_double_bytes() {
-        let port = echo_bridge(Some("s3cret")).await;
+        let (port, traffic) = echo_bridge(Some("s3cret")).await;
         let url = format!("http://127.0.0.1:{port}/bridge");
         let wrong = Remote::new(&url, Some("guess"), &[], None).unwrap();
         let (status, _) = Http::new(&wrong).once(&Method::POST, "/open", &Bytes::new(), REQUEST).await.unwrap();
@@ -728,6 +822,19 @@ mod tests {
 
         assert_eq!(call(Method::DELETE, s.clone(), b"").await.0, StatusCode::NO_CONTENT);
         assert_eq!(call(Method::GET, format!("{s}?off=11"), b"").await.0, StatusCode::NOT_FOUND);
+
+        let mut out = Exposition::default();
+        metrics::Source::render(&*traffic, &mut out);
+        let out = out.into_string();
+        for line in [
+            "ants_bridge_sessions 0",
+            "ants_bridge_sessions_total 1",
+            "ants_bridge_failures_total 0",
+            "ants_bridge_bytes_total{direction=\"up\"} 11",
+            "ants_bridge_bytes_total{direction=\"down\"} 11",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in:\n{out}");
+        }
     }
 
     #[test]

@@ -344,6 +344,7 @@ impl Ledger {
                 (true, (total, tokens, cost))
             })
             .await?;
+        crate::metrics::ant(&self.ant).spent(tokens, cost);
 
         let mut day = self.day.lock().await;
         let daily = self.load_day(&mut day, today).await?;

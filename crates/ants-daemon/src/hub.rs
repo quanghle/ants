@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
 use async_nats::jetstream::{self, ErrorCode, kv, stream};
 
-use crate::bus::RETENTION;
+use crate::bus::{DUPLICATE_WINDOW, RETENTION};
 
 /// A JetStream object `ants init` sets up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -161,6 +161,8 @@ pub enum Drift {
     DirectGets,
     /// The stream does not republish inbox messages it stores ([`stored_inbox`]).
     Republish,
+    /// The stream drops repeated message ids for less than this long ([`duplicate_window`]).
+    DuplicateWindow(Duration),
     /// The owners bucket does not keep one record per key, dropping a repeat of its message id for as long as it
     /// keeps the first ([`crate::owners::first_records_only`]): its duplicate window, among others.
     FirstRecordsOnly,
@@ -172,6 +174,9 @@ impl fmt::Display for Drift {
             Self::Subjects(subjects) => write!(f, "subjects {}", subjects.join(", ")),
             Self::DirectGets => write!(f, "direct gets"),
             Self::Republish => write!(f, "the republishing of stored inbox messages"),
+            Self::DuplicateWindow(window) => {
+                write!(f, "a duplicate window of {}", ants_proto::duration::format(*window))
+            }
             Self::FirstRecordsOnly => write!(f, "a duplicate window as long as its retention, keeping first records"),
         }
     }
@@ -295,10 +300,20 @@ pub fn stream_config() -> stream::Config {
         subjects: STREAM_SUBJECTS.iter().map(|s| (*s).to_owned()).collect(),
         storage: stream::StorageType::File,
         max_age: RETENTION,
+        duplicate_window: DUPLICATE_WINDOW,
         // An ant reads the decision stored on its approval requests with a direct get (`approvals`).
         allow_direct: true,
         republish: Some(stored_inbox()),
         ..Default::default()
+    }
+}
+
+/// The duplicate window the `ANTS` stream configured as `config` should have: [`DUPLICATE_WINDOW`], or its retention
+/// if shorter, as JetStream allows no window longer than that.
+pub fn duplicate_window(config: &stream::Config) -> Duration {
+    match config.max_age {
+        Duration::ZERO => DUPLICATE_WINDOW,
+        max_age => DUPLICATE_WINDOW.min(max_age),
     }
 }
 
@@ -312,8 +327,9 @@ pub fn stored_inbox() -> stream::Republish {
     }
 }
 
-/// Add to `config`, the `ANTS` stream's, the subjects of [`STREAM_SUBJECTS`] it lacks, direct gets and the
-/// republishing of stored inbox messages, keeping its other subjects and settings. Returns what it lacked.
+/// Add to `config`, the `ANTS` stream's, the subjects of [`STREAM_SUBJECTS`] it lacks, direct gets, the
+/// republishing of stored inbox messages and a [`duplicate_window`] as long as it should be, keeping its other
+/// subjects and settings, a longer window too. Returns what it lacked.
 pub fn upgrade_stream(config: &mut stream::Config) -> Vec<Drift> {
     let mut drift = Vec::new();
     let missing = crate::bus::missing_subjects(&config.subjects);
@@ -328,6 +344,11 @@ pub fn upgrade_stream(config: &mut stream::Config) -> Vec<Drift> {
     if config.republish.as_ref() != Some(&stored_inbox()) {
         config.republish = Some(stored_inbox());
         drift.push(Drift::Republish);
+    }
+    let window = duplicate_window(config);
+    if config.duplicate_window < window {
+        config.duplicate_window = window;
+        drift.push(Drift::DuplicateWindow(window));
     }
     drift
 }
@@ -510,8 +531,12 @@ mod tests {
         js.create_stream(owners).await.unwrap();
 
         let findings = check(&js, |_| true).await;
-        let stream_drift =
-            vec![Drift::Subjects(vec![subject::DEAD_ALL.to_owned()]), Drift::DirectGets, Drift::Republish];
+        let stream_drift = vec![
+            Drift::Subjects(vec![subject::DEAD_ALL.to_owned()]),
+            Drift::DirectGets,
+            Drift::Republish,
+            Drift::DuplicateWindow(Duration::from_secs(3600)),
+        ];
         let outdated: Vec<_> = problems(&findings).into_iter().filter(|(_, drift)| drift.is_some()).collect();
         assert_eq!(
             outdated,
@@ -519,7 +544,8 @@ mod tests {
         );
         assert_eq!(
             findings[0].to_string(),
-            "stream ANTS lacks subjects ants.dead.>; direct gets; the republishing of stored inbox messages"
+            "stream ANTS lacks subjects ants.dead.>; direct gets; the republishing of stored inbox messages; a \
+             duplicate window of 1h"
         );
         for finding in &findings {
             apply(&js, finding).await.unwrap();
@@ -531,8 +557,48 @@ mod tests {
         assert!(config.subjects.iter().any(|s| s == "ants.plan.>"), "older subjects stay");
         assert_eq!(config.sources.unwrap()[0].name, "OUTBOX", "sources stay");
         assert_eq!(config.max_age, Duration::from_secs(3600), "and the retention");
+        assert_eq!(config.duplicate_window, Duration::from_secs(3600), "no longer than the retention");
         assert!(config.allow_direct && config.republish == Some(stored_inbox()));
         let owners = js.get_stream(crate::owners::owners_stream()).await.unwrap().cached_info().config.clone();
         assert_eq!(owners.duplicate_window, RETENTION);
+    }
+
+    /// A copy kept in a leaf's outbox can land long after its twin stored directly: the stream drops it for a day.
+    #[tokio::test]
+    async fn the_stream_drops_repeated_message_ids_for_a_day() {
+        let Some(server) = NatsServer::start() else { return };
+        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let window = |stream: &stream::Stream| stream.cached_info().config.duplicate_window;
+        let stream = bus::init_stream(&js).await.unwrap();
+        assert_eq!(window(&stream), DUPLICATE_WINDOW, "created with it");
+        js.delete_stream(STREAM).await.unwrap();
+
+        // As created before, with JetStream's default window of two minutes.
+        let mut old = stream_config();
+        old.duplicate_window = Duration::ZERO;
+        let old = js.create_stream(old).await.unwrap();
+        assert_eq!(window(&old), Duration::from_secs(120));
+        assert_eq!(
+            problems(&check(&js, |_| true).await)[0],
+            (Object::Stream, Some(vec![Drift::DuplicateWindow(DUPLICATE_WINDOW)]))
+        );
+        let stream = bus::init_stream(&js).await.unwrap();
+        assert_eq!(window(&stream), DUPLICATE_WINDOW, "upgraded");
+        assert_eq!(js.get_stream(STREAM).await.unwrap().cached_info().config.duplicate_window, DUPLICATE_WINDOW);
+
+        let publish = async |id: &str| {
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
+            let subject = subject::inbox(&"dev-a".parse().unwrap(), &UserId::human());
+            js.publish_with_headers(subject, headers, "{}".into()).await.unwrap().await.unwrap()
+        };
+        let first = publish("m-1").await;
+        let again = publish("m-1").await;
+        assert!(again.duplicate && again.sequence == first.sequence);
+
+        let mut longer = js.get_stream(STREAM).await.unwrap().cached_info().config.clone();
+        longer.duplicate_window = DUPLICATE_WINDOW * 2;
+        js.update_stream(&longer).await.unwrap();
+        assert!(check(&js, |_| true).await.iter().all(|f| f.object != Object::Stream), "a longer window stays");
     }
 }

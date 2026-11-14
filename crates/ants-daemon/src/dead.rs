@@ -20,9 +20,10 @@
 //! thread's owner directly and terminates the message itself ([`finish`]). The human's side writes dead letters only
 //! from what the hub holds, so straight into its stream.
 //!
-//! The hub's stream keeps a second copy of a dead letter out by its message id only within its duplicate window (two
-//! minutes). A daemon that finishes a burial later, having been down, first reads its own dead letters back from the
-//! hub ([`stored`]) and keeps a letter of the same message found there instead of storing another.
+//! The hub's stream keeps a second copy of a dead letter out by its message id only within its duplicate window (a
+//! day, [`crate::bus::DUPLICATE_WINDOW`]). A daemon that finishes a burial later, having been down, first reads its
+//! own dead letters back from the hub ([`stored`]) and keeps a letter of the same message found there instead of
+//! storing another.
 //!
 //! When storing the dead letter fails on that extra delivery too, JetStream delivers the message no more and only
 //! publishes a max-deliveries advisory. As a backstop, the human's side ([`watch`]) turns those advisories into dead

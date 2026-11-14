@@ -66,6 +66,10 @@ cargo install --path crates/ants        # ~/.cargo/bin/ants
 ants --help
 ```
 
+### Upgrade
+
+Running `cargo install` again replaces `~/.cargo/bin/ants`; the services move onto the new executable by themselves. `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` check every 30s whether another file replaced their executable at the path they started from (or the file was rewritten in place). Once the new file is executable, non-empty and unchanged across two checks, the process exits with status 75 for the service manager to start the new one: `ants daemon` first stops its ants as on `SIGTERM` (prompts in flight finish, waiting messages go back for redelivery) and its schedules at once; the others exit at once, as on `SIGTERM`. The units of `scripts/install-units.sh` restart on status 75 (systemd `RestartForceExitStatus=75`; launchd `KeepAlive`, as on any failed exit); systemd units installed before also restart on it, as on a failure. A process started by hand logs the reason and exits: start it again. `--upgrade-check DURATION` (`ANTS_UPGRADE_CHECK`) on those commands sets the period; `0` turns the check off.
+
 ## Quick start
 
 Single machine without credentials:
@@ -97,7 +101,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 |---|---|
 | `ants ask [--thread ID] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. |
 | `ants inbox [--peek] [--thread ID] [--limit N] [-f] [--json]` | Print unread replies and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread`, the device counts as reading its escalations, see [Notifications](#notifications)). |
-| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`), harnesses, capabilities, `escalate_to` chains and workdirs. |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`), harnesses, capabilities, `escalate_to` chains and workdirs; below the table, one line per signed-out harness with its sign-in command and machine. |
 | `ants spend [ANT] [--thread ID \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants post [--thread ID] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
@@ -113,16 +117,16 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants tools approve ID [--always]` / `reject ID` | Allow once, allow for the session (`--always`, if offered), or reject a tool request. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or delete dead letters; `watch` turns `MAX_DELIVERIES` advisories into dead letters. |
 | `ants init` | Create or update stream `ANTS` and all eleven KV buckets (requires human credentials; other commands with human credentials do the same on connecting). |
-| `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
+| `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`); `--metrics` serves health and metrics (see [Monitoring](#monitoring)). |
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
 | `ants harness check` / `prompt TEXT` | Check the harness is installed and signed in (ACP handshake and `session/new` in the current directory; names the sign-in command when signed out) or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
-| `ants doctor [--config FILE] [--leaf-config FILE] [--no-harness] [--json]` | Check the machine's setup end to end and print the command fixing each problem; exits with status 1 when a check fails (see [Doctor](#doctor)). |
-| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`, `--label LABEL` for a human's device; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--enroll-approver` for the account-key machine, and writes the leaf's system account credentials beside the uplink's). |
+| `ants doctor [--config FILE] [--leaf-config FILE] [--dir DIR] [--no-harness] [--json]` | Check the machine's setup end to end and print the command fixing each problem; exits with status 1 when a check fails (see [Doctor](#doctor)). |
+| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`, `--label LABEL` for a human's device; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--ant`, `--human`, `--webhook` name the machine's members, `--add-*`/`--remove-*` change those of the last run, which a run without them reissues, `--enroll-approver` (`--no-enroll-approver`) for the account-key machine, and writes the leaf's system account credentials beside the uplink's). |
 | `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`, or only the human's `--device DEVICE`), rewrite `server.conf` and push the account to the `--nats` server and the leaf nodes joined to its system account (`--no-push` to skip); list revoked keys; push the account again. |
 | `ants auth issued [--json]` | List the keys issued (key, name, kind, issue time, expiry, permissions version, revoked or reissued), with the command renewing those in use that are outdated or expire within 7 days. |
 | `ants auth devices HUMAN [--json]` / `rename HUMAN DEVICE LABEL` | List a human's devices (id, label, key, issue time, revoked); relabel one. `DEVICE` is an id, a key, or a label no other device of the human has. |
-| `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
+| `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing (`outbox`: members from `--ant`/`--human`, or those the uplink credentials of `--leaf-config FILE` carry, changed by `--add-*`/`--remove-*`). |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
@@ -140,6 +144,7 @@ Every command accepts `--nats`, `--creds` and `--js-domain`. Where neither the f
 - **server** and **jetstream**: the `--nats` server accepts the credentials, and JetStream answers in the `--js-domain` they were issued for; through a leaf node, the hub's JetStream rather than the leaf's own.
 - **hub**: stream `ANTS` and the KV buckets exist and match this version (fix: `ants init`); skipped with an ant's credentials, which get no stream info.
 - **ant NAME credentials** and **ant NAME harness**: each config-file ant's credentials are an ant's of its name, for its JetStream domain; its harness is installed and signed in (the ACP handshake of `ants harness check`, one per harness and environment, all at once; `--no-harness` skips them).
+- **hub resolver**: on the machine holding the team keys (`--dir`, `ANTS_AUTH_DIR`, default `~/.config/ants/auth`), the `--nats` server, asked as a user of the team's system account, keeps pushed accounts across restarts (a `full` resolver); a warning otherwise, with the `resolver` line to add, and when the server refuses the system account (a `server.conf` from before revocations or of another team). Skipped without the team keys and when the CLI connects through the leaf node.
 - **leaf**, **leaf uplink**, **leaf system uplink**, **leaf node**, **outbox**: with a leaf node configuration (`--leaf-config`, default `~/.config/ants/leaf.conf`), its uplink credentials carry the machine's ants and the CLI's human that connect through it, the system account uplink is configured, the leaf node listens where the CLI connects, and, with human credentials, the hub sources the machine's outbox for every member.
 - **daemon service** and **leaf node service**: the units of `scripts/install-units.sh` are installed for the config file and the leaf node configuration, and running (see [Services](#services)).
 
@@ -154,9 +159,11 @@ A check that cannot run, such as one needing a file that does not exist or right
 | `ANTS_JS_DOMAIN` | `--js-domain` (global) | Hub JetStream domain (`$JS.<domain>.API`), else the config file's `[cli]` or top-level `js_domain` |
 | `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`, `spend`); the global connection defaults | `~/.ants/config.toml` |
 | `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
-| `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
+| `ANTS_METRICS` | `--metrics` (`ants daemon`) | Address for `/healthz` and `/metrics`, else the config file's `metrics`; off by default (see [Monitoring](#monitoring)) |
+| `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`, `doctor`) | `~/.config/ants/auth` |
 | `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
 | `ANTS_MCP_TOKEN` | `--token` (`ants mcp`) | Per-thread session token passed automatically by `ants daemon` |
+| `ANTS_UPGRADE_CHECK` | `--upgrade-check` (`daemon`, `channel serve`, `webhook serve`, `bridge serve`, `bridge connect`) | `30s`: how often to check for a replaced executable and exit with status 75 ([Upgrade](#upgrade)); `0` never checks |
 | `ANTS_LOG` | All commands | `tracing` stderr filter, default `info,rmcp=warn` |
 | `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by rustls for private CAs |
 | `ANTS_REQUIRE_TOOLS` | `cargo test` | When `1`, tests fail instead of skipping if `nats-server` is missing on `PATH` |
@@ -184,7 +191,7 @@ Threads of one ant share its workdir unless `worktrees = true` (or `--worktrees`
 Held messages send 20s progress acks against a 60s `ack_wait` (ignoring duplicate deliveries while held). Delivery is at-least-once and acks only after storing the reply:
 
 1. Before prompting, the daemon writes `<ant>.<seq>` in `ants_attempts`. On redelivery after a cut-off, finding that marker resumes the session and prepends a warning that prior tool calls may have run.
-2. When the harness finishes, the reply is saved in `<ant>.<seq>` before publishing with dedup ID `<ant>/<envelope_id>` (2m window), so a post-generation cut-off republishes without re-prompting.
+2. When the harness finishes, the reply is saved in `<ant>.<seq>` before publishing with dedup ID `reply-<ant>-<envelope_id>` (24 h window), so a post-generation cut-off republishes without re-prompting.
 3. Stored replies are also noted in `<home>/answered` until acked, avoiding re-prompts when an offline leaf buffers replies in its outbox. Markers clear on ack or dead-lettering (30d TTL).
 
 During prompts, the daemon streams unpersisted `StatusEvent` JSON to `ants.status.<ant>.<thread>` (`working`, `waiting_approval`, `idle`, `failed`, 250ms batched text/reasoning, tool calls, execution plan), dropping backpressured frames.
@@ -199,6 +206,7 @@ messenger = true                           # default: serve built-in messenger u
 nats = "wss://hub.example/nats"            # default NATS URL for ants without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also settable per ant
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
+metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off); see Monitoring
 
 [cli]                                      # the CLI's connection where no flag or environment variable sets it
 creds = "~/.config/ants/auth/alice.creds"  # the human's credentials (an ant's never apply)
@@ -305,7 +313,8 @@ A harness is signed out when it answers `session/new`, `session/load` or a promp
 - holds the message in hand, with progress acks, first on its thread: the attempt is not counted (its `ants_attempts` marker is cleared unless the prompt had already streamed work, so the retry carries no cut-off warning), its delivery count does not grow, and no message is dead-lettered for it;
 - starts no further prompts; messages already delivered wait their turn, and once `max_harnesses × 2` are in hand the consumer delivers no more;
 - tells the thread's owner, else the default human, once per signed-out period, on the thread, with the sign-in command (`sign_in`, else the terminal auth method the harness offers in its `initialize` response) and the machine to run it on; the notice goes to the human directly, not up the ant's chain;
-- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it) and answers the held messages once one succeeds. The next sign-out after a message got past sign-in tells the human again.
+- shows the harness as signed out in the ant's roster entry (`signed_out`: `since`, `sign_in`), so `ants roster` and peers' `list_ants` show why the ant is not answering, and `route` prefers ants whose harness is signed in;
+- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it); once one succeeds, clears `signed_out` from the roster entry and answers the held messages. The next sign-out after a message got past sign-in tells the human again.
 
 Stopping the daemon while signed out hands the held messages back, each counting one more delivery. `ants harness check` runs the same handshake on demand.
 
@@ -345,7 +354,7 @@ Today's and each day's figures show as `spent/cap` against `max_daily_tokens` an
 
 ## Roster, identity and memory
 
-Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count), refreshing every 10s and on activity transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
+Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count, and while the harness is signed out a `signed_out` object with `since` and the `sign_in` command), refreshing every 10s and on activity or sign-in transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
 
 ### Identity, memory and task tracking
 
@@ -400,8 +409,8 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
 | `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
-| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity). |
-| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (`live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
+| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command). |
+| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
 | `post_notes(text)` | Append to the current thread's notes (1 turn; wakes nobody). |
 | `read_notes(thread?)` | Read up to 50 notes posts (oldest first) and turns left on the current or named thread (0 turns). |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
@@ -492,6 +501,7 @@ If NATS errors prevent storing the dead letter on delivery 6, JetStream emits un
 
 ```toml
 listen = "127.0.0.1:8424"                # overridden by --listen
+metrics = "127.0.0.1:9465"               # serve /healthz and /metrics (default: off); overridden by --metrics
 path = "/hooks"                          # POST /hooks/<name>
 nats = "nats://127.0.0.1:4222"           # overridden by --nats / ANTS_NATS_URL
 js_domain = "hub"                        # overridden by --js-domain / ANTS_JS_DOMAIN
@@ -517,7 +527,7 @@ mention = ["dev-a"]                           # optional; or broadcast = true fo
 ```
 
 - **Auth and limits:** `hmac-sha256` and `bearer` check secrets in constant time (`401` on failure). Max body `256 KiB` (`413`), timeout `15s`, max `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store immediately; nothing buffers locally). Bad JSON/ID returns `400`, non-UTF-8 `{body}` `415`, unknown hook `404`, non-`POST` `405`.
-- **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 2m `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
+- **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 24 h `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` refreshes `<webhook>.webhook` in `ants_webhooks` daily.
 - **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 
 ### Notifications
@@ -580,6 +590,7 @@ cron = "0 3 * * 1-5"                          # minute hour day-of-month month d
 ant = "dev-a"
 owner = "alice"                               # optional human owner for replies and escalations
 text = "Triage the failing nightly tests and summarise them."
+catch_up = true                               # optional: send the latest missed firing late (see Missed firings)
 
 [[schedule]]
 name = "standup"                              # ants auth user standup --webhook --channel ops
@@ -594,8 +605,8 @@ nats = "nats://127.0.0.1:4222"                # optional, as js_domain: default 
 - **Timetable:** exactly one of `cron` and `every`. `cron` takes 5 fields with `*`, lists, ranges, steps (`*/15`, `1-5/2`, `10/20`), month and weekday names (`jan`, `mon`; day of week `0` and `7` are Sunday) or `@yearly`, `@monthly`, `@weekly`, `@daily` and `@hourly`; when both day fields are restricted, a day matching either fires (as cron does). `every` is a duration of at least `1m` (`15m`, `1h30m`, `1d`), so `every = "1d"` fires at 00:00 UTC. All times are UTC.
 - **Destination:** exactly one of `ant` and `channel`; `mention` and `broadcast` (all members at the firing) only with `channel`. `owner` works as for webhooks.
 - **Identity:** a schedule is a webhook-role user (`ants auth user NAME --webhook --to ANT` or `--channel CH`, and `--webhook NAME` in `ants auth leaf`), checked at load: its credentials must name it, be no human's and allow its destination. Its messages carry `webhook: true` and it refreshes `<schedule>.webhook` in `ants_webhooks` daily, so replies and triage work as for a [webhook](#webhooks).
-- **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 2m `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.
-- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, never made up.
+- **Once per firing:** several daemons running the same schedule, or one restarted, send each firing once: its key `<schedule>.<unix time>` in `ants_webhooks` (7 days) and its 24 h `Nats-Msg-Id` `schedule.<schedule>.<unix time>` drop a repeat.
+- **Missed firings:** a firing goes out up to 1 minute late, retried every 5s while the hub does not store it, and fires after a restart within that minute. A firing missed by more (no daemon running, hub unreachable, machine asleep) is logged and skipped, unless the schedule sets `catch_up = true` (default `false`): then, once a daemon runs and reaches the hub again (at start, or on waking), the latest firing missed within the last 7 days goes out late, once, with `(Sent late: due YYYY-MM-DD HH:MM UTC.)` appended to `text`; older missed firings are skipped, never sent as a backlog, and none is made up when a later firing is due within the minute. It keeps the firing's own key `<schedule>.<unix time>`, so several daemons, restarts or an earlier on-time send never repeat it, and a firing the hub does not take is retried every 5s until the next one is due.
 
 ## Credentials
 
@@ -622,7 +633,7 @@ ants auth issued                                            # every key, and how
 ants auth push --nats wss://hub.example/nats                # push the account again
 ```
 
-`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. Leaf nodes joined to the hub's system account by `ants leaf config` (with the `leaf-<machine>.system.creds` that `ants auth leaf` writes) apply the push too, closing the revoked users' local connections, keep it across restarts, and are listed in its output; a leaf node offline during the push gets it from the next `ants auth push`. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`. Either way, copy the new `server.conf` to the hub and reload it (`SIGHUP`): a restart otherwise brings back the old account. Leaf nodes without the system account uplink authenticate their local clients against their own `server.conf`, so a revoked ant behind one keeps working there until it reloads a new `server.conf` (or until `ants auth leaf` is issued again without the ant); give them the uplink with `ants auth leaf` and `ants leaf config` and restart them, once the hub runs a `server.conf` written since (its system account then admits leaf nodes). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
+`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. Leaf nodes joined to the hub's system account by `ants leaf config` (with the `leaf-<machine>.system.creds` that `ants auth leaf` writes) apply the push too, closing the revoked users' local connections, keep it across restarts, and are listed in its output; a leaf node offline during the push catches up within 10 s of reconnecting when the hub runs a `full` resolver (below), and otherwise gets it from the next `ants auth push`. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`, or copy the new `server.conf` to the hub and reload it (`SIGHUP`). A hub with a `full` resolver (below) stores each account pushed to it and keeps it across restarts and reloads with an older `server.conf`, while a newer `server.conf` still replaces it; the push says whether the hub keeps it (only a `full` resolver answers `$SYS.REQ.CLAIMS.LIST`), and so does `ants doctor`. Copy `server.conf` to such a hub only for what a push does not carry: its operator, system account and `max_control_line` (a new team, or an ants version writing them differently). A hub without a `full` resolver keeps pushed accounts in memory only: copy the new `server.conf` to it and reload it after every revocation, as a restart otherwise brings back the old account. Leaf nodes without the system account uplink authenticate their local clients against their own `server.conf`, so a revoked ant behind one keeps working there until it reloads a new `server.conf` (or until `ants auth leaf MACHINE --remove-ant ANT` reissues the uplink without the ant); give them the uplink with `ants auth leaf` and `ants leaf config` and restart them, once the hub runs a `server.conf` written since (its system account then admits leaf nodes). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
 
 ### Devices
 
@@ -637,7 +648,7 @@ ants auth revoke alice --device 01968f7e-...              # that device only
 
 A label naming more than one device is refused, with the ids of those devices; give an id then. Every device of a human reads the same inbox: `ants inbox -f` on each shows every new reply, and what one device reads (`ants inbox`, `ants ask --wait`) is read on all, kept in the human's read marker in `ants_read` (updated with compare-and-set, so devices reading at once keep each other's marks). The first `ants inbox` with new credentials moves the read state of the old shared consumer `inbox-<name>` into the marker and deletes the consumer; a CLI from before would create it again, and show every reply anew, so upgrade the CLI on every device. Push targets are per device too: a `[[human.notify]]` sink with `device = "<id>"` skips notices while that device follows them (see [Notifications](#notifications)). Human credentials (and leaf uplinks carrying humans) issued before the read marker lack its permissions: `ants inbox` refuses them and `ants ask --wait` leaves its reply unread until they are renewed ([Credentials across upgrades](#credentials-across-upgrades)).
 
-Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`). Run `ants init` once with human credentials to create `ANTS` and all eleven KV buckets. The first connection of every other CLI command with human credentials (or none) does the same: in one round of concurrent stream info requests, it creates missing buckets and adds what an older version lacks (stream subjects, direct gets, inbox republishing, the `ants_owners` duplicate window), keeping other settings such as outbox sources, and logs each change. It skips objects whose stream info the credentials do not allow (`ants_presence` for every human, which `ants init` and following create without it), warns that `ants init` is needed for changes they cannot make, and ant and webhook credentials check nothing. When machine members change, issue `ants auth leaf` and run `ants leaf outbox` again; when role permissions change, renew credentials as below.
+Copy `server.conf` next to the hub `nats-server` config and add `include "server.conf"` (`include` resolves relative to the config file even with a leading `/`; `server.conf` sets `max_control_line: 16384`), followed by `resolver { type: full, dir: "/ABSOLUTE/DIR" }` so the hub keeps pushed accounts in that directory across restarts and leaf nodes catch up on pushes they missed while offline (see [docs/transport.md](docs/transport.md#hub)). The `dir` is relative to the working directory of `nats-server`, not to the configuration file, hence absolute; a hub switching resolvers needs a restart, not a reload. `server.conf` itself keeps a `MEMORY` resolver, which the line after the include replaces: leaf nodes include it too, with their own `full` resolver, and a hub reloading a new `server.conf` would not switch resolvers. Run `ants init` once with human credentials to create `ANTS` and all eleven KV buckets. The first connection of every other CLI command with human credentials (or none) does the same: in one round of concurrent stream info requests, it creates missing buckets and adds what an older version lacks (stream subjects, direct gets, inbox republishing, the 24 h duplicate window of `ANTS`, the `ants_owners` duplicate window), keeping other settings such as outbox sources, and logs each change. It skips objects whose stream info the credentials do not allow (`ants_presence` for every human, which `ants init` and following create without it), warns that `ants init` is needed for changes they cannot make, and ant and webhook credentials check nothing. So a publish on a subject an outdated `ANTS` does not capture, from a daemon, webhook or channel manager too, gets no stream while the hub's JetStream still answers: it fails naming `ants init` with human credentials as the fix, or, on a leaf node with an outbox, waits there with a warning saying the same, once per process for each kind of subject (`ants.chan`, `ants.dead` and so on). When machine members change, run `ants auth leaf MACHINE` with `--add-*`/`--remove-*` and then `ants leaf outbox MACHINE` again; when role permissions change, renew credentials as below.
 
 ### Credentials across upgrades
 
@@ -647,7 +658,7 @@ Each user JWT that `ants auth` issues carries the permissions version of the iss
 WARN the credentials of ant dev-a predate permission versions, and this ants gives version 1: requests their role allows now may be refused; renew them on the machine holding the team keys with `ants auth user dev-a --js-domain hub` and put the new file in their place
 ```
 
-The command is `ants auth user NAME` (with `--human`, or `--webhook --to ANT --channel CH`, and `--js-domain D` as issued), `ants auth channel-manager`, or for a leaf node's uplink `ants auth leaf MACHINE --ant ANT --human HUMAN --webhook WEBHOOK [--enroll-approver]` followed by `ants leaf outbox MACHINE --ant ANT --human HUMAN`. Credentials without the tag predate versions and count as outdated; credentials newer than the ants in use ask for an upgrade of ants. nats-server, not ants, uses a leaf node's uplink credentials: `ants leaf config` checks those it writes into `leaf.conf`, the system account uplink's `leaf-<machine>.system.creds` included (renewed with the same `ants auth leaf`), and the leaf node needs a restart once they are replaced (`SIGHUP` does not reread credentials).
+The command is `ants auth user NAME` (with `--human`, or `--webhook --to ANT --channel CH`, and `--js-domain D` as issued), `ants auth channel-manager`, or for a leaf node's uplink `ants auth leaf MACHINE` (members as last issued; on credentials from before the team directory kept them, `--ant ANT --human HUMAN --webhook WEBHOOK [--enroll-approver]`) followed by `ants leaf outbox MACHINE`. Credentials without the tag predate versions and count as outdated; credentials newer than the ants in use ask for an upgrade of ants. nats-server, not ants, uses a leaf node's uplink credentials: `ants leaf config` checks those it writes into `leaf.conf`, the system account uplink's `leaf-<machine>.system.creds` included (renewed with the same `ants auth leaf`), and the leaf node needs a restart once they are replaced (`SIGHUP` does not reread credentials).
 
 Credentials that expire within 7 days, or have expired, get a warning naming the same command; the daemon checks again daily. Enrollment credentials, short-lived by design, warn only once expired. `ants auth issued` lists every key of `issued.jsonl` once (`--json`: one object per line) and, under each one in use (neither revoked, reissued since for the same name, expired nor an enrollment's) that is outdated or expires within 7 days, the commands renewing it: from its `.creds` file in the team directory when there is one, else with placeholders for what only that file tells (`--to ANT...`, `[--js-domain DOMAIN]`). Keys recorded before versions show `perms -`.
 
@@ -677,9 +688,9 @@ ants enroll list --js-domain hub                # auth machine: inspect pending 
 ants enroll approve dev-c --js-domain hub
 ```
 
-Requests prove the enrollment credentials by signature; `--hub URL` sends them to another server than `--nats`. Behind a leaf node, `ants add --enroll` names the machine's leaf (from `~/.config/ants/leaf.conf` or `--leaf-config FILE`) with a signature by its uplink key, and approval renews the leaf's uplink credentials for the ant and admits it to the outbox sourcing set by `ants leaf outbox`; `ants add` then restarts the leaf node service of that `leaf.conf` when it runs (`SIGHUP` does not reread credentials; otherwise it prints the restart command, see [Services](#services)). Name the ant in later `ants auth leaf` and `ants leaf outbox` runs. `ants enroll` behind a leaf node needs uplink credentials issued with `ants auth leaf --enroll-approver`. Leaf uplink credentials issued before enrollment crossed leaves need `ants auth leaf` once more ([Credentials across upgrades](#credentials-across-upgrades)). Uplink credentials grow by about 7.5 KB per ant with a JetStream domain (4 KB without); `ants auth leaf` and approval refuse, before writing or answering anything, uplink JWTs over 252 KiB, the most a hub takes in a leaf's `CONNECT` (16 × `max_control_line`), about 34 ants per leaf with a domain (66 without): run more behind another leaf node under another machine name. See [docs/transport.md](docs/transport.md#enrollment-behind-a-leaf-node).
+Requests prove the enrollment credentials by signature; `--hub URL` sends them to another server than `--nats`. Behind a leaf node, `ants add --enroll` names the machine's leaf (from `~/.config/ants/leaf.conf` or `--leaf-config FILE`) with a signature by its uplink key, and approval renews the leaf's uplink credentials for the ant and admits it to the outbox sourcing set by `ants leaf outbox`; `ants add` then restarts the leaf node service of that `leaf.conf` when it runs (`SIGHUP` does not reread credentials; otherwise it prints the restart command, see [Services](#services)). Later `ants auth leaf` and `ants leaf outbox` runs keep the ant: approval records it with the leaf's members in the team directory, and the renewed uplink credentials carry it. `ants enroll` behind a leaf node needs uplink credentials issued with `ants auth leaf --enroll-approver`. Leaf uplink credentials issued before enrollment crossed leaves need `ants auth leaf` once more ([Credentials across upgrades](#credentials-across-upgrades)). Uplink credentials grow by about 7.5 KB per ant with a JetStream domain (4 KB without); `ants auth leaf` and approval refuse, before writing or answering anything, uplink JWTs over 252 KiB, the most a hub takes in a leaf's `CONNECT` (16 × `max_control_line`), about 34 ants per leaf with a domain (66 without): run more behind another leaf node under another machine name. See [docs/transport.md](docs/transport.md#enrollment-behind-a-leaf-node).
 
-Once the credentials are complete, `ants add` reloads the daemon service serving the config file (see [Services](#services)) when it runs, and otherwise prints the command to send `ants daemon` `SIGHUP` by hand; after `--jwt`, also update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
+Once the credentials are complete, `ants add` reloads the daemon service serving the config file (see [Services](#services)) when it runs, and otherwise prints the command to send `ants daemon` `SIGHUP` by hand; after `--jwt` behind a leaf node, also run `ants auth leaf MACHINE --add-ant NAME` and, with the new uplink credentials, `ants leaf outbox MACHINE`.
 
 ## Leaf nodes
 
@@ -693,9 +704,16 @@ ants auth leaf macbook --ant dev-a --ant messenger --human alice --webhook githu
 ants leaf config macbook --uplink wss://hub.example/nats       # writes ~/.config/ants/leaf.conf
 nats-server -c ~/.config/ants/leaf.conf &
 ants leaf outbox macbook --ant dev-a --ant messenger --human alice
+
+# Later: the auth machine remembers the members, the worker reads them from its uplink credentials
+ants auth leaf macbook --add-ant dev-b --js-domain hub
+ants leaf outbox macbook                                         # after copying the new leaf-macbook.creds and restarting the leaf
 ```
 
-`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. A second uplink joins the hub's system account with `leaf-<machine>.system.creds` (`--system-creds`), so revocations pushed to the hub reach the leaf; a leaf configured before it needs `ants auth leaf`, `ants leaf config` and a restart. While offline, outbound inbox messages, replies, notes, channel posts, dead letters, `ants_links` entries and the `ants_owners` records of `ants ask` queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS`, `ants_links` and `ants_owners` on reconnect (`ants leaf outbox --remove` removes sourcing); a daemon holds a human's message from an outbox up to 10 s until its thread's owner lands. `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`; `ants ask --wait`/`--follow` polls stored replies every 5s (humans via `STREAM.MSG.GET`, ants via spare consumers `inbox-<ant>_1..3`, which ant credentials and leaf uplinks issued before them lack: see [Credentials across upgrades](#credentials-across-upgrades)), and `ants post --wait`/`--follow` (human or ant) polls the channel's stored posts after its own every 5s, so replies stored during an outage or sourced from an outbox show once. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
+- Without `--ant`, `--human` or `--webhook`, `ants auth leaf` reissues the uplink for the members of its last run on the machine, which `issued.jsonl` in the team directory keeps with the ants enrolled through the leaf since (for uplinks issued before, the members their `.creds` file carries); `--add-ant`, `--add-human`, `--add-webhook` and `--remove-*` change that set, and `--enroll-approver` stays until `--no-enroll-approver`. Named lists replace the set. Without members to keep or name, it fails.
+- Without `--ant` or `--human`, `ants leaf outbox` admits the ants and humans the uplink credentials of the machine's leaf node carry (`--leaf-config FILE`, default `~/.config/ants/leaf.conf`), changed by `--add-ant`, `--add-human`, `--remove-ant` and `--remove-human`.
+
+`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it to switch uplinks live: it reloads the leaf node service running that `leaf.conf` (see [Services](#services)), and otherwise prints the `SIGHUP` to send `nats-server` by hand. A reload adds and drops uplinks and changes their TLS settings; any other change (`--listen`, the machine name, `--server-conf`, the `--proxy` of an unchanged uplink) takes a restart, which it does instead. A second uplink joins the hub's system account with `leaf-<machine>.system.creds` (`--system-creds`), so revocations pushed to the hub reach the leaf, those pushed while it was offline within 10 s of reconnecting to a hub with a `full` resolver; a leaf configured before it needs `ants auth leaf`, `ants leaf config` and a restart. While offline, outbound inbox messages, replies, notes, channel posts, dead letters, `ants_links` entries and the `ants_owners` records of `ants ask` queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS`, `ants_links` and `ants_owners` on reconnect (`ants leaf outbox --remove` removes sourcing); a daemon holds a human's message from an outbox up to 10 s until its thread's owner lands. `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`; `ants ask --wait`/`--follow` polls stored replies every 5s (humans via `STREAM.MSG.GET`, ants via spare consumers `inbox-<ant>_1..3`, which ant credentials and leaf uplinks issued before them lack: see [Credentials across upgrades](#credentials-across-upgrades)), and `ants post --wait`/`--follow` (human or ant) polls the channel's stored posts after its own every 5s, so replies stored during an outage or sourced from an outbox show once. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
 
 ### Transport options
 
@@ -706,7 +724,7 @@ ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 | `nats-leaf://127.0.0.1:7422` via `devtunnel connect` | Private Dev Tunnel forwarding the hub leafnode port (`--devtunnel` in `install-units.sh` on workers, `--devtunnel-host` on the hub). |
 | `nats-leaf://127.0.0.1:7422` via `ants bridge connect` | Networks whose proxies block WebSocket; tunnels leaf traffic over plain HTTPS `POST`/long-polled `GET` (`--bridge URL` in `install-units.sh` on workers, `--bridge-serve` on the hub). |
 
-For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN` or `--token-file FILE`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. Run both as services with `scripts/install-units.sh --bridge-serve` on the hub and `--bridge URL` on the worker (see [Services](#services)). See [docs/transport.md](docs/transport.md#https-fallback-bridge).
+For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN` or `--token-file FILE`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. Either end takes `--metrics ADDR` (see [Monitoring](#monitoring)). Run both as services with `scripts/install-units.sh --bridge-serve` on the hub and `--bridge URL` on the worker (see [Services](#services)). See [docs/transport.md](docs/transport.md#https-fallback-bridge).
 
 ## Services
 
@@ -735,21 +753,54 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | HTTPS bridge (`ants bridge connect`) | `ants.bridge` (`bridge.log`) | `ants-bridge.service` | `--bridge URL` |
 | HTTPS bridge server (`ants bridge serve`, hub) | `ants.bridge-serve` (`bridge-serve.log`) | `ants-bridge-serve.service` | `--bridge-serve` |
 
-- **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux).
+- **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux); `ants leaf config` does it itself.
 - **Reload daemon config:** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
-- **Managed by `ants add`:** completed credentials reload `ants.daemon` / `ants-daemon` when its unit (`~/Library/LaunchAgents/ants.daemon.plist`, `~/.config/systemd/user/ants-daemon.service`) runs the config file of `ants add` and the service is running; an enrollment that renewed the leaf's uplink credentials then restarts `ants.nats` / `ants-nats` (`launchctl kickstart -k`, `systemctl --user restart`) when its unit runs that `leaf.conf`. A unit of another file, a stopped service or another system gets the commands printed instead.
+- **Managed by `ants add`:** completed credentials reload `ants.daemon` / `ants-daemon` when its unit (`~/Library/LaunchAgents/ants.daemon.plist`, `~/.config/systemd/user/ants-daemon.service`) runs the config file of `ants add` and the service is running; an enrollment that renewed the leaf's uplink credentials then restarts `ants.nats` / `ants-nats` (`launchctl kickstart -k`, `systemctl --user restart`) when its unit runs that `leaf.conf`. `ants leaf config` reloads `ants.nats` / `ants-nats` (`launchctl kill SIGHUP`, `systemctl --user reload`) when its unit runs the `leaf.conf` written and the service is running, or restarts it for changes a reload does not take. A unit of another file, a stopped service or another system gets the commands printed instead.
 - **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
+- **Upgrade:** the ants services restart onto a new `ants` executable by themselves, exiting with status 75 ([Upgrade](#upgrade)); run `scripts/install-units.sh` again so systemd units installed before treat that exit as a restart rather than a failure.
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.
 
+## Monitoring
+
+`ants daemon`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` serve health and metrics over plain HTTP when given an address: `--metrics ADDR` (`ANTS_METRICS` for the daemon), or `metrics` in the daemon's or the webhooks' config file. It is off by default. The address is meant to be loopback: any other address is served too, with a warning, as the endpoints have no authentication. A daemon reads the address at start; a reload (`SIGHUP`) does not move it.
+
+- `GET /healthz`: `200 ok` when healthy, else `503`. A daemon is healthy while it serves at least one ant and every ant it serves is connected to NATS; the webhook ingress while every webhook and human is connected; a bridge while it runs.
+- `GET /metrics`: the Prometheus text format (`text/plain; version=0.0.4`). Other paths answer `404`, other methods `405`.
+
+| Metric | Type | Labels | From |
+|---|---|---|---|
+| `ants_nats_connected` | gauge | `ant` (daemon), `user` (webhook) | Whether the NATS connection is up (1) or not (0) |
+| `ants_harnesses` | gauge | `ant` | Harness processes alive |
+| `ants_messages_in_hand` | gauge | `ant` | Messages being handled: prompting, or waiting for their thread or a harness |
+| `ants_prompts_in_flight` | gauge | `ant` | Prompts running in a harness |
+| `ants_prompts_total` | counter | `ant` | Prompts started |
+| `ants_retries_total` | counter | `ant` | Messages handed back for redelivery after a failure |
+| `ants_dead_letters_total` | counter | `ant` | Messages buried as dead letters |
+| `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Tokens, and cost in the harness's currency (usually USD), the harnesses reported (see [Spend report](#spend-report)) |
+| `ants_webhook_requests_in_flight` | gauge | | Webhook requests being answered |
+| `ants_webhook_events_total` | counter | `webhook`, `outcome` | Requests to a webhook: `delivered`, `duplicate`, `refused` (4xx) or `failed` (503) |
+| `ants_bridge_sessions`, `ants_bridge_sessions_total` | gauge, counter | | Bridge sessions open, and opened |
+| `ants_bridge_failures_total` | counter | | Upstream unreachable (`serve`), or a session not opened or broken (`connect`) |
+| `ants_bridge_bytes_total` | counter | `direction` (`up`, `down`) | Bytes carried towards the hub's upstream, and back |
+
+A daemon's counters start at zero when it starts; an ant's series appear while it is served.
+
+```sh
+ants daemon --metrics 127.0.0.1:9464 &
+curl -s http://127.0.0.1:9464/healthz
+curl -s http://127.0.0.1:9464/metrics
+```
+
 ## Footprint
 
-`scripts/footprint.sh` starts a temporary `nats-server -js` and `ants daemon`, samples resident memory with `ps`, and fails at or above `--max-mb` (default `20` MB). Pass `--ask "reply with ok"` to measure with one live harness session.
+`scripts/footprint.sh` starts a temporary `nats-server -js` and `ants daemon`, samples resident memory with `ps`, and fails at or above `--max-mb` (default `20` MB). Pass `--ask "reply with ok"` to measure with one live harness session, or `--metrics 127.0.0.1:9464` to measure with health and metrics served and scraped before each sample (about 0.3 MB more on macOS arm64).
 
 ```sh
 scripts/footprint.sh --port 14722
 scripts/footprint.sh --port 14722 --ask "reply with ok"
+scripts/footprint.sh --port 14722 --metrics 127.0.0.1:9464
 ```
 
 Measured with `ants` 0.1.0 (release) and `nats-server` 2.15.3:

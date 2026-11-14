@@ -1,7 +1,9 @@
 //! `ants daemon`: which ants to serve, from the config file and the command line, and serving them together.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
@@ -23,8 +25,14 @@ pub struct DaemonArgs {
     /// Config file listing the ants to serve (default without --ant: ~/.ants/config.toml, if it exists).
     #[arg(long, env = "ANTS_CONFIG")]
     config: Option<PathBuf>,
+    /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464, in
+    /// place of the config file's `metrics` (default: off).
+    #[arg(long, env = "ANTS_METRICS", value_name = "ADDR")]
+    metrics: Option<SocketAddr>,
     #[command(flatten)]
     options: AntOptions,
+    #[command(flatten)]
+    pub upgrade: crate::upgrade::UpgradeArgs,
 }
 
 /// The settings of an ant on the command line, of `ants daemon` and `ants add`.
@@ -229,6 +237,8 @@ pub struct Listed {
     /// The harnesses the ants may name.
     pub harnesses: Harnesses,
     pub schedules: Vec<Schedule>,
+    /// Where to serve health and metrics: `--metrics`, else the file's `metrics`.
+    pub metrics: Option<SocketAddr>,
 }
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
@@ -239,12 +249,13 @@ pub fn ants(args: &DaemonArgs, default_path: &Path) -> Result<Listed> {
         Source::Flags(name) => {
             let ant = args.options.apply(Ant::new(name, std::env::current_dir()?));
             let harnesses = Summary::load(default_path)?.harnesses;
-            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new() })
+            Ok(Listed { ants: vec![ant], harnesses, schedules: Vec::new(), metrics: args.metrics })
         }
         Source::File(path) => {
             let loaded = config::load(&path)?;
             let schedules = if args.ant.is_some() { Vec::new() } else { loaded.schedules };
-            Ok(Listed { ants: pick(loaded.ants, args, &path)?, harnesses: loaded.harnesses, schedules })
+            let metrics = args.metrics.or(loaded.metrics);
+            Ok(Listed { ants: pick(loaded.ants, args, &path)?, harnesses: loaded.harnesses, schedules, metrics })
         }
     }
 }
@@ -296,14 +307,31 @@ pub fn configs(
 pub struct Served {
     pub configs: Vec<Config>,
     pub schedules: Vec<Schedule>,
+    pub metrics: Option<SocketAddr>,
+}
+
+/// How [`run`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    Stopped,
+    /// The executable was replaced and every ant stopped, for the new one to serve them.
+    Replaced,
 }
 
 /// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
 /// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
 /// left. On SIGHUP `reload` lists the ants and schedules again and the daemon serves those ([`reconcile`],
-/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is.
-pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<()> {
+/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is. Health and metrics are
+/// served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once `replaced` the ants
+/// stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
+pub async fn run(
+    served: Served,
+    reload: impl Fn() -> Result<Served>,
+    replaced: impl Future<Output = ()>,
+) -> Result<Ended> {
     let mut hangup = Hangup::new()?;
+    let metrics = served.metrics;
+    let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
     let mut running = HashMap::new();
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
@@ -314,8 +342,8 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
             std::future::pending::<()>().await;
         }
     };
-    tokio::pin!(shutdown);
-    let (mut stopping, mut served, mut errors) = (false, 0, Vec::new());
+    tokio::pin!(shutdown, replaced);
+    let (mut stopping, mut served, mut errors, mut ended) = (false, 0, Vec::new(), Ended::Stopped);
     while !tasks.is_empty() {
         tokio::select! {
             Some((ant, result)) = tasks.next() => {
@@ -336,9 +364,21 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
                 stopping = true;
                 schedules.reconcile(Vec::new(), run_schedule);
             }
+            () = &mut replaced, if !stopping => {
+                tracing::info!("stopping every ant as on SIGTERM, finishing the prompts in flight");
+                (stopping, ended) = (true, Ended::Replaced);
+                schedules.reconcile(Vec::new(), run_schedule);
+                for r in running.values_mut() {
+                    r.next = None;
+                    r.ask_to_stop();
+                }
+            }
             () = hangup.recv(), if !stopping => match reload() {
                 Ok(served) => {
                     tracing::info!("config reloaded");
+                    if served.metrics != metrics {
+                        tracing::warn!("the metrics address changed; it takes effect on a restart");
+                    }
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
                 }
@@ -346,10 +386,11 @@ pub async fn run(served: Served, reload: impl Fn() -> Result<Served>) -> Result<
             },
         }
     }
-    match (served, errors.len()) {
-        (0, 1) => Err(errors.remove(0)),
-        (0, n) if n > 0 => bail!("none of the {n} ants could be served"),
-        _ => Ok(()),
+    match (ended, served, errors.len()) {
+        (Ended::Replaced, _, _) => Ok(Ended::Replaced),
+        (_, 0, 1) => Err(errors.remove(0)),
+        (_, 0, n) if n > 0 => bail!("none of the {n} ants could be served"),
+        (ended, _, _) => Ok(ended),
     }
 }
 

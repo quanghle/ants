@@ -652,6 +652,11 @@ impl Notified {
         Self { config, bus: OnceCell::new(), recent: Mutex::default() }
     }
 
+    /// Whether its connection is made and up.
+    pub fn connected(&self) -> bool {
+        self.bus.get().is_some_and(|bus| ants_daemon::metrics::connected(&bus.client))
+    }
+
     /// Whether the message at `seq` was notified, recording it if not.
     fn first_time(&self, seq: u64) -> bool {
         let mut recent = self.recent.lock().unwrap();
