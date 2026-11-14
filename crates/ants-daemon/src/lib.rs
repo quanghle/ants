@@ -24,6 +24,7 @@ pub mod pool;
 pub mod reading;
 pub mod roster;
 pub mod schedule;
+pub mod signin;
 pub mod status;
 pub mod webhooks;
 pub mod worktrees;

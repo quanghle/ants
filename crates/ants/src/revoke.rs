@@ -5,7 +5,8 @@
 //! enrollment and re-issued credentials add more. Revocations live in [`REVOKED`]; the account JWT in `server.conf`
 //! carries them as NATS revocations (a user key and a time: JWTs of that key issued at or before it are refused),
 //! and [`push`] sends that account JWT to a running server through the system account, which closes the revoked
-//! users' connections at once.
+//! users' connections at once. The update reaches every leaf node connected to that server through a system account
+//! uplink (`ants leaf config`), which applies it too and keeps it across restarts.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 use ants_proto::{DeviceId, PERMISSIONS_VERSION, PermissionsVersion};
 use anyhow::{Context as _, Result, bail};
+use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::auth;
@@ -501,36 +503,73 @@ pub fn list_issued(dir: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The inbox prefix of [`push`], where the leaf nodes' system account uplinks may answer it.
+pub const PUSH_INBOX: &str = "_INBOX.ants-push";
+
+/// How long [`push`] waits for more servers to answer once the one it pushed to has.
+const PUSH_SETTLE: Duration = Duration::from_secs(1);
+
+/// The servers that applied a pushed account.
+#[derive(Debug)]
+pub struct Pushed {
+    /// The server pushed to.
+    pub server: String,
+    /// Other servers that answered, mostly leaf nodes connected to it through a system account uplink, each with the
+    /// error it gave, if any.
+    pub others: Vec<(String, Option<String>)>,
+}
+
 /// Send the team's account JWT, with its revocations, to the server at `url`, as a user of the system account signed
-/// with its key in `dir`; the server closes the connections of users revoked since. Returns the server's name.
-pub async fn push(url: &str, dir: &Path) -> Result<String> {
+/// with its key in `dir`; the server, and every leaf node connected to it through a system account uplink, closes the
+/// connections of users revoked since. Fails unless the server applies it.
+pub async fn push(url: &str, dir: &Path) -> Result<Pushed> {
     ants_daemon::bus::check_url(url)?;
     let (account, jwt) = apply(dir)?;
     let creds = auth::system_creds(dir)?;
-    let update = async {
-        let client = async_nats::ConnectOptions::with_credentials(&creds)?
-            .name("ants-auth")
-            .connection_timeout(PUSH_TIMEOUT)
-            .connect(url)
-            .await
-            .context("connecting to NATS")?;
-        let answer = client
-            .request(format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE"), jwt.into())
-            .await
-            .context("asking the server to update the account")?;
-        anyhow::Ok(answer.payload)
+    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+        .name("ants-auth")
+        .custom_inbox_prefix(PUSH_INBOX)
+        .connection_timeout(PUSH_TIMEOUT)
+        .connect(url);
+    let client = tokio::time::timeout(PUSH_TIMEOUT, connect).await.context("no answer from the server")?;
+    let client = client.context("connecting to NATS")?;
+    let server = client.server_info().server_name;
+    let inbox = client.new_inbox();
+    let mut answers = client.subscribe(inbox.clone()).await?;
+    let subject = format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE");
+    client.publish_with_reply(subject, inbox, jwt.into()).await.context("asking the server to update the account")?;
+    client.flush().await?;
+    let mut until = tokio::time::Instant::now() + PUSH_TIMEOUT;
+    let (mut pushed, mut others) = (None, Vec::new());
+    while let Ok(Some(message)) = tokio::time::timeout_at(until, answers.next()).await {
+        let (name, outcome) = answer(&message.payload);
+        if name == server && pushed.is_none() {
+            pushed = Some(outcome);
+            until = tokio::time::Instant::now() + PUSH_SETTLE;
+        } else {
+            others.push((name, outcome));
+        }
+    }
+    match pushed {
+        None => bail!("no answer from server {server}"),
+        Some(Some(error)) => bail!("server {server}: {error}"),
+        Some(None) => Ok(Pushed { server, others }),
+    }
+}
+
+/// The server answering an account update, and the error it gave, if any.
+fn answer(payload: &[u8]) -> (String, Option<String>) {
+    let Ok(answer) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return ("?".to_owned(), Some("unreadable answer".to_owned()));
     };
-    let answer = tokio::time::timeout(PUSH_TIMEOUT, update).await.context("no answer from the server")??;
-    let answer: serde_json::Value = serde_json::from_slice(&answer).context("the server's answer")?;
     let server = answer["server"]["name"].as_str().unwrap_or("?").to_owned();
-    if let Some(description) = answer["error"]["description"].as_str() {
-        bail!("server {server}: {description}");
-    }
-    match answer["data"]["message"].as_str() {
-        Some("jwt updated") => Ok(server),
-        Some(message) => bail!("server {server}: {message} (the account is not loaded there)"),
-        None => bail!("server {server}: unexpected answer {answer}"),
-    }
+    let error = match (answer["error"]["description"].as_str(), answer["data"]["message"].as_str()) {
+        (Some(description), _) => Some(description.to_owned()),
+        (None, Some("jwt updated")) => None,
+        (None, Some(message)) => Some(format!("{message} (the account is not loaded there)")),
+        (None, None) => Some(format!("unexpected answer {answer}")),
+    };
+    (server, error)
 }
 
 #[cfg(test)]

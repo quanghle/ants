@@ -42,6 +42,11 @@ pub enum Kind {
         webhooks: Vec<UserId>,
         enroll_approver: bool,
     },
+    /// The system account uplink of `machine`'s leaf node, which `ants auth leaf` writes beside its uplink's
+    /// credentials and through which `ants auth push` reaches the leaf.
+    LeafSystem {
+        machine: Machine,
+    },
     /// Enrollment credentials of `ant`, for `ants add --enroll`.
     Enrollment {
         ant: UserId,
@@ -152,6 +157,7 @@ impl Finding {
             Kind::Webhook { .. } => format!("webhook {}", self.name),
             Kind::ChannelManager => "the channel manager".to_owned(),
             Kind::Leaf { machine, .. } => format!("the leaf node uplink of {machine}"),
+            Kind::LeafSystem { machine } => format!("the system account uplink of the leaf node of {machine}"),
             Kind::Enrollment { ant } => format!("the enrollment of {ant}"),
         }
     }
@@ -178,6 +184,10 @@ impl Finding {
                 }
                 renew
             }
+            // They carry nothing of the members: those are in the uplink's credentials, leaf-<machine>.creds.
+            Kind::LeafSystem { machine } => vec![format!(
+                "ants auth leaf {machine} --ant ANT... --human HUMAN... --webhook WEBHOOK... [--js-domain DOMAIN]"
+            )],
             Kind::Enrollment { ant } => vec![format!("ants auth enroll {ant}")],
         }
     }
@@ -190,6 +200,12 @@ impl Finding {
             (Kind::Leaf { .. }, [issue, outbox]) => format!(
                 "renew them on the machine holding the team keys with {issue}, put the new file in their place, \
                  restart the leaf node, then run {outbox} as a human"
+            ),
+            (Kind::LeafSystem { machine }, _) => format!(
+                "renew them on the machine holding the team keys with {}, naming the members of the uplink \
+                 credentials leaf-{machine}.creds, which it renews too, put both new files in their place and restart \
+                 the leaf node",
+                quoted.join(" and ")
             ),
             (Kind::Leaf { .. }, _) => format!(
                 "renew them on the machine holding the team keys with {}, put the new file in their place and \
@@ -295,6 +311,9 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
     if leaf_only {
         let machine = name.strip_prefix("leaf-").unwrap_or(name);
         let machine: Machine = machine.parse().map_err(|e| anyhow!("a leaf node's credentials named {name}: {e}"))?;
+        if !subscribe.is_empty() && subscribe.iter().all(|s| s.starts_with("$SYS.REQ.ACCOUNT.")) {
+            return Ok(Kind::LeafSystem { machine });
+        }
         let users = subscribe.iter().filter_map(|s| s.strip_prefix("_INBOX.")?.strip_suffix(".>")?.parse().ok());
         let (mut ants, mut humans, mut webhooks) = (Vec::new(), Vec::new(), Vec::new());
         for user in users {

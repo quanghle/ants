@@ -116,9 +116,9 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants daemon [--ant NAME] [--config FILE] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`). |
 | `ants add NAME [--config FILE] [--out FILE] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally (see [Adding an ant](#adding-an-ant)). |
 | `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
-| `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
-| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`, `--label LABEL` for a human's device; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--enroll-approver` for the account-key machine). |
-| `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`, or only the human's `--device DEVICE`), rewrite `server.conf` and push the account to the `--nats` server (`--no-push` to skip); list revoked keys; push the account again. |
+| `ants harness check` / `prompt TEXT` | Check the harness is installed and signed in (ACP handshake and `session/new` in the current directory; names the sign-in command when signed out) or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
+| `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`, `--label LABEL` for a human's device; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry; `leaf`: `--enroll-approver` for the account-key machine, and writes the leaf's system account credentials beside the uplink's). |
+| `ants auth revoke NAME` / `revoked` / `push` | Revoke every key issued to `NAME` (or `--key U...`, or only the human's `--device DEVICE`), rewrite `server.conf` and push the account to the `--nats` server and the leaf nodes joined to its system account (`--no-push` to skip); list revoked keys; push the account again. |
 | `ants auth issued [--json]` | List the keys issued (key, name, kind, issue time, expiry, permissions version, revoked or reissued), with the command renewing those in use that are outdated or expire within 7 days. |
 | `ants auth devices HUMAN [--json]` / `rename HUMAN DEVICE LABEL` | List a human's devices (id, label, key, issue time, revoked); relabel one. `DEVICE` is an id, a key, or a label no other device of the human has. |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
@@ -245,13 +245,13 @@ Flag and file precedence on `ants daemon`:
 
 ## Harnesses
 
-A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode and valid `context` options. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
+A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode, valid `context` options and the command that signs it in. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
 
 | Name | Command | Forced ACP mode | Sign-in |
 |---|---|---|---|
 | `copilot` (default) | `copilot --acp` | none | `copilot login` |
 | `claude` | `claude-agent-acp` (`npm install -g @agentclientprotocol/claude-agent-acp`) | `default` | `claude login` or `ANTHROPIC_API_KEY` |
-| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` / `agy acp --login` or Gemini API key |
+| `antigravity` | `agy acp --disable-telemetry` | `default` | `agy` (or `agy acp --login`) or Gemini API key |
 
 Add new harnesses or replace a built-in whole under `[harnesses.NAME]`:
 
@@ -261,6 +261,7 @@ command = "~/.local/bin/custom-acp"            # path if containing '/', else re
 args = ["--stdio", "--log-level", "warn"]
 env = { CUSTOM_ACP_TELEMETRY = "off" }         # layered: daemon env < harness env < ant env < --env
 mode = "default"                               # session fails if harness lacks this mode
+sign_in = "custom-acp login"                   # named when the harness reports it is signed out
 
 [harnesses.custom-acp.context]
 default = {}
@@ -274,12 +275,24 @@ Codex runs through its ACP adapter as a custom definition (`npm install -g @agen
 [harnesses.codex]
 command = "codex-acp"
 mode = "read-only"                             # default `agent` lets Codex's auto-reviewer approve actions
+sign_in = "codex-acp login"
 # env = { DEFAULT_AUTH_REQUEST = '{"methodId":"api-key"}' }  # sign in with the API key from the environment
 ```
 
 - **Claude Code:** forced to `default` mode (`auto` approves tools internally). Built-in read-only tools/commands (`Read`, `Grep`, `ls`, `echo`) and `~/.claude/settings.json` / `.claude/settings*.json` rules still run unasked; loads `CLAUDE.md` and hooks.
 - **Codex:** `read-only` asks before edits, network access and commands that need to leave Codex's read-only sandbox; commands that only read run in that sandbox unasked (`workspace-write` also edits the workdir unasked, `agent-full-access` never asks). Reports MCP tool calls as `execute` titled `mcp.<server>.<tool>` (matched by `other:` rules). Loads `~/.codex/config.toml` and `AGENTS.md`.
 - **Antigravity CLI:** forced to `default` mode (`agentMode` `auto` runs edits/commands unasked). Workspace reads/edits and `~/.gemini/antigravity-cli/settings.json` rules still apply first; loads `GEMINI.md` and `AGENTS.md`. Keychain sign-in requires services to run as the signed-in OS user (logs: `~/.gemini/antigravity-cli/log/`).
+
+### Sign-in
+
+A harness is signed out when it answers `session/new`, `session/load` or a prompt with ACP's `auth_required` error (`-32000`), or when its error or stderr says so in so many words (`No authentication information found`, `not logged in`, `please run /login` and the like; a proxy's or an MCP server's authentication does not count). The daemon then:
+
+- holds the message in hand, with progress acks, first on its thread: the attempt is not counted (its `ants_attempts` marker is cleared unless the prompt had already streamed work, so the retry carries no cut-off warning), its delivery count does not grow, and no message is dead-lettered for it;
+- starts no further prompts; messages already delivered wait their turn, and once `max_harnesses × 2` are in hand the consumer delivers no more;
+- tells the thread's owner, else the default human, once per signed-out period, on the thread, with the sign-in command (`sign_in`, else the terminal auth method the harness offers in its `initialize` response) and the machine to run it on; the notice goes to the human directly, not up the ant's chain;
+- checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it) and answers the held messages once one succeeds. The next sign-out after a message got past sign-in tells the human again.
+
+Stopping the daemon while signed out hands the held messages back, each counting one more delivery. `ants harness check` runs the same handshake on demand.
 
 ### Model, reasoning effort and context
 
@@ -447,7 +460,7 @@ Unresolved thread conditions — `turn_budget`, `cap`, `notes`, `dead_letter`, `
 
 ## Dead letters
 
-Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
+Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`); a harness that is signed out spends none (see [Sign-in](#sign-in)). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
 
 ```sh
 ants dead list          # seq, ant, thread, from, deliveries, time, error, text
@@ -594,7 +607,7 @@ ants auth issued                                            # every key, and how
 ants auth push --nats wss://hub.example/nats                # push the account again
 ```
 
-`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`. Either way, copy the new `server.conf` to the hub and every leaf node and reload them (`SIGHUP`): restarts otherwise bring back the old account, and leaf nodes authenticate their local clients themselves, so a revoked ant behind a leaf keeps working there until its leaf has it (or until `ants auth leaf` is issued again without it). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
+`ants auth revoke NAME` takes the keys recorded for `NAME` plus those of `.creds` files in the team directory carrying that name (credentials issued before the registry), and fails when it knows none: revoke those by `--key`. Revocations go to `revoked.json` and into the account JWT of `server.conf` (NATS account revocations: JWTs of the key issued at or before the revocation are refused; new credentials for the name stay valid). The account is then pushed to the `--nats` server (the hub) as a short-lived system account user (`$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`), which closes the revoked users' connections at once. Leaf nodes joined to the hub's system account by `ants leaf config` (with the `leaf-<machine>.system.creds` that `ants auth leaf` writes) apply the push too, closing the revoked users' local connections, keep it across restarts, and are listed in its output; a leaf node offline during the push gets it from the next `ants auth push`. When the hub is out of reach the revocations stay recorded; push them later with `ants auth push`. Either way, copy the new `server.conf` to the hub and reload it (`SIGHUP`): a restart otherwise brings back the old account. Leaf nodes without the system account uplink authenticate their local clients against their own `server.conf`, so a revoked ant behind one keeps working there until it reloads a new `server.conf` (or until `ants auth leaf` is issued again without the ant); give them the uplink with `ants auth leaf` and `ants leaf config` and restart them, once the hub runs a `server.conf` written since (its system account then admits leaf nodes). A hub on a `server.conf` from before revocations accepts no system account connection, so the first push fails until it runs on a new one. Revocations of credentials that have all expired are dropped on the next `revoke` or `push`.
 
 ### Devices
 
@@ -619,7 +632,7 @@ Each user JWT that `ants auth` issues carries the permissions version of the iss
 WARN the credentials of ant dev-a predate permission versions, and this ants gives version 1: requests their role allows now may be refused; renew them on the machine holding the team keys with `ants auth user dev-a --js-domain hub` and put the new file in their place
 ```
 
-The command is `ants auth user NAME` (with `--human`, or `--webhook --to ANT --channel CH`, and `--js-domain D` as issued), `ants auth channel-manager`, or for a leaf node's uplink `ants auth leaf MACHINE --ant ANT --human HUMAN --webhook WEBHOOK [--enroll-approver]` followed by `ants leaf outbox MACHINE --ant ANT --human HUMAN`. Credentials without the tag predate versions and count as outdated; credentials newer than the ants in use ask for an upgrade of ants. nats-server, not ants, uses a leaf node's uplink credentials: `ants leaf config` checks those it writes into `leaf.conf`, and the leaf node needs a restart once they are replaced (`SIGHUP` does not reread credentials).
+The command is `ants auth user NAME` (with `--human`, or `--webhook --to ANT --channel CH`, and `--js-domain D` as issued), `ants auth channel-manager`, or for a leaf node's uplink `ants auth leaf MACHINE --ant ANT --human HUMAN --webhook WEBHOOK [--enroll-approver]` followed by `ants leaf outbox MACHINE --ant ANT --human HUMAN`. Credentials without the tag predate versions and count as outdated; credentials newer than the ants in use ask for an upgrade of ants. nats-server, not ants, uses a leaf node's uplink credentials: `ants leaf config` checks those it writes into `leaf.conf`, the system account uplink's `leaf-<machine>.system.creds` included (renewed with the same `ants auth leaf`), and the leaf node needs a restart once they are replaced (`SIGHUP` does not reread credentials).
 
 Credentials that expire within 7 days, or have expired, get a warning naming the same command; the daemon checks again daily. Enrollment credentials, short-lived by design, warn only once expired. `ants auth issued` lists every key of `issued.jsonl` once (`--json`: one object per line) and, under each one in use (neither revoked, reissued since for the same name, expired nor an enrollment's) that is outdated or expires within 7 days, the commands renewing it: from its `.creds` file in the team directory when there is one, else with placeholders for what only that file tells (`--to ANT...`, `[--js-domain DOMAIN]`). Keys recorded before versions show `perms -`.
 
@@ -661,13 +674,13 @@ Running a local `nats-server` leaf per machine isolates local `ants` processes o
 # Auth machine (issue user/webhook .creds first)
 ants auth leaf macbook --ant dev-a --ant messenger --human alice --webhook github --js-domain hub
 
-# Worker machine ("macbook", with server.conf and leaf-macbook.creds in ~/.config/ants/auth)
+# Worker machine ("macbook", with server.conf, leaf-macbook.creds and leaf-macbook.system.creds in ~/.config/ants/auth)
 ants leaf config macbook --uplink wss://hub.example/nats       # writes ~/.config/ants/leaf.conf
 nats-server -c ~/.config/ants/leaf.conf &
 ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 ```
 
-`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. While offline, outbound inbox messages, replies, notes, channel posts, dead letters, `ants_links` entries and the `ants_owners` records of `ants ask` queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS`, `ants_links` and `ants_owners` on reconnect (`ants leaf outbox --remove` removes sourcing); a daemon holds a human's message from an outbox up to 10 s until its thread's owner lands. `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`; `ants ask --wait`/`--follow` polls stored replies every 5s (humans via `STREAM.MSG.GET`, ants via spare consumers `inbox-<ant>_1..3`, which ant credentials and leaf uplinks issued before them lack: see [Credentials across upgrades](#credentials-across-upgrades)), and `ants post --wait`/`--follow` (human or ant) polls the channel's stored posts after its own every 5s, so replies stored during an outage or sourced from an outbox show once. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
+`ants leaf config` accepts `nats-leaf://` (or `nats://`), `tls://`, `ws://` and `wss://` uplinks, `--ca-file FILE` and `--proxy http://host:port`; re-run it and send `SIGHUP` to `nats-server` to switch uplinks live. A second uplink joins the hub's system account with `leaf-<machine>.system.creds` (`--system-creds`), so revocations pushed to the hub reach the leaf; a leaf configured before it needs `ants auth leaf`, `ants leaf config` and a restart. While offline, outbound inbox messages, replies, notes, channel posts, dead letters, `ants_links` entries and the `ants_owners` records of `ants ask` queue in local stream `ANTS_OUT` and drain via hub stream `ANTS_IN` into `ANTS`, `ants_links` and `ants_owners` on reconnect (`ants leaf outbox --remove` removes sourcing); a daemon holds a human's message from an outbox up to 10 s until its thread's owner lands. `ANTS` republishes stored inbox messages to `_INBOX.<to>.stored.<from>`; `ants ask --wait`/`--follow` polls stored replies every 5s (humans via `STREAM.MSG.GET`, ants via spare consumers `inbox-<ant>_1..3`, which ant credentials and leaf uplinks issued before them lack: see [Credentials across upgrades](#credentials-across-upgrades)), and `ants post --wait`/`--follow` (human or ant) polls the channel's stored posts after its own every 5s, so replies stored during an outage or sourced from an outbox show once. Full hub, proxy, leaf, outbox, Dev Tunnel and keepalive details live in [docs/transport.md](docs/transport.md) (`Hub`, `Reverse proxy`, `Leaf nodes`, `Store and forward`, `HTTPS fallback bridge`, `Dev Tunnels`, `Keepalive and limits`).
 
 ### Transport options
 

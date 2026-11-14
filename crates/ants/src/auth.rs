@@ -173,7 +173,8 @@ fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>) ->
 /// `members`, ants and humans each in its role ([`members`]), may do and the sourcing of the machine's outbox
 /// ([`Permissions::for_leaf`]), plus what the credentials of `webhooks` allow, for an `ants webhook serve` on the
 /// machine ([`webhook_permissions`]), plus with `enroll_approver` what `ants enroll` on the machine needs
-/// ([`Permissions::for_enroll_approver`]), and connect only as a leaf node, not as a client.
+/// ([`Permissions::for_enroll_approver`]), and connect only as a leaf node, not as a client. Also writes the system
+/// account credentials of the leaf's second uplink beside them ([`leaf_system_creds`]).
 ///
 /// nats-server applies a leaf user's permissions from the leaf's side, as for a client: publish limits what the leaf
 /// sends to the hub, subscribe what the hub sends to the leaf (the hub swaps them internally).
@@ -210,7 +211,29 @@ pub fn issue_leaf(
     let jwt = user_jwt(&account, &user.public_key(), &name, permissions, only_leaf, None)?;
     check_uplink_size(&jwt, machine)?;
     write_secret(out, &creds(&jwt, &seed(&user)?))?;
-    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)
+    revoke::record(dir, &Issued::new(&user.public_key(), &name, Kind::Leaf, None)?)?;
+    issue_leaf_system(dir, machine, &account.public_key(), &leaf_system_creds(out))
+}
+
+/// Where [`issue_leaf`] writes the system account credentials of a leaf node whose uplink credentials are at
+/// `uplink`: beside them, `leaf-<machine>.system.creds` for `leaf-<machine>.creds`.
+pub fn leaf_system_creds(uplink: &Path) -> PathBuf {
+    uplink.with_extension("system.creds")
+}
+
+/// Write to `out` the credentials of the system account for the second uplink of `machine`'s leaf node, through which
+/// the account updates `ants auth push` sends the hub reach the leaf: they hear those of `account` only, answer only
+/// the push ([`revoke::PUSH_INBOX`]), and connect only as a leaf node.
+fn issue_leaf_system(dir: &Path, machine: &Machine, account: &str, out: &Path) -> Result<()> {
+    let system = load(&dir.join(SYSTEM_SEED))?;
+    let user = KeyPair::new_user();
+    let permissions = Permissions {
+        publish: vec![format!("{}.>", revoke::PUSH_INBOX)],
+        subscribe: vec![format!("$SYS.REQ.ACCOUNT.{account}.CLAIMS.UPDATE")],
+    };
+    let only_leaf = json!({ "allowed_connection_types": LEAF_CONNECTIONS });
+    let jwt = user_jwt(&system, &user.public_key(), &leaf_user(machine), permissions, only_leaf, None)?;
+    write_secret(out, &creds(&jwt, &seed(&user)?))
 }
 
 const LEAF_CONNECTIONS: [&str; 2] = ["LEAFNODE", "LEAFNODE_WS"];
@@ -541,8 +564,9 @@ fn server_conf(
             None,
         )?,
     };
-    // JetStream needs a system account in operator mode; `ants auth push` connects to it.
-    let system_limits = json!({ "conn": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
+    // JetStream needs a system account in operator mode; `ants auth push` connects to it, and leaf nodes join it to
+    // hear the pushes.
+    let system_limits = json!({ "conn": -1, "leaf": -1, "subs": -1, "data": -1, "payload": -1, "wildcards": true });
     let system_claims = json!({ "limits": system_limits, "type": "account", "version": 2 });
     let system_jwt = jwt(operator, &system.public_key(), "SYS", system_claims, None)?;
     let account_jwt = account_jwt(operator, account, revocations)?;
@@ -840,6 +864,11 @@ pub(crate) mod tests {
                 "ants auth leaf m1 --ant dev-a --human alice --webhook hook --enroll-approver --js-domain hub",
                 "ants leaf outbox m1 --ant dev-a --human alice --js-domain hub",
             ]
+        );
+        let system = creds::check(&leaf_system_creds(&out("leaf-m1"))).unwrap();
+        assert_eq!(
+            (system.kind.clone(), system.version_status()),
+            (creds::Kind::LeafSystem { machine: m1.clone() }, VersionStatus::Current)
         );
         let (jwt, _) = read_creds(&out("leaf-m1")).unwrap();
         let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_js_domain(Some(&hub));
