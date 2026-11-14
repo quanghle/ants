@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use ants_daemon::chains;
+use ants_daemon::{bus, chains};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, Following, ROSTER_BUCKET, RosterEntry, STREAM, UserId,
     Uuid, Verdict, subject,
@@ -407,7 +407,7 @@ async fn decide(
             Some(first) => Err(answered(request, &first)),
             None => Err(e).context("publishing the decision: the request changed meanwhile; try again"),
         },
-        Err(e) => Err(e).context("publishing the decision"),
+        Err(e) => Err(bus::explain(js, &decision.subject(), e).await).context("publishing the decision"),
     }
 }
 
