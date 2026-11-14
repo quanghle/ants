@@ -375,11 +375,11 @@ mod tests {
         let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(10));
         let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
         let decided = tokio::spawn(approver.decide(thread.clone(), tool(), options));
-        let msg = timeout(Duration::from_secs(5), requests.next()).await.unwrap().unwrap();
+        let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
         let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
         assert_eq!((&request.ant, &request.thread_id, &request.tool), (&ant, &thread, &tool()));
         assert_eq!(request.options, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
-        let status = timeout(Duration::from_secs(5), statuses.next()).await.unwrap().unwrap();
+        let status = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
         let status: ants_proto::StatusEvent = serde_json::from_slice(&status.payload).unwrap();
         assert_eq!(status.update, ants_proto::StatusUpdate::State { state: State::WaitingApproval });
 
@@ -390,7 +390,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        assert_eq!(timeout(Duration::from_secs(5), decided).await.unwrap().unwrap(), Verdict::AllowAlways);
+        assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
 
         // Both the request and the decision stay in the stream for a late `ants tools list`.
         let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
