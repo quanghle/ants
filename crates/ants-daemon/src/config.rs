@@ -591,12 +591,63 @@ pub fn append(path: &Path, entry: &str) -> Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    // Written beside the file and renamed over it, so a failure leaves the old file whole.
+    write(path, &text)
+}
+
+/// Write `text` to the config file at `path`: beside it first, then renamed over it, so a failure leaves the old file
+/// whole.
+pub fn write(path: &Path, text: &str) -> Result<()> {
     let mut new = path.as_os_str().to_owned();
     new.push(".new");
     let new = PathBuf::from(new);
     std::fs::write(&new, text).with_context(|| format!("writing {}", new.display()))?;
     std::fs::rename(&new, path).with_context(|| format!("writing config {}", path.display()))
+}
+
+/// The text of the config file at `path` with `rule` added to the `allow` list of `ant`'s `[[ant]]` table, or None
+/// when the list holds it already. The text around stays as it is, comments included: the rule goes after the list's
+/// last item, or a new `allow` line after the table's `name`. Fails, leaving the file alone, when the file does not
+/// list the ant or does not parse ([`parse`]) with the rule in place.
+pub fn with_allow_rule(path: &Path, ant: &UserId, rule: &str) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Spans {
+        #[serde(default, rename = "ant")]
+        ants: Vec<AntSpans>,
+    }
+    #[derive(Deserialize)]
+    struct AntSpans {
+        name: toml::Spanned<String>,
+        allow: Option<toml::Spanned<Vec<toml::Spanned<String>>>>,
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
+    let spans: Spans = toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    let entry = spans
+        .ants
+        .into_iter()
+        .find(|entry| entry.name.get_ref() == ant.as_str())
+        .with_context(|| format!("config {} lists no ant {ant}", path.display()))?;
+    let (at, insert) = match &entry.allow {
+        Some(allow) if allow.get_ref().iter().any(|r| r.get_ref() == rule) => return Ok(None),
+        Some(allow) => match allow.get_ref().last() {
+            Some(last) => (last.span().end, format!(", {}", toml_string(rule))),
+            // Just inside the `[`.
+            None => (allow.span().start + 1, toml_string(rule)),
+        },
+        None => {
+            let end = entry.name.span().end;
+            match text[end..].find('\n') {
+                Some(newline) => (end + newline + 1, format!("allow = [{}]\n", toml_string(rule))),
+                None => (text.len(), format!("\nallow = [{}]\n", toml_string(rule))),
+            }
+        }
+    };
+    let mut new = text;
+    new.insert_str(at, &insert);
+    let loaded = parse(&new, &std::path::absolute(path)?, &home_dir()?)?;
+    if !loaded.ants.iter().any(|a| &a.name == ant && a.allow.iter().any(|r| r == rule)) {
+        bail!("cannot add {} to the allow list of {ant} in {}: add it by hand", toml_string(rule), path.display());
+    }
+    Ok(Some(new))
 }
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
@@ -1272,6 +1323,42 @@ Review changes for correctness."""
         assert_eq!(summary.creds_of(&"dev-b".parse().unwrap()), Some(None));
         assert_eq!(summary.creds_of(&"dev-c".parse().unwrap()), None);
         assert_eq!(Summary::load(&dir.join("none.toml")).unwrap(), Summary::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_allow_rule_goes_into_the_ants_list_and_the_rest_stays() {
+        let dir = ants_test_support::scratch_dir("config-allow").canonicalize().unwrap();
+        let path = dir.join("config.toml");
+        let old = "# the team\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\" # first\nworkdir = \".\"\n\n\
+                   [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nallow = [\n  \"read\", # reading is fine\n]\n\n\
+                   [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nallow = []\n";
+        std::fs::write(&path, old).unwrap();
+        let add = |ant: &str, rule: &str| {
+            let text = with_allow_rule(&path, &ant.parse().unwrap(), rule)?;
+            if let Some(text) = &text {
+                write(&path, text)?;
+            }
+            anyhow::Ok(text.is_some())
+        };
+        assert!(add("dev-a", "execute:cargo test").unwrap());
+        assert!(add("dev-b", "edit:/a \"b\"").unwrap());
+        assert!(add("dev-c", "read").unwrap());
+        assert!(!add("dev-b", "read").unwrap(), "listed already");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            old.replace("# first\n", "# first\nallow = [\"execute:cargo test\"]\n")
+                .replace("\"read\", #", "\"read\", \"edit:/a \\\"b\\\"\", #")
+                .replace("[]", "[\"read\"]")
+        );
+        let allow: Vec<_> = load(&path).unwrap().ants.into_iter().map(|a| a.allow).collect();
+        assert_eq!(allow[..3], [vec!["execute:cargo test"], vec!["read", "edit:/a \"b\""], vec!["read"]]);
+
+        let err = format!("{:#}", add("dev-d", "read").unwrap_err());
+        assert!(err.contains("lists no ant dev-d"), "{err}");
+        std::fs::write(&path, "ant = [{ name = \"dev-a\", workdir = \".\" }]\n").unwrap();
+        assert!(add("dev-a", "read").is_err(), "an inline table is left to edit by hand");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
