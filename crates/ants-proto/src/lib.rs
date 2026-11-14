@@ -1836,8 +1836,8 @@ pub struct ChannelPost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
     /// A webhook's post, as `ants webhook serve` marks it: one that mentions nobody goes to the channel's messenger, as
-    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim, granting nothing an ant could not get by
-    /// messaging the messenger itself.
+    /// a human's does ([`ChannelPost::to_triage`]). It is the poster's claim: a daemon takes it only from a sender whose
+    /// marker is in [`WEBHOOKS_BUCKET`] ([`webhook_marker_key`]) or a human, so no ant names a thread's owner with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     pub sent_at: DateTime<Utc>,
