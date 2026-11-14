@@ -967,6 +967,75 @@ pub fn with_allow_rule(path: &Path, ant: &UserId, rule: &str) -> Result<Option<S
     Ok(Some(new))
 }
 
+/// The text of the config file at `path` without the `[[ant]]` table of `ant`: from its header up to the next table's
+/// header, the comment lines right above that one left to it. The text around stays as it is, comments included.
+/// Fails, leaving the file alone, when the file does not list the ant, or when the cut would change anything else or
+/// leave a file that does not parse ([`parse`]).
+pub fn without_ant(path: &Path, ant: &UserId) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Spans {
+        #[serde(default, rename = "ant")]
+        ants: Vec<Named>,
+    }
+    #[derive(Deserialize)]
+    struct Named {
+        name: toml::Spanned<String>,
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config {}", path.display()))?;
+    let spans: Spans = toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    let index = spans
+        .ants
+        .iter()
+        .position(|entry| entry.name.get_ref() == ant.as_str())
+        .with_context(|| format!("config {} lists no ant {ant}", path.display()))?;
+    let at = spans.ants[index].name.span().start;
+    let by_hand = || format!("cannot remove the [[ant]] table of {ant} from {}: remove it by hand", path.display());
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        lines.push((offset, line));
+        offset += line.len();
+    }
+    let bare = |line: &str| -> String {
+        line.split('#').next().unwrap_or_default().chars().filter(|c| !c.is_whitespace()).collect()
+    };
+    let header = |line: &str| {
+        let bare = bare(line);
+        bare.starts_with('[') && bare.ends_with(']')
+    };
+    let first =
+        lines.iter().rposition(|(start, line)| *start <= at && bare(line) == "[[ant]]").with_context(by_hand)?;
+    let next = lines.iter().skip(first + 1).position(|(_, line)| header(line)).map(|n| first + 1 + n);
+    let (mut from, mut to) = (first, next.unwrap_or(lines.len()));
+    match next {
+        Some(_) => {
+            while to > from + 1 && lines[to - 1].1.trim_start().starts_with('#') {
+                to -= 1;
+            }
+        }
+        // Last in the file: the blank lines that set it apart go too.
+        None => {
+            while from > 0 && lines[from - 1].1.trim().is_empty() {
+                from -= 1;
+            }
+        }
+    }
+    let end = lines.get(to).map_or(text.len(), |(start, _)| *start);
+    let new = format!("{}{}", &text[..lines[from].0], &text[end..]);
+    let mut expected: toml::Table = toml::from_str(&text)?;
+    if let Some(toml::Value::Array(ants)) = expected.get_mut("ant") {
+        ants.remove(index);
+        if ants.is_empty() {
+            expected.remove("ant");
+        }
+    }
+    if toml::from_str::<toml::Table>(&new).ok() != Some(expected) {
+        bail!(by_hand());
+    }
+    parse(&new, &std::path::absolute(path)?, &home_dir()?)?;
+    Ok(new)
+}
+
 /// The template the config file at `path` adds `ant` from, None when the file lists the ant without one. Fails when the
 /// file does not list the ant or does not parse as TOML.
 pub fn template_of(path: &Path, ant: &UserId) -> Result<Option<String>> {
@@ -1886,6 +1955,24 @@ Review changes for correctness."""
         assert!(err.contains("lists no ant dev-d"), "{err}");
         std::fs::write(&path, "ant = [{ name = \"dev-a\", workdir = \".\" }]\n").unwrap();
         assert!(add("dev-a", "read").is_err(), "an inline table is left to edit by hand");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_ants_table_leaves_the_file_and_the_rest_stays() {
+        let dir = ants_test_support::scratch_dir("config-without").canonicalize().unwrap();
+        let path = dir.join("config.toml");
+        let a = "# the team\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\" # first\nworkdir = \".\"\n\n";
+        let b = "[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nallow = [\n  \"read\",\n]\n\n";
+        let c = "# last\n[[ ant ]] # spaced\nworkdir = \".\"\nname = \"dev-c\"\n";
+        std::fs::write(&path, format!("{a}{b}{c}")).unwrap();
+        let without = |ant: &str| without_ant(&path, &ant.parse().unwrap());
+        assert_eq!(without("dev-b").unwrap(), format!("{a}{c}"));
+        assert_eq!(without("dev-c").unwrap(), format!("{a}{b}# last\n"), "the comment above stays");
+        assert_eq!(without("dev-a").unwrap(), format!("# the team\nnats = \"nats://hub:4222\"\n\n{b}{c}"));
+        assert!(format!("{:#}", without("dev-d").unwrap_err()).contains("lists no ant dev-d"));
+        std::fs::write(&path, "ant = [{ name = \"dev-a\", workdir = \".\" }]\n").unwrap();
+        assert!(format!("{:#}", without("dev-a").unwrap_err()).contains("remove it by hand"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

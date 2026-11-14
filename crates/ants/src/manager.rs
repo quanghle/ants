@@ -1,7 +1,7 @@
 //! The ants a manager ant adds with its `request_ant` tool: checked against the template of the config file first,
 //! keyed on this machine (the seed never leaves it), signed by `ants signer` where the account key is
 //! ([`signer::ask`]), then listed in the config file, whose change the daemon picks up within seconds
-//! ([`crate::reload`]) to serve the new ant.
+//! ([`crate::reload`]) to serve the new ant. Its `retire_ant` tool retires one of them ([`crate::retire`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use ants_daemon::config;
 use ants_daemon::creds;
 use ants_daemon::keystore;
-use ants_daemon::mcp::{AntAsk, AntRequester};
+use ants_daemon::mcp::{AntAsk, AntRequester, ManagerAsk, RetireAsk};
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{ENROLL_REPEAT, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
@@ -17,7 +17,7 @@ use chrono::Utc;
 use nkeys::KeyPair;
 
 use crate::service::{Action, Service};
-use crate::{add, auth, signer};
+use crate::{add, auth, retire, signer};
 
 /// Where and how a manager ant's daemon adds ants.
 #[derive(Debug, Clone)]
@@ -34,6 +34,9 @@ pub struct Manager {
     pub leaf_config: Option<PathBuf>,
 }
 
+/// How long `retire_ant` waits for the signer's answer.
+const RETIRE_WAIT: std::time::Duration = std::time::Duration::from_mins(2);
+
 /// One request at a time, so two cannot both take a template's last place in the file.
 static BUSY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -44,12 +47,18 @@ impl Manager {
         Ok(Self { config, nats, creds, js_domain, keys, leaf_config })
     }
 
-    /// The requester of `request_ant`, refusing with the reason as its text.
+    /// The requester of `request_ant` and `retire_ant`, refusing with the reason as its text.
     pub fn requester(self) -> AntRequester {
         let manager = Arc::new(self);
         Arc::new(move |ask| {
             let manager = manager.clone();
-            Box::pin(async move { manager.add(ask).await.map_err(|e| format!("{e:#}")) })
+            Box::pin(async move {
+                let done = match ask {
+                    ManagerAsk::Add(ask) => manager.add(*ask).await,
+                    ManagerAsk::Retire(ask) => manager.retire(ask).await,
+                };
+                done.map_err(|e| format!("{e:#}"))
+            })
         })
     }
 
@@ -119,6 +128,70 @@ impl Manager {
         config::append(&self.config, &entry)
             .with_context(|| format!("listing {name}, whose credentials are in {}", out.display()))?;
         Ok(said)
+    }
+}
+
+impl Manager {
+    /// Retire the ant `ask` names, one the manager added: unlist it, wait up to [`retire::STOP_WAIT`] for the daemon
+    /// to stop it, have the signer revoke its credentials, and remove their file; say what was done. An earlier
+    /// retirement cut off after the ant was unlisted carries on from its credentials file.
+    pub async fn retire(&self, ask: RetireAsk) -> Result<String> {
+        let _busy = BUSY.lock().await;
+        let RetireAsk { manager, thread, name } = ask;
+        let creds = self.creds.as_deref().context("the manager has no credentials (`creds`) to sign a request")?;
+        let left = self.keys.join(format!("{name}.creds"));
+        let listed = config::load(&self.config)?.ants.iter().any(|a| a.name == name);
+        let (template, path, key, home) = match listed {
+            true => {
+                let unlisted = retire::unlist(&self.config, &name, Some(&manager))?;
+                let path = unlisted.creds.unwrap_or(left);
+                (Some(unlisted.template), path, unlisted.key, Some(unlisted.home))
+            }
+            false if left.exists() => (None, left.clone(), Some(retire::key_of(&left)?), None),
+            false => bail!("the config file lists no ant {name}"),
+        };
+        let key = key.with_context(|| {
+            format!(
+                "{name} is unlisted, but its credentials {} do not read: a human retires it with `ants retire {name}`",
+                path.display()
+            )
+        })?;
+        let (jwt, signing) = creds::load(creds, keystore::os())?;
+        let (client, js) =
+            ants_daemon::bus::connect(&self.nats, Some(creds), self.js_domain.as_ref(), &manager, "retire_ant").await?;
+        let stopped = retire::stopped(&js, &name, retire::STOP_WAIT).await;
+        let until = Utc::now() + RETIRE_WAIT;
+        let template_name = template.as_deref().unwrap_or_default();
+        let retired =
+            signer::retire(&client, &jwt, &signing, template_name, &thread, &name, &key, ENROLL_REPEAT, until)
+                .await
+                .with_context(|| {
+                    format!("{name} is unlisted, its credentials not revoked yet: retire_ant {name} again")
+                })?;
+        let mut said = vec![
+            format!("Retired {name}: unlisted from {}.", self.config.display()),
+            retire::stop_note(&name, stopped),
+            match retired.revoked.len() {
+                0 => "Its credentials were revoked already.".to_owned(),
+                n => format!("The signer revoked {n} key(s) of it."),
+            },
+        ];
+        if let Some(e) = &retired.push_error {
+            said.push(format!(
+                "Pushing the revocation to the hub failed ({e}): the hub refuses the credentials once a human runs \
+                 `ants auth push` where the account key is, or it reloads."
+            ));
+        }
+        said.push(match retire::forget(&path) {
+            Ok(()) => format!("{} removed.", path.display()),
+            Err(e) => {
+                format!("{} stays ({e:#}): request_ant of {name} needs it gone; a human removes it.", path.display())
+            }
+        });
+        if let (Some(template), Some(home)) = (&template, &home) {
+            said.push(retire::home_note(&name, template, home));
+        }
+        Ok(said.join(" "))
     }
 }
 
@@ -270,8 +343,64 @@ mod tests {
             let (added, ()) = tokio::join!(manager.add(ask("lead-h", "helper", Request::default())), approving);
             assert!(added.unwrap().starts_with("Added lead-h from template helper"));
             timeout(WAIT, listed("lead-h")).await.expect("lead-h served after the reload");
+
+            // Only the manager that added an ant retires it: refused here, and by the signer.
+            let retire_ask = |manager: &str, name: &str| RetireAsk {
+                manager: p(manager),
+                thread: ThreadId::generate(),
+                name: p(name),
+            };
+            let err = format!("{:#}", manager.retire(retire_ask("boss", "lead-a")).await.unwrap_err());
+            assert!(err.contains("a manager retires only the ants it added"), "{err}");
+            let creds_a = dir.join("keys/lead-a.creds");
+            let key_a = retire::key_of(&creds_a).unwrap();
+            assert!(signer::revoke_added(&team, &p("lead-a"), Some(&p("boss")), Some(&key_a)).is_err());
+            assert!(revoke::revoked(&team).unwrap().is_empty());
+
+            // Retired: unlisted, stopped, its credentials revoked and removed, its home kept.
+            let home_a = dir.join("homes/lead-a");
+            std::fs::create_dir_all(&home_a).unwrap();
+            std::fs::write(home_a.join("kept"), "memory").unwrap();
+            let old_a = dir.join("lead-a-retired.creds");
+            std::fs::copy(&creds_a, &old_a).unwrap();
+            let said = manager.retire(retire_ask("lead", "lead-a")).await.unwrap();
+            assert!(said.starts_with("Retired lead-a"), "{said}");
+            assert!(said.contains("lead-a stopped") && said.contains("revoked 1 key(s)"), "{said}");
+            assert!(!said.contains("failed"), "{said}");
+            assert!(config::load(&config).unwrap().ants.iter().all(|a| a.name != p("lead-a")));
+            assert_eq!(lookup(p("lead-a")).await.unwrap(), None);
+            assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == key_a));
+            let refused = async_nats::ConnectOptions::with_credentials_file(&old_a).await.unwrap();
+            assert!(refused.connect(&server.url).await.is_err(), "the retired credentials still connect");
+            assert!(!creds_a.exists());
+            assert!(home_a.join("kept").exists());
+
+            // Added again from the same template, whose max_ants it no longer counts toward, with the same home.
+            let said = manager.add(ask("lead-a", "worker", Request::default())).await.unwrap();
+            assert!(said.starts_with("Added lead-a from template worker"), "{said}");
+            timeout(WAIT, listed("lead-a")).await.expect("lead-a served again");
+            assert_ne!(retire::key_of(&creds_a).unwrap(), key_a);
+            assert!(home_a.join("kept").exists());
+
+            // A human retires any ant added from a template, but not the others.
+            let creds_h = dir.join("keys/lead-h.creds");
+            let key_h = retire::key_of(&creds_h).unwrap();
+            let args = |name: &str| retire::RetireArgs {
+                name: p(name),
+                config: Some(config.clone()),
+                dir: Some(team.clone()),
+                no_push: false,
+            };
+            let err = format!("{:#}", retire::retire(&args("lead"), Some(&js), WAIT, &server.url).await.unwrap_err());
+            assert!(err.contains("lead was not added from a template"), "{err}");
+            retire::retire(&args("lead-h"), Some(&js), WAIT, &server.url).await.unwrap();
+            assert!(config::load(&config).unwrap().ants.iter().all(|a| a.name != p("lead-h")));
+            assert_eq!(lookup(p("lead-h")).await.unwrap(), None);
+            assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == key_h));
+            assert!(!creds_h.exists());
+            assert!(lookup(p("lead-a")).await.unwrap().is_some(), "lead-a is still served");
         };
-        Box::pin(timeout(WAIT * 2, async {
+        Box::pin(timeout(WAIT * 4, async {
             tokio::select! {
                 r = daemon => panic!("the daemon stopped: {r:?}"),
                 r = signer => panic!("the signer stopped: {r:?}"),

@@ -21,6 +21,7 @@ mod presence;
 mod progress;
 mod reload;
 mod renew;
+mod retire;
 mod revoke;
 mod roster;
 mod scheduler;
@@ -227,6 +228,12 @@ enum Command {
     /// key to sign; run again with --jwt or --enroll to complete the credentials. Completed credentials reload the
     /// daemon service of the config file to serve the ant, when it runs (scripts/install-units.sh).
     Add(Box<add::AddArgs>),
+    /// Retire an ant added from a template (by a manager's `request_ant`): unlist it from the config file, so the
+    /// daemon stops it as on any reload, its prompts in flight ending first; wait up to 5m for that; revoke its
+    /// credentials, when the account key is in --dir, and push the account; remove its credentials file. Its home
+    /// stays: a later `request_ant` of the same name from the same template brings it back with its memory, task
+    /// database and worktrees. Other ants are refused: edit the config file and run `ants auth revoke NAME` instead.
+    Retire(Box<retire::RetireArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
     /// list them, approve or reject one; and renewal requests (`ants renew`): list them, renew one or all.
     #[command(subcommand)]
@@ -1323,6 +1330,20 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
+        Command::Retire(args) => {
+            let connected = match nats() {
+                Ok(nats) => nats.connect("ants-retire").await,
+                Err(e) => Err(e),
+            };
+            let roster = match connected {
+                Ok((_, js)) => Some(js),
+                Err(e) => {
+                    println!("cannot read the roster ({e:#}): not waiting for {} to stop", args.name);
+                    None
+                }
+            };
+            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats).await
+        }
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
         Command::Signer { config, approval_timeout, dir, upgrade } => {
