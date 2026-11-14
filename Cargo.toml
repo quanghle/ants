@@ -35,6 +35,7 @@ unused_dependencies = "warn"
 [workspace.lints.clippy]
 duration_suboptimal_units = "warn"
 format_push_string = "warn"
+large_futures = "warn"
 redundant_clone = "warn"
 
 # Small, lean binaries: one `ants` executable runs on every machine.

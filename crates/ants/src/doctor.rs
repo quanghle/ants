@@ -971,7 +971,7 @@ mod tests {
         let rights = Rights::from_creds(setup.creds.as_deref()).unwrap();
         hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
         let versions =
-            async || run(&setup).await.into_iter().find(|c| c.check == "versions").expect("a versions check");
+            async || Box::pin(run(&setup)).await.into_iter().find(|c| c.check == "versions").expect("a versions check");
 
         let dev_a = "dev-a".parse::<UserId>().unwrap();
         let (_, a_js) = server.connect_as(&dev_a, Role::Ant).await;

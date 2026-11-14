@@ -498,7 +498,7 @@ mod tests {
             assert_eq!((heard[0].name.as_str(), heard[0].public_key.as_str()), ("dev-a", user.public_key().as_str()));
             approver.renew(&team, "dev-a", None).await.unwrap().1
         };
-        let (jwt, renewed) = timeout(WAIT * 2, async { tokio::join!(asking, approving) }).await.unwrap();
+        let (jwt, renewed) = timeout(WAIT * 2, Box::pin(async { tokio::join!(asking, approving) })).await.unwrap();
         let jwt = jwt.unwrap();
         assert_eq!(jwt, renewed.jwt);
         assert_eq!(renewed.previous, old_key.public_key());
@@ -539,7 +539,8 @@ mod tests {
             stop_tx.send(()).unwrap();
             (first, again)
         };
-        let (approved, (first, again)) = timeout(WAIT * 2, async { tokio::join!(approving, asking) }).await.unwrap();
+        let (approved, (first, again)) =
+            timeout(WAIT * 2, Box::pin(async { tokio::join!(approving, asking) })).await.unwrap();
         approved.unwrap();
         assert_eq!(first, again);
         assert_eq!(done.recv().await.unwrap(), ("alice".to_owned(), first.clone()));
@@ -604,7 +605,7 @@ mod tests {
             }
             heard
         };
-        let ((), heard) = timeout(WAIT * 4, async { tokio::join!(sending, listening) }).await.unwrap();
+        let ((), heard) = timeout(WAIT * 4, Box::pin(async { tokio::join!(sending, listening) })).await.unwrap();
         assert!(!heard.is_empty() && heard.iter().all(|r| *r == good), "{heard:?}");
         // The revoked credentials are refused by the signing too, whatever hears them.
         let err = auth::renew(&team, &revoked_jwt, &KeyPair::new_user().public_key()).unwrap_err();
@@ -651,7 +652,7 @@ mod tests {
         let user = KeyPair::new_user();
         let asking = request(&server.url, &alice, &uplink, &user, REPEAT, pending());
         let approving = approver.renew(&team, "leaf-m1", None);
-        let (jwt, renewed) = timeout(WAIT * 2, async { tokio::join!(asking, approving) }).await.unwrap();
+        let (jwt, renewed) = timeout(WAIT * 2, Box::pin(async { tokio::join!(asking, approving) })).await.unwrap();
         let (_, renewed) = renewed.unwrap();
         assert_eq!(jwt.unwrap(), renewed.jwt);
         assert!(before.same_credentials(&renewed.finding), "{:?}", renewed.finding.kind);
