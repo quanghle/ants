@@ -745,7 +745,7 @@ enum EnrollCommand {
 enum LeafCommand {
     /// Write the nats-server configuration of the machine's leaf node: listening on localhost only, with one uplink
     /// to the hub, and a JetStream of its own (domain: the machine name) for the outbox. Run it again to switch the
-    /// uplink, then reload the leaf (SIGHUP).
+    /// uplink: it reloads the leaf node service (ants.nats, ants-nats) running the file, or says how.
     Config {
         /// Machine name, as given to `ants auth leaf`.
         machine: Machine,
@@ -1162,12 +1162,17 @@ async fn main() -> Result<()> {
                 proxy: proxy.as_deref(),
                 listen: &listen,
             };
+            let old = std::fs::read_to_string(&out).ok();
             leaf::write(&config, &out)?;
             ants_daemon::creds::warn(&creds);
             system_creds.as_deref().map(ants_daemon::creds::warn);
+            let new = std::fs::read_to_string(&out).with_context(|| format!("reading {}", out.display()))?;
+            let taken = leaf::take(&out, old.as_deref(), &new, |action| {
+                service::Services::local().apply(service::Service::Nats, action, &out)
+            });
             println!(
-                "{0}\nstart: nats-server -c {0} (scripts/install-units.sh installs it as a service)\n\
-                 switch the uplink: run this again, then send the running leaf SIGHUP\n\
+                "{}\n{taken}\n\
+                 switch the uplink: run this again\n\
                  clients on this machine: nats://{listen} (the default) with the hub's --js-domain\n\
                  once the leaf is up: ants leaf outbox {machine} --ant ... --human ...",
                 out.display()

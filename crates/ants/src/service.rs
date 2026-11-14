@@ -186,6 +186,14 @@ impl Services {
     }
 }
 
+/// `outcome` of a failed command, as the start of a message.
+pub fn failure(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Failed(command, error) => format!("`{command}` failed ({error}): "),
+        _ => String::new(),
+    }
+}
+
 /// The commands doing `action` on `service` by hand, on macOS and on Linux.
 pub fn manual(service: Service, action: Action) -> String {
     format!(

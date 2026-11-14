@@ -14,7 +14,7 @@ use crate::auth;
 use crate::enroll;
 use crate::leaf;
 use crate::serve::AntOptions;
-use crate::service::{Action, Outcome, Service, Services};
+use crate::service::{Action, Outcome, Service, Services, failure};
 
 /// The server `--nats` defaults to.
 const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
@@ -202,14 +202,6 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
     }
     p.clone().into_config(nats, &summary.harnesses)?;
     config::entry(&p)
-}
-
-/// `outcome` of a failed command, as the start of a message.
-fn failure(outcome: Outcome) -> String {
-    match outcome {
-        Outcome::Failed(command, error) => format!("`{command}` failed ({error}): "),
-        _ => String::new(),
-    }
 }
 
 /// The configuration of the machine's leaf node, at `path`, or at ~/.config/ants/leaf.conf when it exists, and the
