@@ -15,6 +15,7 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::task::JoinHandle;
 use tracing::Instrument as _;
 
+use crate::reload::Triggers;
 use crate::scheduler;
 
 #[derive(clap::Args, Debug)]
@@ -238,6 +239,15 @@ fn source(args: &DaemonArgs, default_path: &Path) -> Result<Source> {
     })
 }
 
+/// The file a reload reads: the config file, or for an ant described by flags the file at `default_path`, for its
+/// harnesses.
+pub fn config_file(args: &DaemonArgs, default_path: &Path) -> Result<PathBuf> {
+    Ok(match source(args, default_path)? {
+        Source::Flags(_) => default_path.to_owned(),
+        Source::File(path) => path,
+    })
+}
+
 /// What `ants daemon` is to serve, as listed.
 #[derive(Debug)]
 pub struct Listed {
@@ -328,16 +338,17 @@ pub enum Ended {
 
 /// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection, and run the schedules alongside, each
 /// over its own as well. An ant that fails is reported and the others keep running; it is an error only when none is
-/// left. On SIGHUP `reload` lists the ants and schedules again and the daemon serves those ([`reconcile`],
-/// [`Schedules::reconcile`]); a list it cannot read is reported and what runs stays as it is. Health and metrics are
+/// left. On SIGHUP, or once the config file changed and settled (`triggers`), `reload` lists the ants and schedules
+/// again and the daemon serves those ([`reconcile`], [`Schedules::reconcile`]); a list it cannot read is reported and
+/// what runs stays as it is. Health and metrics are
 /// served on `served.metrics`, if given, until the daemon stops; a reload does not move them. Once `replaced` the ants
 /// stop as on SIGTERM, finishing their prompts in flight, and the schedules at once.
 pub async fn run(
     served: Served,
     reload: impl Fn() -> Result<Served>,
+    mut triggers: Triggers,
     replaced: impl Future<Output = ()>,
 ) -> Result<Ended> {
-    let mut hangup = Hangup::new()?;
     let metrics = served.metrics;
     let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
     let mut running = HashMap::new();
@@ -381,16 +392,20 @@ pub async fn run(
                     r.ask_to_stop();
                 }
             }
-            () = hangup.recv(), if !stopping => match reload() {
+            trigger = triggers.next(), if !stopping => match reload() {
                 Ok(served) => {
-                    tracing::info!("config reloaded");
+                    tracing::info!(on = trigger.describe(), "config reloaded");
                     if served.metrics != metrics {
                         tracing::warn!("the metrics address changed; it takes effect on a restart");
                     }
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
                 }
-                Err(e) => tracing::error!(error = format!("{e:#}"), "reload failed; serving the ants as before"),
+                Err(e) => tracing::error!(
+                    on = trigger.describe(),
+                    error = format!("{e:#}"),
+                    "reload failed; serving the ants as before"
+                ),
             },
         }
     }
@@ -541,29 +556,6 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
         }
     }
     start
-}
-
-/// SIGHUP, which `systemctl reload` sends.
-struct Hangup(#[cfg(unix)] tokio::signal::unix::Signal);
-
-impl Hangup {
-    fn new() -> Result<Self> {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            Ok(Self(signal(SignalKind::hangup()).context("listening for SIGHUP")?))
-        }
-        #[cfg(not(unix))]
-        Ok(Self())
-    }
-
-    async fn recv(&mut self) {
-        #[cfg(unix)]
-        if self.0.recv().await.is_some() {
-            return;
-        }
-        std::future::pending().await
-    }
 }
 
 #[cfg(test)]

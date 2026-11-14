@@ -5,7 +5,7 @@
      launchd has no start order: until ants.nats listens, the daemon waits, retrying the connection. KeepAlive and
      ThrottleInterval cover other failures.
      SIGTERM lets prompts in flight finish for up to ExitTimeOut seconds; messages cut off are redelivered.
-     Serve the ants of an edited config file without a restart (ants add does it itself): launchctl kill SIGHUP gui/$(id -u)/ants.daemon
+     The daemon reloads an edited config file within seconds; to reload at once: launchctl kill SIGHUP gui/$(id -u)/ants.daemon
      A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
 <plist version="1.0">
 <dict>

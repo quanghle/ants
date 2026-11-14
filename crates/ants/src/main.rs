@@ -16,6 +16,7 @@ mod notify;
 mod outbox;
 mod presence;
 mod progress;
+mod reload;
 mod renew;
 mod revoke;
 mod roster;
@@ -1013,7 +1014,8 @@ async fn main() -> Result<()> {
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
                 Ok(serve::Served { configs, schedules, metrics: listed.metrics })
             };
-            match serve::run(served()?, served, upgrade::replaced(args.upgrade.upgrade_check)).await? {
+            let triggers = reload::Triggers::new(serve::config_file(&args, &default_path)?, reload::CHECK_EVERY)?;
+            match serve::run(served()?, served, triggers, upgrade::replaced(args.upgrade.upgrade_check)).await? {
                 serve::Ended::Stopped => Ok(()),
                 serve::Ended::Replaced => upgrade::exit(),
             }
