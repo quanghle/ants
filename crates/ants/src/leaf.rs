@@ -14,6 +14,8 @@
 //! credentials `ants auth leaf` writes beside the uplink's: allowed only to hear updates of the team's account and
 //! answer them, it brings the leaf every account `ants auth push` sends the hub, revocations included. The leaf keeps
 //! accounts in a `full` resolver of its own, so the last one pushed outlives restarts with an older `server.conf`.
+//! That resolver also asks the hub's, if the hub runs a `full` one, for its accounts every [`RESOLVER_SYNC`], so a leaf
+//! offline during a push catches up once it reconnects.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -28,6 +30,10 @@ use serde_json::Value;
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4222";
 /// nats-server's own default for a remote without a port; written out so the file says where it goes.
 const LEAFNODE_PORT: u16 = 7422;
+
+/// How often the leaf's resolver asks the hub's for accounts newer than its own: at most that long after reconnecting,
+/// a leaf applies the pushes it missed. The hub answers with nothing while their accounts match, so this costs little.
+const RESOLVER_SYNC: &str = "10s";
 
 /// A machine's leaf node.
 pub struct Leaf<'a> {
@@ -171,8 +177,9 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
          ping_interval: \"20s\"\n\
          include {include}\n\
          # Keeps the team's account as last pushed (`ants auth push`, through the hub and the system account's uplink)\n\
-         # across restarts and reloads, even with an older server.conf.\n\
-         resolver {{ type: full, dir: {jwt} }}\n\
+         # across restarts and reloads, even with an older server.conf, and every {sync} asks a hub with a full\n\
+         # resolver for a newer one, missed while the uplink was down.\n\
+         resolver {{ type: full, dir: {jwt}, interval: {sync_quoted} }}\n\
          # Only for the outbox, which keeps what the hub could not take while the uplink was down; clients reach the\n\
          # hub's JetStream through its domain.\n\
          jetstream {{\n  domain: {name}\n  store_dir: {store}\n  max_memory_store: 64MB\n  max_file_store: 1GB\n}}\n\
@@ -183,6 +190,8 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
         include = quote(&include.to_string_lossy()),
         store = quote(&dir.join("jetstream").to_string_lossy()),
         jwt = quote(&dir.join("jwt").to_string_lossy()),
+        sync = RESOLVER_SYNC,
+        sync_quoted = quote(RESOLVER_SYNC),
     ))
 }
 
@@ -445,7 +454,8 @@ mod tests {
         let text = render(&Leaf { system_creds: Some(&system), ..leaf(&tcp, &creds, &server_conf) }, &dir).unwrap();
         assert_eq!(text.matches("urls: [\"nats-leaf://127.0.0.1:7422\"]").count(), 2, "{text}");
         let jwt = normalize(&dir).unwrap().join("jwt");
-        assert!(text.contains(&format!("resolver {{ type: full, dir: {} }}", quote(&jwt.to_string_lossy()))), "{text}");
+        let resolver = format!("resolver {{ type: full, dir: {}, interval: \"10s\" }}", quote(&jwt.to_string_lossy()));
+        assert!(text.contains(&resolver), "{text}");
         let conf = dir.join("leaf.conf");
         fs::write(&conf, &text).unwrap();
         assert_eq!(read_uplink(&conf).unwrap(), (M1.clone(), normalize(&creds).unwrap()), "the team's uplink first");
@@ -594,75 +604,129 @@ mod tests {
         Ok((client, rx))
     }
 
-    /// A revocation pushed to the hub reaches a leaf node through its system account uplink, with no server.conf
-    /// copied: the leaf closes the revoked ant's connection and refuses it, also once restarted on its older
-    /// server.conf.
-    #[tokio::test]
-    async fn a_revocation_pushed_to_the_hub_reaches_the_leaf_and_outlives_its_restart() {
-        let leaf_port = free_port();
-        let Some(hub) = NatsServer::spawn_with(|dir| {
-            auth::init(&dir.join("auth")).unwrap();
-            format!(
-                "include \"auth/{}\"\nleafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",
-                auth::SERVER_CONF
-            )
-        }) else {
-            return;
-        };
-        let team = hub.dir().join("auth");
-        let (dev_a, dev_b) = ("dev-a".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
-        let creds = |user: &UserId| {
-            let out = hub.dir().join(format!("{user}.creds"));
-            auth::issue(&team, user, Role::Ant, None, &out).unwrap();
-            out
-        };
-        let (a, b) = (creds(&dev_a), creds(&dev_b));
-        let leaf_creds = hub.dir().join("leaf-m1.creds");
-        let members = [(dev_a.clone(), Role::Ant), (dev_b.clone(), Role::Ant)];
-        auth::issue_leaf(&team, &M1, &members, &[], false, None, &leaf_creds).unwrap();
+    /// A hub, with a `full` resolver or not, the team's directory in it, credentials of dev-a and dev-b, and the files
+    /// of m1's leaf node joined to the hub's system account, which outlive the leaf's process, to restart it; the leaf
+    /// has its own copy of server.conf.
+    struct Revocable {
+        hub: NatsServer,
+        team: PathBuf,
+        a: PathBuf,
+        b: PathBuf,
+        files: PathBuf,
+    }
 
-        // The leaf's files outlive its process, to restart it; it has its own copy of server.conf.
-        let files = scratch_dir("leaf-files");
-        let server_conf = files.join(auth::SERVER_CONF);
-        fs::copy(team.join(auth::SERVER_CONF), &server_conf).unwrap();
-        let (uplinks, listen) = ([format!("nats-leaf://127.0.0.1:{leaf_port}")], format!("127.0.0.1:{}", free_port()));
-        let system_creds = auth::leaf_system_creds(&leaf_creds);
-        let config =
-            Leaf { system_creds: Some(&system_creds), listen: &listen, ..leaf(&uplinks, &leaf_creds, &server_conf) };
-        write(&config, &files.join("leaf.conf")).unwrap();
-        let start = || {
+    impl Revocable {
+        fn new(full_resolver: bool) -> Option<Self> {
+            let leaf_port = free_port();
+            let hub = NatsServer::spawn_with(|dir| {
+                auth::init(&dir.join("auth")).unwrap();
+                let resolver = match full_resolver {
+                    true => format!("resolver {{ type: full, dir: {} }}\n", quote(&dir.join("jwt").to_string_lossy())),
+                    false => String::new(),
+                };
+                format!(
+                    "include \"auth/{}\"\n{resolver}leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",
+                    auth::SERVER_CONF
+                )
+            })?;
+            let team = hub.dir().join("auth");
+            let (dev_a, dev_b) = ("dev-a".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
+            let creds = |user: &UserId| {
+                let out = hub.dir().join(format!("{user}.creds"));
+                auth::issue(&team, user, Role::Ant, None, &out).unwrap();
+                out
+            };
+            let (a, b) = (creds(&dev_a), creds(&dev_b));
+            let leaf_creds = hub.dir().join("leaf-m1.creds");
+            let members = [(dev_a, Role::Ant), (dev_b, Role::Ant)];
+            auth::issue_leaf(&team, &M1, &members, &[], false, None, &leaf_creds).unwrap();
+
+            let files = scratch_dir("leaf-files");
+            let server_conf = files.join(auth::SERVER_CONF);
+            fs::copy(team.join(auth::SERVER_CONF), &server_conf).unwrap();
+            let (uplinks, listen) =
+                ([format!("nats-leaf://127.0.0.1:{leaf_port}")], format!("127.0.0.1:{}", free_port()));
+            let system_creds = auth::leaf_system_creds(&leaf_creds);
+            let config = Leaf {
+                system_creds: Some(&system_creds),
+                listen: &listen,
+                ..leaf(&uplinks, &leaf_creds, &server_conf)
+            };
+            write(&config, &files.join("leaf.conf")).unwrap();
+            Some(Self { hub, team, a, b, files })
+        }
+
+        fn start_leaf(&self) -> NatsServer {
             NatsServer::spawn_with(|dir| {
-                let include = relative(&normalize(dir).unwrap(), &normalize(&files.join("leaf.conf")).unwrap());
+                let include = relative(&normalize(dir).unwrap(), &normalize(&self.files.join("leaf.conf")).unwrap());
                 format!("include {}\n", quote(&include.unwrap().to_string_lossy()))
             })
             .unwrap()
-        };
-        let leaf_node = start();
-        let pushed_to_leaf = async || {
+        }
+
+        /// The leaf nodes that applied a push, once one has: their system account uplink is up.
+        async fn pushed_to_leaf(&self) -> Vec<(String, Option<String>)> {
             for _ in 0..50 {
-                let pushed = crate::revoke::push(&hub.url, &team).await.unwrap();
+                let pushed = crate::revoke::push(&self.hub.url, &self.team).await.unwrap();
                 if !pushed.others.is_empty() {
                     return pushed.others;
                 }
             }
             panic!("the leaf never heard a push");
-        };
-        assert_eq!(pushed_to_leaf().await, [("m1".to_owned(), None)]);
+        }
+    }
 
-        let (_a_client, mut a_closed) = watched(&leaf_node.url, &a).await.unwrap();
-        let (b_client, mut b_closed) = watched(&leaf_node.url, &b).await.unwrap();
-        crate::revoke::revoke(&team, Some("dev-a"), &[]).unwrap();
-        let pushed = crate::revoke::push(&hub.url, &team).await.unwrap();
+    impl Drop for Revocable {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.files);
+        }
+    }
+
+    /// A revocation pushed to the hub reaches a leaf node through its system account uplink, with no server.conf
+    /// copied: the leaf closes the revoked ant's connection and refuses it, also once restarted on its older
+    /// server.conf.
+    #[tokio::test]
+    async fn a_revocation_pushed_to_the_hub_reaches_the_leaf_and_outlives_its_restart() {
+        let Some(team) = Revocable::new(false) else { return };
+        let leaf_node = team.start_leaf();
+        assert_eq!(team.pushed_to_leaf().await, [("m1".to_owned(), None)]);
+
+        let (_a_client, mut a_closed) = watched(&leaf_node.url, &team.a).await.unwrap();
+        let (b_client, mut b_closed) = watched(&leaf_node.url, &team.b).await.unwrap();
+        crate::revoke::revoke(&team.team, Some("dev-a"), &[]).unwrap();
+        let pushed = crate::revoke::push(&team.hub.url, &team.team).await.unwrap();
         assert_eq!(pushed.others, [("m1".to_owned(), None)]);
         timeout(Duration::from_secs(5), a_closed.recv()).await.expect("dev-a's connection to the leaf stays open");
-        assert!(watched(&leaf_node.url, &a).await.is_err(), "the leaf still takes dev-a's credentials");
+        assert!(watched(&leaf_node.url, &team.a).await.is_err(), "the leaf still takes dev-a's credentials");
         b_client.flush().await.unwrap();
         assert!(b_closed.try_recv().is_err(), "dev-b's connection was closed");
 
         drop((b_client, leaf_node));
-        let leaf_node = start();
-        assert!(watched(&leaf_node.url, &b).await.is_ok(), "the restarted leaf refuses dev-b");
-        assert!(watched(&leaf_node.url, &a).await.is_err(), "the restarted leaf forgot dev-a's revocation");
-        let _ = fs::remove_dir_all(&files);
+        let leaf_node = team.start_leaf();
+        assert!(watched(&leaf_node.url, &team.b).await.is_ok(), "the restarted leaf refuses dev-b");
+        assert!(watched(&leaf_node.url, &team.a).await.is_err(), "the restarted leaf forgot dev-a's revocation");
+    }
+
+    /// A leaf node down while a revocation is pushed to a hub with a `full` resolver catches up once back, with no
+    /// other push: its resolver gets the account from the hub's, closes the revoked ant's connection and refuses it.
+    #[tokio::test]
+    async fn a_leaf_offline_during_a_push_catches_up_from_a_hub_with_a_full_resolver() {
+        let Some(team) = Revocable::new(true) else { return };
+        let leaf_node = team.start_leaf();
+        assert_eq!(team.pushed_to_leaf().await, [("m1".to_owned(), None)]);
+        drop(leaf_node);
+
+        crate::revoke::revoke(&team.team, Some("dev-a"), &[]).unwrap();
+        let pushed = crate::revoke::push(&team.hub.url, &team.team).await.unwrap();
+        assert_eq!(pushed.others, [], "the stopped leaf heard the push");
+
+        let leaf_node = team.start_leaf();
+        let (_a_client, mut a_closed) =
+            watched(&leaf_node.url, &team.a).await.expect("the restarted leaf knew of the revocation already");
+        let (b_client, mut b_closed) = watched(&leaf_node.url, &team.b).await.unwrap();
+        timeout(Duration::from_secs(30), a_closed.recv()).await.expect("dev-a's connection to the leaf stays open");
+        assert!(watched(&leaf_node.url, &team.a).await.is_err(), "the leaf still takes dev-a's credentials");
+        b_client.flush().await.unwrap();
+        assert!(b_closed.try_recv().is_err(), "dev-b's connection was closed");
     }
 }

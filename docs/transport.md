@@ -35,21 +35,25 @@ feature_flags {
   js_api_reply_v2: true
 }
 include "server.conf"
+resolver { type: full, dir: "/var/lib/ants/jwt" }
 ```
 
 - `include "server.conf"` resolves relative to the config directory even if prefixed with `/`. Copy `server.conf` (`ants auth init`) next to the hub config; it configures operator/account trust and `max_control_line: 16384` so permission JWTs fit in `CONNECT`.
 - `websocket` routes paths ending in `/leafnode` to leaf connections, `/mqtt` to MQTT, and any other path (such as `/nats`) to client connections. WebSocket and TCP clients authenticate identically with `.creds`.
 - `leafnodes { no_advertise: true }` stops the hub from advertising `127.0.0.1:7422` to leaves, keeping reconnects on the proxy or tunnel address (likewise set `no_advertise: true` on clustered hubs or client WebSocket blocks).
+- `resolver { type: full, dir: "..." }`, after the include, replaces `server.conf`'s `MEMORY` resolver: the hub keeps the accounts pushed to it in that directory and hands them to leaf nodes that missed a push (see [Revocation](#revocation)). A hub running without it needs a restart to take it (a change of resolver is not reloadable).
 - `feature_flags { js_api_reply_v2: true }` scopes JetStream source control replies to `$JSC.R.<machine>.*.ANTS_OUT.>`, required for hub outbox sourcing under scoped leaf credentials.
 
 ### Revocation
 
-`server.conf` preloads the team's account JWT into a `MEMORY` resolver. `ants auth revoke NAME` (or `--key U...`) adds the user keys to the account's `revocations` (key to revocation time; JWTs of the key issued at or before it are refused), rewrites `server.conf` keeping its operator JWT (nats-server reloads no change of the trusted operator), and pushes the account JWT to the `--nats` server:
+`server.conf` preloads the team's account JWT into a `MEMORY` resolver, or into the `full` resolver configured after it. `ants auth revoke NAME` (or `--key U...`) adds the user keys to the account's `revocations` (key to revocation time; JWTs of the key issued at or before it are refused), rewrites `server.conf` keeping its operator JWT (nats-server reloads no change of the trusted operator), and pushes the account JWT to the `--nats` server:
 
 - **Push:** a user of the system account, signed with `system.nk` for ten minutes, requests `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE`; the server applies the account at once and closes the revoked users' connections. Pointed at a leaf node, the push updates that leaf only. An unreachable server leaves the revocation recorded in `revoked.json` and `server.conf`; `ants auth push` retries. Hubs on a `server.conf` from before revocations (whose system account allows no connection) need the new one copied and reloaded first.
-- **Leaf nodes:** a leaf node configured with the system account credentials `ants auth leaf` writes beside its uplink's (`leaf-<machine>.system.creds`) joins the hub's system account through a second uplink, hears the pushed account and applies it at once, closing the revoked users' local connections. The push lists the leaf nodes that applied it (by server name, the machine). Their `full` resolver (`resolver { type: full, dir: ".../jwt" }`) stores the pushed account, so a restart or reload with an older `server.conf` keeps the revocations; a newer `server.conf` replaces it. The system account uplink may only subscribe to `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` and publish answers on `_INBOX.ants-push.>`, and only as a leaf node connection. A leaf node not connected during the push misses it: run `ants auth push` again once it is, or copy it the new `server.conf`. The hub needs a `server.conf` whose system account allows leaf connections (one written by `ants auth init`, `revoke` or `push` since this uplink exists) copied and reloaded first. Leaf nodes configured before this second uplink existed need `ants auth leaf` and `ants leaf config` run again and a restart (a change of resolver is not reloadable).
-- **Reload:** copying the new `server.conf` over the hub's or a leaf's and sending `SIGHUP` applies the revocations too, also closing connections. Copy it to the hub in any case: the hub keeps its account in memory only, and a restart otherwise loads the old one. A leaf node without a system account uplink authenticates its local clients against its own copy, so a revoked ant behind it keeps working through its uplink until it reloads a new `server.conf` (or its uplink credentials are reissued without the ant).
-- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink at the hub. Its system account uplink stays, as revocations apply to the team's account only; it hears account updates and nothing else.
+- **Leaf nodes:** a leaf node configured with the system account credentials `ants auth leaf` writes beside its uplink's (`leaf-<machine>.system.creds`) joins the hub's system account through a second uplink, hears the pushed account and applies it at once, closing the revoked users' local connections. The push lists the leaf nodes that applied it (by server name, the machine). Their `full` resolver (`resolver { type: full, dir: ".../jwt", interval: "10s" }`) stores the pushed account, so a restart or reload with an older `server.conf` keeps the revocations; a newer `server.conf` replaces it. The hub needs a `server.conf` whose system account allows leaf connections (one written by `ants auth init`, `revoke` or `push` since this uplink exists) copied and reloaded first. Leaf nodes configured before this second uplink existed need `ants auth leaf` and `ants leaf config` run again and a restart (a change of resolver is not reloadable).
+- **Catching up:** every 10 s (the resolver's `interval`; every minute in a `leaf.conf` written without it) a leaf node's resolver sends `$SYS.REQ.CLAIMS.PACK` with a hash of its accounts; a hub with a `full` resolver (see [Hub](#hub)) answers with its own when they differ, and the leaf keeps those newer than its own. A leaf node not connected during a push thus applies it within 10 s of reconnecting, closing the revoked users' local connections, with no other push. Behind a hub without a `full` resolver, a leaf node not connected during the push misses it: run `ants auth push` again once it is, or copy it the new `server.conf`.
+- **System account uplink permissions:** it may subscribe only to `$SYS.REQ.ACCOUNT.<account>.CLAIMS.UPDATE` and to the leaf's own system inbox (`$SYS._INBOX.<hash of the machine name>.*`, where the answers to its resolver arrive), and publish only answers on `_INBOX.ants-push.>` and `$SYS.REQ.CLAIMS.PACK`, and only as a leaf node connection. System account credentials issued before catching up existed lack the inbox and `$SYS.REQ.CLAIMS.PACK`: renew them with `ants auth leaf` and restart the leaf node.
+- **Reload:** copying the new `server.conf` over the hub's or a leaf's and sending `SIGHUP` applies the revocations too, also closing connections. Copy it to a hub without a `full` resolver in any case: such a hub keeps its account in memory only, and a restart otherwise loads the old one. A leaf node without a system account uplink authenticates its local clients against its own copy, so a revoked ant behind it keeps working through its uplink until it reloads a new `server.conf` (or its uplink credentials are reissued without the ant).
+- **Uplinks:** revoking `leaf-<machine>` drops that leaf's uplink at the hub. Its system account uplink stays, as revocations apply to the team's account only; it carries account updates and nothing else.
 
 ## Reverse proxy
 
@@ -97,7 +101,7 @@ server_name: "macbook"
 listen: "127.0.0.1:4222"
 ping_interval: "20s"
 include "auth/server.conf"
-resolver { type: full, dir: "/Users/alice/.config/ants/jwt" }
+resolver { type: full, dir: "/Users/alice/.config/ants/jwt", interval: "10s" }
 jetstream {
   domain: "macbook"
   store_dir: "/Users/alice/.config/ants/jetstream"
@@ -125,7 +129,7 @@ leafnodes {
 - `--listen` accepts loopback addresses only (default `127.0.0.1:4222`).
 - Explicit ports (`443`, `80`, `7422`) are always written because `nats-server` defaults portless remote URLs to `7422`.
 - Multiple `--uplink` URLs must share one scheme. `tls://` and `wss://` always emit `tls {}` (or `tls { ca_file: "..." }`), preventing plaintext fallback and satisfying `nats-server` when `proxy { url: "..." }` is set. `--proxy` takes `http://host:port` or `https://host:port` without credentials.
-- The second remote joins the hub's system account with `--system-creds` (default: `leaf-<machine>.system.creds` beside the uplink credentials, when present), so account pushes reach the leaf (see [Revocation](#revocation)). The `full` resolver after the include overrides `server.conf`'s `MEMORY` one and keeps the last pushed account in `jwt/` beside `leaf.conf`.
+- The second remote joins the hub's system account with `--system-creds` (default: `leaf-<machine>.system.creds` beside the uplink credentials, when present), so account pushes reach the leaf (see [Revocation](#revocation)). The `full` resolver after the include overrides `server.conf`'s `MEMORY` one and keeps the last pushed account in `jwt/` beside `leaf.conf`; every 10 s it asks the hub's resolver for newer accounts, to catch up on pushes made while the uplink was down.
 - Switch uplinks by rerunning `ants leaf config` and sending `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/ants.nats` or `systemctl --user reload ants-nats`); local clients stay connected.
 
 ### JetStream domain
