@@ -16,7 +16,8 @@ use ants_proto::{
     ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, NotesPost, ThreadId, UserId, Uuid,
     subject,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -25,6 +26,10 @@ use crate::tools;
 
 /// How long the opening message's line in `ants thread list` may be.
 const OPENING: usize = 72;
+/// How far back a start of a thread id looks for the threads of the CLI's user.
+pub const RECENT: Duration = Duration::from_hours(7 * 24);
+/// How many threads an error on a start of a thread id lists.
+const LISTED: usize = 10;
 
 /// What a stored message on a thread is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -406,6 +411,146 @@ pub async fn scan(js: &jetstream::Context, start: consumer::DeliverPolicy, mut t
     .await
 }
 
+/// What a THREAD argument or `--thread` picks: a whole thread id (a UUID), taken as given; a start of one (or a whole
+/// id of another form), among the threads the CLI's user took part in lately ([`RECENT`]); or `last`, the thread of
+/// the latest message to or from that user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    Id(ThreadId),
+    Prefix(String),
+    Last,
+}
+
+impl std::str::FromStr for Pick {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        if text == "last" {
+            return Ok(Self::Last);
+        }
+        if Uuid::try_parse(&text).is_ok_and(|id| id.hyphenated().to_string() == text) {
+            return Ok(Self::Id(text.parse()?));
+        }
+        match text.parse::<ThreadId>() {
+            Ok(_) => Ok(Self::Prefix(text)),
+            Err(_) => bail!("{text} is no thread id, start of one or `last`"),
+        }
+    }
+}
+
+impl Pick {
+    /// The thread this picks for `me`, reading the stream with `js` unless given a whole thread id. Only a human's
+    /// credentials get stream messages by sequence, so only a human picks by a start of an id or `last`.
+    pub async fn resolve(self, js: &jetstream::Context, me: &crate::humans::Me) -> Result<ThreadId> {
+        let prefix = match self {
+            Self::Id(thread) => return Ok(thread),
+            Self::Prefix(prefix) => Some(prefix),
+            Self::Last => None,
+        };
+        if !me.role.is_human() {
+            bail!("the credentials of {} are an ant's, which read no thread back: give the whole thread id", me.id);
+        }
+        match prefix {
+            Some(prefix) => select(&recent(js, &me.id, window(RECENT)).await?, &prefix, &me.id),
+            None => last(js, &me.id).await,
+        }
+    }
+}
+
+/// [`Pick::resolve`] for an optional pick.
+pub async fn resolve(pick: Option<Pick>, js: &jetstream::Context, me: &crate::humans::Me) -> Result<Option<ThreadId>> {
+    match pick {
+        Some(pick) => Ok(Some(pick.resolve(js, me).await?)),
+        None => Ok(None),
+    }
+}
+
+/// The subjects of the messages `user` took part in: its inbox both ways, its channel posts and its notes posts.
+fn own_subjects(user: &UserId) -> [String; 4] {
+    [subject::inbox_of(user), subject::inbox_from(user), subject::chan_from(user), subject::notes_from(user)]
+}
+
+/// The thread of the latest message to or from `user` ([`own_subjects`]), however old.
+async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
+    let stream = js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream")?;
+    let mut parser = Parser::default();
+    let mut latest: Option<Entry> = None;
+    for filter in own_subjects(user) {
+        let msg = match stream.get_last_raw_message_by_subject(&filter).await {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading the last message on {filter}")),
+        };
+        let stored = DateTime::<Utc>::from(SystemTime::from(msg.time));
+        let entry = parser.entry(msg.sequence, stored, &msg.subject, &msg.payload).filter(|e| !e.forged);
+        if let Some(entry) = entry.filter(|e| latest.as_ref().is_none_or(|l| l.seq < e.seq)) {
+            latest = Some(entry);
+        }
+    }
+    latest.map(|e| e.thread_id).ok_or_else(|| anyhow!("no message to or from {user} in the stream, so no last thread"))
+}
+
+/// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first.
+async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::DeliverPolicy) -> Result<Vec<Entry>> {
+    let mut parser = Parser::default();
+    let mut latest: HashMap<ThreadId, Entry> = HashMap::new();
+    for filter in own_subjects(user) {
+        reading::read_back(js, "", Reading::Gets, &filter, start, |seq, stored, subject, payload| {
+            if let Some(entry) = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged) {
+                match latest.get(&entry.thread_id) {
+                    Some(kept) if kept.seq > entry.seq => {}
+                    _ => _ = latest.insert(entry.thread_id.clone(), entry),
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .await?;
+    }
+    let mut threads: Vec<Entry> = latest.into_values().collect();
+    threads.sort_by_key(|e| std::cmp::Reverse(e.seq));
+    Ok(threads)
+}
+
+/// The one thread among `threads` (the latest message of each, most recent first) whose id is `prefix`, else starts
+/// with it. The error on none or several lists the threads to choose from.
+fn select(threads: &[Entry], prefix: &str, user: &UserId) -> Result<ThreadId> {
+    if let Some(exact) = threads.iter().find(|e| e.thread_id.as_str() == prefix) {
+        return Ok(exact.thread_id.clone());
+    }
+    let found: Vec<&Entry> = threads.iter().filter(|e| e.thread_id.as_str().starts_with(prefix)).collect();
+    let days = RECENT.as_secs() / 86_400;
+    match found.as_slice() {
+        [one] => Ok(one.thread_id.clone()),
+        [] if threads.is_empty() => {
+            bail!("no thread {user} took part in over the last {days} days: give the whole thread id")
+        }
+        [] => bail!(
+            "no thread {user} took part in over the last {days} days starts with {prefix}; give the whole id of an \
+             older one, or pick one of the most recent:\n{}",
+            listing(threads.iter())
+        ),
+        _ => bail!(
+            "{} threads {user} took part in over the last {days} days start with {prefix}; give more of the id:\n{}",
+            found.len(),
+            listing(found.iter().copied())
+        ),
+    }
+}
+
+/// Threads as an error lists them, one per line: id, time and route of the latest message, and its first line.
+fn listing<'a>(threads: impl ExactSizeIterator<Item = &'a Entry>) -> String {
+    let more = threads.len().saturating_sub(LISTED);
+    let mut lines: Vec<String> = threads
+        .take(LISTED)
+        .map(|e| format!("  {}  {}  {}: {}", e.thread_id, time(e.stored_at), e.route(), crate::excerpt(&e.text, 48)))
+        .collect();
+    if more > 0 {
+        lines.push(format!("  and {more} more"));
+    }
+    lines.join("\n")
+}
+
 /// Connect as the CLI's human: only a human's credentials get stream messages by sequence.
 async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
     if !nats.me.role.is_human() {
@@ -439,9 +584,10 @@ pub async fn list(nats: &crate::Nats<'_>, since: Duration, select: &Select, json
     Ok(())
 }
 
-/// `ants thread show THREAD`: every message stored on `thread`, in the order the stream stored them.
-pub async fn show(nats: &crate::Nats<'_>, thread: &ThreadId, since: Option<Duration>, json: bool) -> Result<()> {
+/// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
+pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
     let js = connect(nats).await?;
+    let thread = &pick.resolve(&js, &nats.me).await?;
     let mut entries = Vec::new();
     scan(&js, show_start(thread, since), |entry| {
         if entry.thread_id == *thread {
@@ -624,6 +770,82 @@ mod tests {
             consumer::DeliverPolicy::ByStartTime { .. }
         );
         assert_matches!(window(Duration::ZERO), consumer::DeliverPolicy::All);
+    }
+
+    #[test]
+    fn a_pick_is_a_whole_uuid_a_start_of_an_id_or_last() {
+        let id = ThreadId::generate();
+        let pick = |s: &str| s.parse::<Pick>();
+        assert_eq!(pick(&id.as_str().to_uppercase()).unwrap(), Pick::Id(id.clone()));
+        assert_eq!(pick(&id.as_str()[..8]).unwrap(), Pick::Prefix(id.as_str()[..8].to_owned()));
+        assert_eq!(pick("t1").unwrap(), Pick::Prefix("t1".to_owned()));
+        assert_eq!(pick("LAST").unwrap(), Pick::Last);
+        assert!(pick("no_such").is_err());
+    }
+
+    #[test]
+    fn a_start_of_an_id_picks_one_recent_thread_or_lists_them() {
+        let alice = p("alice");
+        let entry = |thread: &str, secs| Entry {
+            from: Some(alice.clone()),
+            to: Some(p("dev-a")),
+            text: format!("on {thread}\nmore"),
+            ..Entry::new(secs as u64, at(secs), Kind::Message, t(thread))
+        };
+        // The latest message of each thread, most recent first.
+        let threads = [entry("ab12", 3), entry("ab1", 2), entry("cd34", 1)];
+        assert_eq!(select(&threads, "ab1", &alice).unwrap(), t("ab1"), "a whole id wins");
+        assert_eq!(select(&threads, "c", &alice).unwrap(), t("cd34"));
+
+        let several = select(&threads, "ab", &alice).unwrap_err().to_string();
+        assert!(several.starts_with("2 threads alice took part in over the last 7 days start with ab"), "{several}");
+        assert!(several.contains("\n  ab12  2023-11-14 22:13:23  alice -> dev-a: on ab12…\n  ab1  "), "{several}");
+        assert!(!several.contains("cd34"), "{several}");
+
+        let none = select(&threads, "ef", &alice).unwrap_err().to_string();
+        assert!(none.contains("starts with ef; give the whole id of an older one"), "{none}");
+        assert!(none.contains("\n  ab12 ") && none.contains("\n  cd34 "), "{none}");
+        let many: Vec<Entry> = (0..12).map(|i| entry(&format!("t{i}"), i)).collect();
+        assert!(select(&many, "x", &alice).unwrap_err().to_string().ends_with("\n  and 2 more"));
+        assert!(select(&[], "ab", &alice).unwrap_err().to_string().contains("give the whole thread id"));
+    }
+
+    #[tokio::test]
+    async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+        let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        ants_daemon::bus::init_stream(&js).await.unwrap();
+        let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+        let resolve = |pick: &str| pick.parse::<Pick>().unwrap().resolve(&js, &me);
+        assert!(resolve("last").await.unwrap_err().to_string().contains("no message to or from alice"));
+
+        let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+        let posted = ChannelPost::new("ops".parse().unwrap(), alice.clone(), "deploy?");
+        let others = Envelope::new(dev_a.clone(), dev_b.clone(), "between ants");
+        let reply = asked.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+        for (subject, payload) in [
+            (asked.subject(), json(&asked)),
+            (posted.subject(), json(&posted)),
+            (reply.subject(), json(&reply)),
+            (others.subject(), json(&others)),
+        ] {
+            js.publish(subject, payload.into()).await.unwrap().await.unwrap();
+        }
+
+        assert_eq!(resolve("last").await.unwrap(), asked.thread_id, "the reply is the latest of alice's");
+        let start = |thread: &ThreadId| thread.as_str()[..thread.as_str().len() - 4].to_owned();
+        assert_eq!(resolve(&start(&posted.thread_id)).await.unwrap(), posted.thread_id);
+        let unknown = resolve(&start(&others.thread_id)).await.unwrap_err().to_string();
+        assert!(unknown.contains(&format!("\n  {} ", asked.thread_id)), "{unknown}");
+        assert!(unknown.contains(&format!("\n  {} ", posted.thread_id)), "{unknown}");
+        assert!(!unknown.contains(&format!("\n  {} ", others.thread_id)), "{unknown}");
+        // A whole id needs no read, whoever's thread it is.
+        assert_eq!(resolve(others.thread_id.as_str()).await.unwrap(), others.thread_id);
+
+        let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
+        let refused = Pick::Last.resolve(&js, &ant).await.unwrap_err().to_string();
+        assert!(refused.contains("give the whole thread id"), "{refused}");
     }
 
     #[tokio::test]
