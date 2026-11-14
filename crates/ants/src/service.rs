@@ -152,7 +152,7 @@ impl Services {
     }
 
     /// The services under `home` of this platform's manager, answering commands with `answer`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn answering(home: &Path, answer: impl Fn(&str) -> Ran + 'static) -> Self {
         let manager = if cfg!(target_os = "macos") { Manager::Launchd } else { Manager::Systemd };
         let run = move |args: &[&str]| Ok(answer(&args.join(" ")));

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 /// How often the config file is checked for a change.
 pub const CHECK_EVERY: Duration = Duration::from_secs(3);
@@ -126,6 +126,7 @@ impl Hangup {
     fn new() -> Result<Self> {
         #[cfg(unix)]
         {
+            use anyhow::Context as _;
             use tokio::signal::unix::{SignalKind, signal};
             Ok(Self(signal(SignalKind::hangup()).context("listening for SIGHUP")?))
         }

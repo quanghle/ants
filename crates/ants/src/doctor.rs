@@ -1812,17 +1812,20 @@ mod tests {
         assert!(!same_address("wss://hub.example/nats", "127.0.0.1:4222"));
     }
 
+    #[cfg(unix)]
     fn private(path: &Path, text: &str) {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::write(path, text).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    #[cfg(unix)]
     fn chmod(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    #[cfg(unix)]
     /// The unit files scripts/install-units.sh writes for `args`, installed under `home` for this platform's
     /// manager; false where it has none.
     fn install_units(home: &Path, args: &[&str]) -> bool {
@@ -1844,6 +1847,7 @@ mod tests {
         true
     }
 
+    #[cfg(unix)]
     /// The services under `home`, every one running.
     fn running(home: &Path) -> Services {
         Services::answering(home, |command| {
@@ -1856,17 +1860,20 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     async fn transports(home: &Path) -> Vec<Check> {
         let installed = installed_transports(&mut running(home));
         check_transports(installed, auth::now().unwrap()).await
     }
 
+    #[cfg(unix)]
     fn one<'a>(checks: &'a [Check], name: &str) -> &'a Check {
         let found = named(checks, name);
         assert_eq!(found.len(), 1, "one {name} check: {checks:#?}");
         found[0]
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dev_tunnel_needs_a_login_or_a_connect_token_far_from_expiring() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1934,6 +1941,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
         let home = ants_test_support::scratch_dir("doctor-bridge").canonicalize().unwrap();
@@ -1990,6 +1998,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_webhook_config_needs_private_secrets_and_a_public_url_reaching_it() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
