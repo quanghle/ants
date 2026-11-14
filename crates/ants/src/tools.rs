@@ -24,6 +24,9 @@
 //! Request ids are unique only per ant: any ant can publish a request reusing another's id. So a request is
 //! written `<ant>/<id>`, and a bare id (or start of one) matching requests of several ants is refused with
 //! the qualified ids to choose from.
+//!
+//! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
+//! how each ends.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -242,6 +245,15 @@ async fn state_at(
 /// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human or an agent
 /// of the ant's escalate_to.
 pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
+    Ok(pending_at(js, stream, now).await?.into_iter().map(|(_, request)| request).collect())
+}
+
+/// [`pending`], each with its stream sequence.
+async fn pending_at(
+    js: &jetstream::Context,
+    stream: &Stream,
+    now: DateTime<Utc>,
+) -> Result<Vec<(u64, ApprovalRequest)>> {
     let mut undecided = Vec::new();
     for (seq, request) in requests(stream).await? {
         // Expired ones need no decision lookup.
@@ -261,8 +273,7 @@ pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc
     }
     Ok(undecided
         .into_iter()
-        .map(|(_, request)| request)
-        .filter(|r| decided.get(&r.ant).and_then(|d| d.get(&r.id)).and_then(|d| d.on(r)).is_none())
+        .filter(|(_, r)| decided.get(&r.ant).and_then(|d| d.get(&r.id)).and_then(|d| d.on(r)).is_none())
         .collect())
 }
 
@@ -517,10 +528,202 @@ fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> Stri
     out
 }
 
+/// What following the tool requests reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    /// A request waiting for a decision: pending when following started, or new since.
+    Pending(ApprovalRequest),
+    /// How a request reported pending ended: decided, or expired.
+    Resolved(ApprovalRequest, State),
+}
+
+/// A request reported pending and not resolved yet.
+struct Open {
+    /// Its stream sequence, once read: a request heard live is looked up in the stream when its state is needed.
+    seq: Option<u64>,
+    request: ApprovalRequest,
+    /// When to look again at a request that was still pending right after word of a decision on it came, as that
+    /// word may come before the stream stores the decision.
+    recheck: Option<DateTime<Utc>>,
+}
+
+/// How long after word of a decision a request still pending is looked at again.
+const RECHECK: TimeDelta = TimeDelta::seconds(1);
+
+/// Report the pending requests, then each new one and how each reported one ends, until the connection closes. Word
+/// of a decision comes on the decision subjects (a human's) and in the inbox of each ant with a request reported (an
+/// agent's of its escalate_to); a request is looked at again when one names it, and when it expires.
+pub async fn follow(
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    mut report: impl FnMut(&Update) -> Result<()>,
+) -> Result<()> {
+    let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+    // A request heard live is stored after this.
+    let stored = stream.cached_info().state.last_sequence;
+    // Subscribe before listing, so a request or decision published in between is not missed.
+    let mut asked = client.subscribe(subject::ALL_APPROVAL_REQUESTS).await.context("following tool requests")?;
+    let mut decided = client.subscribe(subject::ALL_APPROVAL_DECISIONS).await.context("following decisions")?;
+    let mut inboxes = futures::stream::SelectAll::new();
+    let mut heard = std::collections::HashSet::new();
+    let mut reported = std::collections::HashSet::new();
+    let mut open: Vec<Open> = Vec::new();
+    let mut fresh: Vec<_> =
+        Box::pin(pending_at(js, &stream, Utc::now())).await?.into_iter().map(|(seq, r)| (Some(seq), r)).collect();
+    loop {
+        for (seq, request) in fresh.drain(..) {
+            if !reported.insert((request.ant.clone(), request.id)) {
+                continue;
+            }
+            if heard.insert(request.ant.clone()) {
+                let inbox = subject::inbox_of(&request.ant);
+                inboxes.push(client.subscribe(inbox).await.context("following decisions of agents")?);
+            }
+            report(&Update::Pending(request.clone()))?;
+            open.push(Open { seq, request, recheck: None });
+        }
+        let wake = open.iter().map(|o| o.recheck.unwrap_or(o.request.expires_at)).min();
+        let wake = async {
+            match wake {
+                Some(at) => tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await,
+                None => std::future::pending().await,
+            }
+        };
+        let mut named = None;
+        tokio::select! {
+            msg = asked.next() => {
+                let Some(msg) = msg else { return Ok(()) };
+                match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
+                    Ok(request) => match request.check_subject(&msg.subject) {
+                        Err(e) => tracing::warn!(error = %e, "skipping a request for another ant"),
+                        Ok(()) if !request.is_expired(Utc::now()) => fresh.push((None, request)),
+                        Ok(()) => {}
+                    },
+                    Err(e) => tracing::warn!(error = %e, "skipping unreadable tool request"),
+                }
+            }
+            msg = decided.next() => {
+                let Some(msg) = msg else { return Ok(()) };
+                if let Ok(d) = serde_json::from_slice::<ApprovalDecision>(&msg.payload) {
+                    named = Some((d.ant, d.request_id));
+                }
+            }
+            Some(msg) = inboxes.next(), if !inboxes.is_empty() => {
+                if let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload)
+                    && let Some(d) = envelope.approval
+                {
+                    named = Some((d.ant, d.request_id));
+                }
+            }
+            () = wake => {}
+        }
+        let now = Utc::now();
+        let mut i = 0;
+        while i < open.len() {
+            let o = &mut open[i];
+            let is_named = named.as_ref().is_some_and(|(ant, id)| *ant == o.request.ant && *id == o.request.id);
+            let due = is_named || o.request.is_expired(now) || o.recheck.is_some_and(|at| at <= now);
+            if !due {
+                i += 1;
+                continue;
+            }
+            o.recheck = None;
+            match Box::pin(resolution(js, &stream, stored, o, now)).await {
+                Ok(State::Pending) if o.request.is_expired(now) => {
+                    // Only a request no longer in the stream: an expired one is pending no more.
+                    tracing::debug!(request = %qualified(&o.request), "no longer following an expired request");
+                    open.remove(i);
+                }
+                Ok(State::Pending) => {
+                    if is_named {
+                        o.recheck = Some(now + RECHECK);
+                    }
+                    i += 1;
+                }
+                Ok(state) => report(&Update::Resolved(open.remove(i).request, state))?,
+                Err(e) if o.request.is_expired(now) => {
+                    tracing::warn!(request = %qualified(&o.request), "not telling how the request ended: {e:#}");
+                    open.remove(i);
+                }
+                Err(e) => {
+                    tracing::warn!(request = %qualified(&o.request), "reading the state of the request: {e:#}");
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Where `open` stands at `now`; a request heard live is looked up among those stored after sequence `stored`.
+async fn resolution(
+    js: &jetstream::Context,
+    stream: &Stream,
+    stored: u64,
+    open: &mut Open,
+    now: DateTime<Utc>,
+) -> Result<State> {
+    let seq = match open.seq {
+        Some(seq) => seq,
+        None => {
+            let Some(seq) = seq_of(stream, &open.request, stored + 1).await? else { return Ok(State::Pending) };
+            *open.seq.insert(seq)
+        }
+    };
+    state(js, stream, seq, &open.request, now).await
+}
+
+/// The stream sequence of `request`, looked for from sequence `from` on, if stored.
+async fn seq_of(stream: &Stream, request: &ApprovalRequest, mut from: u64) -> Result<Option<u64>> {
+    loop {
+        let msg = match stream.get_first_raw_message_by_subject(&request.subject(), from).await {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading request {}", qualified(request))),
+        };
+        if serde_json::from_slice::<ApprovalRequest>(&msg.payload).is_ok_and(|r| r.id == request.id) {
+            return Ok(Some(msg.sequence));
+        }
+        from = msg.sequence + 1;
+    }
+}
+
+/// An update as `ants inbox --follow` shows it among replies: when, what, and how to answer a pending request.
+pub fn render(update: &Update, now: DateTime<Utc>) -> String {
+    let local = |at: DateTime<Utc>| at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
+    match update {
+        Update::Pending(r) => {
+            let mut out = format!(
+                "{}  {} asks to run a tool on thread {}: request {}\n  {}: {}\n",
+                local(r.requested_at),
+                r.ant,
+                r.thread_id,
+                qualified(r),
+                r.tool.kind,
+                excerpt(&r.tool.title, 200)
+            );
+            if !r.tool.locations.is_empty() {
+                let _ = writeln!(out, "  files: {}", r.tool.locations.join(", "));
+            }
+            let _ = writeln!(out, "  expires in {}; answer with {}", left(r.expires_at, now), commands(r));
+            out
+        }
+        Update::Resolved(r, state) => {
+            let (at, how) = match state {
+                State::Pending => (now, "is pending".to_owned()),
+                State::Decided(d) => (d.decided_at, format!("was answered: {}", spelling(d.verdict))),
+                State::DecidedByAgent(by, d) => {
+                    (d.decided_at, format!("was answered by {by}: {}", spelling(d.verdict)))
+                }
+                State::Expired => (r.expires_at, format!("expired unanswered: {} rejected it", r.ant)),
+            };
+            format!("{}  request {} of {} {how}\n", local(at), qualified(r), r.ant)
+        }
+    }
+}
+
 /// `ants tools list`: the pending requests, then with `follow` new ones as they come, until interrupted.
 pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()> {
     let (client, js) = nats.connect("ants-tools").await?;
-    let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let print = |request: &ApprovalRequest| -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(request)?);
@@ -529,27 +732,18 @@ pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()
         }
         Ok(())
     };
-    // Subscribe before listing, so a request published in between is not missed.
-    let mut live = if follow { Some(client.subscribe(subject::ALL_APPROVAL_REQUESTS).await?) } else { None };
-    let listed = pending(&js, &stream, Utc::now()).await?;
-    if listed.is_empty() && !follow && !json {
-        println!("no pending tool requests");
-    }
-    listed.iter().try_for_each(print)?;
-    let Some(live) = &mut live else { return Ok(()) };
-    let follow = async {
-        while let Some(msg) = live.next().await {
-            let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
-            if let Err(e) = request.check_subject(&msg.subject) {
-                tracing::warn!(error = %e, "skipping a request for another ant");
-            } else if !request.is_expired(Utc::now())
-                && !listed.iter().any(|r| r.id == request.id && r.ant == request.ant)
-            {
-                print(&request)?;
-            }
+    if !follow {
+        let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
+        let listed = pending(&js, &stream, Utc::now()).await?;
+        if listed.is_empty() && !json {
+            println!("no pending tool requests");
         }
-        Ok(())
-    };
+        return listed.iter().try_for_each(print);
+    }
+    let follow = Box::pin(self::follow(&client, &js, |update| match update {
+        Update::Pending(request) => print(request),
+        Update::Resolved(..) => Ok(()),
+    }));
     // Ctrl-C ends the following cleanly, so the device's presence goes at once.
     let follow = async {
         tokio::select! {
@@ -869,6 +1063,59 @@ mod tests {
         assert_eq!(suggested(5).await, Some(third), "a request still pending is no approval");
         assert_eq!(suggested(2).await, None, "git push was allowed once");
         assert!(suggestion_text(&stored[4].1, &suggested(4).await.unwrap()).contains("allowed this 3 times"));
+    }
+
+    /// Following reports the pending request, then a new one, and how each ends: answered by the human, by lead of
+    /// dev-a's escalate_to, or expired.
+    #[tokio::test]
+    async fn following_reports_new_requests_and_how_each_ends() {
+        let Some(server) = Server::start() else { return };
+        let [dev_a, lead]: [UserId; 2] = ["dev-a", "lead"].map(|p| p.parse().unwrap());
+        let (client, human) = server.connect(&UserId::human()).await;
+        let stream = bus::ensure_stream(&human).await.unwrap();
+        bus::ensure_chains(&human).await.unwrap();
+        let (_, agent) = server.connect(&dev_a).await;
+        ants_daemon::chains::publish(&agent, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
+        let (_, lead_js) = server.connect(&lead).await;
+        let offered = || vec![Verdict::AllowOnce, Verdict::Reject];
+        let minute = Duration::from_secs(60);
+        let push = request(&dev_a, "git push", offered(), minute);
+        bus::publish_json(&agent, push.subject(), &push, None).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let following = follow(&client, &human, |update| {
+            tx.send(update.clone()).unwrap();
+            Ok(())
+        });
+        let script = async {
+            let mut next = async || tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+            assert_eq!(next().await, Update::Pending(push.clone()));
+            let [rm, cat] = [("rm -rf build", minute), ("cat secrets", Duration::from_secs(3))]
+                .map(|(title, timeout)| request(&dev_a, title, offered(), timeout));
+            for r in [&rm, &cat] {
+                bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+                assert_eq!(next().await, Update::Pending(r.clone()));
+            }
+            let shown = render(&Update::Pending(rm.clone()), Utc::now());
+            let id = qualified(&rm);
+            assert!(
+                shown.contains(&format!("answer with ants tools approve {id} | ants tools reject {id}")),
+                "{shown}"
+            );
+
+            let answered = answer(&human, &stream, &qualified(&push), Verdict::AllowOnce, Utc::now()).await.unwrap();
+            assert_eq!(next().await, Update::Resolved(push.clone(), State::Decided(answered)));
+            let decision = ApprovalDecision::new(rm.id, dev_a.clone(), Verdict::Reject);
+            let envelope = Envelope::decision(rm.thread_id.clone(), lead.clone(), decision);
+            bus::publish_json(&lead_js, envelope.subject(), &envelope, None).await.unwrap();
+            let Update::Resolved(r, State::DecidedByAgent(by, d)) = next().await else { panic!("decided by lead") };
+            assert_eq!((r, by, d.verdict), (rm, lead.clone(), Verdict::Reject));
+            assert_eq!(next().await, Update::Resolved(cat.clone(), State::Expired));
+        };
+        tokio::select! {
+            ended = following => panic!("following ended: {ended:?}"),
+            () = script => {}
+        }
     }
 
     #[test]

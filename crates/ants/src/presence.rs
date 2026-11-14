@@ -1,6 +1,7 @@
-//! Where a human reads: while `ants inbox --follow` or `ants tools list --follow` runs, the CLI keeps its device's
-//! [`Presence`] in [`PRESENCE_BUCKET`], so `ants webhook serve` pushes nothing to that device's push targets that it
-//! shows already ([`Present`]). Only a device with an id has a presence: a legacy device's credentials name none.
+//! Where a human reads: while `ants inbox --follow` (the inbox, and the tool requests it shows) or `ants tools list
+//! --follow` runs, the CLI keeps its device's [`Presence`] in [`PRESENCE_BUCKET`], so `ants webhook serve` pushes
+//! nothing to that device's push targets that it shows already ([`Present`]). Only a device with an id has a presence:
+//! a legacy device's credentials name none.
 
 use std::collections::HashSet;
 
