@@ -565,15 +565,23 @@ impl Threads {
         Ok(self.root(thread, seq).await?.is_some())
     }
 
-    /// The owner recorded for `thread` by the human or webhook that first messaged an ant on it
-    /// ([`Owners::owner_of`]).
-    pub async fn recorded_owner(&self, thread: &ThreadId) -> Result<Option<UserId>> {
-        self.owners.owner_of(thread).await
+    /// The owner of `thread` that a human's or a webhook's message to `to` named ([`Owners::recorded`]), waiting up to
+    /// `within` for a record on its way ([`Owners::wait_for`]).
+    pub async fn awaited_owner(&self, thread: &ThreadId, to: &UserId, within: Duration) -> Result<Option<UserId>> {
+        self.owners.wait_for(thread, to, within).await
     }
 
-    /// [`Threads::recorded_owner`], waiting up to `within` for a record on its way ([`Owners::wait_for`]).
-    pub async fn awaited_owner(&self, thread: &ThreadId, within: Duration) -> Result<Option<UserId>> {
-        self.owners.wait_for(thread, within).await
+    /// The owner of `thread`, a thread no channel post started, for an ant's message on or linking to it, when `sender`
+    /// has a link to it: the one a human's or a webhook's message to it on the thread named ([`Owners::recorded`]),
+    /// else the one such a message named to an ant that passed the link on to it, directly or through ants it passed
+    /// the link on to in turn ([`links::passed_on`]). None otherwise: no ant names the owner of a message thread it has
+    /// no link to.
+    pub async fn owner_for(&self, thread: &ThreadId, sender: &UserId) -> Result<Option<UserId>> {
+        let recorded = async |ant: &UserId| self.owners.recorded(thread, ant).await;
+        if let Some(owner) = recorded(sender).await? {
+            return Ok(Some(owner));
+        }
+        self.passed_to(thread, sender, recorded).await
     }
 
     /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` has a link
@@ -591,7 +599,8 @@ impl Threads {
         let channels = self.js.get_key_value(CHANNELS_BUCKET).await.context("opening the channels")?;
         let Stored::Entry(entry, _) = load(&channels, &channel).await? else { return Ok(None) };
         let at = Part { thread, sender, entry: &entry, humans, upto: seq, found: false };
-        if !self.takes_part(&channel, &at, sender).await? && !self.passed_to(&channel, &at, sender).await? {
+        let takes_part = async |ant: &UserId| Ok(self.takes_part(&channel, &at, ant).await?.then_some(()));
+        if takes_part(sender).await?.is_none() && self.passed_to(thread, sender, takes_part).await?.is_none() {
             return Ok(None);
         }
         let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
@@ -623,11 +632,16 @@ impl Threads {
         Ok(part.found)
     }
 
-    /// Whether an ant taking part in the thread of `channel` that `at` reads ([`Threads::takes_part`]) passed the link
-    /// to the thread on to `to`, directly or through ants it passed it on to in turn, as the links bucket says
-    /// ([`links::passed_on`]). At most [`MAX_LINK_CHECKS`] ants are checked.
-    async fn passed_to(&self, channel: &ChannelId, at: &Part<'_>, to: &UserId) -> Result<bool> {
-        let links = links::passed_on(&self.js, at.thread).await?;
+    /// What `takes_part` finds of the first ant taking part in `thread` that passed the link to the thread on to `to`,
+    /// directly or through ants it passed it on to in turn, as the links bucket says ([`links::passed_on`]). At most
+    /// [`MAX_LINK_CHECKS`] ants are checked.
+    async fn passed_to<T>(
+        &self,
+        thread: &ThreadId,
+        to: &UserId,
+        takes_part: impl AsyncFn(&UserId) -> Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        let links = links::passed_on(&self.js, thread).await?;
         let from = |to: &UserId| links.iter().filter(|(_, t)| t == to).map(|(from, _)| from).collect::<Vec<_>>();
         let mut checked = HashSet::from([to]);
         let mut queue = VecDeque::from(from(to));
@@ -638,12 +652,12 @@ impl Threads {
             if checked.len() > MAX_LINK_CHECKS {
                 break;
             }
-            if self.takes_part(channel, at, ant).await? {
-                return Ok(true);
+            if let Some(found) = takes_part(ant).await? {
+                return Ok(Some(found));
             }
             queue.extend(from(ant));
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// The channel whose top-level post, stored before stream sequence `seq`, started `thread`: the first post of any

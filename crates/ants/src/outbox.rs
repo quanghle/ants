@@ -473,13 +473,13 @@ mod tests {
         // So do the owners a human records, ahead of the message: a second record of a thread is dropped,
         // and does not hold up those after it.
         let (taken, asked, after) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
-        owners::record(&h_js, Some(&domain), &taken, &alice).await.unwrap();
-        owners::record(&h_leaf_js, Some(&domain), &taken, &human).await.unwrap();
-        owners::record(&h_leaf_js, Some(&domain), &asked, &human).await.unwrap();
+        owners::record(&h_js, Some(&domain), &taken, &dev_a, &alice).await.unwrap();
+        owners::record(&h_leaf_js, Some(&domain), &taken, &dev_a, &human).await.unwrap();
+        owners::record(&h_leaf_js, Some(&domain), &asked, &dev_b, &human).await.unwrap();
         let ask =
             Envelope::on_thread(asked.clone(), human.clone(), dev_b.clone(), "asked").with_owner(Some(human.clone()));
         assert_eq!(bus::publish(&h_leaf_js, &ask).await.unwrap(), bus::Stored::Outbox);
-        owners::record(&h_leaf_js, Some(&domain), &after, &human).await.unwrap();
+        owners::record(&h_leaf_js, Some(&domain), &after, &dev_a, &human).await.unwrap();
         assert!(messages(&h_js, STREAM).await == 1);
 
         reload(leaf_port);
@@ -503,11 +503,11 @@ mod tests {
         assert_eq!(passed_on().await, [(dev_a.clone(), dev_b.clone())]);
         let read = owners::Owners::new(h_js.clone());
         eventually("the owners bucket takes the owners", async || {
-            read.owner_of(&after).await.unwrap() == Some(human.clone())
+            read.recorded(&after, &dev_a).await.unwrap() == Some(human.clone())
         })
         .await;
-        assert_eq!(read.owner_of(&asked).await.unwrap(), Some(human.clone()));
-        assert_eq!(read.owner_of(&taken).await.unwrap(), Some(alice.clone()), "the first record stays");
+        assert_eq!(read.recorded(&asked, &dev_b).await.unwrap(), Some(human.clone()));
+        assert_eq!(read.recorded(&taken, &dev_a).await.unwrap(), Some(alice.clone()), "the first record stays");
         // How a daemon tells a message from an outbox.
         let source = |msg: StreamMessage| msg.headers.get("Nats-Stream-Source").is_some();
         assert!(source(ants.get_last_raw_message_by_subject(&ask.subject()).await.unwrap()));

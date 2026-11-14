@@ -675,7 +675,7 @@ impl Hook {
                     .with_owner(hook.owner.clone())
                     .from_webhook();
                 if let Some(owner) = &hook.owner {
-                    owners::recording(&bus.js, bus.js_domain.as_ref(), &message.thread_id, owner).await;
+                    owners::recording(&bus.js, bus.js_domain.as_ref(), &message.thread_id, ant, owner).await;
                 }
                 (message.subject(), serde_json::to_vec(&message)?, message.thread_id)
             }
@@ -1067,7 +1067,7 @@ mod tests {
         let [message] = &messages[..] else { panic!("one message: {messages:?}") };
         assert_eq!((&message.from, &message.to, message.thread_id.as_str()), (&github, &p("dev-a"), thread.as_str()));
         assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
-        let recorded = owners::Owners::new(js.clone()).owner_of(&message.thread_id).await.unwrap();
+        let recorded = owners::Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
         assert_eq!(recorded, Some(p("alice")), "ants' messages on the thread name its owner as recorded");
         assert_eq!(message.text, format!("issues opened: {}", std::str::from_utf8(body).unwrap()));
         let marker = seen.get(webhook_marker_key(&github)).await.unwrap();
