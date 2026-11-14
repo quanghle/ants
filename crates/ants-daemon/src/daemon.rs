@@ -2420,7 +2420,17 @@ mod tests {
         let ctrl_c = Arc::new(Semaphore::new(0));
         let check = async {
             until("prompts tried again", || log.lock().unwrap().prompted >= 4).await;
-            let shown = bus.workload.limited().expect("the roster shows the limit");
+            // Each backoff clears the limit until the next try meets it again.
+            let shown = timeout(WAIT, async {
+                loop {
+                    if let Some(shown) = bus.workload.limited() {
+                        break shown;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the roster shows the limit");
             assert_eq!(shown.kind, LimitKind::RateLimit);
             assert!(shown.until > shown.since);
             assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "a rate limit tells nobody");
