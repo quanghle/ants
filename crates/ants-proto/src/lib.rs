@@ -1376,6 +1376,8 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
                 format!("$JS.ACK.{STREAM}.{consumer}.>"),
+                // nats-server 2.16's form: `$JS.ACK.<domain>.<account hash>.<stream>.<consumer>...`.
+                format!("$JS.ACK.*.*.{STREAM}.{consumer}.>"),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{consumer}"),
             ]);
         }
@@ -1385,6 +1387,7 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{roster}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster}"),
             format!("$JS.FC.{roster}.>"),
+            format!("$JS.FC.*.*.{roster}.>"),
         ]);
         publish.push(subject::renew(observer.as_str()));
         let subscribe = vec![
@@ -4299,6 +4302,11 @@ mod tests {
         assert!(!perms.publish.iter().any(|s| s.contains("STREAM.MSG.GET")));
         let buckets: Vec<&String> = perms.publish.iter().filter(|s| s.contains("KV_")).collect();
         assert!(buckets.iter().all(|s| s.contains("KV_ants_roster")), "{buckets:?}");
+        let acks: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("$JS.ACK.")).collect();
+        assert_eq!(acks.len(), 6, "v1 and v2 acks of its own consumers only: {acks:?}");
+        assert!(acks.iter().all(|s| s.contains(".ANTS.observe-") && s.ends_with("-audit.>")), "{acks:?}");
+        let fc: Vec<&String> = perms.publish.iter().filter(|s| s.starts_with("$JS.FC.")).collect();
+        assert_eq!(fc, ["$JS.FC.KV_ants_roster.>", "$JS.FC.*.*.KV_ants_roster.>"]);
         assert_eq!(
             perms.subscribe,
             [
