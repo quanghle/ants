@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
-use ants_daemon::channel::{Stored, load};
+use ants_daemon::channel::{OriginFold, Stored, load};
+use ants_daemon::webhooks::Webhooks;
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, ThreadOrigin, UserId, Uuid, subject,
 };
@@ -267,7 +268,8 @@ pub async fn compose(
 
 /// The owner and creator of `thread` in `channel`, read through the reader consumer of `reader`: as its posts still
 /// kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
-/// start; any other from the channel's oldest post kept.
+/// start; any other from the channel's oldest post kept. A top-level post marked as a webhook's counts as one only from
+/// a human or a webhook ([`OriginFold`]).
 pub async fn thread_origin(
     js: &jetstream::Context,
     reader: &UserId,
@@ -279,14 +281,15 @@ pub async fn thread_origin(
         Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
         None => consumer::DeliverPolicy::All,
     };
-    let mut origin = ThreadOrigin::default();
+    let mut fold = OriginFold::new(ThreadOrigin::default());
     scan(js, reader, channel, start, |post| {
         if post.thread_id == *thread {
-            origin.push(&post, humans);
+            fold.push(post, humans);
         }
-        if origin.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        if fold.settled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     })
     .await?;
+    let origin = fold.resolve(thread, &Webhooks::new(js.clone())).await;
     Ok((origin.owner, origin.creator))
 }
 
@@ -669,6 +672,47 @@ mod tests {
         bus::publish_json(&d_js, started.subject(), &started, None).await.unwrap();
         let on = compose(&b_js, &me(&bob), &humans, ops(), Some(started.thread_id.clone()), "ok".to_owned()).await;
         assert_eq!((&on.creator, &on.owner), (&Some(dev_a.clone()), &Some(bob.clone())));
+    }
+
+    /// The webhook github, and dev-a, each with its own credentials, start a thread with a post marked as a webhook's
+    /// naming alice its owner: bob's post on github's thread keeps alice; on dev-a's, which has no marker, it takes the
+    /// thread and keeps dev-a as its creator.
+    #[tokio::test]
+    async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a, hook) = (p("alice"), p("bob"), p("dev-a"), p("github"));
+        let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+        let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
+        bus::init_stream(&a_js).await.unwrap();
+        crate::humans::ensure(&a_js).await.unwrap();
+        crate::webhook::ensure_bucket(&a_js).await.unwrap();
+        for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
+            crate::humans::register(js, &me(human)).await.unwrap();
+        }
+        let humans = crate::humans::load(&b_js, &me(&bob)).await;
+
+        let creds = server.dir().join("github.creds");
+        let permissions = ants_proto::Permissions::for_webhook(&hook, &[ants_proto::Destination::Channel(ops())]);
+        crate::auth::issue_with(&server.dir().join("auth"), &hook, permissions, &creds).unwrap();
+        let (_, h_js) = bus::connect(&server.url, Some(&creds), None, &hook, "test").await.unwrap();
+        let markers = h_js.get_key_value(ants_proto::WEBHOOKS_BUCKET).await.unwrap();
+        markers.put(ants_proto::webhook_marker_key(&hook), "github".into()).await.unwrap();
+        let (_, d_js) = server.connect(&dev_a).await;
+
+        let owner = Some(alice.clone());
+        let real =
+            ChannelPost::new(ops(), hook.clone(), "build red").with_owner(owner.clone()).from_webhook(Vec::new());
+        bus::publish_json(&h_js, real.subject(), &real, None).await.unwrap();
+        let forged = ChannelPost::new(ops(), dev_a.clone(), "look").with_owner(owner.clone()).from_webhook(Vec::new());
+        bus::publish_json(&d_js, forged.subject(), &forged, None).await.unwrap();
+
+        let as_bob = me(&bob);
+        let on = |thread: &ThreadId| compose(&b_js, &as_bob, &humans, ops(), Some(thread.clone()), "ok".to_owned());
+        let on_real = on(&real.thread_id).await;
+        assert_eq!((on_real.owner, on_real.creator), (owner, None), "the webhook's");
+        let on_forged = on(&forged.thread_id).await;
+        assert_eq!((on_forged.owner, on_forged.creator), (Some(bob.clone()), Some(dev_a.clone())), "dev-a's");
     }
 
     /// alice's post and dev-a's, each with its own credentials, mention bob, a member: bob's inbox gets one notice

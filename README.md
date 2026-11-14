@@ -838,10 +838,11 @@ wakes them by @mentioning them in a post on the thread. The messenger need not b
 post` prints. The ants a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
 too. A thread's owner is the human whose post started it, else the first human to post on it (or the `owner` of the
 webhook that started it): each post carries it as `owner`, but daemons and `ants post --thread` take it from the
-thread's posts kept in the stream, not from what a later post says, so no ant can name or change it. An ant can start a
-thread too, with the MCP tool `post_channel` or `ants post` under its own credentials, in a channel it is a member or
-the messenger of: the thread has no owner until a human posts on it, and the ant is its `creator`, which every later
-post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
+thread's posts kept in the stream, not from what a later post says, so no ant can name or change it; both take a
+top-level post marked `webhook: true` as a webhook's only from a sender with a webhook marker (see
+[Webhooks](#webhooks)) or a human. An ant can start a thread too, with the MCP tool `post_channel` or `ants post` under
+its own credentials, in a channel it is a member or the messenger of: the thread has no owner until a human posts on
+it, and the ant is its `creator`, which every later post and message on the thread carries, like `owner`. The creator of a thread is always the author of its top-level
 post, whatever that post or a later one says, and never a human, a webhook or the channel manager. A daemon takes the
 `owner` and `creator` of a message an ant sends on the thread from the thread's posts too. A message an ant sends
 from the thread on another one (`send_message` with `thread`) links back to it as `origin_thread`, and so do the
@@ -1036,8 +1037,9 @@ channel = "ops"
   `<webhook>.webhook` in `ants_webhooks`. Only the webhook's credentials write it, and daemons honour `webhook: true`
   on a message or channel post only from a sender with a marker there (or a human): from an ant, the message is an
   ant's, and the answer goes back to its inbox; the post is an ant's too, so the messenger does not triage it, and a
-  thread it starts has the ant as its `creator` and no owner until a human posts on it. A webhook served by a CLI
-  from before the marker has its answers sent to its own inbox, which nobody reads, until the CLI is upgraded.
+  thread it starts has the ant as its `creator` and no owner until a human posts on it, as `ants post --thread` also
+  reads it. A webhook served by a CLI from before the marker has its answers sent to its own inbox, which nobody
+  reads, until the CLI is upgraded.
 - **Text**: `text` is a template, default `[webhook {webhook}] {id}` and the body. `{body}`, `{id}`, `{webhook}`,
   `{header:Name}` and `{json:/pointer}` (a JSON string unquoted, a missing field empty) are replaced; `{{` and `}}`
   are literal braces. The text is untrusted input for the ant's prompt: give a webhook a destination whose tools
@@ -1055,10 +1057,11 @@ Credentials: `ants auth user NAME --webhook` with `--to ANT` or `--channel CHANN
 those keys and its channels' entries (for `broadcast`), and writes neither channels nor humans. The name `human` is
 refused; `ants webhook serve` refuses credentials naming another user, a human's, or ones without the configured
 destination. A webhook joins no roster and needs no `ants_humans` entry. Its messages and posts carry `webhook: true`,
-so readers never take them for a human's, even when a human goes by the same name. Ant credentials read the webhooks'
-markers by direct get (`$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.*.webhook`), none of their events;
-ants' credentials and leaf uplinks issued before the marker lack it, and need `ants auth user` and `ants auth leaf`
-again: until then their daemons send no answer to a webhook's `owner`.
+so readers never take them for a human's, even when a human goes by the same name. Ant and human credentials read the
+webhooks' markers by direct get (`$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.*.webhook`), none of their
+events; credentials and leaf uplinks issued before the marker lack it, and need `ants auth user` and `ants auth leaf`
+again: until then their daemons send no answer to a webhook's `owner`, and `ants post --thread` on a webhook's thread
+takes the webhook for the thread's `creator` and the posting human for its owner.
 
 Behind a leaf node, issue the leaf's uplink with the webhook too, `ants auth leaf MACHINE --webhook NAME`, after its
 credentials (see [Leaf nodes](#leaf-nodes)). Events cross to the hub as they arrive, without the leaf's outbox: while
