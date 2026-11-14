@@ -1031,7 +1031,8 @@ async fn post(
     } else {
         None
     };
-    if bus::store(&js, post.subject(), &post, &post.id.to_string()).await? == bus::Stored::Outbox {
+    let stored = bus::store_acked(&js, post.subject(), &post, &post.id.to_string()).await?.map(|ack| ack.sequence);
+    if stored.is_none() {
         println!("kept in this machine's outbox until the hub is reachable");
     }
     // An ant's daemon notifies the humans its posts mention.
@@ -1044,8 +1045,10 @@ async fn post(
     }
     println!("thread {}", post.thread_id);
     let Some(room) = room else { return Ok(()) };
-    // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all.
-    let on_thread = channel::thread_posts(room, &post, replies.wait);
+    // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all. What
+    // never comes live, as while the leaf's uplink is down, is read back from the hub's stream.
+    let posts = channel::caught_up_posts(room, &js, &nats.me, &post, stored);
+    let on_thread = channel::thread_posts(posts, &post, replies.wait);
     replies
         .show(&post.thread_id, on_thread, async |reply: ChannelPost| {
             println!("{}: {}", reply.from, reply.text);

@@ -9,11 +9,13 @@
 //! Members are ants and humans. A human's post that @mentions a human member puts a notice in that human's inbox
 //! ([`notify_mentioned`]); an ant's daemon sends those of the ant's posts.
 
+use std::collections::{HashSet, VecDeque};
 use std::ops::ControlFlow;
+use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
-use ants_daemon::channel::{OriginFold, Reading, Stored, load, read_back};
+use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Reading, Stored, load, read_back};
 use ants_daemon::webhooks::Webhooks;
 use ants_proto::{
     ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, ThreadId, ThreadOrigin, UserId, Uuid, subject,
@@ -289,20 +291,24 @@ pub async fn thread_origin(
     Ok((origin.owner, origin.creator))
 }
 
-/// The posts on the thread of `post` that `room`, a subscription to its channel, receives after it: those of others
-/// only with `by_others`. Forged posts are dropped with a warning.
-pub fn thread_posts(
-    room: async_nats::Subscriber,
+/// The posts among `posts` on the thread of `post`, other than `post` itself: those of others only with `by_others`.
+pub fn thread_posts<S: futures::Stream<Item = ChannelPost>>(
+    posts: S,
     post: &ChannelPost,
     by_others: bool,
-) -> impl futures::Stream<Item = ChannelPost> + use<> {
+) -> impl futures::Stream<Item = ChannelPost> + use<S> {
     let (thread, id, from) = (post.thread_id.clone(), post.id, post.from.clone());
-    room.filter_map(move |msg| {
-        let reply = match serde_json::from_slice::<ChannelPost>(&msg.payload) {
-            Ok(reply) => match reply.check_subject(&msg.subject) {
-                Ok(()) => {
-                    (reply.thread_id == thread && reply.id != id && !(by_others && reply.from == from)).then_some(reply)
-                }
+    posts.filter(move |reply| {
+        std::future::ready(reply.thread_id == thread && reply.id != id && !(by_others && reply.from == from))
+    })
+}
+
+/// The posts `room`, a subscription to a channel, receives. Forged posts are dropped with a warning.
+pub fn live_posts(room: async_nats::Subscriber) -> impl futures::Stream<Item = ChannelPost> {
+    room.filter_map(|msg| {
+        let post = match serde_json::from_slice::<ChannelPost>(&msg.payload) {
+            Ok(post) => match post.check_subject(&msg.subject) {
+                Ok(()) => Some(post),
                 Err(e) => {
                     tracing::warn!("ignoring a forged channel post: {e}");
                     None
@@ -310,8 +316,115 @@ pub fn thread_posts(
             },
             Err(_) => None,
         };
-        std::future::ready(reply)
+        std::future::ready(post)
     })
+}
+
+/// How often [`caught_up_posts`] reads back what the hub's stream stored.
+pub const CATCH_UP: Duration = Duration::from_secs(5);
+
+/// How many posts [`caught_up_posts`] remembers to take each once.
+const SEEN: usize = 1024;
+
+/// The posts `room`, a subscription to the channel of `post`, receives ([`live_posts`]), and those the hub's stream
+/// stores after `post`, read back every [`CATCH_UP`] as `reader` reads channels back ([`read`]), each once: what the
+/// hub stores while this connection, or the uplink of the leaf node it goes through, is down never comes live, nor does
+/// a post the hub takes from a leaf's outbox. `stored` is the stream sequence of `post`, when the hub stored it; for a
+/// post kept in the machine's outbox, the read-back looks for it from [`CLOCK_SLACK`] before it was sent, and takes
+/// only what the stream stores after it.
+pub fn caught_up_posts(
+    room: async_nats::Subscriber,
+    js: &jetstream::Context,
+    reader: &Me,
+    post: &ChannelPost,
+    stored: Option<u64>,
+) -> impl futures::Stream<Item = ChannelPost> + use<> {
+    let since = SystemTime::from(post.sent_at).checked_sub(CLOCK_SLACK).unwrap_or(SystemTime::UNIX_EPOCH);
+    let back = ReadBack {
+        js: js.clone(),
+        reader: reader.clone(),
+        room: subject::chan_room(&post.channel),
+        own: post.id,
+        since,
+        after: stored,
+    };
+    let back = futures::stream::unfold(back, async |mut back| {
+        tokio::time::sleep(CATCH_UP).await;
+        let posts = back.round().await;
+        Some((posts, back))
+    })
+    .flat_map(futures::stream::iter);
+    let mut seen = Seen::default();
+    futures::stream::select(live_posts(room), back).filter(move |post| std::future::ready(seen.first(post.id)))
+}
+
+/// Where [`caught_up_posts`] reads back.
+struct ReadBack {
+    js: jetstream::Context,
+    reader: Me,
+    room: String,
+    /// The post waited on.
+    own: Uuid,
+    /// From when to look for [`ReadBack::own`] while its stream sequence is unknown.
+    since: SystemTime,
+    /// The stream sequence of the last post read back, from [`ReadBack::own`] on.
+    after: Option<u64>,
+}
+
+impl ReadBack {
+    /// The posts stored after the last one read back, or, until the post waited on shows, after it. Out of the hub's
+    /// reach, none.
+    async fn round(&mut self) -> Vec<ChannelPost> {
+        let start = match self.after {
+            Some(seq) => consumer::DeliverPolicy::ByStartSequence { start_sequence: seq + 1 },
+            None => consumer::DeliverPolicy::ByStartTime { start_time: self.since.into() },
+        };
+        let (own, after, mut posts) = (self.own, &mut self.after, Vec::new());
+        let reading = Reading::cli(self.reader.role);
+        let read = read_back(&self.js, &self.reader.id, reading, &self.room, start, |seq, _, subject, post| {
+            match post {
+                Ok(post) if after.is_some() => posts.push(post),
+                Ok(post) if post.id == own => {}
+                Ok(_) => return ControlFlow::Continue(()),
+                Err(error) => {
+                    tracing::debug!(subject, error, "dropping a channel post read back");
+                    if after.is_none() {
+                        return ControlFlow::Continue(());
+                    }
+                }
+            }
+            *after = Some(seq);
+            ControlFlow::Continue(())
+        })
+        .await;
+        if let Err(e) = read {
+            tracing::debug!("reading back {}: {e:#}", self.room);
+        }
+        posts
+    }
+}
+
+/// The ids of the latest posts taken.
+#[derive(Default)]
+struct Seen {
+    order: VecDeque<Uuid>,
+    ids: HashSet<Uuid>,
+}
+
+impl Seen {
+    /// Whether the post `id` is new, then remembered.
+    fn first(&mut self, id: Uuid) -> bool {
+        if !self.ids.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > SEEN
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ids.remove(&old);
+        }
+        true
+    }
 }
 
 /// The posts of `channel` kept in the stream, oldest first, read as the CLI reads channels back as `reader`
@@ -570,9 +683,9 @@ mod tests {
         let answer = top.reply(dev_a.clone(), "on it", &[], &Humans::default()).unwrap();
         bus::publish_json(&a_js, answer.subject(), &answer, None).await.unwrap();
         let texts = |posts: Vec<ChannelPost>| posts.into_iter().map(|p| p.text).collect::<Vec<_>>();
-        let next_two = thread_posts(following, &top, false).take(2).collect();
+        let next_two = thread_posts(live_posts(following), &top, false).take(2).collect();
         assert_eq!(texts(tokio::time::timeout(Duration::from_secs(2), next_two).await.unwrap()), ["anyone?", "on it"]);
-        let mut waiting = Box::pin(thread_posts(waiting, &top, true));
+        let mut waiting = Box::pin(thread_posts(live_posts(waiting), &top, true));
         let next = tokio::time::timeout(Duration::from_secs(2), waiting.next()).await.unwrap().unwrap();
         assert_eq!(next.text, "on it", "waiting skips the poster's own posts");
 
