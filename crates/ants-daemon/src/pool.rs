@@ -88,8 +88,10 @@ pub struct Pool {
     slots: Mutex<HashMap<ThreadId, Slot>>,
     /// Signalled when a harness becomes free, starts or stops.
     changed: Notify,
-    /// A git worktree per thread, instead of the shared workdir.
+    /// The git worktrees of threads, pruned as their sessions expire.
     worktrees: Option<Worktrees>,
+    /// Each thread works in its worktree, instead of the shared workdir.
+    isolate: bool,
 }
 
 impl Pool {
@@ -104,12 +106,19 @@ impl Pool {
             slots: Mutex::default(),
             changed: Notify::new(),
             worktrees: None,
+            isolate: false,
         }
     }
 
     /// Each thread works in its own git worktree ([`Worktrees`]).
     pub fn with_worktrees(self, worktrees: Worktrees) -> Self {
-        Self { worktrees: Some(worktrees), ..self }
+        Self { worktrees: Some(worktrees), isolate: true, ..self }
+    }
+
+    /// Threads share the workdir, and the worktrees left from when each had its own are pruned
+    /// ([`Worktrees::left_behind`]).
+    pub fn with_worktrees_left_behind(self, worktrees: Worktrees) -> Self {
+        Self { worktrees: Some(worktrees), isolate: false, ..self }
     }
 
     /// Remove the worktrees of threads with no live harness whose session is no longer in the store, at once and then
@@ -235,7 +244,7 @@ impl Pool {
         let mut starting = Starting { pool: self, thread, done: false };
         let resume = self.store.get(thread).await?;
         let mut launch = self.launch.for_thread(thread);
-        if let Some(worktrees) = &self.worktrees {
+        if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
             match worktrees.checkout(thread).await {
                 Ok(dir) => launch = launch.in_dir(dir),
                 Err(e) => tracing::warn!(%thread, error = format!("{e:#}"), "working in the shared workdir"),
@@ -520,6 +529,29 @@ mod tests {
         sessions.lock().unwrap().clear();
         assert_eq!(pool.prune_worktrees().await, 1, "only the thread without a live harness");
         assert!(t1.is_dir() && !t2.exists());
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
+        let Some(repo) = crate::worktrees::tests::repo("pool-worktrees-off") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+        worktrees.checkout(&thread(1)).await.unwrap();
+        worktrees.checkout(&thread(2)).await.unwrap();
+        let (launch, log, _) = fake::launch(true);
+        let store = SessionStore::memory();
+        let left = Worktrees::left_behind(&"dev-a".parse().unwrap(), &home).await.unwrap();
+        let pool = Pool::new(launch.in_dir(repo.clone()), store.clone(), 4, IDLE).with_worktrees_left_behind(left);
+        pool.prompt(&thread(1), "a").await.unwrap();
+        pool.prompt(&thread(3), "b").await.unwrap();
+        assert_eq!(log.lock().unwrap().cwds, [repo.clone(), repo.clone()], "threads share the workdir");
+        assert_eq!(pool.prune_worktrees().await, 1, "only the thread with no session and no live harness");
+        let SessionStore::Memory(sessions) = &store else { unreachable!() };
+        sessions.lock().unwrap().clear();
+        pool.evict_idle(Instant::now() + IDLE * 2);
+        assert_eq!(pool.prune_worktrees().await, 1);
+        assert!(!home.join("worktrees/t1").exists() && !home.join("worktrees/t3").exists());
         std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
 
