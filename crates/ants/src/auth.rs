@@ -1239,6 +1239,10 @@ pub(crate) mod tests {
         assert_eq!(sessions.get(session_key(&dev_a, &thread)).await.unwrap().as_deref(), Some(&b"s1"[..]));
         assert!(sessions.put(session_key(&dev_b, &thread), "s1").await.is_err());
         assert!(sessions.get(session_key(&dev_b, &thread)).await.is_err());
+        // Except that it reads dev-b's daily spend, for pool caps, though it cannot write it.
+        let day = ants_proto::daily_spend_key(&dev_b, "2026-11-13");
+        assert_eq!(sessions.get(&day).await.unwrap(), None);
+        assert!(sessions.put(&day, "{}").await.is_err());
 
         // So it does with the markers of its attempts.
         let attempts = bus::ensure_attempts(&a_js, None, &dev_a).await.unwrap();

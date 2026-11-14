@@ -285,6 +285,13 @@ fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
                 .into_iter()
                 .find(|p| &p.name == name)
                 .with_context(|| format!("ant {name} is not in {}", path.display()))?;
+            if let Some(template) = p.template.as_ref().filter(|_| args.options.sets_any()) {
+                bail!(
+                    "ant {name} was added from template {template}, which bounds its settings: change its entry in {} \
+                     instead of passing ant flags such as --workdir",
+                    path.display()
+                );
+            }
             Ok(vec![args.options.apply(p)])
         }
         None if args.options.sets_any() => {
@@ -553,6 +560,9 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
+        } else if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
+            // Members are left out of the comparison: the running ant takes the new ones as it is.
+            serving.members.replace(&listed.members);
         }
     }
     start
@@ -622,6 +632,11 @@ mod tests {
         assert!(err.contains("ant dev-c is not in config.toml"), "{err}");
         let err = pick(all, &args("--workdir ."), path).unwrap_err().to_string();
         assert!(err.contains("add --ant"), "{err}");
+
+        let added = vec![Ant { template: Some("worker".to_owned()), ..ant("lead-a") }];
+        assert_eq!(pick(added.clone(), &args("--ant lead-a"), path).unwrap(), added);
+        let err = pick(added, &args("--ant lead-a --max-daily-cost 99"), path).unwrap_err().to_string();
+        assert!(err.contains("ant lead-a was added from template worker"), "{err}");
     }
 
     #[test]
@@ -684,6 +699,27 @@ mod tests {
         assert!(names(reconcile(&mut running, vec![a, b, config("dev-c", None)])).is_empty());
         assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((true, Some(None)), (true, Some(None))));
         assert_eq!(state(&running, "dev-c"), (false, None));
+    }
+
+    #[test]
+    fn a_reload_hands_a_running_ant_its_pool_s_new_members_without_a_restart() {
+        use ants_daemon::caps::{Members, Pool};
+        let member = |name: &str| name.parse::<UserId>().unwrap();
+        let config = |members: &[&str]| {
+            let pool = Pool {
+                template: "worker".to_owned(),
+                daily_tokens: Some(100),
+                daily_cost: None,
+                members: Members::new(members.iter().map(|m| member(m)).collect()),
+            };
+            let p = Ant { pool: Some(pool), ..ant("lead-a") };
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+        };
+        let mut running = HashMap::new();
+        let (served, _) = reconcile(&mut running, vec![config(&["lead-a"])]).remove(0);
+        assert!(reconcile(&mut running, vec![config(&["lead-a", "lead-b"])]).is_empty());
+        assert!(!running[&member("lead-a")].stopping, "only its pool's members changed");
+        assert_eq!(served.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
     }
 
     #[test]
