@@ -12,7 +12,7 @@ use std::time::Duration;
 use ants_proto::{
     ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
     PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
-    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{
@@ -37,13 +37,14 @@ pub enum Object {
     Owners,
     Webhooks,
     Reactions,
+    Threads,
     Read,
     Presence,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -55,6 +56,7 @@ impl Object {
         Self::Owners,
         Self::Webhooks,
         Self::Reactions,
+        Self::Threads,
         Self::Read,
         Self::Presence,
     ];
@@ -73,6 +75,7 @@ impl Object {
             Self::Owners => OWNERS_BUCKET,
             Self::Webhooks => WEBHOOKS_BUCKET,
             Self::Reactions => REACTIONS_BUCKET,
+            Self::Threads => THREADS_BUCKET,
             Self::Read => READ_BUCKET,
             Self::Presence => PRESENCE_BUCKET,
         })
@@ -104,6 +107,7 @@ impl Object {
             Self::Humans => Spec::Bucket(Box::new(humans_config())),
             Self::Chains => Spec::Bucket(Box::new(chains_config())),
             Self::Webhooks => Spec::Bucket(Box::new(webhooks_config())),
+            Self::Threads => Spec::Bucket(Box::new(threads_config())),
             Self::Read => Spec::Bucket(Box::new(read_config())),
             Self::Presence => Spec::Bucket(Box::new(presence_config())),
         }
@@ -504,6 +508,11 @@ pub fn humans_config() -> kv::Config {
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
+}
+
+/// Thread titles and each human's pinned and archived threads ([`THREADS_BUCKET`]).
+pub fn threads_config() -> kv::Config {
+    lasting_config(THREADS_BUCKET, "Thread titles, and the threads each human pinned or archived")
 }
 
 /// Where the devices of humans read ([`PRESENCE_BUCKET`]), whose entries expire [`PRESENCE_TTL`] after their last put.

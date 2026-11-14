@@ -206,7 +206,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 | Enrollment (`ants.enroll.*`) | `ants add --enroll` keeps repeating its request until the uplink is back and an answer comes or the enrollment credentials expire. |
 | Requests for new ants (`ants.antreq.*`) | `request_ant` keeps repeating its request until the uplink is back and an answer comes or its timeout passes. |
 | Renewal (`ants.renew.*`) | `ants renew` keeps repeating its request until the uplink is back and an answer comes or the credentials expire. |
-| KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`, `ants_reactions` from `ants react` and the `react` tool) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
+| KV writes (`ants_roster`, `ants_sessions`, `ants_attempts`, `ants_channels`, `ants_humans`, `ants_chains`, `ants_reactions` from `ants react` and the `react` tool, `ants_threads` from `ants thread title`, `pin` and `archive`) | Fail immediately so late puts cannot overwrite newer keys; daemons refresh `ants_roster` every 10 s on reconnect. |
 | Owner records (`ants_owners`, from `ants ask`) | Buffered in `ANTS_OUT` ahead of the message and sourced into `ants_owners` on reconnect; a second record of a thread and ant is dropped as a repeat. `ANTS` and `ants_owners` source apart, so a daemon holds a human's message sourced from an outbox (`Nats-Stream-Source`) up to 10 s until its thread's owner is recorded for the ant. Webhooks reach the hub directly and record no owner in an outbox. |
 
 ### Republishing and live waiters

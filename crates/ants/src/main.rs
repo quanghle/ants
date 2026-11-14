@@ -33,6 +33,7 @@ mod setup;
 mod signer;
 mod spend;
 mod thread;
+mod thread_meta;
 mod tools;
 mod upgrade;
 mod versions;
@@ -206,8 +207,8 @@ enum Command {
     },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
     /// and decisions, and dead letters: list the recent ones, find those mentioning a text, show one's whole history,
-    /// or search messages by sender, recipient, channel, kind, time and text. Nothing is consumed or marked read.
-    /// Needs a human's credentials.
+    /// or search messages by sender, recipient, channel, kind, time and text; title, pin or archive one. Nothing is
+    /// consumed or marked read. Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
@@ -231,7 +232,7 @@ enum Command {
         thread: thread::Pick,
     },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
-    /// reactions, read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
+    /// reactions, threads, read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
     /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
     /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
@@ -636,7 +637,9 @@ enum BridgeCommand {
 #[derive(Subcommand, Debug)]
 enum ThreadCommand {
     /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
-    /// last time, messages, and the first line of the first message; the most recently active last.
+    /// last time, messages, pinned or archived and title when any is, and the first line of the first message; the
+    /// most recently active last, and the pinned after the others. Archived threads are left out, but for those with
+    /// a message stored since they were archived (`archived+new`).
     List {
         /// Only threads this ant (or human) sent or received a message on.
         #[arg(long, value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
@@ -652,10 +655,16 @@ enum ThreadCommand {
         /// tool request's; the escalation is shown under the thread. One sent before --since is not seen.
         #[arg(long)]
         escalated: bool,
+        /// Only the threads pinned (`ants thread pin`), by default read from the earliest one's start.
+        #[arg(long, conflicts_with = "archived")]
+        pinned: bool,
+        /// Only the threads archived (`ants thread archive`), by default read from the earliest one's start.
+        #[arg(long)]
+        archived: bool,
         /// How far back to read, such as 90m, 24h or 7d; 0 for everything the stream keeps. Each message in it is
-        /// read, so a longer one takes longer.
-        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
-        since: Duration,
+        /// read, so a longer one takes longer. By default 24h.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
+        since: Option<Duration>,
         /// At most this many threads, the most recently active.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -709,6 +718,43 @@ enum ThreadCommand {
         /// One JSON entry per line, as `ants thread show --json` prints them.
         #[arg(long)]
         json: bool,
+    },
+    /// Print a thread's title, or with TEXT title it, for every human: any human titles or retitles any thread.
+    Title {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+        /// The title: one line of up to 120 characters.
+        #[arg(conflicts_with = "clear")]
+        text: Vec<String>,
+        /// Remove the title.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Pin a thread, unarchiving it, for every device of the human: `ants thread list` lists it after the others.
+    Pin {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
+    /// Unpin a thread.
+    Unpin {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
+    /// Archive a thread, unpinning it, for every device of the human: `ants thread list` leaves it out until a
+    /// message is stored on it. Its messages stay, and its work goes on.
+    Archive {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
+    /// Unarchive a thread.
+    Unarchive {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
     },
 }
 
@@ -1156,9 +1202,24 @@ async fn run() -> Result<()> {
         Command::Channel(command) => channels(&nats()?, command).await,
         Command::Notes { thread, text } => thread_notes(&nats()?, thread, text).await,
         Command::React { message, reaction, remove } => react(&nats()?, message, reaction, remove).await,
-        Command::Thread(ThreadCommand::List { ant, owner, grep, escalated, since, limit, json }) => {
-            let select = thread::Select { ant, owner, grep, limit: Some(limit), escalated };
+        Command::Thread(ThreadCommand::List { ant, owner, grep, escalated, pinned, archived, since, limit, json }) => {
+            let select = thread::Select { ant, owner, grep, limit: Some(limit), escalated, pinned, archived };
             thread::list(&nats()?, since, &select, json).await
+        }
+        Command::Thread(ThreadCommand::Title { thread, text, clear }) => {
+            thread_meta::title(&nats()?, thread, &text, clear).await
+        }
+        Command::Thread(ThreadCommand::Pin { thread }) => {
+            thread_meta::mark(&nats()?, thread, thread_meta::Marking::Pin).await
+        }
+        Command::Thread(ThreadCommand::Unpin { thread }) => {
+            thread_meta::mark(&nats()?, thread, thread_meta::Marking::Unpin).await
+        }
+        Command::Thread(ThreadCommand::Archive { thread }) => {
+            thread_meta::mark(&nats()?, thread, thread_meta::Marking::Archive).await
+        }
+        Command::Thread(ThreadCommand::Unarchive { thread }) => {
+            thread_meta::mark(&nats()?, thread, thread_meta::Marking::Unarchive).await
         }
         Command::Thread(ThreadCommand::Show { thread, since, json }) => {
             thread::show(&nats()?, thread, since, json).await
@@ -1791,7 +1852,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let mut lines: Vec<String> = fixed.iter().map(|finding| finding.fixed()).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
-        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -1803,6 +1864,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::OWNERS_BUCKET,
         ants_proto::WEBHOOKS_BUCKET,
         ants_proto::REACTIONS_BUCKET,
+        ants_proto::THREADS_BUCKET,
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET
     ));

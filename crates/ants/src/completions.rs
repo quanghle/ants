@@ -20,7 +20,7 @@ use clap_complete::engine::CompletionCandidate;
 use clap_complete::env::{CompleteEnv, Shells};
 use futures::TryStreamExt as _;
 
-use crate::{defaults, humans, thread, tools};
+use crate::{defaults, humans, thread, thread_meta, tools};
 
 /// The environment variable the scripts set to ask `ants` for completions.
 pub const VAR: &str = "ANTS_COMPLETE";
@@ -208,16 +208,30 @@ pub fn channels() -> Vec<CompletionCandidate> {
     })
 }
 
-/// `last` and the threads the CLI's human took part in recently, most recent first, each with its latest text.
+/// `last` and the threads the CLI's human took part in recently, most recent first, each with its title, else its
+/// latest text.
 pub fn threads() -> Vec<CompletionCandidate> {
     let last = CompletionCandidate::new("last").help(Some("the latest thread".into()));
+    let creds = Connection::of(&words()).creds;
+    let rights = humans::Rights::from_creds(creds.as_deref());
+    let titled = rights.is_ok_and(|r| r.may_publish(&thread_meta::titles_right()));
     let recent = lookup(async |js, me| {
         let entries = thread::recent_threads(js, me).await?;
+        let mut titles = match titled {
+            true => match thread_meta::Meta::open(js, None, me).await {
+                Ok(meta) => meta.titles(entries.iter().map(|e| &e.thread_id)).await.unwrap_or_default(),
+                Err(_) => Default::default(),
+            },
+            false => Default::default(),
+        };
         Ok(entries
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                let help = e.text.lines().next().unwrap_or_default().chars().take(60).collect::<String>();
+                let help = match titles.remove(&e.thread_id) {
+                    Some(title) => title.title,
+                    None => e.text.lines().next().unwrap_or_default().chars().take(60).collect::<String>(),
+                };
                 CompletionCandidate::new(e.thread_id.to_string()).help(Some(help.into())).display_order(Some(i))
             })
             .collect())
