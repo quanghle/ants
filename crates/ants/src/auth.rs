@@ -733,6 +733,24 @@ pub(crate) mod tests {
         a_raw.publish(of_b.clone(), "".into()).await.unwrap();
         let v = next_violation(&a_raw, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{of_b}\"")), "{v}");
+        // Only a human asks dev-a to cancel a prompt; dev-a hears its own cancel requests, and answers as itself only.
+        let mut cancels = a_raw.subscribe(subject::cancel_of(&dev_a)).await.unwrap();
+        let mut answers = h_client.subscribe(subject::cancelled(&dev_a, &thread)).await.unwrap();
+        h_client.flush().await.unwrap();
+        a_raw.publish(subject::cancel(&dev_a, &thread), "self".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{}\"", subject::cancel(&dev_a, &thread))), "{v}");
+        h_client.publish(subject::cancel(&dev_a, &thread), "cancel".into()).await.unwrap();
+        let got = timeout(WAIT, cancels.next()).await.unwrap().unwrap();
+        assert_eq!(&got.payload[..], b"cancel");
+        a_raw.publish(subject::cancelled(&dev_a, &thread), "done".into()).await.unwrap();
+        assert_eq!(&timeout(WAIT, answers.next()).await.unwrap().unwrap().payload[..], b"done");
+        a_raw.publish(subject::cancelled(&dev_b, &thread), "spoof".into()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{}\"", subject::cancelled(&dev_b, &thread))), "{v}");
+        let _sub = a_raw.subscribe(subject::cancel_of(&dev_b)).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Subscription to \"{}\"", subject::cancel_of(&dev_b))), "{v}");
         // Its own inbox it may watch live; a denial would be the next violation below.
         let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
         let _own = a_raw.subscribe(subject::stored_inbox(&dev_a)).await.unwrap();
