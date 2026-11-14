@@ -1152,8 +1152,9 @@ impl Permissions {
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
     /// request, reading the roster and the humans, reading and writing the channels bucket, posting in any channel
-    /// as [`UserId::channel_manager`], and putting the version it runs ([`channel_manager_serving_key`]). Its JWT also lets it answer each request it hears once, on the request's reply
-    /// subject, so it needs no right to publish on any ant's reply inboxes.
+    /// as [`UserId::channel_manager`], and putting the version it runs ([`channel_manager_serving_key`]). Its JWT also
+    /// lets it answer each request it hears once, on the request's reply subject, so it needs no right to publish on
+    /// any ant's reply inboxes.
     pub fn for_channel_manager() -> Self {
         let user = UserId::channel_manager();
         let (roster, channels, humans) =
