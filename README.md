@@ -41,7 +41,7 @@ Headless agent teams across machines, communicating with each other and with hum
 |---|---|---|
 | Stream `ANTS` | File, 30d | Captures `ants.inbox.>`, `ants.notes.>`, `ants.approvals.>`, `ants.dead.>`, `ants.chan.>`; enables direct gets; republishes `ants.inbox.*.*` to `_INBOX.<to>.stored.<from>`. |
 | KV `ants_roster` | Memory, 30s | Live `RosterEntry` per ant (`<ant>`), refreshed every 10s. |
-| KV `ants_sessions` | File, 30d | Thread ACP session IDs (`<ant>.<thread>`), spend/escalation state, channel seen cursors, mention markers. |
+| KV `ants_sessions` | File, 30d | Thread ACP session IDs (`<ant>.<thread>`), spend/escalation state and reminders, channel seen cursors, mention markers. |
 | KV `ants_attempts` | File, 30d | Started delivery markers and saved replies (`<ant>.<seq>`) before consumer ack. |
 | KV `ants_channels` | File, none | `ChannelEntry` (`<channel>`): members, optional messenger, optional owner ant. |
 | KV `ants_humans` | File, none | Registered humans (`<human>`), written automatically on CLI connection. |
@@ -88,6 +88,7 @@ ants roster                                         # active ants
 ants tools list                                     # pending tool approval requests
 ants notes <thread>                                 # passive thread notes
 ants thread list                                    # threads active in the last 24h
+ants thread list --escalated --since 7d             # escalations no human answered yet
 ants thread show <thread>                           # one thread's whole history
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"          # wakes dev-a; prints thread ID
@@ -112,7 +113,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels: `--member USER,...`, `--messenger ANT` (`--default-messenger` on `set`), `--owner ANT` (`--no-owner` on `set`). Warns about ants named that no daemon serves now, as `ants ask` does. |
 | `ants channel read CHANNEL [--thread ID \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests; it puts the version of ants it runs at `channel-manager.serve` in `ants_webhooks` hourly. |
-| `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--since DUR] [--limit N] [--json]` | List threads with messages stored within `--since` (default `24h`, `0` for all kept): id, owner, users and channels, first/last time, message count, opening line; most recently active last, up to `--limit` (default 50). `--grep` keeps threads with a message containing `TEXT` (case-insensitive) and prints the matching line. |
+| `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--escalated] [--since DUR] [--limit N] [--json]` | List threads with messages stored within `--since` (default `24h`, `0` for all kept): id, owner, users and channels, first/last time, message count, opening line; most recently active last, up to `--limit` (default 50). `--grep` keeps threads with a message containing `TEXT` (case-insensitive) and prints the matching line. `--escalated` keeps threads whose escalation (other than a tool request's) reached a human with no human message on the thread since, and prints when it first did, to whom, and the escalation. |
 | `ants thread show THREAD [--since DUR] [--json]` | Print a thread's history in stored order: inbox messages both ways, channel posts, notes, escalations, tool requests and decisions, dead letters (see [Thread overview](#thread-overview)). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations and decisions, or live harness progress for `ANT`. |
 | `ants cancel ANT THREAD` | Stop the prompt `ANT` runs on `THREAD` (see [Prompt limits](#prompt-limits-and-spending-caps)); fails when no daemon of `ANT` runs one there or none answers within 5s. Requires human credentials. |
@@ -258,6 +259,7 @@ spend_warn_percent = 80                    # default; warn once past this share 
 escalate_to = ["lead", "dev-b"]            # optional escalation chain; first ant leads
 max_escalation_hops = 3                    # default
 escalate_after = "30m"                     # default; "0" waits indefinitely
+escalation_reminder = "4h"                 # default; remind a human of an unanswered escalation; "0" disables
 
 [[ant]]
 name = "dev-b"
@@ -496,6 +498,7 @@ Unresolved thread conditions — `turn_budget`, `cap`, `notes`, `dead_letter`, `
 - **Origin chain:** the stuck ant's `escalate_to` (persisted in `ants_chains`), or on ant-created channel threads and verified `origin_thread` spin-offs, level 1 of the `creator` ant's `escalate_to` (both stuck ant and creator marked visited).
 - **Group coordination:** all unvisited ants in `escalate_to` receive an `[ants]` inbox notice on the thread, and thread notes get 8 fresh turns for that level. The first listed ant leads: only the leader may answer the stuck ant (renewing turn budget and spending allowance once per level) or call `escalate`. Non-leaders reply into thread notes and cannot message the stuck ant directly on the thread.
 - **Advancement and reset:** after `escalate_after` (`30m`; `"0"` waits indefinitely) without a leader reply, or if a member gets stuck, escalation climbs to the leader's `escalate_to`. Empty chains, visited leaders or `max_escalation_hops` (default 3) hand off to the human owner. Only a human message on the thread resets escalation to level 0.
+- **Reaching a human:** the notice to the owner, else the default human, carries the escalation at every level, so `ants webhook serve` pushes it (see [Notifications](#notifications)). Without a human message to the ant on the thread within `escalation_reminder` (default `4h`, `"0"` disables), that human gets an `[ants] Reminder:` on the thread, carrying the escalation (so pushed too), naming the stuck ant, reason and waiting time, and the `ants ask --thread` command that ends it, then one daily for 30 days after the escalation first reached a human. The reminder is kept with the thread's escalation in `ants_sessions` and listed with its deadlines, so only the daemon serving the ant sends it, once, across restarts and hand-overs. `ants thread list --escalated` lists the escalations still open within `--since`.
 
 ## Dead letters
 
@@ -582,7 +585,7 @@ device = "01968f7e-..."                       # optional: a device id (ants auth
 
 - **One notice per event:** each human is its own NATS user and reads durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so several `ants webhook serve` processes listing the same human share it and each request or escalation is sent once. Requests already decided or expired, unreadable or forged ones, and escalations older than a day are skipped. Sinks run concurrently with a `10s` timeout; failures are logged (never with URLs or tokens) and not retried.
 - **Per device:** a sink with `device` is that device's push target and gets no notice while the device follows what the notice is about: `ants tools list -f` or `ants inbox -f` without `--thread` and `--json` for tool requests, `ants inbox -f` without `--thread` for escalations. The human's other devices still get it. While following, the CLI puts the device's presence in `ants_presence` every 10s and deletes it when it stops; a device that stops without deleting it (crash, lost connection) counts as away within 30s. A sink without `device` gets every notice, as before. Unreadable presence counts as away, so a failure sends a notice too many, never one too few. Legacy devices (credentials without a device id) record no presence.
-- **Content:** approval notices carry the ant, tool title and kind, files, an input excerpt, thread, time left and the `ants tools approve|reject <ant>/<id>` commands; a request whose call was approved twice before carries the allow rule `ants tools approve --rule` would add; escalation notices carry the reason, the stuck ant, the text and the `ants ask --thread` command to answer on the escalation's thread (an expired tool request's notice is titled as such and answers on the request's thread). Plain messages are not notified.
+- **Content:** approval notices carry the ant, tool title and kind, files, an input excerpt, thread, time left and the `ants tools approve|reject <ant>/<id>` commands; a request whose call was approved twice before carries the allow rule `ants tools approve --rule` would add; escalation notices carry the reason, the stuck ant, the text and the `ants ask --thread` command to answer on the escalation's thread (an expired tool request's notice is titled as such and answers on the request's thread); `[ants] Reminder:` messages of an unanswered escalation are pushed the same way. Plain messages are not notified.
 - **Approve/reject links:** with `public_url` and the action secret, approval notices carry one link per offered verdict (`Approve`, `Always allow`, `Reject`): `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=`, HMAC-SHA256 over every field, valid until the request expires. `GET` shows the request, its state and a confirm button; `POST` stores the decision with the human's credentials exactly as `ants tools approve|reject` does (first answer wins). Answers: `200` stored or shown, `400` incomplete link, `403` wrong signature, `404` unknown human or request, `405` not `GET`/`POST`, `409` already answered or expired, `410` past expiry, `503` hub unreachable. Without `public_url`, notices carry only the commands. Anyone holding a link can decide that one request, so keep sinks private (ntfy topics are public unless the server requires a token).
 
 | Sink | Notice | Actions |

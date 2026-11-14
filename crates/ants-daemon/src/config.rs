@@ -65,6 +65,7 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = crate::approvals::DEFAULT_TIMEOUT
 pub const DEFAULT_PROMPT_TIMEOUT: Duration = harness::DEFAULT_PROMPT_TIMEOUT;
 pub const DEFAULT_MAX_TOOL_CALLS: usize = harness::DEFAULT_MAX_TOOL_CALLS;
 pub const DEFAULT_ESCALATE_AFTER: Duration = escalation::DEFAULT_ESCALATE_AFTER;
+pub const DEFAULT_ESCALATION_REMINDER: Duration = escalation::DEFAULT_ESCALATION_REMINDER;
 pub const DEFAULT_SPEND_WARN_PERCENT: u8 = 80;
 
 /// `~/.ants/config.toml`.
@@ -173,6 +174,10 @@ pub struct Ant {
     /// How long an escalation waits for its leader's answer before going one level higher; 0 waits for good.
     #[serde(default = "default_escalate_after", deserialize_with = "ants_proto::duration::deserialize")]
     pub escalate_after: Duration,
+    /// How long an escalation that reached a human waits for a human's message on the thread before a reminder, sent
+    /// daily after that; 0 never reminds.
+    #[serde(default = "default_escalation_reminder", deserialize_with = "ants_proto::duration::deserialize")]
+    pub escalation_reminder: Duration,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -214,6 +219,10 @@ fn default_escalate_after() -> Duration {
     DEFAULT_ESCALATE_AFTER
 }
 
+fn default_escalation_reminder() -> Duration {
+    DEFAULT_ESCALATION_REMINDER
+}
+
 impl Ant {
     /// An ant with default settings.
     pub fn new(name: UserId, workdir: PathBuf) -> Self {
@@ -250,6 +259,7 @@ impl Ant {
             escalate_to: Vec::new(),
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
             escalate_after: DEFAULT_ESCALATE_AFTER,
+            escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             builtin: false,
         }
     }
@@ -308,6 +318,7 @@ impl Ant {
                 escalate_to: self.escalate_to,
                 max_hops: self.max_escalation_hops,
                 after: Some(self.escalate_after).filter(|t| !t.is_zero()),
+                remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
             },
             ant: self.name,
             defer_to_others: self.builtin,
@@ -740,6 +751,7 @@ pub fn entry(ant: &Ant) -> Result<String> {
         ("idle_timeout", ant.idle_timeout, default.idle_timeout),
         ("prompt_timeout", ant.prompt_timeout, default.prompt_timeout),
         ("escalate_after", ant.escalate_after, default.escalate_after),
+        ("escalation_reminder", ant.escalation_reminder, default.escalation_reminder),
     ];
     for (key, value, default) in durations {
         if value != default {
@@ -851,6 +863,7 @@ Review changes for correctness."""
             escalate_to = ["lead", "dev-b"]
             max_escalation_hops = 2
             escalate_after = "0"
+            escalation_reminder = "0"
 
             [[ant]]
             name = "dev-b"
@@ -891,9 +904,9 @@ Review changes for correctness."""
         let caps = Caps { thread_cost: Some(2.5), daily_tokens: Some(1_000_000), ..Caps::default() };
         assert_eq!(config.caps, caps);
         assert_eq!(config.spend_warn_percent, 90);
-        let chain =
-            Chain { escalate_to: vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()], max_hops: 2, after: None };
-        assert_eq!(config.escalation, chain, "0 waits for the leader for good");
+        let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
+        let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None };
+        assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
         assert!(config.worktrees);
 
         let b = ants[1].clone();
@@ -914,6 +927,7 @@ Review changes for correctness."""
         assert_eq!(config.spend_warn_percent, DEFAULT_SPEND_WARN_PERCENT);
         assert_eq!(config.escalation, Chain::default(), "no chain: escalations go to the owner");
         assert_eq!(config.escalation.after, Some(DEFAULT_ESCALATE_AFTER));
+        assert_eq!(config.escalation.remind, Some(DEFAULT_ESCALATION_REMINDER));
         assert!(config.home.ends_with(".ants/dev-b"));
         assert_eq!(config.whoami, None);
         assert_eq!(config.model_settings, ModelSettings::default());

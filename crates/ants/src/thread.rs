@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime};
 
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, NotesPost, ThreadId, UserId, Uuid,
-    subject,
+    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans,
+    NotesPost, ThreadId, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -95,6 +95,9 @@ pub struct Entry {
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
+    /// The reason of the escalation an inbox message carries, which the note spells out.
+    #[serde(skip)]
+    pub reason: Option<EscalationReason>,
 }
 
 impl Entry {
@@ -111,6 +114,7 @@ impl Entry {
             note: None,
             text: String::new(),
             forged: false,
+            reason: None,
         }
     }
 
@@ -165,6 +169,7 @@ impl Parser {
                 note,
                 text,
                 forged,
+                reason: e.escalation.map(|x| x.reason),
                 ..entry(kind, e.thread_id)
             });
         }
@@ -250,6 +255,10 @@ pub struct Summary {
     /// The first line matching `--grep`, after its sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched: Option<String>,
+    /// With `--escalated`, the escalation that reached a human and no human's message followed: when it first did,
+    /// to whom, and the escalation's note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalated: Option<String>,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -263,6 +272,8 @@ pub struct Select {
     pub grep: Option<String>,
     /// Only the most recently active threads, this many.
     pub limit: Option<usize>,
+    /// Only threads with an open escalation ([`Threads::escalated`]).
+    pub escalated: bool,
 }
 
 /// The threads of the entries handed to [`Threads::add`].
@@ -271,11 +282,20 @@ pub struct Threads {
     by_id: HashMap<ThreadId, Summary>,
     /// `--grep`'s text, lowercased.
     grep: Option<String>,
+    /// With `--escalated`, the team's humans.
+    humans: Option<Humans>,
 }
 
 impl Threads {
     pub fn new(grep: Option<&str>) -> Self {
-        Self { by_id: HashMap::new(), grep: grep.map(str::to_lowercase) }
+        Self { by_id: HashMap::new(), grep: grep.map(str::to_lowercase), humans: None }
+    }
+
+    /// Keep each thread's open escalation: the first of the escalations reaching one of `humans` since a human's
+    /// last message or post on the thread, other than a tool request's. A human's message on the thread ends it, as
+    /// it ends the escalation in the daemon.
+    pub fn escalated(self, humans: Humans) -> Self {
+        Self { humans: Some(humans), ..self }
     }
 
     pub fn add(&mut self, entry: &Entry) {
@@ -289,6 +309,7 @@ impl Threads {
             messages: 0,
             opening: crate::excerpt(&entry.text, OPENING),
             matched: None,
+            escalated: None,
         });
         summary.messages += 1;
         summary.first_at = summary.first_at.min(entry.stored_at);
@@ -304,6 +325,19 @@ impl Threads {
                 format!("{from}: {}", crate::excerpt(line.trim(), OPENING))
             });
         }
+        if let Some(humans) = self.humans.as_ref().filter(|_| !entry.forged) {
+            let human = |user: &Option<UserId>| user.as_ref().is_some_and(|u| humans.contains(u));
+            match entry.kind {
+                Kind::Escalation if summary.escalated.is_none() && human(&entry.to) => {
+                    if entry.reason.is_some_and(|r| r != EscalationReason::Approval) {
+                        let note = entry.note.as_deref().unwrap_or_default();
+                        summary.escalated = Some(format!("{} {}: {note}", time(entry.stored_at), entry.route()));
+                    }
+                }
+                Kind::Message | Kind::Post if human(&entry.from) => summary.escalated = None,
+                _ => {}
+            }
+        }
     }
 
     /// The threads `select` keeps, least recently active first, and how many more it left out for its limit.
@@ -314,6 +348,7 @@ impl Threads {
             .filter(|t| select.ant.as_ref().is_none_or(|ant| t.users.contains(ant)))
             .filter(|t| select.owner.is_none() || t.owner == select.owner)
             .filter(|t| select.grep.is_none() || t.matched.is_some())
+            .filter(|t| !select.escalated || t.escalated.is_some())
             .collect();
         threads.sort_by(|a, b| (a.last_at, &a.thread_id).cmp(&(b.last_at, &b.thread_id)));
         let omitted = select.limit.map_or(0, |limit| threads.len().saturating_sub(limit));
@@ -327,7 +362,7 @@ fn time(at: DateTime<Utc>) -> String {
 }
 
 /// The threads as a table: one row per thread under a header, columns padded to line up, and under a thread
-/// matching `--grep` its matching line.
+/// matching `--grep` its matching line, under one with an open escalation that escalation.
 pub fn table(threads: &[Summary]) -> String {
     let header = ["THREAD", "OWNER", "USERS", "FIRST", "LAST", "MSGS", "OPENING"].map(str::to_owned);
     let rows: Vec<[String; 7]> = std::iter::once(header)
@@ -355,8 +390,10 @@ pub fn table(threads: &[Summary]) -> String {
     for (i, row) in rows.iter().enumerate() {
         let cells: Vec<String> = row.iter().zip(widths).map(|(cell, width)| format!("{cell:width$}")).collect();
         lines.push(cells.join("  ").trim_end().to_owned());
-        if let Some(matched) = i.checked_sub(1).and_then(|i| threads[i].matched.as_ref()) {
-            lines.push(format!("    {matched}"));
+        if let Some(thread) = i.checked_sub(1).map(|i| &threads[i]) {
+            for line in thread.matched.iter().chain(&thread.escalated) {
+                lines.push(format!("    {line}"));
+            }
         }
     }
     lines.join("\n")
@@ -567,6 +604,9 @@ async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
 pub async fn list(nats: &crate::Nats<'_>, since: Duration, select: &Select, json: bool) -> Result<()> {
     let js = connect(nats).await?;
     let mut threads = Threads::new(select.grep.as_deref());
+    if select.escalated {
+        threads = threads.escalated(crate::humans::load(&js, &nats.me).await);
+    }
     scan(&js, window(since), |entry| threads.add(&entry)).await?;
     let (threads, omitted) = threads.finish(select);
     if json {
@@ -759,6 +799,36 @@ mod tests {
         let table = table(&found);
         assert!(table.starts_with("THREAD  OWNER  USERS"), "{table}");
         assert!(table.ends_with("\n    dev-a: Deploy failed"), "{table}");
+    }
+
+    #[test]
+    fn an_escalation_reaching_a_human_stays_open_until_a_human_s_message_on_the_thread() {
+        let (alice, dev_a, lead) = (p("alice"), p("dev-a"), p("lead"));
+        let escalate = |thread: &str, to: &UserId, reason| {
+            let escalation = Escalation::new(dev_a.clone(), t(thread), reason);
+            Envelope::on_thread(t(thread), dev_a.clone(), to.clone(), "[ants] stuck").with_escalation(Some(escalation))
+        };
+        let messages: Vec<Envelope> = vec![
+            escalate("t1", &alice, EscalationReason::TurnBudget),
+            escalate("t2", &UserId::human(), EscalationReason::Approval),
+            escalate("t3", &lead, EscalationReason::Cap),
+            escalate("t4", &alice, EscalationReason::Asked),
+            Envelope::on_thread(t("t4"), alice.clone(), dev_a.clone(), "go on"),
+            Envelope::on_thread(t("t1"), dev_a.clone(), alice.clone(), "still here"),
+            escalate("t1", &alice, EscalationReason::TurnBudget),
+        ];
+        let read = entries(&messages.iter().map(|e| (e.subject(), json(e))).collect::<Vec<_>>());
+        let mut humans = Humans::default();
+        humans.add("alice", ants_proto::HumanEntry::new(alice)).unwrap();
+        let mut threads = Threads::new(None).escalated(humans);
+        read.iter().for_each(|e| threads.add(e));
+        let (open, _) = threads.finish(&Select { escalated: true, ..Default::default() });
+
+        assert_eq!(open.iter().map(|t| t.thread_id.as_str()).collect::<Vec<_>>(), ["t1"]);
+        let since = open[0].escalated.as_deref().unwrap();
+        let first = "2023-11-14 22:13:20 dev-a -> alice: escalation level 0, turn_budget: dev-a stuck on t1";
+        assert!(since.starts_with(first), "the first since a human's message: {since}");
+        assert!(table(&open).ends_with(&format!("\n    {since}")), "{}", table(&open));
     }
 
     #[test]
