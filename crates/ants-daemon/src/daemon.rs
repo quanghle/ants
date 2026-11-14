@@ -1056,13 +1056,18 @@ impl Inbox<'_> {
         (thread, retry.map_or(Handled::Done, Handled::Retry))
     }
 
-    /// Hold the messages, `incoming` having found the harness signed out, and tell its thread's owner, else the
-    /// default human, how to sign it in, unless told already since the harness last worked. The notice goes to the
-    /// human directly: no ant up the chain can sign the harness in.
+    /// Hold the messages, `incoming` having found the harness signed out, show that in the roster entry, and tell its
+    /// thread's owner, else the default human, how to sign it in, unless told already since the harness last worked.
+    /// The notice goes to the human directly: no ant up the chain can sign the harness in.
     async fn wait_for_sign_in(&self, incoming: &Incoming, signed_out: &SignedOut) {
         let thread = &incoming.envelope.thread_id;
         status::state(self.client, self.ant, thread, State::Idle);
-        let Some(since) = self.sign_in.out() else {
+        let tell = self.sign_in.out();
+        if let Some(since) = self.sign_in.out_since() {
+            let sign_in = signed_out.sign_in.clone();
+            self.workload.set_signed_out(Some(ants_proto::SignInNeeded { since, sign_in }));
+        }
+        let Some(since) = tell else {
             tracing::info!(%thread, error = %signed_out, "harness signed out; the message waits");
             return;
         };
@@ -1078,7 +1083,8 @@ impl Inbox<'_> {
         }
     }
 
-    /// Check the harness every `sign_in_every` until a handshake with it succeeds, then let the messages go on.
+    /// Check the harness every `sign_in_every` until a handshake with it succeeds, then clear the roster entry's
+    /// signed-out state and let the messages go on.
     async fn signed_in(&self) {
         loop {
             tokio::time::sleep(self.sign_in_every).await;
@@ -1087,6 +1093,7 @@ impl Inbox<'_> {
                 harness::Readiness::Ready { agent } => {
                     tracing::info!(%agent, "harness signed in; answering the waiting messages");
                     self.sign_in.back();
+                    self.workload.set_signed_out(None);
                     return;
                 }
                 harness::Readiness::SignedOut { detail } => {
@@ -1745,6 +1752,7 @@ mod tests {
                 handling: None,
                 harnesses: None,
                 escalate_to: escalate_to.to_vec(),
+                signed_out: None,
             };
             roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
         }
@@ -2051,6 +2059,8 @@ mod tests {
             let notice = next_envelope(&mut replies).await;
             signed_out(&notice);
             assert!([&t1, &t2].contains(&&notice.thread_id));
+            let shown = bus.workload.signed_out().expect("the roster shows the harness signed out");
+            assert_eq!(shown.sign_in, None, "the test harness names no sign-in command");
             // Several checks of the harness pass, telling nobody again and spending no attempt.
             let starts = log.lock().unwrap().starts;
             until("checks of the harness", || log.lock().unwrap().starts >= starts + 3).await;
@@ -2065,11 +2075,13 @@ mod tests {
             answered.sort_by_key(|(_, text)| text.clone());
             let expected = [(t1.clone(), "a"), (t1.clone(), "b"), (t2.clone(), "c")].map(|(t, s)| (t, s.to_owned()));
             assert_eq!(answered, expected, "answered unwarned: no attempt started");
+            assert_eq!(bus.workload.signed_out(), None, "signed in again: the roster no longer shows it");
 
             // Signed out again once it worked: a live harness turns the prompt away, and a human is told again.
             log.lock().unwrap().signed_out = true;
             bus.send(&t1, "d").await;
             signed_out(&next_envelope(&mut replies).await);
+            assert!(bus.workload.signed_out().is_some_and(|s| s.since > shown.since), "a new signed-out period");
             log.lock().unwrap().signed_out = false;
             assert_eq!(next_reply(&mut replies).await, (t1.clone(), "d".to_owned()));
             ctrl_c.add_permits(1);
@@ -3811,6 +3823,7 @@ mod tests {
             handling: None,
             harnesses: None,
             escalate_to: Vec::new(),
+            signed_out: None,
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
         let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");
