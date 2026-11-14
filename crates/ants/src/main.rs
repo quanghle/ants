@@ -471,8 +471,8 @@ enum ChannelCommand {
 enum WebhookCommand {
     /// On the hub, behind the TLS-terminating reverse proxy: take `POST <path>/<webhook>` for each webhook of the
     /// config file and deliver its events, each webhook as itself with its own credentials. Also push the tool
-    /// requests and escalations of each `[[human]]` to its ntfy, Slack or Telegram, with approve and reject links
-    /// answered at `<path>/_approval`.
+    /// requests and escalations of each `[[human]]` to its ntfy, Slack, Telegram, command (exec) or signed HTTP
+    /// endpoint (http) sinks, with approve and reject links answered at `<path>/_approval`.
     Serve {
         /// The webhooks' config file (default: ~/.ants/webhooks.toml).
         #[arg(long)]
@@ -487,8 +487,8 @@ enum WebhookCommand {
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
-    /// Send a test notice through each ntfy, Slack or Telegram sink of HUMAN in the config file, those of a device
-    /// too, and print how each went; exits with status 1 when one fails. Needs no NATS.
+    /// Send a test notice through each sink (ntfy, slack, telegram, exec, http) of HUMAN in the config file, those of
+    /// a device too, and print how each went; exits with status 1 when one fails. Needs no NATS.
     NotifyTest {
         /// A `[[human]]` of the config file.
         human: UserId,

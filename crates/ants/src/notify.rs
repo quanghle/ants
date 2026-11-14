@@ -8,6 +8,9 @@
 //! decided or expired, or an escalation older than [`ESCALATION_MAX_AGE`], is skipped; a sink that fails is logged
 //! and the others still get the notice.
 //!
+//! Besides ntfy, Slack and Telegram, a sink may be a command (`exec`), given the notice as JSON on its standard input,
+//! or an HTTP endpoint (`http`), given the same JSON in a `POST` signed with HMAC-SHA256 ([`notice_json`]).
+//!
 //! A sink may be the push target of one device of the human (`device`): it gets no notice of what that device follows
 //! as it comes, the human's inbox for an escalation and the tool requests for an approval, while the device's
 //! [`ants_proto::Presence`] says it follows it ([`Present`]). A sink of no device gets every notice.
@@ -27,8 +30,8 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_proto::{
-    ApprovalRequest, DeviceId, Envelope, EscalationReason, Following, JsDomain, STREAM, UserId, Uuid, Verdict,
-    notify_consumer, subject,
+    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, STREAM, UserId, Uuid,
+    Verdict, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, stream::Stream};
@@ -53,8 +56,14 @@ use crate::tools;
 /// Where approval links point, under the config's `path`. A webhook name starts with a letter or digit, so no
 /// webhook is named like it.
 pub const APPROVAL_PATH: &str = "/_approval";
-/// How long one sink may take to take a notice.
+/// How long one sink may take to take a notice, unless its `timeout` says otherwise.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest `timeout` of a sink, well within [`ACK_WAIT`].
+const MAX_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// The version of the JSON notice exec and http sinks get ([`notice_json`]).
+const NOTICE_VERSION: u32 = 1;
+/// Shortest signing secret of an http sink.
+const MIN_SECRET: usize = 16;
 /// How long the consumer waits for a notice to be sent before handing it out again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
 const MAX_DELIVER: i64 = 3;
@@ -98,10 +107,14 @@ struct SinkEntry {
     url: Option<String>,
     topic: Option<String>,
     chat: Option<String>,
+    /// The program of an exec sink and its arguments, run without a shell.
+    command: Option<Vec<String>>,
     secret_env: Option<String>,
     secret_file: Option<PathBuf>,
     /// The device of the human whose push target the sink is: none while that device follows what a notice is about.
     device: Option<DeviceId>,
+    /// How long the sink may take, such as `20s`.
+    timeout: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +123,8 @@ enum SinkKind {
     Ntfy,
     Slack,
     Telegram,
+    Exec,
+    Http,
 }
 
 impl HumanEntry {
@@ -118,6 +133,14 @@ impl HumanEntry {
         self.notify.iter().enumerate().map(|(i, sink)| {
             let what = format!("human {} notify #{}", self.name, i + 1);
             (what, sink.secret_env.as_deref(), sink.secret_file.as_deref())
+        })
+    }
+
+    /// The programs of its exec sinks, as written: what each is for and the program.
+    pub fn commands(&self) -> impl Iterator<Item = (String, &str)> {
+        self.notify.iter().enumerate().filter_map(|(i, sink)| {
+            let program = sink.command.as_ref()?.first()?;
+            Some((format!("human {} notify #{}", self.name, i + 1), program.as_str()))
         })
     }
 }
@@ -138,6 +161,8 @@ pub struct Human {
 struct Target {
     device: Option<DeviceId>,
     sink: Sink,
+    /// How long the sink may take to take a notice.
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for Target {
@@ -158,6 +183,10 @@ enum Sink {
     Slack { url: String },
     /// A Telegram bot's `sendMessage` to `chat`, through the Bot API at `api`.
     Telegram { api: String, token: String, chat: String },
+    /// A program, with its arguments, run with the notice's JSON on its standard input.
+    Exec { command: Vec<String> },
+    /// The notice's JSON `POST`ed to `url`, signed with `secret`.
+    Http { url: String, secret: String },
 }
 
 impl std::fmt::Debug for Sink {
@@ -192,10 +221,11 @@ impl Human {
             .notify
             .into_iter()
             .enumerate()
-            .map(|(i, sink)| {
+            .map(|(i, mut sink)| {
                 let device = sink.device;
+                let timeout = sink_timeout(sink.timeout.take()).with_context(|| format!("notify #{}", i + 1))?;
                 let sink = Sink::from_entry(sink, resolve, env).with_context(|| format!("notify #{}", i + 1))?;
-                Ok(Target { device, sink })
+                Ok(Target { device, sink, timeout })
             })
             .collect::<Result<Vec<_>>>()?;
         let creds = entry.creds.as_deref().map(resolve);
@@ -242,6 +272,25 @@ impl Human {
     }
 }
 
+/// The program of an exec sink as it is run: a path, one with a separator or starting with `~`, resolved as the
+/// config file's paths are; a bare name left to be found on `PATH`.
+pub fn resolve_program(program: &str, resolve: &impl Fn(&Path) -> PathBuf) -> String {
+    match program.starts_with('~') || program.contains(std::path::is_separator) {
+        true => resolve(Path::new(program)).to_string_lossy().into_owned(),
+        false => program.to_owned(),
+    }
+}
+
+/// A sink's `timeout`, [`SEND_TIMEOUT`] unless given.
+fn sink_timeout(text: Option<String>) -> Result<Duration> {
+    let Some(text) = text else { return Ok(SEND_TIMEOUT) };
+    let timeout = ants_proto::duration::parse(&text).map_err(|e| anyhow!(e))?;
+    if timeout.is_zero() || timeout > MAX_SEND_TIMEOUT {
+        bail!("timeout {text:?}: from 1s to {}", ants_proto::duration::format(MAX_SEND_TIMEOUT));
+    }
+    Ok(timeout)
+}
+
 /// `url` checked as an http(s) URL without credentials or query, without its trailing `/`.
 fn http_url(url: &str, what: &str) -> Result<String> {
     let uri: Uri = url.parse().with_context(|| format!("{what} {url:?}"))?;
@@ -274,6 +323,9 @@ impl Sink {
             true => Err(anyhow!("{what} does not go with kind = {:?}", entry.kind)),
             false => Ok(()),
         };
+        if entry.kind != SinkKind::Exec {
+            only("command", entry.command.is_some())?;
+        }
         match entry.kind {
             SinkKind::Ntfy => {
                 only("chat", entry.chat.is_some())?;
@@ -307,6 +359,33 @@ impl Sink {
                 let api = http_url(entry.url.as_deref().unwrap_or(TELEGRAM), "url")?;
                 Ok(Self::Telegram { api, token, chat })
             }
+            SinkKind::Exec => {
+                only("url", entry.url.is_some())?;
+                only("topic", entry.topic.is_some())?;
+                only("chat", entry.chat.is_some())?;
+                if secret.is_some() {
+                    bail!(
+                        "secret_file and secret_env do not go with kind = \"exec\": the command reads its own secrets"
+                    );
+                }
+                let mut command = entry.command.context("exec needs command, the program and its arguments")?;
+                let Some(program) = command.first_mut().filter(|p| !p.is_empty()) else {
+                    bail!("command: give the program first, then its arguments");
+                };
+                *program = resolve_program(program, resolve);
+                Ok(Self::Exec { command })
+            }
+            SinkKind::Http => {
+                only("topic", entry.topic.is_some())?;
+                only("chat", entry.chat.is_some())?;
+                let url = entry.url.context("http needs url, where to POST notices")?;
+                http_url(&url, "url")?;
+                let secret = secret.context("http needs the signing secret in secret_file or secret_env")?;
+                if secret.len() < MIN_SECRET {
+                    bail!("the signing secret is too short: give at least {MIN_SECRET} random characters");
+                }
+                Ok(Self::Http { url, secret })
+            }
         }
     }
 
@@ -315,11 +394,16 @@ impl Sink {
             Self::Ntfy { topic, .. } => format!("ntfy topic {topic}"),
             Self::Slack { .. } => "slack".to_owned(),
             Self::Telegram { chat, .. } => format!("telegram chat {chat}"),
+            Self::Exec { command } => format!("exec {}", command[0]),
+            Self::Http { url, .. } => {
+                let host = url.parse::<Uri>().ok().and_then(|uri| uri.host().map(str::to_owned));
+                format!("http {}", host.unwrap_or_default())
+            }
         }
     }
 
-    /// Where to `POST` `notice`, the bearer token if any, and the JSON body.
-    fn request(&self, notice: &Notice) -> (String, Option<&str>, Value) {
+    /// `notice` in the sink's form, and how it goes there.
+    fn request(&self, notice: &Notice) -> Delivery {
         match self {
             Self::Ntfy { url, topic, token } => {
                 let actions: Vec<Value> = notice
@@ -335,7 +419,7 @@ impl Sink {
                 if !actions.is_empty() {
                     body["actions"] = Value::Array(actions);
                 }
-                (url.clone(), token.as_deref(), body)
+                Delivery::post(url, token.as_deref(), &body)
             }
             Self::Slack { url } => {
                 let text = cut(&format!("*{}*\n{}", slack_escape(&notice.title), slack_escape(&notice.text)), 2900);
@@ -357,7 +441,7 @@ impl Sink {
                         .collect();
                     blocks.push(json!({ "type": "actions", "elements": elements }));
                 }
-                (url.clone(), None, json!({ "text": slack_escape(&notice.title), "blocks": blocks }))
+                Delivery::post(url, None, &json!({ "text": slack_escape(&notice.title), "blocks": blocks }))
             }
             Self::Telegram { api, token, chat } => {
                 let mut body = json!({
@@ -370,9 +454,51 @@ impl Sink {
                         notice.buttons.iter().map(|b| json!({ "text": b.label, "url": b.url })).collect();
                     body["reply_markup"] = json!({ "inline_keyboard": [row] });
                 }
-                (format!("{api}/bot{token}/sendMessage"), None, body)
+                Delivery::post(&format!("{api}/bot{token}/sendMessage"), None, &body)
+            }
+            Self::Exec { command } => {
+                let input = format!("{}\n", notice_json(notice, Utc::now())).into_bytes();
+                Delivery::Run { command: command.clone(), input }
+            }
+            Self::Http { url, secret } => {
+                let now = Utc::now();
+                let body = notice_json(notice, now).to_string().into_bytes();
+                let timestamp = now.timestamp().to_string();
+                let signature = signature(secret, &timestamp, &body);
+                let headers = vec![(TIMESTAMP_HEADER, timestamp), (SIGNATURE_HEADER, signature)];
+                Delivery::Post { url: url.clone(), headers, body }
             }
         }
+    }
+}
+
+/// The header of an http sink's `POST` with its Unix time in seconds, part of what is signed.
+const TIMESTAMP_HEADER: &str = "x-ants-timestamp";
+/// The header of an http sink's `POST` with its signature, `sha256=` and the hex HMAC-SHA256 of [`signature`].
+const SIGNATURE_HEADER: &str = "x-ants-signature";
+
+/// The signature an http sink's `POST` of `body` at `timestamp` carries: `sha256=` and the lowercase hex HMAC-SHA256,
+/// keyed with `secret`, of the timestamp's decimal digits, a `.` and the body.
+fn signature(secret: &str, timestamp: &str, body: &[u8]) -> String {
+    let mut context = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()));
+    context.update(timestamp.as_bytes());
+    context.update(b".");
+    context.update(body);
+    format!("sha256={}", HEXLOWER.encode(context.sign().as_ref()))
+}
+
+/// How a notice goes to a sink. Holds the sink's secrets, so it has no `Debug`.
+enum Delivery {
+    /// `body`, JSON, `POST`ed to `url` with `headers`.
+    Post { url: String, headers: Vec<(&'static str, String)>, body: Vec<u8> },
+    /// `command` run with `input` on its standard input.
+    Run { command: Vec<String>, input: Vec<u8> },
+}
+
+impl Delivery {
+    fn post(url: &str, bearer: Option<&str>, body: &Value) -> Self {
+        let headers = bearer.map(|token| ("authorization", format!("Bearer {token}")));
+        Self::Post { url: url.to_owned(), headers: headers.into_iter().collect(), body: body.to_string().into_bytes() }
     }
 }
 
@@ -491,13 +617,72 @@ impl Links {
 
 // ---- notices ---------------------------------------------------------------------------------------------------
 
-/// What a sink sends.
+/// What a sink sends, whatever its kind: each kind's form of it is [`Sink::request`]'s.
 #[derive(Debug, PartialEq, Eq)]
 struct Notice {
+    about: About,
+    /// The human notified.
+    human: UserId,
     title: String,
     text: String,
     buttons: Vec<Button>,
     urgent: bool,
+}
+
+/// What a notice is about.
+#[derive(Debug, PartialEq, Eq)]
+enum About {
+    /// A pending tool request, at stream sequence `seq`.
+    Approval { request: Box<ApprovalRequest>, seq: u64 },
+    /// An escalation reaching the human's inbox, in the message `id` from `from`.
+    Escalation { id: Uuid, from: UserId, escalation: Box<Escalation> },
+    /// A test notice of `ants webhook notify-test`.
+    Test { id: Uuid },
+}
+
+/// `notice` as exec and http sinks get it, at `now`: version [`NOTICE_VERSION`] of the schema the README documents.
+fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
+    let links: Vec<Value> = notice
+        .buttons
+        .iter()
+        .map(|b| json!({ "verdict": b.verdict.as_str(), "label": b.label, "url": b.url }))
+        .collect();
+    let mut json = json!({
+        "version": NOTICE_VERSION,
+        "human": notice.human,
+        "title": notice.title,
+        "text": notice.text,
+        "urgent": notice.urgent,
+        "sent_at": now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "links": links,
+    });
+    let facts = match &notice.about {
+        About::Approval { request, seq } => json!({
+            "kind": "approval",
+            "id": request.id,
+            "ant": request.ant,
+            "thread": request.thread_id,
+            "request": tools::qualified(request),
+            "seq": seq,
+            "tool": request.tool,
+            "options": request.options.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            "expires_at": request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+        About::Escalation { id, from, escalation } => json!({
+            "kind": "escalation",
+            "id": id,
+            "ant": from,
+            "thread": escalation.thread_id,
+            "reason": escalation.reason.as_str(),
+            "stuck": escalation.stuck,
+            "level": escalation.level,
+        }),
+        About::Test { id } => json!({ "kind": "test", "id": id }),
+    };
+    if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts) {
+        json.extend(facts);
+    }
+    json
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -566,7 +751,14 @@ fn approval_notice(
                 .collect()
         })
         .unwrap_or_default();
-    Notice { title: format!("{} asks to run a tool", request.ant), text, buttons, urgent: true }
+    Notice {
+        about: About::Approval { request: Box::new(request.clone()), seq },
+        human: human.clone(),
+        title: format!("{} asks to run a tool", request.ant),
+        text,
+        buttons,
+        urgent: true,
+    }
 }
 
 /// The notice of an escalation `envelope` brings, if it brings one. The thread to answer on is the escalation's: an
@@ -583,7 +775,14 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
         EscalationReason::Approval => format!("{}'s tool request expired unanswered", escalation.stuck),
         reason => format!("{} escalates: {} on {}", envelope.from, reason.as_str(), escalation.stuck),
     };
-    Some(Notice { title, text, buttons: Vec::new(), urgent: false })
+    Some(Notice {
+        about: About::Escalation { id: envelope.id, from: envelope.from.clone(), escalation: escalation.clone() },
+        human: envelope.to.clone(),
+        title,
+        text,
+        buttons: Vec::new(),
+        urgent: false,
+    })
 }
 
 // ---- sending ---------------------------------------------------------------------------------------------------
@@ -600,9 +799,14 @@ fn tls() -> Result<TlsConnector> {
 trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
-/// `method` on `url`, with `body` as JSON if any: the status of the answer and the start of its body. Errors never
-/// name the URL, which may hold a secret.
-async fn fetch(method: Method, url: &str, bearer: Option<&str>, body: Option<&Value>) -> Result<(StatusCode, String)> {
+/// `method` on `url`, with `headers` and `body` as JSON if any: the status of the answer and the start of its body.
+/// Errors never name the URL, which may hold a secret.
+async fn fetch(
+    method: Method,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<Vec<u8>>,
+) -> Result<(StatusCode, String)> {
     let uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL"))?;
     let https = uri.scheme_str() == Some("https");
     let host = uri.host().context("a URL without a host")?;
@@ -629,41 +833,77 @@ async fn fetch(method: Method, url: &str, bearer: Option<&str>, body: Option<&Va
     if body.is_some() {
         request = request.header(header::CONTENT_TYPE, "application/json");
     }
-    if let Some(token) = bearer {
-        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    for (name, value) in headers {
+        request = request.header(*name, value);
     }
-    let body = match body {
-        Some(body) => Bytes::from(serde_json::to_vec(body)?),
-        None => Bytes::new(),
-    };
-    let response = send.send_request(request.body(Full::new(body))?).await.context("sending")?;
+    let response =
+        send.send_request(request.body(Full::new(Bytes::from(body.unwrap_or_default())))?).await.context("sending")?;
     let status = response.status();
     let answer = Limited::new(response.into_body(), MAX_ANSWER * 8).collect().await;
     let answer = answer.map(|b| b.to_bytes()).unwrap_or_default();
     Ok((status, String::from_utf8_lossy(&answer[..answer.len().min(MAX_ANSWER)]).into_owned()))
 }
 
-/// `POST` `body` as JSON to `url`. Errors never name the URL, which may hold a secret.
-async fn post_json(url: &str, bearer: Option<&str>, body: &Value) -> Result<()> {
-    let (status, answer) = fetch(Method::POST, url, bearer, Some(body)).await?;
+/// `POST` `body`, JSON, to `url`. Errors never name the URL, which may hold a secret.
+async fn post_json(url: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<()> {
+    let (status, answer) = fetch(Method::POST, url, headers, Some(body)).await?;
     if status.is_success() {
         return Ok(());
     }
     bail!("answered {status}: {}", answer.trim())
 }
 
-/// `notice` sent to `sink` within [`SEND_TIMEOUT`].
-async fn send_to(sink: &Sink, notice: &Notice) -> Result<()> {
-    let (url, bearer, body) = sink.request(notice);
-    match tokio::time::timeout(SEND_TIMEOUT, post_json(&url, bearer, &body)).await {
-        Ok(sent) => sent,
-        Err(_) => bail!("no answer within {}s", SEND_TIMEOUT.as_secs()),
+/// Run `command` with `input` on its standard input, its output dropped and its errors on those of the process: an
+/// error unless it exits with status 0 within `wait`. Past `wait` it is killed and reaped.
+async fn run_command(command: &[String], input: Vec<u8>, wait: Duration) -> Result<()> {
+    let (program, args) = command.split_first().context("no program")?;
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting the command")?;
+    let mut stdin = child.stdin.take().context("no standard input")?;
+    // A command that does not read its input may exit before taking it all.
+    let feed = async move {
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, &input).await;
+    };
+    let ran = tokio::time::timeout(wait, async { tokio::join!(feed, child.wait()).1 }).await;
+    match ran {
+        Ok(status) => {
+            let status = status.context("waiting for the command")?;
+            if !status.success() {
+                bail!("{status}");
+            }
+            Ok(())
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("no exit within {}s: killed", wait.as_secs())
+        }
+    }
+}
+
+/// `notice` sent to the sink of `target` within its timeout.
+async fn send_to(target: &Target, notice: &Notice) -> Result<()> {
+    let wait = target.timeout;
+    match target.sink.request(notice) {
+        Delivery::Post { url, headers, body } => {
+            match tokio::time::timeout(wait, post_json(&url, &headers, body)).await {
+                Ok(sent) => sent,
+                Err(_) => bail!("no answer within {}s", wait.as_secs()),
+            }
+        }
+        Delivery::Run { command, input } => run_command(&command, input, wait).await,
     }
 }
 
 /// Send a test notice to every sink of `human`, those of a device too, at once: each sink's label and how it went.
 pub async fn test(human: &Human, machine: &str) -> Vec<(String, Result<()>)> {
     let notice = Notice {
+        about: About::Test { id: Uuid::now_v7() },
+        human: human.name.clone(),
         title: format!("ants test notice for {}", human.name),
         text: format!(
             "Sent by `ants webhook notify-test {}` on {machine}: tool requests and escalations reach this sink.",
@@ -674,7 +914,7 @@ pub async fn test(human: &Human, machine: &str) -> Vec<(String, Result<()>)> {
     };
     let notice = &notice;
     let sends = human.sinks.iter().map(|target| async move {
-        let sent = send_to(&target.sink, notice).await;
+        let sent = send_to(target, notice).await;
         (format!("{target:?}"), sent)
     });
     futures::future::join_all(sends).await
@@ -684,7 +924,7 @@ pub async fn test(human: &Human, machine: &str) -> Vec<(String, Result<()>)> {
 /// start of the body.
 pub async fn probe_links(public_url: &str, wait: Duration) -> Result<(StatusCode, String)> {
     let url = format!("{}{APPROVAL_PATH}", http_url(public_url, "public_url")?);
-    match tokio::time::timeout(wait, fetch(Method::GET, &url, None, None)).await {
+    match tokio::time::timeout(wait, fetch(Method::GET, &url, &[], None)).await {
         Ok(answer) => answer,
         Err(_) => bail!("no answer within {}s", wait.as_secs()),
     }
@@ -694,10 +934,10 @@ pub async fn probe_links(public_url: &str, wait: Duration) -> Result<(StatusCode
 /// never fatal.
 async fn send(human: &Human, notice: &Notice, away: impl Fn(&DeviceId) -> bool) {
     let targets = human.sinks.iter().filter(|t| t.device.as_ref().is_none_or(&away));
-    let sends = targets.map(|Target { sink, .. }| async move {
-        match send_to(sink, notice).await {
-            Ok(()) => tracing::debug!(human = %human.name, sink = sink.label(), "notified"),
-            Err(e) => tracing::warn!(human = %human.name, sink = sink.label(), "notifying: {e:#}"),
+    let sends = targets.map(|target| async move {
+        match send_to(target, notice).await {
+            Ok(()) => tracing::debug!(human = %human.name, sink = target.sink.label(), "notified"),
+            Err(e) => tracing::warn!(human = %human.name, sink = target.sink.label(), "notifying: {e:#}"),
         }
     });
     futures::future::join_all(sends).await;
@@ -1064,6 +1304,7 @@ mod tests {
         let env = |name: &str| match name {
             "SLACK_URL" => Some("https://hooks.slack.com/services/T0/B0/xyz\n".to_owned()),
             "BOT_TOKEN" => Some("123:abc".to_owned()),
+            "HOOK_SECRET" => Some("0123456789abcdef-hook".to_owned()),
             _ => None,
         };
         Human::from_entry(entry, &|p: &Path| Path::new("/etc/ants").join(p), &env)
@@ -1136,6 +1377,14 @@ mod tests {
         }
         let leaked = error("name = \"bob\"\n[[notify]]\nkind = \"slack\"\nsecret_env = \"BOT_TOKEN\"\n");
         assert!(!leaked.contains("123:abc"), "{leaked}");
+    }
+
+    /// Where a delivery `POST`s, its bearer token and its JSON body.
+    fn posted(delivery: Delivery) -> (String, Option<String>, Value) {
+        let Delivery::Post { url, headers, body } = delivery else { panic!("not a POST") };
+        let bearer = headers.iter().find(|(name, _)| *name == "authorization");
+        let bearer = bearer.map(|(_, value)| value.strip_prefix("Bearer ").unwrap().to_owned());
+        (url, bearer, serde_json::from_slice(&body).unwrap())
     }
 
     fn links() -> Links {
@@ -1236,8 +1485,8 @@ mod tests {
         );
 
         let ntfy = Sink::Ntfy { url: NTFY.to_owned(), topic: "t".to_owned(), token: Some("tk".to_owned()) };
-        let (url, bearer, body) = ntfy.request(&notice);
-        assert_eq!((url.as_str(), bearer), (NTFY, Some("tk")));
+        let (url, bearer, body) = posted(ntfy.request(&notice));
+        assert_eq!((url.as_str(), bearer.as_deref()), (NTFY, Some("tk")));
         assert_eq!((body["topic"].as_str(), body["priority"].as_i64()), (Some("t"), Some(4)));
         assert_eq!(
             body["actions"][2],
@@ -1247,7 +1496,7 @@ mod tests {
         );
 
         let slack = Sink::Slack { url: "https://hooks.slack.com/s".to_owned() };
-        let (url, bearer, body) = slack.request(&notice);
+        let (url, bearer, body) = posted(slack.request(&notice));
         assert_eq!((url.as_str(), bearer), ("https://hooks.slack.com/s", None));
         let section = body["blocks"][0]["text"]["text"].as_str().unwrap();
         assert!(section.starts_with("*dev-a asks to run a tool*\nrm -rf &lt;build&gt;"), "{section}");
@@ -1259,7 +1508,7 @@ mod tests {
         assert_eq!(buttons[2]["style"], "danger");
 
         let telegram = Sink::Telegram { api: TELEGRAM.to_owned(), token: "1:x".to_owned(), chat: "42".to_owned() };
-        let (url, _, body) = telegram.request(&notice);
+        let (url, _, body) = posted(telegram.request(&notice));
         assert_eq!(url, "https://api.telegram.org/bot1:x/sendMessage");
         assert_eq!((body["chat_id"].as_str(), body["disable_web_page_preview"].as_bool()), (Some("42"), Some(true)));
         assert_eq!(
@@ -1275,7 +1524,7 @@ mod tests {
         let notice = escalation_notice(&escalated).unwrap();
         assert_eq!(notice.title, "dev-a escalates: turn_budget on dev-a");
         assert!(notice.text.starts_with("hello\n\nthread ") && notice.text.ends_with("@dev-a TEXT"), "{}", notice.text);
-        let (_, _, body) = telegram.request(&notice);
+        let (_, _, body) = posted(telegram.request(&notice));
         assert!(body.get("reply_markup").is_none());
 
         // An expired tool request's notice, on a thread of its own, is answered on the request's thread.
@@ -1294,5 +1543,216 @@ mod tests {
         assert_eq!(html("<a href=\"x\">&'"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
         let old = Uuid::from_u128((1_000_000_000_u128 << 80) | (7 << 76) | (2 << 62));
         assert!(!is_recent(&old, Utc::now()) && is_recent(&Uuid::now_v7(), Utc::now()));
+    }
+
+    #[test]
+    fn exec_and_http_sinks_are_checked() {
+        let alice = human(
+            "name = \"alice\"\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"bin/notify\", \"--to\", \"alice\"]\ntimeout = \"20s\"\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"notify-send\"]\n\
+             [[notify]]\nkind = \"http\"\nurl = \"https://hooks.example/ants/\"\nsecret_env = \"HOOK_SECRET\"\n",
+        )
+        .unwrap();
+        let sinks: Vec<_> = alice.sinks.iter().map(|t| (&t.sink, t.timeout)).collect();
+        let exec = |command: &[&str]| Sink::Exec { command: command.iter().map(|&a| a.to_owned()).collect() };
+        let http = Sink::Http { url: "https://hooks.example/ants/".to_owned(), secret: "0123456789abcdef-hook".into() };
+        assert_eq!(
+            sinks,
+            [
+                (&exec(&["/etc/ants/bin/notify", "--to", "alice"]), Duration::from_secs(20)),
+                (&exec(&["notify-send"]), SEND_TIMEOUT),
+                (&http, SEND_TIMEOUT),
+            ]
+        );
+        assert_eq!(format!("{:?}", alice.sinks), "[exec /etc/ants/bin/notify, exec notify-send, http hooks.example]");
+        for (text, why) in [
+            ("[[notify]]\nkind = \"exec\"\n", "exec needs command"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = []\n", "give the program first"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = [\"x\"]\nurl = \"https://a\"\n", "url does not go with"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = [\"x\"]\nsecret_env = \"HOOK_SECRET\"\n", "reads its own"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = [\"x\"]\ntimeout = \"0\"\n", "from 1s to 30s"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = [\"x\"]\ntimeout = \"31s\"\n", "from 1s to 30s"),
+            ("[[notify]]\nkind = \"exec\"\ncommand = [\"x\"]\ntimeout = \"10\"\n", "without a unit"),
+            ("[[notify]]\nkind = \"ntfy\"\ntopic = \"t\"\ncommand = [\"x\"]\n", "command does not go with"),
+            ("[[notify]]\nkind = \"http\"\nsecret_env = \"HOOK_SECRET\"\n", "http needs url"),
+            ("[[notify]]\nkind = \"http\"\nurl = \"https://a/?k=v\"\nsecret_env = \"HOOK_SECRET\"\n", "no user"),
+            ("[[notify]]\nkind = \"http\"\nurl = \"https://a\"\n", "needs the signing secret"),
+            ("[[notify]]\nkind = \"http\"\nurl = \"https://a\"\nsecret_env = \"BOT_TOKEN\"\n", "too short"),
+        ] {
+            let text = format!("name = \"bob\"\n{text}");
+            assert!(error(&text).contains(why), "{text}: {}", error(&text));
+        }
+    }
+
+    #[test]
+    fn exec_and_http_sinks_get_the_notice_as_versioned_json() {
+        let (request, links) = (request(), links());
+        let notice = approval_notice(&request, 9, &p("alice"), Some(&links), None, Utc::now());
+        let now = Utc::now();
+        let json = notice_json(&notice, now);
+        let expires = request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(
+            json,
+            json!({
+                "version": 1,
+                "kind": "approval",
+                "id": request.id,
+                "human": "alice",
+                "ant": "dev-a",
+                "thread": request.thread_id,
+                "title": notice.title,
+                "text": notice.text,
+                "urgent": true,
+                "sent_at": now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "request": format!("dev-a/{}", request.id),
+                "seq": 9,
+                "tool": {
+                    "kind": "execute", "title": "rm -rf <build>", "locations": ["src/a.rs"],
+                    "input": "{\"command\":\"rm -rf build\"}"
+                },
+                "options": ["allow_once", "allow_always", "reject"],
+                "expires_at": expires,
+                "links": [
+                    { "verdict": "allow_once", "label": "Approve", "url": notice.buttons[0].url },
+                    { "verdict": "allow_always", "label": "Always allow", "url": notice.buttons[1].url },
+                    { "verdict": "reject", "label": "Reject", "url": notice.buttons[2].url },
+                ],
+            })
+        );
+        let unlinked = notice_json(&approval_notice(&request, 9, &p("alice"), None, None, now), now);
+        assert_eq!(unlinked["links"], json!([]));
+
+        let escalated = Envelope::new(p("dev-b"), p("alice"), "stuck".to_owned()).with_escalation(Some(
+            Escalation::new(p("dev-a"), ThreadId::generate(), ants_proto::EscalationReason::TurnBudget),
+        ));
+        let json = notice_json(&escalation_notice(&escalated).unwrap(), now);
+        let thread = &escalated.escalation.as_ref().unwrap().thread_id;
+        assert_eq!(
+            (&json["kind"], &json["id"], &json["human"], &json["ant"], &json["thread"]),
+            (&json!("escalation"), &json!(escalated.id), &json!("alice"), &json!("dev-b"), &json!(thread))
+        );
+        assert_eq!(
+            (&json["reason"], &json["stuck"], &json["level"]),
+            (&json!("turn_budget"), &json!("dev-a"), &json!(0))
+        );
+        assert!(json.get("expires_at").is_none() && json["links"] == json!([]), "{json}");
+
+        let http = Sink::Http { url: "https://hooks.example/a".to_owned(), secret: "0123456789abcdef-hook".into() };
+        let Delivery::Post { url, headers, body } = http.request(&notice) else { panic!("not a POST") };
+        assert_eq!(url, "https://hooks.example/a");
+        let header = |name: &str| headers.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()).unwrap();
+        let timestamp = header("x-ants-timestamp");
+        let signed = format!("{timestamp}.{}", String::from_utf8(body.clone()).unwrap());
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"0123456789abcdef-hook");
+        let expected = HEXLOWER.encode(hmac::sign(&key, signed.as_bytes()).as_ref());
+        assert_eq!(header("x-ants-signature"), format!("sha256={expected}"));
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["kind"], "approval");
+    }
+
+    /// An endpoint on loopback answering 200 to a `POST` signed with `secret` and 401 to others, handing over the
+    /// JSON of each.
+    async fn endpoint(secret: &'static str) -> (std::net::SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+        use hyper::body::Incoming;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                    let tx = tx.clone();
+                    async move {
+                        let header = |name: &str| {
+                            request.headers().get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned()
+                        };
+                        let (timestamp, signature) = (header("x-ants-timestamp"), header("x-ants-signature"));
+                        let body = request.into_body().collect().await.unwrap().to_bytes();
+                        let mut signed = format!("{timestamp}.").into_bytes();
+                        signed.extend_from_slice(&body);
+                        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+                        let sig = signature.strip_prefix("sha256=").and_then(|s| HEXLOWER.decode(s.as_bytes()).ok());
+                        let fresh = timestamp.parse::<i64>().is_ok_and(|t| (Utc::now().timestamp() - t).abs() < 300);
+                        let valid = fresh && sig.is_some_and(|sig| hmac::verify(&key, &signed, &sig).is_ok());
+                        let status = if valid { StatusCode::OK } else { StatusCode::UNAUTHORIZED };
+                        if valid {
+                            let _ = tx.send(serde_json::from_slice::<Value>(&body).unwrap());
+                        }
+                        let mut response = Response::new(Full::new(Bytes::from_static(b"bad signature")));
+                        *response.status_mut() = status;
+                        Ok::<_, std::convert::Infallible>(response)
+                    }
+                });
+                tokio::spawn(
+                    hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), service),
+                );
+            }
+        });
+        (addr, rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_and_http_sinks_take_the_notice_and_each_failure_is_reported() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = ants_test_support::scratch_dir("notify-exec-http").canonicalize().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        };
+        let taken = dir.join("taken.json");
+        let pid = dir.join("pid");
+        let take = script("take", &format!("cat > {}", taken.display()));
+        let fail = script("fail", "cat > /dev/null; echo failing >&2; exit 3");
+        let hang = script("hang", &format!("echo $$ > {}\nexec sleep 30", pid.display()));
+        let (good, mut posts) = endpoint("0123456789abcdef-hook").await;
+        let (forged, _) = endpoint("another-secret-0123456789").await;
+        let alice = human(&format!(
+            "name = \"alice\"\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"{take}\"]\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"{fail}\", \"an argument\"]\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"{hang}\"]\ntimeout = \"1s\"\n\
+             [[notify]]\nkind = \"exec\"\ncommand = [\"{}/missing\"]\n\
+             [[notify]]\nkind = \"http\"\nurl = \"http://{good}/notices\"\nsecret_env = \"HOOK_SECRET\"\n\
+             [[notify]]\nkind = \"http\"\nurl = \"http://{forged}/notices\"\nsecret_env = \"HOOK_SECRET\"\n",
+            dir.display()
+        ))
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let results = test(&alice, "laptop").await;
+        assert!(started.elapsed() < Duration::from_secs(5), "the sinks run at once, the hanging one for 1s");
+        let shown: Vec<(&str, String)> = results
+            .iter()
+            .map(|(sink, sent)| (sink.as_str(), sent.as_ref().map_or_else(|e| format!("{e:#}"), |()| "ok".into())))
+            .collect();
+        let missing = format!("exec {}/missing", dir.display());
+        assert_eq!(
+            shown,
+            [
+                (&*format!("exec {take}"), "ok".to_owned()),
+                (&*format!("exec {fail}"), "exit status: 3".to_owned()),
+                (&*format!("exec {hang}"), "no exit within 1s: killed".to_owned()),
+                (&*missing, "starting the command: No such file or directory (os error 2)".to_owned()),
+                ("http 127.0.0.1", "ok".to_owned()),
+                ("http 127.0.0.1", "answered 401 Unauthorized: bad signature".to_owned()),
+            ]
+        );
+        let json: Value = serde_json::from_slice(&std::fs::read(&taken).unwrap()).unwrap();
+        assert_eq!((&json["version"], &json["kind"], &json["human"]), (&json!(1), &json!("test"), &json!("alice")));
+        assert!(json["text"].as_str().unwrap().contains("on laptop"), "{json}");
+        let posted = tokio::time::timeout(Duration::from_secs(5), posts.recv()).await.unwrap().unwrap();
+        assert_eq!((&posted["kind"], &posted["id"]), (&json!("test"), &json["id"]), "one notice, one id");
+        // Killed and reaped: no process, not even a zombie, answers to its pid.
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!alive.success(), "the hanging command {} is gone", pid.trim());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
