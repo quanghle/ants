@@ -595,16 +595,35 @@ impl Inbox<'_> {
         incoming.envelope.creator.clone_from(&posted.post.creator);
     }
 
-    /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread: its sender
-    /// wrote it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
-    /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
-    /// creator its posts say ([`Threads::origin_of`]); any other has no creator, and the owner the ant names, which
-    /// nothing stored can check.
+    /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread
+    /// ([`Claims::sender_claims`]).
     async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
-        let envelope = &mut incoming.envelope;
         if incoming.post.is_some() {
             return;
         }
+        let claims = Claims { humans: self.humans, webhooks: self.webhooks, threads: self.threads };
+        claims.sender_claims(&mut incoming.envelope, seq).await;
+    }
+}
+
+/// What stored state checks the claims of an inbox message against, for the ant's daemon and for the human's side
+/// that buries what the daemon could not ([`dead::bury_undelivered`]).
+pub struct Claims<'a> {
+    /// Who is a human.
+    pub humans: &'a Registry,
+    /// Who of the senders that say so are webhooks.
+    pub webhooks: &'a Webhooks,
+    /// The channel threads, whose posts say who started each.
+    pub threads: &'a Threads,
+}
+
+impl Claims<'_> {
+    /// Check what inbox message `envelope`, at stream sequence `seq`, says of its sender and thread: its sender wrote
+    /// it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
+    /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
+    /// creator its posts say ([`Threads::origin_of`]); any other has no creator, and the owner the ant names, which
+    /// nothing stored can check.
+    pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
         if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
         {
             tracing::warn!(
@@ -636,7 +655,9 @@ impl Inbox<'_> {
             }
         }
     }
+}
 
+impl Inbox<'_> {
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
     /// thread's queue: the prompt that asked is in flight on that thread.
     async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
@@ -2620,7 +2641,11 @@ mod tests {
                 deliveries: MAX_DELIVER as u64,
             };
             let humans = Registry::default();
-            let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &humans);
+            let webhooks = Webhooks::new(uplinked.hub_js.clone());
+            let sessions = bus::ensure_sessions(&uplinked.hub_js).await.unwrap();
+            let threads = Threads::new(uplinked.hub_js.clone(), UserId::human(), sessions);
+            let claims = Claims { humans: &humans, webhooks: &webhooks, threads: &threads };
+            let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &claims);
             // As the hub's stream takes the outbox copy once the uplink is back.
             let dead_id = kept.dead.msg_id();
             let outbox_copy = || bus::publish_json(&uplinked.hub_js, kept.dead.subject(), &kept.dead, Some(&dead_id));

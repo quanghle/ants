@@ -527,7 +527,8 @@ existed lacks `ants.dead.>`; `ants init` adds it.
 If storing the dead letter fails on that extra delivery too (NATS trouble), JetStream delivers the message no more and
 only publishes `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ANTS.<consumer>`. `ants dead watch`, and `ants inbox
 --follow` while it runs, turn each such advisory of an ant's inbox consumer into a dead letter in the same format,
-with the same notice, unless that message is a dead letter already. That notice goes to the thread's owner, else the
+with the same notice, unless that message is a dead letter already. That notice goes to the thread's owner, checked as
+the ant's daemon checks it (a channel thread's from its posts, a webhook mark against the webhook's marker), else the
 default human, directly and not up the ant's escalation chain: the ant's daemon is failing, which no chain member
 can fix, and human credentials cannot follow the escalation the ant keeps in `ants_sessions`. Fetching a message by sequence
 (`STREAM.MSG.GET`) would let an ant read every inbox, so only human credentials hear the advisories; those
