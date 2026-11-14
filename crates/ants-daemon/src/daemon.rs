@@ -2447,7 +2447,8 @@ mod tests {
         let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
         let ctrl_c = Arc::new(Semaphore::new(0));
         let crash = async {
-            until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+            // Not just the harness's start: stopped before its session is stored, the thread would start afresh.
+            until("the prompt to reach the harness", || log.lock().unwrap().prompted == 1).await;
             ctrl_c.add_permits(2);
         };
         tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);

@@ -277,6 +277,8 @@ pub(crate) mod fake {
         pub starts: usize,
         pub new_sessions: usize,
         pub loaded: Vec<String>,
+        /// Prompts received, before any is held or answered.
+        pub prompted: usize,
         /// Prompts in the order they were answered.
         pub answered: Vec<String>,
         /// Prompts ended by session/cancel.
@@ -341,6 +343,7 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| {
+                            on_prompt.lock().unwrap().prompted += 1;
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
                             let (text, gate, sender, log, cancels) =
                                 (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
