@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_proto::{JsDomain, Machine, Permissions, Role, UserId};
+use ants_proto::{DeviceId, JsDomain, Machine, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -119,14 +119,50 @@ pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>
 }
 
 /// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
-/// key ([`revoke::record`]).
+/// key ([`revoke::record`]). A human's are for a new device ([`issue_device`]).
+#[cfg(test)]
 pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
+    issue_device(dir, user, kind, permissions, None, out).map(drop)
+}
+
+/// [`issue_with`], with a human's credentials for a new device labelled `label`, whose id their user JWT carries
+/// ([`DeviceId::tag`]) and the registry records. Returns the device id, for a human's.
+pub fn issue_device(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    label: Option<&str>,
+    out: &Path,
+) -> Result<Option<DeviceId>> {
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
-    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, json!({}), None)?;
+    let (device, extra) = device_claims(kind, label)?;
+    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, None)?;
     write_secret(out, &creds(&jwt, &seed(&key)?))?;
-    revoke::record(dir, &Issued::new(&key.public_key(), user.as_str(), kind, None)?)
+    revoke::record(dir, &with_device(Issued::new(&key.public_key(), user.as_str(), kind, None)?, device, label))?;
+    Ok(device)
+}
+
+/// A new device for credentials of `kind`, if a human's, and the claims carrying it.
+fn device_claims(kind: Kind, label: Option<&str>) -> Result<(Option<DeviceId>, Value)> {
+    if kind != Kind::Human {
+        if label.is_some() {
+            bail!("only a human's credentials are for a device with a label");
+        }
+        return Ok((None, json!({})));
+    }
+    label.map(revoke::check_label).transpose()?;
+    let device = DeviceId::generate();
+    Ok((Some(device), json!({ "tags": [device.tag()] })))
+}
+
+fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>) -> Issued {
+    match device {
+        Some(device) => issued.for_device(device, label.map(str::to_owned)),
+        None => issued,
+    }
 }
 
 /// Issue the uplink user of `machine`'s leaf node and write its `.creds` file to `out`. It may carry only what
@@ -232,14 +268,28 @@ pub fn sign_user(
 }
 
 /// Sign the user JWT of `user`, of `kind`, with `permissions` for `public_key`, a user NKey generated on another
-/// machine, and record the key ([`revoke::record`]).
+/// machine, and record the key ([`revoke::record`]). A human's are for a new device ([`sign_device`]).
 pub fn sign_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, public_key: &str) -> Result<String> {
+    sign_device(dir, user, kind, permissions, None, public_key).map(|(jwt, _)| jwt)
+}
+
+/// [`sign_with`], with a human's for a new device labelled `label`, as [`issue_device`]. Returns the JWT and the
+/// device id, for a human's.
+pub fn sign_device(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    label: Option<&str>,
+    public_key: &str,
+) -> Result<(String, Option<DeviceId>)> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, json!({}), None)?;
-    revoke::record(dir, &Issued::new(public_key, user.as_str(), kind, None)?)?;
-    Ok(jwt)
+    let (device, extra) = device_claims(kind, label)?;
+    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, None)?;
+    revoke::record(dir, &with_device(Issued::new(public_key, user.as_str(), kind, None)?, device, label))?;
+    Ok((jwt, device))
 }
 
 /// Fail unless `public_key` is a user's public NKey, `U...`.
@@ -811,7 +861,7 @@ pub(crate) mod tests {
         }
         assert!(dead::list(&b_stream).await.unwrap().is_empty());
 
-        // Each reads its replies through its own inbox consumer, never through the other's.
+        // Each reads its replies in its own inbox, never in the other's.
         let (to_alice, to_bob) =
             (Envelope::new(dev_a.clone(), alice.clone(), "a"), Envelope::new(dev_a.clone(), bob.clone(), "b"));
         bus::publish(&d_js, &to_alice).await.unwrap();
@@ -820,12 +870,10 @@ pub(crate) mod tests {
             assert_eq!(timeout(WAIT, all.next()).await.unwrap().unwrap().subject.as_str(), to_alice.subject());
         }
         for (js, human, other, sent) in [(&a_js, &alice, &bob, &to_alice), (&b_js, &bob, &alice, &to_bob)] {
-            let stream = bus::ensure_stream(js).await.unwrap();
-            assert!(bus::human_inbox_consumer(&stream, other, WAIT).await.is_err(), "{human} reads {other}'s inbox");
-            let consumer = bus::human_inbox_consumer(&stream, human, WAIT).await.unwrap();
-            let msg = timeout(WAIT, consumer.messages().await.unwrap().next()).await.unwrap().unwrap().unwrap();
-            assert_eq!(&serde_json::from_slice::<Envelope>(&msg.payload).unwrap(), sent);
-            msg.double_ack().await.unwrap();
+            assert!(crate::inbox::Inbox::open(js, other).await.is_err(), "{human} reads {other}'s inbox");
+            let mut inbox = crate::inbox::Inbox::open(js, human).await.unwrap();
+            let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
+            assert_eq!(unread.as_slice(), std::slice::from_ref(sent));
         }
 
         // Either human decides dev-a's approval requests.

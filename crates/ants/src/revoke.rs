@@ -13,6 +13,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use ants_proto::DeviceId;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -59,13 +60,131 @@ pub struct Issued {
     /// Seconds since the epoch; none for credentials that never expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// A human's device the credentials are for, whose user JWT carries it ([`DeviceId::tag`]); none for an ant's, a
+    /// webhook's and so on, and for a human's issued before devices had ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceId>,
+    /// The label of a human's device, for display: a later line of the same key relabels it ([`rename`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl Issued {
     /// A key issued now.
     pub fn new(key: &str, name: &str, kind: Kind, expires_at: Option<u64>) -> Result<Self> {
-        Ok(Self { key: key.to_owned(), name: name.to_owned(), kind, issued_at: auth::now()?, expires_at })
+        let issued_at = auth::now()?;
+        Ok(Self { key: key.to_owned(), name: name.to_owned(), kind, issued_at, expires_at, device: None, label: None })
     }
+
+    /// The key, for `device` labelled `label`.
+    pub fn for_device(self, device: DeviceId, label: Option<String>) -> Self {
+        Self { device: Some(device), label, ..self }
+    }
+}
+
+/// Longest device label.
+const MAX_LABEL: usize = 64;
+
+/// Fail unless `label` can label a device: 1 to 64 characters, none of them control characters.
+pub fn check_label(label: &str) -> Result<()> {
+    if label.trim().is_empty() || label.chars().count() > MAX_LABEL || label.chars().any(char::is_control) {
+        bail!("invalid device label {label:?}: use 1-{MAX_LABEL} characters, no control characters");
+    }
+    Ok(())
+}
+
+/// One device of a human: the latest line of [`ISSUED`] for one of its keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Device {
+    /// None for a legacy device, whose credentials carry no id.
+    pub device: Option<DeviceId>,
+    pub label: Option<String>,
+    pub key: String,
+    pub issued_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    pub revoked: bool,
+}
+
+/// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human.
+pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
+    let revoked = revoked(dir)?;
+    let mut found: Vec<Device> = Vec::new();
+    for one in issued(dir)?.into_iter().filter(|i| i.name == name && i.kind == Kind::Human) {
+        let device = Device {
+            device: one.device,
+            label: one.label,
+            revoked: revoked.iter().any(|r| r.key == one.key),
+            key: one.key,
+            issued_at: one.issued_at,
+            expires_at: one.expires_at,
+        };
+        match found.iter_mut().find(|d| d.key == device.key) {
+            Some(known) => *known = Device { issued_at: known.issued_at, ..device },
+            None => found.push(device),
+        }
+    }
+    Ok(found)
+}
+
+/// The device of `devices` that `selector` names: its id, its public key, or its label when no other device of the
+/// human has that label.
+pub fn select<'a>(devices: &'a [Device], name: &str, selector: &str) -> Result<&'a Device> {
+    let by_id_or_key =
+        devices.iter().find(|d| d.key == selector || d.device.is_some_and(|id| id.to_string() == selector));
+    if let Some(device) = by_id_or_key {
+        return Ok(device);
+    }
+    let labelled: Vec<&Device> = devices.iter().filter(|d| d.label.as_deref() == Some(selector)).collect();
+    match labelled.as_slice() {
+        [device] => Ok(device),
+        [] => bail!("{name} has no device {selector:?}; `ants auth devices {name}` lists them"),
+        several => {
+            let ids: Vec<String> = several
+                .iter()
+                .map(|d| d.device.map_or_else(|| format!("legacy device {}", d.key), |id| id.to_string()))
+                .collect();
+            bail!("{name} has {} devices labelled {selector:?}; name one by id: {}", several.len(), ids.join(", "))
+        }
+    }
+}
+
+/// The keys of the devices of the human `name` in `dir` that `selectors` name ([`select`]), to revoke them alone.
+pub fn device_keys(dir: &Path, name: &str, selectors: &[String]) -> Result<Vec<String>> {
+    let devices = devices(dir, name)?;
+    selectors.iter().map(|selector| Ok(select(&devices, name, selector)?.key.clone())).collect()
+}
+
+/// Label the device of the human `name` that `selector` names ([`select`]) `label`, appending its line to the registry
+/// of `dir` again with the new label. Returns the device as relabelled.
+pub fn rename(dir: &Path, name: &str, selector: &str, label: &str) -> Result<Device> {
+    check_label(label)?;
+    let devices = devices(dir, name)?;
+    let device = select(&devices, name, selector)?;
+    let latest = issued(dir)?.into_iter().rev().find(|i| i.key == device.key && i.kind == Kind::Human);
+    let latest = latest.context("the device's registry line")?;
+    record(dir, &Issued { label: Some(label.to_owned()), ..latest })?;
+    Ok(Device { label: Some(label.to_owned()), ..device.clone() })
+}
+
+/// Print the devices of the human `name` in `dir`: id (`legacy` for one without), label, key, when issued, and
+/// whether revoked; with `json`, one JSON object per line.
+pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
+    let devices = devices(dir, name)?;
+    if devices.is_empty() && !json {
+        println!("no devices of {name} known in {}", dir.display());
+    }
+    for d in devices {
+        if json {
+            println!("{}", serde_json::to_string(&d)?);
+            continue;
+        }
+        let id = d.device.map_or_else(|| "legacy".to_owned(), |id| id.to_string());
+        let label = d.label.as_deref().unwrap_or("-");
+        let revoked = if d.revoked { "  revoked" } else { "" };
+        println!("{id}  {label}  {}  issued {}{revoked}", d.key, time(d.issued_at));
+    }
+    Ok(())
 }
 
 /// One revoked user key, an entry of [`REVOKED`].
@@ -390,5 +509,76 @@ mod tests {
         let port = ants_test_support::free_port();
         assert!(push(&format!("nats://127.0.0.1:{port}"), &team).await.is_err());
         assert_eq!(revoked(&team).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_human_s_devices_are_listed_relabelled_and_revoked_one_by_one() {
+        let Some(server) = Server::start() else { return };
+        let team = server.dir().join("auth");
+        let alice: ants_proto::UserId = "alice".parse().unwrap();
+        let issue = |label: &str, file: &str| {
+            let out = team.join(file);
+            let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
+            let device = auth::issue_device(&team, &alice, Kind::Human, permissions, Some(label), &out).unwrap();
+            (out, device.unwrap())
+        };
+        let (laptop, laptop_id) = issue("Laptop", "alice-laptop.creds");
+        let (phone, phone_id) = issue("Phone", "alice-phone.creds");
+        let (tablet, tablet_id) = issue("Phone", "alice-tablet.creds");
+        // Credentials of a human from before devices: a legacy device.
+        let legacy = team.join("alice-legacy.creds");
+        let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
+        let mut old = issued(&team).unwrap();
+        auth::issue_device(&team, &alice, Kind::Ant, permissions, None, &legacy).unwrap();
+        let mut line = issued(&team).unwrap().pop().unwrap();
+        line.kind = Kind::Human;
+        old.push(line);
+        let lines: String = old.iter().map(|i| serde_json::to_string(i).unwrap() + "\n").collect();
+        fs::write(team.join(ISSUED), lines).unwrap();
+        let text = fs::read_to_string(&laptop).unwrap();
+        let claims = crate::humans::creds_claims(&text).unwrap();
+        assert_eq!(claims["nats"]["tags"][0], laptop_id.tag(), "the JWT carries the device id");
+        assert!(
+            auth::issue_device(
+                &team,
+                &alice,
+                Kind::Ant,
+                ants_proto::Permissions::for_user(&alice, ants_proto::Role::Ant),
+                Some("x"),
+                &legacy
+            )
+            .is_err()
+        );
+
+        let listed = devices(&team, "alice").unwrap();
+        let ids: Vec<Option<ants_proto::DeviceId>> = listed.iter().map(|d| d.device).collect();
+        assert_eq!(ids, [Some(laptop_id), Some(phone_id), Some(tablet_id), None]);
+        let err = device_keys(&team, "alice", &["Phone".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains(&phone_id.to_string()) && err.contains(&tablet_id.to_string()), "{err}");
+        assert!(device_keys(&team, "alice", &["Desk".to_owned()]).is_err());
+        assert!(rename(&team, "alice", "Laptop", "").is_err());
+        let renamed = rename(&team, "alice", &tablet_id.to_string(), "Tablet").unwrap();
+        assert_eq!((renamed.device, renamed.label.as_deref()), (Some(tablet_id), Some("Tablet")));
+        let labels: Vec<Option<String>> = devices(&team, "alice").unwrap().into_iter().map(|d| d.label).collect();
+        assert_eq!(labels, [Some("Laptop".into()), Some("Phone".into()), Some("Tablet".into()), None]);
+
+        // Revoking the phone, by its label now unique, closes its connection only.
+        let connected = async |creds: &Path| {
+            let (client, closed) = watched(&server.url, creds).await.unwrap();
+            client.flush().await.unwrap();
+            (client, closed)
+        };
+        let (_phone_client, mut phone_closed) = connected(&phone).await;
+        let (laptop_client, mut laptop_closed) = connected(&laptop).await;
+        let keys = device_keys(&team, "alice", &["Phone".to_owned()]).unwrap();
+        assert_eq!(revoke(&team, None, &keys).unwrap().len(), 1);
+        push(&server.url, &team).await.unwrap();
+        timeout(WAIT, phone_closed.recv()).await.expect("the phone's connection stays open").unwrap();
+        assert!(watched(&server.url, &phone).await.is_err());
+        laptop_client.flush().await.unwrap();
+        assert!(laptop_closed.try_recv().is_err(), "the laptop's connection was closed");
+        assert!(watched(&server.url, &tablet).await.is_ok());
+        let revoked: Vec<bool> = devices(&team, "alice").unwrap().into_iter().map(|d| d.revoked).collect();
+        assert_eq!(revoked, [false, true, false, false]);
     }
 }

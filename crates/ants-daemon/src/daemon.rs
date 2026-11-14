@@ -1976,22 +1976,16 @@ mod tests {
     #[tokio::test]
     async fn inbox_consumers_from_before_sender_subjects_get_the_new_filter() {
         let Some((bus, _)) = Bus::start().await else { return };
-        let human = UserId::human();
-        for user in [&bus.dev, &human] {
-            let name = ants_proto::inbox_consumer(user);
-            let old = jetstream::consumer::pull::Config {
-                durable_name: Some(name.clone()),
-                filter_subject: format!("ants.inbox.{user}"),
-                ..Default::default()
-            };
-            bus.stream.create_consumer(old).await.unwrap();
-        }
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let old = jetstream::consumer::pull::Config {
+            durable_name: Some(name.clone()),
+            filter_subject: format!("ants.inbox.{}", bus.dev),
+            ..Default::default()
+        };
+        bus.stream.create_consumer(old).await.unwrap();
         drop(crate::bus::inbox_consumer(&bus.stream, &bus.dev, ACK_WAIT, MAX_DELIVER, 4).await.unwrap());
-        crate::bus::human_inbox_consumer(&bus.stream, &human, ACK_WAIT).await.unwrap();
-        for user in [&bus.dev, &human] {
-            let mut consumer: PullConsumer = bus.stream.get_consumer(&ants_proto::inbox_consumer(user)).await.unwrap();
-            assert_eq!(consumer.info().await.unwrap().config.filter_subject, subject::inbox_of(user));
-        }
+        let mut consumer: PullConsumer = bus.stream.get_consumer(&name).await.unwrap();
+        assert_eq!(consumer.info().await.unwrap().config.filter_subject, subject::inbox_of(&bus.dev));
     }
 
     #[tokio::test]

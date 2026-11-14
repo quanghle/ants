@@ -465,31 +465,6 @@ pub async fn chan_consumer(
     Ok(consumer.messages().await?)
 }
 
-/// The durable consumer of the inbox of `human`, created if missing. A reply stays in it, unread, until acked. Any
-/// number may be outstanding and none is ever given up on, so a reply shown without being marked read never expires. A
-/// consumer from before inbox subjects named the sender gets the current filter.
-pub async fn human_inbox_consumer(stream: &stream::Stream, human: &UserId, ack_wait: Duration) -> Result<PullConsumer> {
-    let name = ants_proto::inbox_consumer(human);
-    let config = pull::Config {
-        durable_name: Some(name.clone()),
-        filter_subject: subject::inbox_of(human),
-        ack_policy: consumer::AckPolicy::Explicit,
-        ack_wait,
-        max_deliver: -1,
-        max_ack_pending: -1,
-        ..Default::default()
-    };
-    let consumer: PullConsumer = stream
-        .get_or_create_consumer(&name, config.clone())
-        .await
-        .with_context(|| format!("creating consumer {name}"))?;
-    if consumer.cached_info().config.filter_subject == config.filter_subject {
-        return Ok(consumer);
-    }
-    tracing::info!(consumer = name, filter = config.filter_subject, "updating the inbox filter");
-    stream.create_consumer(config).await.with_context(|| format!("updating consumer {name}"))
-}
-
 /// Where [`store`] put a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stored {

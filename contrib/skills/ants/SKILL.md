@@ -64,7 +64,7 @@ ants inbox --thread <thread> --json    # one JSON envelope per line (from, threa
 yet; check again later rather than polling in a tight loop.
 
 Always pass `--thread` or `--peek` to `ants inbox`. A bare `ants inbox` marks every unread message in the human's inbox
-as read, consuming replies and notices from other threads.
+as read, on every device of the human, including replies and notices from other threads.
 
 ## Watch progress
 

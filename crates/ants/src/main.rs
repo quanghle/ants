@@ -512,6 +512,10 @@ enum AuthCommand {
         /// the JWT, given to `ants add --jwt` there, completes the credentials.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
+        /// With --human (or for `human`): a label for the device the credentials are for, such as "Quang's laptop",
+        /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
+        #[arg(long, conflicts_with = "webhook")]
+        label: Option<String>,
     },
     /// Issue enrollment credentials for a new ant: they may only ask for the ant's credentials, with
     /// `ants add NAME --enroll FILE` on its machine, and hear the answer `ants enroll approve` or `reject`
@@ -571,9 +575,35 @@ enum AuthCommand {
         /// Public user NKey to revoke (repeatable), as `ants auth revoked` or the credentials' JWT shows it.
         #[arg(long = "key", value_name = "KEY")]
         keys: Vec<String>,
+        /// Revoke only this device of the human NAME (repeatable): its id, its label when no other device of NAME
+        /// has it, or its key, as `ants auth devices NAME` lists them.
+        #[arg(long = "device", value_name = "DEVICE", requires = "name")]
+        devices: Vec<String>,
         /// Only record the revocation and write server.conf; push later with `ants auth push`.
         #[arg(long)]
         no_push: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// List the devices of a human, one per credentials issued to it with `ants auth user NAME --human`: id
+    /// (`legacy` for credentials issued before devices had ids), label, key, when issued, and whether revoked.
+    Devices {
+        human: UserId,
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Label a device of a human anew. Labels need not be unique; an id tells devices with the same label apart.
+    Rename {
+        human: UserId,
+        /// The device: its id, its label when no other device of the human has it, or its key.
+        device: String,
+        /// The new label.
+        label: String,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -808,9 +838,10 @@ async fn main() -> Result<()> {
             bus::ensure_owners(&js).await?;
             humans::ensure(&js).await?;
             webhook::ensure_bucket(&js).await?;
+            inbox::ensure_bucket(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
@@ -820,7 +851,8 @@ async fn main() -> Result<()> {
                 ants_proto::CHAINS_BUCKET,
                 ants_proto::LINKS_BUCKET,
                 ants_proto::OWNERS_BUCKET,
-                ants_proto::WEBHOOKS_BUCKET
+                ants_proto::WEBHOOKS_BUCKET,
+                ants_proto::READ_BUCKET
             );
             Ok(())
         }
@@ -871,7 +903,7 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key }) => {
+        Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key, label }) => {
             let kind = match webhook {
                 true => revoke::Kind::Webhook,
                 false => auth::role(&user, human).into(),
@@ -890,13 +922,20 @@ async fn main() -> Result<()> {
             }
             .with_js_domain(domain);
             let dir = team_dir(dir)?;
+            let label = label.as_deref();
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                auth::issue_with(&dir, &user, kind, permissions, &out)?;
+                let device = auth::issue_device(&dir, &user, kind, permissions, label, &out)?;
                 println!("{}", out.display());
+                if let Some(device) = device {
+                    eprintln!("device {device}");
+                }
                 return Ok(());
             };
-            let jwt = auth::sign_with(&dir, &user, kind, permissions, &key)?;
+            let (jwt, device) = auth::sign_device(&dir, &user, kind, permissions, label, &key)?;
+            if let Some(device) = device {
+                eprintln!("device {device}");
+            }
             match out {
                 Some(out) => {
                     std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
@@ -963,9 +1002,14 @@ async fn main() -> Result<()> {
             println!("{}", out.display());
             Ok(())
         }
-        Command::Auth(AuthCommand::Revoke { name, keys, no_push, dir }) => {
+        Command::Auth(AuthCommand::Revoke { name, mut keys, devices, no_push, dir }) => {
             let dir = team_dir(dir)?;
             let now = auth::now()?;
+            let mut name = name;
+            if let (Some(human), false) = (&name, devices.is_empty()) {
+                keys.extend(revoke::device_keys(&dir, human, &devices)?);
+                name = None;
+            }
             for r in revoke::revoke(&dir, name.as_deref(), &keys)? {
                 let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
                 println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
@@ -982,6 +1026,15 @@ async fn main() -> Result<()> {
             push(&cli.nats, &dir).await
         }
         Command::Auth(AuthCommand::Revoked { dir }) => revoke::list(&team_dir(dir)?),
+        Command::Auth(AuthCommand::Devices { human, json, dir }) => {
+            revoke::list_devices(&team_dir(dir)?, human.as_str(), json)
+        }
+        Command::Auth(AuthCommand::Rename { human, device, label, dir }) => {
+            let renamed = revoke::rename(&team_dir(dir)?, human.as_str(), &device, &label)?;
+            let id = renamed.device.map_or_else(|| format!("legacy device {}", renamed.key), |id| id.to_string());
+            println!("{id} of {human} is now labelled {label:?}");
+            Ok(())
+        }
         Command::Auth(AuthCommand::Push { dir }) => push(&cli.nats, &team_dir(dir)?).await,
         Command::Leaf(LeafCommand::Config {
             machine,
@@ -1076,11 +1129,15 @@ pub struct Nats<'a> {
     creds: Option<&'a Path>,
     domain: Option<&'a JsDomain>,
     pub me: humans::Me,
+    /// The device of the human the credentials were issued for.
+    pub device: humans::Device,
 }
 
 impl<'a> Nats<'a> {
     fn new(url: &'a str, creds: Option<&'a Path>, domain: Option<&'a JsDomain>) -> Result<Self> {
-        Ok(Self { url, creds, domain, me: humans::Me::from_creds(creds)? })
+        let me = humans::Me::from_creds(creds)?;
+        let device = humans::Device::from_creds(creds, &me.id)?;
+        Ok(Self { url, creds, domain, me, device })
     }
 
     /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]).
@@ -1090,9 +1147,13 @@ impl<'a> Nats<'a> {
         Ok((client, js))
     }
 
-    /// Connect as [`Nats::me`] without registering it.
+    /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
     async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
-        bus::connect(self.url, self.creds, self.domain, &self.me.id, name).await
+        let name = match &self.device.id {
+            Some(device) => format!("{name} {device}"),
+            None => name.to_owned(),
+        };
+        bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await
     }
 }
 
@@ -1172,7 +1233,9 @@ async fn ask(nats: &Nats<'_>, thread: Option<ThreadId>, replies: &Replies, words
             println!("{}: {}", reply.from, reply.text);
             // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
             // consumer is its daemon's.
-            if nats.me.role.is_human() {
+            if nats.me.role.is_human() && !nats.device.marks_read {
+                tracing::warn!("{REISSUE_HUMAN}; the reply stays unread");
+            } else if nats.me.role.is_human() {
                 match inbox::mark_read(&js, &nats.me.id, &reply).await {
                     Ok(true) => {}
                     Ok(false) => tracing::debug!("reply already read"),
@@ -1370,10 +1433,17 @@ async fn warn_unserved<'a>(
     }
 }
 
+/// Why credentials of a human from before the read marker cannot mark replies read.
+const REISSUE_HUMAN: &str = "these credentials predate the read marker every device of a human shares: issue new ones \
+                             with `ants auth user NAME --human` (and a leaf's with `ants auth leaf`)";
+
 async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json: bool) -> Result<()> {
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");
+    }
+    if !nats.device.marks_read {
+        bail!("{REISSUE_HUMAN}");
     }
     let (client, js) = nats.connect("ants-inbox").await?;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
@@ -1385,31 +1455,25 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
         }
         Ok(())
     };
-    let result = async {
-        let unread = inbox.unread(select).await?;
-        if unread.is_empty() && !follow && !json {
-            println!("no unread replies");
-        }
-        unread.iter().try_for_each(show)?;
-        if follow {
-            // A dead letter stored here tells the human through the inbox, like one the daemon stores.
-            let watch = async {
-                if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
-                    tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
-                }
-                std::future::pending::<()>().await
-            };
-            tokio::select! {
-                followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
-                () = watch => {}
-            }
-        }
-        anyhow::Ok(())
+    let unread = inbox.unread(select).await?;
+    if unread.is_empty() && !follow && !json {
+        println!("no unread replies");
     }
-    .await;
-    // Hand back what was not taken even after an error, so it is not hidden until the ack wait runs out.
-    let released = inbox.release().await;
-    result.and(released)
+    unread.iter().try_for_each(show)?;
+    if follow {
+        // A dead letter stored here tells the human through the inbox, like one the daemon stores.
+        let watch = async {
+            if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
+                tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
+            }
+            std::future::pending::<()>().await
+        };
+        tokio::select! {
+            followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
+            () = watch => {}
+        }
+    }
+    Ok(())
 }
 
 async fn dead_letters(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {

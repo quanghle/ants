@@ -84,6 +84,9 @@ pub const OWNERS_BUCKET: &str = "ants_owners";
 pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
+/// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
+pub const READ_BUCKET: &str = "ants_read";
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
@@ -557,6 +560,11 @@ pub mod subject {
         format!("$KV.{}.{human}", super::HUMANS_BUCKET)
     }
 
+    /// The [`super::ReadMarker`] of a human in [`super::READ_BUCKET`]: the subject only that human puts it on.
+    pub fn read_marker(human: &UserId) -> String {
+        format!("$KV.{}.{human}", super::READ_BUCKET)
+    }
+
     /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
     /// [`super::ChannelEntry`] on.
     pub fn channel_entry(channel: &ChannelId) -> String {
@@ -734,6 +742,21 @@ fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
 }
 
+/// What a human's credentials need for its inbox ([`READ_BUCKET`]): creating the bucket and reading and writing its own
+/// [`ReadMarker`] only, by key, so no human reads or moves another's; and deleting its own inbox consumer
+/// ([`inbox_consumer`]), which kept a human's read state before the marker, once its state moved into the marker.
+fn read_marker_rights(human: &UserId) -> [String; 5] {
+    let read = kv_stream(READ_BUCKET);
+    let marker = subject::read_marker(human);
+    [
+        format!("$JS.API.STREAM.INFO.{read}"),
+        format!("$JS.API.STREAM.CREATE.{read}"),
+        format!("$JS.API.DIRECT.GET.{read}.{marker}"),
+        marker,
+        format!("$JS.API.CONSUMER.DELETE.{STREAM}.{}", inbox_consumer(human)),
+    ]
+}
+
 /// Where a webhook delivers its events: an ant's inbox, or a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {
@@ -781,7 +804,8 @@ impl Permissions {
     /// upgrade the stream and create the roster, sessions,
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), and reads and removes dead
-    /// letters by sequence; its inbox consumer keeps the replies `ants inbox` has not shown yet. A human may send under
+    /// letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
+    /// of its devices ([`read_marker_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
@@ -908,6 +932,7 @@ impl Permissions {
                 publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
                 publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
             }
+            publish.extend(read_marker_rights(user));
             subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
         } else {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
@@ -1279,6 +1304,89 @@ impl HumanEntry {
             return Ok(());
         }
         Err(Error::ForeignUser { kind: "human entry", user: self.human.clone(), at: format!("key {key}") })
+    }
+}
+
+/// Which of a human's inbox messages, by [`STREAM`] sequence, the human has read: every one up to `below`, and those
+/// in `read` above it. Kept under the human's key in [`READ_BUCKET`] and shared by all its devices, which update it
+/// with compare-and-set, so reading on one device marks read on all of them without consuming the message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadMarker {
+    /// Every inbox message of the human at or below this sequence is read.
+    #[serde(default)]
+    pub below: u64,
+    /// Inbox messages above `below` read too, as when only one thread's were read.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub read: std::collections::BTreeSet<u64>,
+}
+
+impl ReadMarker {
+    pub fn is_read(&self, seq: u64) -> bool {
+        seq <= self.below || self.read.contains(&seq)
+    }
+
+    /// Mark the message at `seq` read.
+    pub fn mark(&mut self, seq: u64) {
+        if seq > self.below {
+            self.read.insert(seq);
+        }
+    }
+
+    /// Move `below` past the read messages that follow it, given `inbox`, the sequences, in order, of every inbox
+    /// message of the human stored after some sequence at or below `below`: what is read before the first unread one
+    /// needs no entry of its own. Sequences of messages gone from the stream are skipped over as well.
+    pub fn compact(&mut self, inbox: impl IntoIterator<Item = u64>) {
+        for seq in inbox {
+            if seq <= self.below {
+                continue;
+            }
+            if !self.read.contains(&seq) {
+                break;
+            }
+            self.below = seq;
+        }
+        let below = self.below;
+        self.read.retain(|seq| *seq > below);
+    }
+}
+
+/// The id of one device of a human: each `ants auth user NAME --human` issues credentials for a new device, whose user
+/// JWT carries its id as the tag [`DeviceId::tag`]. Generated (a UUIDv7), never chosen and never reused; a label
+/// for display is kept beside it where the credentials were issued. Credentials without one are a legacy device's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeviceId(Uuid);
+
+impl DeviceId {
+    /// Prefix of the user JWT tag carrying the device id.
+    pub const TAG: &str = "ants-device:";
+
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// The user JWT tag carrying the id.
+    pub fn tag(&self) -> String {
+        format!("{}{}", Self::TAG, self.0)
+    }
+
+    /// The device id among a user JWT's `tags`, if any.
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<Self> {
+        tags.into_iter().find_map(|tag| tag.strip_prefix(Self::TAG)?.parse().ok())
+    }
+}
+
+impl fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for DeviceId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
     }
 }
 
@@ -4030,5 +4138,39 @@ mod tests {
         let dead = DeadLetter::of_payload(p("dev-a"), 8, 1, "not an envelope", &junk);
         assert_eq!(dead.envelope, None);
         assert_eq!(dead.payload.unwrap().len(), DeadLetter::PAYLOAD_EXCERPT);
+    }
+
+    #[test]
+    fn a_read_marker_keeps_selective_reads_until_the_unread_before_them_are_read() {
+        let mut marker = ReadMarker::default();
+        // Inbox messages at 3, 5, 8 and 9; 5 and 9 are read first, as on one thread.
+        for seq in [5, 9] {
+            marker.mark(seq);
+        }
+        marker.compact([3, 5, 8, 9]);
+        assert_eq!((marker.below, marker.read.iter().copied().collect::<Vec<_>>()), (0, vec![5, 9]));
+        assert!(!marker.is_read(3) && marker.is_read(5) && !marker.is_read(8));
+        marker.mark(3);
+        marker.compact([3, 5, 8, 9]);
+        assert_eq!((marker.below, marker.read.len()), (5, 1), "3 and 5 read, 8 not");
+        // 8 left the stream before it was read: nothing holds the marker back any more.
+        marker.compact([9]);
+        assert_eq!(marker, ReadMarker { below: 9, read: Default::default() });
+        marker.mark(2);
+        assert!(marker.read.is_empty(), "already read");
+        let json = serde_json::to_string(&marker).unwrap();
+        assert_eq!(json, r#"{"below":9}"#);
+        assert_eq!(serde_json::from_str::<ReadMarker>("{}").unwrap(), ReadMarker::default());
+    }
+
+    #[test]
+    fn a_device_id_travels_as_a_user_jwt_tag() {
+        let device = DeviceId::generate();
+        assert_ne!(device, DeviceId::generate(), "never reused");
+        let tag = device.tag();
+        assert!(tag.starts_with("ants-device:"));
+        assert_eq!(DeviceId::from_tags(["team", tag.as_str()]), Some(device));
+        assert_eq!(DeviceId::from_tags(["ants-device:not-a-uuid"]), None);
+        assert_eq!(device.to_string().parse::<DeviceId>().unwrap(), device);
     }
 }

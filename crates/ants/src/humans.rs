@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ants_proto::{HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
+use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv, stream};
@@ -54,6 +54,33 @@ impl Me {
         let writes_humans = may_publish(&claims, &format!("$KV.{HUMANS_BUCKET}.>"));
         let role = if writes_humans { Role::Human } else { Role::by_default(&id) };
         Ok(Self { id, role })
+    }
+}
+
+/// The device of a human the credentials were issued for ([`DeviceId`]), as the CLI acting as the human tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// None for a legacy device, whose credentials carry no id, and without credentials.
+    pub id: Option<DeviceId>,
+    /// Whether the credentials write the human's read marker ([`subject::read_marker`]): those issued before it was
+    /// kept do not.
+    pub marks_read: bool,
+}
+
+impl Device {
+    /// The device the credentials file `creds` of `me` were issued for.
+    pub fn from_creds(creds: Option<&Path>, me: &UserId) -> Result<Self> {
+        let Some(path) = creds else {
+            return Ok(Self { id: None, marks_read: true });
+        };
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+        Self::from_creds_text(&text, me).with_context(|| format!("credentials {}", path.display()))
+    }
+
+    fn from_creds_text(text: &str, me: &UserId) -> Result<Self> {
+        let claims = creds_claims(text)?;
+        let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
+        Ok(Self { id: DeviceId::from_tags(tags), marks_read: may_publish(&claims, &subject::read_marker(me)) })
     }
 }
 
@@ -184,6 +211,22 @@ mod tests {
         assert!(me(json!({ "name": "Alice Smith" })).unwrap_err().starts_with("a user JWT naming \"Alice Smith\""));
         assert_eq!(me(json!({ "sub": "U123" })).unwrap_err(), "a user JWT without a name");
         assert_eq!(Me::from_creds_text("no JWT here").unwrap_err().to_string(), "no user JWT");
+    }
+
+    #[test]
+    fn the_credentials_tell_the_device_and_whether_they_mark_read() {
+        let device = DeviceId::generate();
+        let claims = json!({ "name": "alice", "nats": {
+            "tags": ["team", device.tag()], "pub": { "allow": ["$KV.ants_read.alice"] } } });
+        let alice = p("alice");
+        let got = Device::from_creds_text(&creds_with(claims), &alice).unwrap();
+        assert_eq!(got, Device { id: Some(device), marks_read: true });
+        let legacy = json!({ "name": "alice", "nats": { "pub": { "allow": ["$KV.ants_humans.>"] } } });
+        assert_eq!(
+            Device::from_creds_text(&creds_with(legacy), &alice).unwrap(),
+            Device { id: None, marks_read: false }
+        );
+        assert_eq!(Device::from_creds(None, &UserId::human()).unwrap(), Device { id: None, marks_read: true });
     }
 
     /// With real credentials: the human's first connection creates the bucket and registers it, later ones find it.
