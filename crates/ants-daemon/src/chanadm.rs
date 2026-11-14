@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ants_proto::{
     CHANADM_REPEAT, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminReply, ChannelAdminRequest,
-    ChannelEntry, ChannelPost, Refusal, UserId, subject,
+    ChannelEntry, ChannelPost, Humans, Refusal, UserId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::{self, kv};
@@ -147,7 +147,7 @@ impl Manager {
             if changed.is_empty() {
                 return Ok((ChannelAdminOutcome::Applied { entry, revision, changed }, None));
             }
-            if let Some(missing) = self.missing_from_roster(&before, &entry).await? {
+            if let Some(missing) = self.missing_from_roster(&before, &entry, &humans).await? {
                 return refused(Refusal::NotInRoster(missing));
             }
             let value = serde_json::to_vec(&entry)?;
@@ -165,11 +165,17 @@ impl Manager {
         refused(Refusal::Busy)
     }
 
-    /// The first ant that `after` makes a member or the messenger and `before` did not, when it is not in the roster.
-    async fn missing_from_roster(&self, before: &ChannelEntry, after: &ChannelEntry) -> Result<Option<UserId>> {
+    /// The first user that `after` makes a member or the messenger and `before` did not, when it is neither one of the
+    /// `humans` nor in the roster.
+    async fn missing_from_roster(
+        &self,
+        before: &ChannelEntry,
+        after: &ChannelEntry,
+        humans: &Humans,
+    ) -> Result<Option<UserId>> {
         let messenger = after.messenger.as_ref().filter(|m| before.messenger.as_ref() != Some(*m));
         let members = after.members.iter().filter(|m| !before.is_member(m));
-        let added: Vec<&UserId> = members.chain(messenger).collect();
+        let added: Vec<&UserId> = members.chain(messenger).filter(|user| !humans.contains(user)).collect();
         if added.is_empty() {
             return Ok(None);
         }

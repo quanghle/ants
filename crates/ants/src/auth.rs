@@ -1061,6 +1061,17 @@ pub(crate) mod tests {
         // Ants outside the roster, other ants, and the former owner are refused.
         let add_c = vec![ChannelOp::AddMember { ant: p("dev-c") }];
         assert_eq!(refused(ask(&a_admin, &dev_a, add_c).await), Refusal::NotInRoster(p("dev-c")));
+        // A human needs no roster entry to be a member, but is never the messenger.
+        let add_human = vec![ChannelOp::AddMember { ant: human.clone() }];
+        let ChannelAdminOutcome::Applied { entry: with_human, changed, .. } = ask(&a_admin, &dev_a, add_human).await
+        else {
+            panic!("a human member refused")
+        };
+        assert_eq!((with_human.members, changed), (vec![dev_b.clone(), human.clone()], vec!["added human".to_owned()]));
+        let human_messenger = vec![ChannelOp::SetMessenger { ant: human.clone() }];
+        assert_eq!(refused(ask(&a_admin, &dev_a, human_messenger).await), Refusal::Human(human.clone()));
+        let remove_human = vec![ChannelOp::RemoveMember { ant: human.clone() }];
+        assert!(matches!(ask(&a_admin, &dev_a, remove_human).await, ChannelAdminOutcome::Applied { .. }));
         let (b_client, b_js) = server.connect(&dev_b).await;
         let b_admin = chanadm::nats_admin(b_client, b_js);
         let remove_b = vec![ChannelOp::RemoveMember { ant: dev_b.clone() }];

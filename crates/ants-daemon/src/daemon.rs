@@ -557,6 +557,9 @@ impl Inbox<'_> {
             }
         };
         let humans = self.humans.humans();
+        if post.from == *self.ant && !self.notify_mentioned(msg, &post, channels, &humans).await {
+            return None;
+        }
         let mut wake = channel::wake(self.ant, channels.get(&post.channel), &post, &humans);
         let unseen = channels.get(&post.channel).is_none() && post.to_triage(&humans);
         if wake == Wake::Skip && (post.mentions(self.ant) && post.from != *self.ant || unseen) {
@@ -576,6 +579,42 @@ impl Inbox<'_> {
         origin.apply(&mut post);
         let envelope = channel::as_envelope(&post, self.ant);
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage, owned })), resume: None })
+    }
+
+    /// Notify the human members the ant's own `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the
+    /// post is acked. False when that failed: the post is naked, to be tried again.
+    async fn notify_mentioned(
+        &self,
+        msg: &jetstream::Message,
+        post: &ChannelPost,
+        channels: &mut Channels,
+        humans: &Humans,
+    ) -> bool {
+        let mut mentioned = post.mentions.iter().filter(|m| humans.contains(m)).peekable();
+        if mentioned.peek().is_none() {
+            return true;
+        }
+        if channels.get(&post.channel).is_none_or(|entry| mentioned.any(|m| !entry.is_member(m))) {
+            // The post may have overtaken the change that made the human a member.
+            channels.refresh(&post.channel).await;
+        }
+        let Some(seq) = stream_seq(msg) else {
+            tracing::warn!(channel = %post.channel, "notifying no human of a post without its stream sequence");
+            return true;
+        };
+        match self.threads.notify_mentioned(post, seq, channels.get(&post.channel), humans).await {
+            Ok(notified) => {
+                if !notified.is_empty() {
+                    tracing::info!(channel = %post.channel, thread = %post.thread_id, ?notified, "notified humans");
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(channel = %post.channel, error = format!("{e:#}"), "notifying the humans mentioned");
+                nak(msg, Some(self.retry_delay)).await;
+                false
+            }
+        }
     }
 
     /// Name the owner and creator of the thread of the channel post in `incoming`, at stream sequence `seq`, as its
@@ -1052,7 +1091,7 @@ impl Inbox<'_> {
                     tracing::warn!(error = format!("{e:#}"), "reading the roster; members show as offline");
                     Vec::new()
                 });
-                channel::triage_prompt(post, entry, &roster, read, left)
+                channel::triage_prompt(post, entry, &roster, humans, read, left)
             }
         };
         if posted.owned {
@@ -1470,6 +1509,13 @@ mod tests {
 
         async fn post(&self, post: &ChannelPost) -> u64 {
             self.post_on(post.subject(), post).await
+        }
+
+        /// How many messages the stream keeps on `subject`.
+        async fn stored(&self, subject: &str) -> usize {
+            use futures::TryStreamExt as _;
+            let subjects = self.stream.info_with_subjects(subject).await.unwrap();
+            subjects.try_fold(0, |n, (_, count)| async move { Ok(n + count) }).await.unwrap()
         }
 
         async fn consumer(&self) -> jetstream::consumer::Info {
@@ -3040,5 +3086,99 @@ mod tests {
         assert_eq!(answered.len(), 1, "alice's post only: {answered:?}");
         assert!(answered[0].contains(channel::TRIAGE_RULES), "{}", answered[0]);
         assert!(answered[0].contains("Post from alice mentioning nobody:\nthe build is red"), "{}", answered[0]);
+    }
+
+    #[tokio::test]
+    async fn the_ant_s_own_post_notifies_the_human_members_it_mentions_and_wakes_no_messenger() {
+        let Some((mut bus, _)) = Bus::start().await else { return };
+        bus.humans = Registry::with(UserId::human(), &["alice", "bob"]);
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (alice, bob, dev_b) =
+            ("alice".parse::<UserId>().unwrap(), "bob".parse::<UserId>().unwrap(), "dev-b".parse::<UserId>().unwrap());
+        // dev-a is a member and the messenger; bob is no member.
+        let mut entry = ChannelEntry::new("ops".parse().unwrap());
+        for member in [&bus.dev, &dev_b, &alice] {
+            entry.add_member(member.clone());
+        }
+        entry.messenger = Some(bus.dev.clone());
+        bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+        let ops = entry.channel.clone();
+        let mut replies = bus.client.subscribe(subject::chan(&ops, &bus.dev)).await.unwrap();
+        let mut alice_inbox = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        let own = ChannelPost::new(ops.clone(), bus.dev.clone(), "@alice @bob @dev-b heads up");
+        bus.post(&own).await;
+        // A human's post mentioning only a human goes to no triage; another's mention of alice is its daemon's to tell.
+        bus.post(&ChannelPost::new(ops.clone(), UserId::human(), "@alice see")).await;
+        let mixed = ChannelPost::new(ops.clone(), dev_b.clone(), "@dev-a @alice check");
+        let seq = bus.post(&mixed).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let notice = next_envelope(&mut alice_inbox).await;
+            assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&bus.dev, &alice, &own.thread_id));
+            assert_eq!(notice.mention, Some(ants_proto::Mention { channel: ops.clone(), post: own.id }));
+            assert_eq!(notice.text, own.text);
+            assert_eq!(next_post(&mut replies).await.id, own.id);
+            let answer = next_post(&mut replies).await;
+            assert_eq!(answer.in_reply_to, Some(mixed.id));
+            // The fake harness quotes the prompt, so the answer on the thread mentions alice too.
+            let notice = next_envelope(&mut alice_inbox).await;
+            assert_eq!((notice.mention.map(|m| m.post), &notice.thread_id), (Some(answer.id), &mixed.thread_id));
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let answered = log.lock().unwrap().answered.clone();
+        assert_eq!(answered.len(), 1, "the mention of dev-a only: {answered:?}");
+        assert!(answered[0].contains("Post from dev-b mentioning dev-a:\n@dev-a @alice check"), "{}", answered[0]);
+        assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 2, "one notice per post, from dev-a's daemon");
+        assert_eq!(bus.stored(&subject::inbox(&bob, &bus.dev)).await, 0, "bob is no member");
+    }
+
+    #[tokio::test]
+    async fn a_mention_notice_that_failed_is_sent_on_the_post_s_redelivery_and_only_once() {
+        let Some((mut bus, _)) = Bus::start().await else { return };
+        bus.humans = Registry::with(UserId::human(), &["alice"]);
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let alice: UserId = "alice".parse().unwrap();
+        let (ops, _) = bus.channel("ops", &["dev-a", "alice"]).await;
+        let own = ChannelPost::new(ops.clone(), bus.dev.clone(), "@alice done");
+        // The markers' bucket is gone, so the first attempts fail and the post waits for a redelivery.
+        bus.js.delete_key_value(ants_proto::SESSIONS_BUCKET).await.unwrap();
+        let seq = bus.post(&own).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 0);
+            let mut consumer: PullConsumer =
+                bus.stream.get_consumer(&ants_proto::chan_consumer(&bus.dev)).await.unwrap();
+            assert!(consumer.info().await.unwrap().ack_floor.stream_sequence < seq, "not acked before the notice");
+            bus::ensure_sessions(&bus.js).await.unwrap();
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        assert!(log.lock().unwrap().answered.is_empty());
+        assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 1);
+        let stored: Envelope = serde_json::from_slice(
+            &bus.stream.get_last_raw_message_by_subject(&subject::inbox(&alice, &bus.dev)).await.unwrap().payload,
+        )
+        .unwrap();
+        assert_eq!(stored.mention.map(|m| m.post), Some(own.id));
+
+        // Taken again, as after a restart past JetStream's duplicate window, the post finds its marker.
+        let entry = bus.channels.get("ops").await.unwrap().unwrap();
+        let entry: ChannelEntry = serde_json::from_slice(&entry).unwrap();
+        let humans = bus.humans.humans();
+        let again = bus.threads.notify_mentioned(&own, seq, Some(&entry), &humans).await.unwrap();
+        assert!(again.is_empty(), "{again:?}");
+        let other = ChannelPost::new(ops, bus.dev.clone(), "@alice and again");
+        let notified = bus.threads.notify_mentioned(&other, seq + 100, Some(&entry), &humans).await.unwrap();
+        assert_eq!(notified, std::slice::from_ref(&alice));
+        assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 2);
     }
 }

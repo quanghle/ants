@@ -539,6 +539,12 @@ pub fn channel_seen_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{thread}.seen")
 }
 
+/// Key of the marker that the mention notice of the ant's own channel post at stream sequence `seq` reached `human`,
+/// in [`SESSIONS_BUCKET`] ([`ChannelPost::mention_notice`]).
+pub fn mention_key(ant: &UserId, seq: u64, human: &UserId) -> String {
+    format!("{ant}.mention.{seq}.{human}")
+}
+
 /// Key of the ant's escalation deadlines, the threads whose escalation awaits its leader until a time, in
 /// [`SESSIONS_BUCKET`]. Each thread's escalation itself is kept with its spend ([`thread_spend_key`]).
 pub fn escalation_deadlines_key(ant: &UserId) -> String {
@@ -1168,7 +1174,19 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// The channel post that @mentioned `to`, a human member of the channel, when the message tells it so
+    /// ([`ChannelPost::mention_notice`]): `from` is the post's author, the thread and text are the post's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention: Option<Mention>,
     pub sent_at: DateTime<Utc>,
+}
+
+/// Where the channel post a mention notice tells of is ([`Envelope::mention`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mention {
+    pub channel: ChannelId,
+    /// The post's id.
+    pub post: Uuid,
 }
 
 impl Envelope {
@@ -1192,6 +1210,7 @@ impl Envelope {
             escalation: None,
             approval: None,
             webhook: false,
+            mention: None,
             sent_at: Utc::now(),
         }
     }
@@ -1273,6 +1292,7 @@ impl Envelope {
             escalation: None,
             approval: None,
             webhook: false,
+            mention: None,
             sent_at: Utc::now(),
         })
     }
@@ -1539,7 +1559,7 @@ pub fn parse_mentions(text: &str) -> Vec<UserId> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelEntry {
     pub channel: ChannelId,
-    /// The ants in the channel, in the order they were added.
+    /// The users in the channel, ants and humans, in the order they were added.
     #[serde(default)]
     pub members: Vec<UserId>,
     /// The ant that triages humans' posts that @mention nobody, when not the default `messenger`
@@ -1580,19 +1600,19 @@ impl ChannelEntry {
         self.messenger.clone().unwrap_or_else(UserId::messenger)
     }
 
-    /// Add `ant` after the other members; false when it already is one.
-    pub fn add_member(&mut self, ant: UserId) -> bool {
-        if self.is_member(&ant) {
+    /// Add `user`, an ant or a human, after the other members; false when it already is one.
+    pub fn add_member(&mut self, user: UserId) -> bool {
+        if self.is_member(&user) {
             return false;
         }
-        self.members.push(ant);
+        self.members.push(user);
         true
     }
 
-    /// Remove `ant` from the members; false when it was none.
-    pub fn remove_member(&mut self, ant: &UserId) -> bool {
+    /// Remove `user` from the members; false when it was none.
+    pub fn remove_member(&mut self, user: &UserId) -> bool {
         let before = self.members.len();
-        self.members.retain(|m| m != ant);
+        self.members.retain(|m| m != user);
         self.members.len() != before
     }
 
@@ -1610,16 +1630,27 @@ impl ChannelEntry {
         post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && !humans.contains(m)).cloned().collect()
     }
 
-    /// Apply the `ops` of `requester`, which must be the channel's owner, leaving the owner as it is. None may make one
-    /// of the `humans` a member or the messenger: those are ants. Returns what changed, in order, empty when nothing did; on a
-    /// refusal the entry is unchanged.
+    /// The `humans` `post` notifies ([`ChannelPost::mention_notice`]): the members among them it @mentions, except its
+    /// author. They are never woken: a mention of a human wakes no agent, and keeps the post from triage. A post to
+    /// another channel notifies nobody here.
+    pub fn notified(&self, post: &ChannelPost, humans: &Humans) -> Vec<UserId> {
+        if post.channel != self.channel {
+            return Vec::new();
+        }
+        post.mentions.iter().filter(|m| self.is_member(m) && **m != post.from && humans.contains(m)).cloned().collect()
+    }
+
+    /// Apply the `ops` of `requester`, which must be the channel's owner, leaving the owner as it is. Members may be
+    /// ants or `humans`, but none may make a human the messenger: it is an ant. Returns what changed, in order, empty
+    /// when nothing did; on a refusal the entry is unchanged.
     pub fn apply(&mut self, requester: &UserId, ops: &[ChannelOp], humans: &Humans) -> Result<Vec<String>, Refusal> {
         if self.owner.as_ref() != Some(requester) {
             return Err(Refusal::NotOwner { owner: self.owner.clone() });
         }
-        if let Some(human) =
-            ops.iter().filter(|op| op.adds()).filter_map(ChannelOp::ant).find(|ant| humans.contains(ant))
-        {
+        if let Some(human) = ops.iter().find_map(|op| match op {
+            ChannelOp::SetMessenger { ant } if humans.contains(ant) => Some(ant),
+            _ => None,
+        }) {
             return Err(Refusal::Human(human.clone()));
         }
         let mut changed = Vec::new();
@@ -1656,22 +1687,18 @@ impl ChannelEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ChannelOp {
-    AddMember {
-        ant: UserId,
-    },
-    RemoveMember {
-        ant: UserId,
-    },
+    /// Make `ant`, an ant or a human despite the field's name, a member.
+    AddMember { ant: UserId },
+    /// Remove the member `ant`, an ant or a human.
+    RemoveMember { ant: UserId },
     /// Make `ant` the channel's messenger; the default `messenger` clears it.
-    SetMessenger {
-        ant: UserId,
-    },
+    SetMessenger { ant: UserId },
     /// Give the channel the default messenger again.
     ClearMessenger,
 }
 
 impl ChannelOp {
-    /// The ant the operation names, if any.
+    /// The user the operation names, if any.
     pub fn ant(&self) -> Option<&UserId> {
         match self {
             Self::AddMember { ant } | Self::RemoveMember { ant } | Self::SetMessenger { ant } => Some(ant),
@@ -1679,7 +1706,8 @@ impl ChannelOp {
         }
     }
 
-    /// Whether the operation makes [`ChannelOp::ant`] a member or the messenger, so the ant must be in the roster.
+    /// Whether the operation makes [`ChannelOp::ant`] a member or the messenger, so it must be a human or an ant in
+    /// the roster.
     pub fn adds(&self) -> bool {
         matches!(self, Self::AddMember { .. } | Self::SetMessenger { .. })
     }
@@ -1780,9 +1808,9 @@ pub enum Refusal {
     NoSuchChannel,
     #[error("the channel's entry is unreadable; a human has to set it again")]
     Unreadable,
-    #[error("{0} is a human; members and messengers are ants")]
+    #[error("{0} is a human; the messenger is an ant")]
     Human(UserId),
-    #[error("{0} is not in the roster; only ants in the roster may be added")]
+    #[error("{0} is neither a human nor in the roster; only humans and ants in the roster may be added")]
     NotInRoster(UserId),
     #[error("the request expired")]
     Expired,
@@ -1948,6 +1976,25 @@ impl ChannelPost {
     /// Whether the post @mentions `user`.
     pub fn mentions(&self, user: &UserId) -> bool {
         self.mentions.contains(user)
+    }
+
+    /// The message telling `human`, a human member of the channel it @mentions ([`ChannelEntry::notified`]), of the
+    /// post: from its author, on its thread, with its text, and the channel and post in [`Envelope::mention`]. It
+    /// spends no turn and names no owner or creator. Sent with [`ChannelPost::mention_msg_id`].
+    pub fn mention_notice(&self, human: &UserId) -> Envelope {
+        Envelope {
+            in_reply_to: None,
+            turn_budget: self.turn_budget,
+            webhook: self.webhook,
+            mention: Some(Mention { channel: self.channel.clone(), post: self.id }),
+            sent_at: self.sent_at,
+            ..Envelope::on_thread(self.thread_id.clone(), self.from.clone(), human.clone(), self.text.clone())
+        }
+    }
+
+    /// The JetStream msg id of the [`ChannelPost::mention_notice`] to `human`, so a notice sent again is stored once.
+    pub fn mention_msg_id(&self, human: &UserId) -> String {
+        format!("mention.{}.{human}", self.id)
     }
 
     /// Whether the post @mentions an ant other than its author and the `humans`: an agent it would wake.
@@ -2822,6 +2869,47 @@ mod tests {
     }
 
     #[test]
+    fn a_mention_notifies_human_members_and_wakes_ant_members() {
+        let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
+        let mut humans = Humans::default();
+        for h in [&alice, &bob] {
+            humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
+        }
+        let mut entry = ChannelEntry::new(c.clone());
+        for member in [p("dev-a"), p("dev-b"), alice.clone()] {
+            entry.add_member(member);
+        }
+        let mixed =
+            ChannelPost::new(c.clone(), p("dev-a"), "@alice @bob @dev-b @dev-c look").with_owner(Some(bob.clone()));
+        assert_eq!(entry.woken(&mixed, &humans), [p("dev-b")]);
+        assert_eq!(entry.notified(&mixed, &humans), std::slice::from_ref(&alice), "members only: bob is none");
+        let human_only = ChannelPost::new(c.clone(), p("dev-a"), "@alice see");
+        assert!(entry.woken(&human_only, &humans).is_empty(), "no agent, nor the messenger");
+        let by_alice = ChannelPost::new(c.clone(), alice.clone(), "@alice @dev-b note");
+        assert!(entry.notified(&by_alice, &humans).is_empty(), "not its author");
+        assert_eq!(entry.woken(&by_alice, &humans), [p("dev-b")]);
+        assert!(entry.notified(&ChannelPost::new("dev".parse().unwrap(), p("dev-a"), "@alice"), &humans).is_empty());
+
+        let notice = mixed.mention_notice(&alice);
+        assert_eq!((&notice.from, &notice.to, &notice.thread_id), (&p("dev-a"), &alice, &mixed.thread_id));
+        assert_eq!((notice.text.as_str(), notice.turn_budget), (mixed.text.as_str(), mixed.turn_budget));
+        assert_eq!((&notice.owner, &notice.creator), (&None, &None), "a notice claims no thread");
+        assert_eq!(notice.mention, Some(Mention { channel: c, post: mixed.id }));
+        assert_eq!(notice.subject(), subject::inbox(&alice, &p("dev-a")));
+        assert_eq!(mixed.mention_msg_id(&alice), format!("mention.{}.alice", mixed.id));
+        assert_eq!(mention_key(&p("dev-a"), 7, &alice), "dev-a.mention.7.alice");
+
+        let json = serde_json::to_value(&notice).unwrap();
+        assert_eq!(json["mention"]["channel"], "ops");
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("mention");
+        let read: Envelope = serde_json::from_value(old).unwrap();
+        assert_eq!(read, Envelope { mention: None, ..notice }, "an envelope from before mentions reads as a message");
+        let plain = serde_json::to_string(&Envelope::new(p("dev-a"), alice, "hi")).unwrap();
+        assert!(!plain.contains("mention"), "{plain}");
+    }
+
+    #[test]
     fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them() {
         let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
         let mut humans = Humans::default();
@@ -3031,6 +3119,10 @@ mod tests {
         let human = [ChannelOp::AddMember { ant: p("dev-d") }, ChannelOp::SetMessenger { ant: p("alice") }];
         assert_eq!(entry.apply(&p("lead"), &human, &humans), Err(Refusal::Human(p("alice"))));
         assert_eq!(entry, ChannelEntry { owner: Some(p("lead")), ..before }, "a refusal changes nothing");
+        let member = [ChannelOp::AddMember { ant: p("alice") }];
+        assert_eq!(entry.apply(&p("lead"), &member, &humans).unwrap(), ["added alice"], "a human may be a member");
+        let member = [ChannelOp::RemoveMember { ant: p("alice") }];
+        assert_eq!(entry.apply(&p("lead"), &member, &humans).unwrap(), ["removed alice"]);
 
         let changed = entry.apply(&p("lead"), &ops, &humans).unwrap();
         assert_eq!(changed, ["added dev-b", "removed dev-a", "messenger dev-c"]);

@@ -519,7 +519,7 @@ impl Hub {
 
     /// Post `text` to `channel` as the ant, a member or the channel's messenger: a top-level post starting a thread
     /// the ant creates, with no owner and the turns the message `thread` is handling leaves, as `send_message` spends
-    /// them. Returns the new thread and whom the post wakes.
+    /// them. Returns the new thread and whom the post wakes or notifies (its daemon sends the notices).
     async fn post_channel(&self, thread: &ThreadId, channel: &str, text: String) -> Result<String, String> {
         let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
@@ -543,10 +543,14 @@ impl Hub {
         let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text).with_creator(Some(self.ant.clone()));
         post.turn_budget = left;
         (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
-        let woken = entry.woken(&post, &self.humans.humans());
-        let wakes = match woken.is_empty() {
-            true => "it wakes nobody: only @mentions of members wake anyone".to_owned(),
-            false => format!("it wakes {}", woken.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ")),
+        let humans = self.humans.humans();
+        let names = |users: Vec<UserId>| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
+        let (woken, notified) = (entry.woken(&post, &humans), entry.notified(&post, &humans));
+        let wakes = match (woken.is_empty(), notified.is_empty()) {
+            (true, true) => "it wakes nobody: only @mentions of members reach anyone".to_owned(),
+            (false, true) => format!("it wakes {}", names(woken)),
+            (true, false) => format!("it notifies {}", names(notified)),
+            (false, false) => format!("it wakes {} and notifies {}", names(woken), names(notified)),
         };
         Ok(format!(
             "Posted to #{channel}, starting thread {} that {} created ({left} turns left); {wakes}.",
@@ -902,7 +906,7 @@ struct PostNotes {
 struct PostChannel {
     /// Channel to post to, such as `ops` or `#ops`.
     channel: String,
-    /// The post; an @ant in it wakes that member of the channel.
+    /// The post; an @mention in it wakes that member of the channel, or notifies it if a human.
     text: String,
 }
 
@@ -949,7 +953,7 @@ struct ManageChannel {
     /// The channel, such as `ops`; omitted to list the channels this ant owns.
     #[serde(default)]
     channel: Option<String>,
-    /// Ants to make members; each must be in the roster.
+    /// Users to make members: ants in the roster, or humans.
     #[serde(default)]
     add: Vec<String>,
     /// Members to remove.
@@ -1261,7 +1265,8 @@ impl Tools {
 
     #[tool(description = "Manage a channel this ant owns (a human makes an ant a channel's owner): `add` and \
         `remove` change its members, `messenger` sets the ant that triages humans' posts that mention nobody, and \
-        `clear_messenger` gives it the default messenger again. Members and messengers must be ants in the roster. \
+        `clear_messenger` gives it the default messenger again. Members are ants in the roster or humans; the \
+        messenger is an ant in the roster. \
         The channel manager applies the change, refuses it unless this ant owns the channel, and announces it in \
         the channel. With only `channel` it shows the channel; with nothing it lists the channels this ant owns.")]
     async fn manage_channel(
@@ -1910,6 +1915,7 @@ mod tests {
         let mut ops = ChannelEntry::new("ops".parse().unwrap());
         ops.add_member(user("dev-a"));
         ops.add_member(user("dev-b"));
+        ops.add_member(UserId::human());
         let mut dev = ChannelEntry::new("dev".parse().unwrap());
         dev.add_member(user("dev-b"));
         let mut triage = ChannelEntry::new("triage".parse().unwrap());
@@ -1917,8 +1923,8 @@ mod tests {
         let posted = Arc::new(StdMutex::new(Vec::new()));
         mcp.with_channels(channels(vec![ops, dev, triage], posted.clone()));
 
-        let (ok, text) = call(&client, "post_channel", post("#ops", "@dev-b check the build")).await;
-        assert!(ok && text.contains("that dev-a created (8 turns left); it wakes dev-b."), "{text}");
+        let (ok, text) = call(&client, "post_channel", post("#ops", "@dev-b @human check the build")).await;
+        assert!(ok && text.contains("that dev-a created (8 turns left); it wakes dev-b and notifies human."), "{text}");
         let got = posted.lock().unwrap().pop().unwrap();
         assert_eq!((got.channel.as_str(), &got.from, got.in_reply_to), ("ops", &user("dev-a"), None));
         assert_eq!((&got.creator, &got.owner), (&Some(user("dev-a")), &None));

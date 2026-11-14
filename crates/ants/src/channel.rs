@@ -5,6 +5,9 @@
 //! existing thread (`--thread`) keeps the owner the thread's first posts name ([`thread_origin`]); only when none is
 //! known, as on a thread no longer kept or unreachable, does the posting human take it. A thread an ant starts with
 //! `ants post` under its own credentials has the ant as its creator, which later posts keep ([`thread_origin`]).
+//!
+//! Members are ants and humans. A human's post that @mentions a human member puts a notice in that human's inbox
+//! ([`notify_mentioned`]); an ant's daemon sends those of the ant's posts.
 
 use std::ops::ControlFlow;
 
@@ -33,7 +36,7 @@ pub fn parse_channel(s: &str) -> Result<ChannelId, ants_proto::Error> {
     s.strip_prefix('#').unwrap_or(s).parse()
 }
 
-/// An ant id as given on the command line: `@dev-a` or `dev-a`; never the channel manager.
+/// A user id as given on the command line, an ant's or a human's: `@dev-a` or `dev-a`; never the channel manager.
 pub fn parse_ant(s: &str) -> Result<UserId, String> {
     let ant: UserId = s.strip_prefix('@').unwrap_or(s).parse().map_err(|e: ants_proto::Error| e.to_string())?;
     if ant == UserId::channel_manager() {
@@ -42,12 +45,11 @@ pub fn parse_ant(s: &str) -> Result<UserId, String> {
     Ok(ant)
 }
 
-/// Members and messengers are ants a daemon serves: `humans` read channels instead.
-pub fn check_not_human<'a>(ants: impl IntoIterator<Item = &'a UserId>, humans: &Humans) -> Result<()> {
-    if let Some(human) = ants.into_iter().find(|p| humans.contains(p)) {
+/// The messenger is an ant a daemon serves, as it triages with an agent; `humans` may be members instead.
+pub fn check_messenger_not_human(messenger: Option<&UserId>, humans: &Humans) -> Result<()> {
+    if let Some(human) = messenger.filter(|m| humans.contains(m)) {
         bail!(
-            "{human} is a human, so neither a member nor the messenger of a channel; `ants channel read` shows channel \
-             posts"
+            "{human} is a human, so not the messenger of a channel, which is an ant; `--member {human}` adds a member"
         );
     }
     Ok(())
@@ -113,15 +115,39 @@ pub fn table(entries: &[ChannelEntry]) -> String {
     lines.join("\n")
 }
 
-/// Those of `ants` that no entry of the roster serves now.
-pub fn unserved<'a>(ants: impl IntoIterator<Item = &'a UserId>, roster: &[RosterEntry]) -> Vec<&'a UserId> {
-    ants.into_iter().filter(|p| !roster.iter().any(|e| e.ant == **p)).collect()
+/// Those of `users` that are not `humans` and that no entry of the roster serves now.
+pub fn unserved<'a>(
+    users: impl IntoIterator<Item = &'a UserId>,
+    roster: &[RosterEntry],
+    humans: &Humans,
+) -> Vec<&'a UserId> {
+    users.into_iter().filter(|p| !humans.contains(p) && !roster.iter().any(|e| e.ant == **p)).collect()
 }
 
-/// The ants `post` @mentions that it does not wake, not being members of the channel. `humans` are no members
-/// but read the channel anyway, so mentions of them are left out.
-pub fn idle_mentions<'a>(post: &'a ChannelPost, entry: Option<&ChannelEntry>, humans: &Humans) -> Vec<&'a UserId> {
-    post.mentions.iter().filter(|m| !humans.contains(m) && entry.is_none_or(|e| !e.is_member(m))).collect()
+/// The users `post` @mentions, other than its author, that it neither wakes nor notifies, not being members of the
+/// channel.
+pub fn idle_mentions<'a>(post: &'a ChannelPost, entry: Option<&ChannelEntry>) -> Vec<&'a UserId> {
+    post.mentions.iter().filter(|m| **m != post.from && entry.is_none_or(|e| !e.is_member(m))).collect()
+}
+
+/// Put the notice of `post`, a human's, in the inbox of each human member of `entry` it @mentions
+/// ([`ChannelPost::mention_notice`]), with the msg id that stores it once. Returns the humans notified, and warns of
+/// those not.
+pub async fn notify_mentioned(
+    js: &jetstream::Context,
+    post: &ChannelPost,
+    entry: Option<&ChannelEntry>,
+    humans: &Humans,
+) -> Vec<UserId> {
+    let mut notified = Vec::new();
+    for human in entry.map(|entry| entry.notified(post, humans)).unwrap_or_default() {
+        let notice = post.mention_notice(&human);
+        match bus::store(js, notice.subject(), &notice, &post.mention_msg_id(&human)).await {
+            Ok(_) => notified.push(human),
+            Err(e) => tracing::warn!("{human} was not notified of the mention: {e:#}"),
+        }
+    }
+    notified
 }
 
 /// The channels bucket, created if missing (the human's credentials may).
@@ -453,9 +479,10 @@ mod tests {
         assert!(parse_ant("@").is_err());
         assert!(parse_ant("channel-manager").is_err());
         let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
-        assert!(check_not_human([&p("dev-a"), &UserId::human()], &humans).is_err());
-        assert!(check_not_human([&p("alice")], &humans).is_err());
-        assert!(check_not_human([&p("dev-a")], &humans).is_ok());
+        assert!(check_messenger_not_human(Some(&UserId::human()), &humans).is_err());
+        assert!(check_messenger_not_human(Some(&p("alice")), &humans).is_err());
+        assert!(check_messenger_not_human(Some(&p("dev-a")), &humans).is_ok());
+        assert!(check_messenger_not_human(None, &humans).is_ok());
     }
 
     #[test]
@@ -476,15 +503,17 @@ mod tests {
     }
 
     #[test]
-    fn mentions_of_non_members_wake_nobody() {
+    fn mentions_of_non_members_reach_nobody() {
         let mut entry = ChannelEntry::new(ops());
         entry.add_member(p("dev-a"));
         let post = ChannelPost::new(ops(), UserId::human(), "@dev-a @dev-b @human @alice look");
         let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
-        assert_eq!(idle_mentions(&post, Some(&entry), &humans), [&p("dev-b")]);
-        assert_eq!(idle_mentions(&post, None, &humans), [&p("dev-a"), &p("dev-b")]);
+        assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b"), &p("alice")], "a human is no member either");
+        entry.add_member(p("alice"));
+        assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b")], "a human member is notified");
+        assert_eq!(idle_mentions(&post, None), [&p("dev-a"), &p("dev-b"), &p("alice")]);
         let roster: Vec<RosterEntry> = Vec::new();
-        assert_eq!(unserved([&p("dev-a")], &roster), [&p("dev-a")]);
+        assert_eq!(unserved([&p("dev-a"), &p("alice")], &roster, &humans), [&p("dev-a")], "a human needs no daemon");
     }
 
     #[test]
@@ -640,5 +669,46 @@ mod tests {
         bus::publish_json(&d_js, started.subject(), &started, None).await.unwrap();
         let on = compose(&b_js, &me(&bob), &humans, ops(), Some(started.thread_id.clone()), "ok".to_owned()).await;
         assert_eq!((&on.creator, &on.owner), (&Some(dev_a.clone()), &Some(bob.clone())));
+    }
+
+    /// alice's post and dev-a's, each with its own credentials, mention bob, a member: bob's inbox gets one notice
+    /// of each, however often it is sent, and none of a post mentioning bob as no member.
+    #[tokio::test]
+    async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+        let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+        let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
+        bus::init_stream(&a_js).await.unwrap();
+        crate::humans::ensure(&a_js).await.unwrap();
+        for (js, human) in [(&a_js, &alice), (&b_js, &bob)] {
+            crate::humans::register(js, &me(human)).await.unwrap();
+        }
+        let humans = crate::humans::load(&a_js, &me(&alice)).await;
+        let mut entry = ChannelEntry::new(ops());
+        let (_, d_js) = server.connect(&dev_a).await;
+        let post = compose(&a_js, &me(&alice), &humans, ops(), None, "@bob @alice @dev-a look".to_owned()).await;
+        assert!(notify_mentioned(&a_js, &post, Some(&entry), &humans).await.is_empty(), "bob is no member yet");
+
+        entry.add_member(dev_a.clone());
+        entry.add_member(bob.clone());
+        for _ in 0..2 {
+            assert_eq!(notify_mentioned(&a_js, &post, Some(&entry), &humans).await, std::slice::from_ref(&bob));
+        }
+        let ant_post = ChannelPost::new(ops(), dev_a.clone(), "@bob done");
+        let notice = ant_post.mention_notice(&bob);
+        for _ in 0..2 {
+            bus::store(&d_js, notice.subject(), &notice, &ant_post.mention_msg_id(&bob)).await.unwrap();
+        }
+
+        let mut inbox = crate::inbox::Inbox::open(&b_js, &bob).await.unwrap();
+        let unread = inbox.unread(&crate::inbox::Select::default()).await.unwrap();
+        inbox.release().await.unwrap();
+        let got: Vec<_> = unread.iter().map(|e| (e.from.clone(), e.mention.as_ref().map(|m| m.post))).collect();
+        assert_eq!(got, [(alice.clone(), Some(post.id)), (dev_a.clone(), Some(ant_post.id))]);
+        let shown = crate::inbox::render(&unread[1]);
+        assert!(shown.contains(&format!("dev-a mentioned bob in #ops on thread {}", ant_post.thread_id)), "{shown}");
+        assert!(shown.contains(&format!("`ants post ops --thread {} ...`", ant_post.thread_id)), "{shown}");
     }
 }

@@ -90,8 +90,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Post to a channel as the CLI's human. An @ant in the text wakes only that member; a post that @mentions
-    /// nobody goes to the channel's messenger, which wakes the members the post concerns. A new thread belongs to the
+    /// Post to a channel as the CLI's human. An @mention in the text wakes only that member, if an ant, or puts a
+    /// notice in the member's inbox, if a human; a post that @mentions nobody goes to the channel's messenger, which
+    /// wakes the members the post concerns. A new thread belongs to the
     /// human who posts it, and the turn budget it runs out of comes back to that human. With --wait, the first post
     /// on the thread by someone other than the poster ends the wait; --follow prints every later post on it.
     Post {
@@ -247,8 +248,8 @@ enum ChannelCommand {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Member ant (repeatable, or comma-separated).
-        #[arg(long = "member", value_name = "ANT", value_delimiter = ',', value_parser = channel::parse_ant)]
+        /// Member, an ant or a human (repeatable, or comma-separated).
+        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant)]
         members: Vec<UserId>,
         /// Ant that triages the posts of humans that @mention nobody (default: `messenger`).
         #[arg(long, value_parser = channel::parse_ant)]
@@ -262,8 +263,8 @@ enum ChannelCommand {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Member ant (repeatable, or comma-separated): together, the new members.
-        #[arg(long = "member", value_name = "ANT", value_delimiter = ',', value_parser = channel::parse_ant)]
+        /// Member, an ant or a human (repeatable, or comma-separated): together, the new members.
+        #[arg(long = "member", value_name = "USER", value_delimiter = ',', value_parser = channel::parse_ant)]
         members: Option<Vec<UserId>>,
         /// Ant that triages the posts of humans that @mention nobody.
         #[arg(long, value_parser = channel::parse_ant, conflicts_with = "default_messenger")]
@@ -278,23 +279,23 @@ enum ChannelCommand {
         #[arg(long)]
         no_owner: bool,
     },
-    /// Add members to a channel.
+    /// Add members, ants or humans, to a channel. An @mention of a human member puts a notice in the human's inbox.
     Add {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Ants: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_parser = channel::parse_ant)]
-        ants: Vec<UserId>,
+        /// Ants or humans: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant)]
+        users: Vec<UserId>,
     },
     /// Remove members from a channel.
     Remove {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
         channel: ChannelId,
-        /// Ants: `dev-a` or `@dev-a`.
-        #[arg(required = true, num_args = 1.., value_parser = channel::parse_ant)]
-        ants: Vec<UserId>,
+        /// Ants or humans: `dev-a` or `@dev-a`.
+        #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant)]
+        users: Vec<UserId>,
     },
     /// List the channels with the members, the messenger and the owner of each.
     List,
@@ -1018,8 +1019,8 @@ async fn post(
     if entry.is_none() {
         tracing::warn!("no channel #{0} (`ants channel create {0}` makes one): the post wakes nobody", post.channel);
     }
-    for ant in channel::idle_mentions(&post, entry.as_ref(), &humans) {
-        tracing::warn!("@{ant} is no member of #{}: the post does not wake {ant}", post.channel);
+    for user in channel::idle_mentions(&post, entry.as_ref()) {
+        tracing::warn!("@{user} is no member of #{}: the post neither wakes nor notifies {user}", post.channel);
     }
     // Subscribe first so a fast reply is not missed.
     let room = if replies.wait || replies.follow {
@@ -1029,6 +1030,14 @@ async fn post(
     };
     if bus::store(&js, post.subject(), &post, &post.id.to_string()).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
+    }
+    // An ant's daemon notifies the humans its posts mention.
+    if nats.me.role.is_human() {
+        let notified = channel::notify_mentioned(&js, &post, entry.as_ref(), &humans).await;
+        if !notified.is_empty() {
+            let names: Vec<&str> = notified.iter().map(UserId::as_str).collect();
+            println!("notified {}", names.join(", "));
+        }
     }
     println!("thread {}", post.thread_id);
     let Some(room) = room else { return Ok(()) };
@@ -1048,7 +1057,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
     let humans = humans::load(&js, &nats.me).await;
     match command {
         ChannelCommand::Create { channel, members, messenger, owner } => {
-            channel::check_not_human(members.iter().chain(&messenger), &humans)?;
+            channel::check_messenger_not_human(messenger.as_ref(), &humans)?;
             channel::check_owner_not_human(owner.as_ref(), &humans)?;
             let mut entry = ants_proto::ChannelEntry::new(channel);
             for member in members {
@@ -1057,14 +1066,14 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             entry.messenger = messenger;
             entry.owner = owner;
             channel::create(&kv, &entry).await?;
-            warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner)).await;
+            warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner), &humans).await;
             println!("created {}", channel::describe(&entry));
         }
         ChannelCommand::Set { channel, members, messenger, default_messenger, owner, no_owner } => {
             if members.is_none() && messenger.is_none() && !default_messenger && owner.is_none() && !no_owner {
                 bail!("nothing to change: give --member, --messenger, --default-messenger, --owner or --no-owner");
             }
-            channel::check_not_human(members.iter().flatten().chain(&messenger), &humans)?;
+            channel::check_messenger_not_human(messenger.as_ref(), &humans)?;
             channel::check_owner_not_human(owner.as_ref(), &humans)?;
             let (entry, ()) = channel::update(&kv, &channel, |entry| {
                 if let Some(members) = &members {
@@ -1081,28 +1090,27 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
                 }
             })
             .await?;
-            warn_unserved(&js, members.iter().flatten().chain(&messenger).chain(&owner)).await;
+            warn_unserved(&js, members.iter().flatten().chain(&messenger).chain(&owner), &humans).await;
             println!("{}", channel::describe(&entry));
         }
-        ChannelCommand::Add { channel, ants } => {
-            channel::check_not_human(&ants, &humans)?;
+        ChannelCommand::Add { channel, users } => {
             let (entry, added) = channel::update(&kv, &channel, |entry| {
-                ants.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
+                users.iter().filter(|p| entry.add_member((*p).clone())).cloned().collect::<Vec<_>>()
             })
             .await?;
-            for ant in ants.iter().filter(|p| !added.contains(p)) {
-                tracing::warn!("{ant} is already a member of #{channel}");
+            for user in users.iter().filter(|p| !added.contains(p)) {
+                tracing::warn!("{user} is already a member of #{channel}");
             }
-            warn_unserved(&js, &added).await;
+            warn_unserved(&js, &added, &humans).await;
             println!("{}", channel::describe(&entry));
         }
-        ChannelCommand::Remove { channel, ants } => {
+        ChannelCommand::Remove { channel, users } => {
             let (entry, removed) = channel::update(&kv, &channel, |entry| {
-                ants.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
+                users.iter().filter(|p| entry.remove_member(p)).cloned().collect::<Vec<_>>()
             })
             .await?;
-            for ant in ants.iter().filter(|p| !removed.contains(p)) {
-                tracing::warn!("{ant} is no member of #{channel}");
+            for user in users.iter().filter(|p| !removed.contains(p)) {
+                tracing::warn!("{user} is no member of #{channel}");
             }
             println!("{}", channel::describe(&entry));
         }
@@ -1143,14 +1151,19 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
 }
 
 /// Warn about members, messengers and owners no daemon serves now, rather than refuse them: one may start later.
-async fn warn_unserved<'a>(js: &async_nats::jetstream::Context, ants: impl IntoIterator<Item = &'a UserId>) {
-    let ants: Vec<&UserId> = ants.into_iter().collect();
-    if ants.is_empty() {
+/// `humans` need none.
+async fn warn_unserved<'a>(
+    js: &async_nats::jetstream::Context,
+    users: impl IntoIterator<Item = &'a UserId>,
+    humans: &ants_proto::Humans,
+) {
+    let users: Vec<&UserId> = users.into_iter().filter(|u| !humans.contains(u)).collect();
+    if users.is_empty() {
         return;
     }
     match roster::list(js).await {
         Ok(roster) => {
-            for ant in channel::unserved(ants, &roster) {
+            for ant in channel::unserved(users, &roster, humans) {
                 tracing::warn!("{ant} is not in the roster: no daemon serves {ant} now");
             }
         }
