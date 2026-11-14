@@ -376,15 +376,22 @@ fn run_schedule(schedule: Schedule) -> JoinHandle<()> {
 
 /// The schedules running, each in its task, which stops with them.
 #[derive(Default)]
-struct Schedules(HashMap<UserId, (Schedule, JoinHandle<()>)>);
+struct Schedules(HashMap<UserId, ScheduleRun>);
+
+struct ScheduleRun {
+    schedule: Schedule,
+    /// The contents of its credentials file when it started ([`creds_snapshot`]).
+    creds: Option<Vec<u8>>,
+    task: JoinHandle<()>,
+}
 
 impl Schedules {
     /// Run the schedules `wanted`, started with `spawn`. One no longer listed stops at once, between firings or in
-    /// the middle of one, which another daemon or a restart sends as it was not marked sent; one whose entry changed,
-    /// or which stopped, starts again; the others carry on untouched.
+    /// the middle of one, which another daemon or a restart sends as it was not marked sent; one whose entry or
+    /// credentials file changed, or which stopped, starts again; the others carry on untouched.
     fn reconcile(&mut self, wanted: Vec<Schedule>, spawn: impl Fn(Schedule) -> JoinHandle<()>) {
         let listed: HashSet<UserId> = wanted.iter().map(|s| s.name.clone()).collect();
-        self.0.retain(|name, (_, task)| {
+        self.0.retain(|name, ScheduleRun { task, .. }| {
             let keep = listed.contains(name);
             if !keep {
                 tracing::info!(schedule = %name, "stopping the schedule no longer listed");
@@ -394,14 +401,18 @@ impl Schedules {
         });
         for schedule in wanted {
             let name = schedule.name.clone();
+            let creds = creds_snapshot(schedule.creds.as_deref());
             match self.0.get(&name) {
-                Some((running, task)) if *running == schedule && !task.is_finished() => continue,
-                Some(_) => tracing::info!(schedule = %name, "restarting the schedule: its entry changed or it stopped"),
+                Some(run) if run.schedule == schedule && run.creds == creds && !run.task.is_finished() => continue,
+                Some(_) => tracing::info!(
+                    schedule = %name,
+                    "restarting the schedule: its entry or credentials changed, or it stopped"
+                ),
                 None => tracing::info!(schedule = %name, "starting the schedule"),
             }
             let task = spawn(schedule.clone());
-            if let Some((_, old)) = self.0.insert(name, (schedule, task)) {
-                old.abort();
+            if let Some(old) = self.0.insert(name, ScheduleRun { schedule, creds, task }) {
+                old.task.abort();
             }
         }
     }
@@ -409,16 +420,24 @@ impl Schedules {
 
 impl Drop for Schedules {
     fn drop(&mut self) {
-        for (_, task) in self.0.values() {
-            task.abort();
+        for run in self.0.values() {
+            run.task.abort();
         }
     }
+}
+
+/// The contents of the credentials file at `path`, to tell when it changed (`ants renew`): a NATS connection reads it
+/// only when it connects.
+fn creds_snapshot(path: Option<&Path>) -> Option<Vec<u8>> {
+    std::fs::read(path?).ok()
 }
 
 /// An ant being served.
 #[derive(Debug)]
 struct Running {
     config: Config,
+    /// The contents of its credentials file when it started ([`creds_snapshot`]).
+    creds: Option<Vec<u8>>,
     stop: Stop,
     /// Asked to stop, as it is no longer listed or its entry changed.
     stopping: bool,
@@ -430,7 +449,8 @@ impl Running {
     /// Note `config` as served, returning it with the stop to serve it until.
     fn insert(running: &mut HashMap<UserId, Running>, config: Config) -> (Config, Stop) {
         let stop = Stop::default();
-        let entry = Running { config: config.clone(), stop: stop.clone(), stopping: false, next: None };
+        let creds = creds_snapshot(config.creds.as_deref());
+        let entry = Running { config: config.clone(), creds, stop: stop.clone(), stopping: false, next: None };
         running.insert(config.ant.clone(), entry);
         (config, stop)
     }
@@ -444,8 +464,8 @@ impl Running {
 }
 
 /// Bring the ants `running` in line with those `wanted`, returning the ants to start: those newly listed. An ant no
-/// longer listed is asked to stop, finishing its prompts in flight; one whose config changed is asked to stop and is
-/// served again with its new config once it stopped; the others carry on untouched.
+/// longer listed is asked to stop, finishing its prompts in flight; one whose config or credentials file changed is
+/// asked to stop and is served again with its new config once it stopped; the others carry on untouched.
 fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec<(Config, Stop)> {
     let listed: HashSet<UserId> = wanted.iter().map(|c| c.ant.clone()).collect();
     for (ant, r) in running.iter_mut().filter(|(ant, _)| !listed.contains(*ant)) {
@@ -467,6 +487,10 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             r.next = Some(config);
         } else if r.config != config {
             tracing::info!(%ant, "restarting the ant: its entry changed");
+            r.next = Some(config);
+            r.ask_to_stop();
+        } else if r.creds != creds_snapshot(config.creds.as_deref()) {
+            tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
         }
@@ -625,6 +649,25 @@ mod tests {
         assert_eq!(state(&running, "dev-c"), (false, None));
     }
 
+    #[test]
+    fn a_reload_restarts_an_ant_whose_credentials_file_changed() {
+        let dir = ants_test_support::scratch_dir("reload-creds");
+        let creds = dir.join("dev-a.creds");
+        std::fs::write(&creds, "issued").unwrap();
+        let mut p = ant("dev-a");
+        p.creds = Some(creds.clone());
+        let config = configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0);
+        let mut running = HashMap::new();
+        assert_eq!(reconcile(&mut running, vec![config.clone()]).len(), 1);
+        assert!(reconcile(&mut running, vec![config.clone()]).is_empty());
+        assert!(!running[&config.ant].stopping, "same entry, same credentials");
+        std::fs::write(&creds, "renewed").unwrap();
+        assert!(reconcile(&mut running, vec![config.clone()]).is_empty());
+        let r = &running[&config.ant];
+        assert!(r.stopping && r.next.as_ref() == Some(&config), "served again with the renewed credentials");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_reload_starts_stops_or_restarts_schedules() {
         use std::cell::RefCell;
@@ -641,7 +684,7 @@ mod tests {
         schedules.reconcile(vec![entry("nightly", "a"), entry("pulse", "a")], spawn);
         schedules.reconcile(vec![entry("nightly", "a"), entry("pulse", "a")], spawn);
         assert_eq!(started.take(), ["nightly", "pulse"]);
-        let pulse = schedules.0[&"pulse".parse::<UserId>().unwrap()].1.abort_handle();
+        let pulse = schedules.0[&"pulse".parse::<UserId>().unwrap()].task.abort_handle();
 
         schedules.reconcile(vec![entry("nightly", "b"), entry("weekly", "a")], spawn);
         assert_eq!(started.take(), ["nightly", "weekly"]);

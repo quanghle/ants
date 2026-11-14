@@ -123,6 +123,10 @@ pub enum Error {
     ForeignChannel { kind: &'static str, channel: ChannelId, at: String },
     #[error("invalid machine name {0:?}: use 1-64 of letters, digits, '-' and '_', starting with a letter or digit")]
     InvalidMachine(String),
+    /// A renewal request naming other credentials than the subject it arrived on, or no credentials renewable over
+    /// NATS ([`subject::renewable_name`]).
+    #[error("renewal request of {name:?} found at {at}")]
+    ForeignRenewal { name: String, at: String },
 }
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
@@ -351,7 +355,7 @@ pub mod duration;
 
 /// Subject names. Each takes typed ids, so a subject never carries a wildcard or a stray dot.
 pub mod subject {
-    use super::{ChannelId, Role, ThreadId, UserId};
+    use super::{ChannelId, Machine, Role, ThreadId, UserId};
 
     /// Durable inbox of `to`, for messages from `from`. The sender is part of the subject because credentials can pin
     /// it there ([`inbox_from`]), while anything in the payload is whatever the publisher wrote.
@@ -520,6 +524,30 @@ pub mod subject {
     pub const ALL_ENROLL_REQUESTS: &str = "ants.enroll.*";
     /// Every answer to an enrollment request.
     pub const ALL_ENROLL_REPLIES: &str = "ants.enroll.*.reply";
+
+    /// Where `ants renew` asks for the credentials named `name` renewed for a new key
+    /// ([`RenewRequest`](super::RenewRequest); core NATS, not stored): an ant, human, webhook or the channel manager
+    /// for its own, a human also for the uplink of its machine's leaf node (`leaf-<machine>`), which connects as no
+    /// client. `name` is a [`renewable_name`].
+    pub fn renew(name: &str) -> String {
+        format!("ants.renew.{name}")
+    }
+
+    /// Where the answer to a renewal request of `name` goes ([`RenewReply`](super::RenewReply); core NATS).
+    pub fn renew_reply(name: &str) -> String {
+        format!("ants.renew.{name}.reply")
+    }
+
+    /// Whether `name` is one credentials renewed over NATS may carry: a user id, or `leaf-<machine>` of a leaf node's
+    /// uplink. Either is one subject token.
+    pub fn renewable_name(name: &str) -> bool {
+        name.parse::<UserId>().is_ok() || name.strip_prefix("leaf-").is_some_and(|m| m.parse::<Machine>().is_ok())
+    }
+
+    /// Every renewal request.
+    pub const ALL_RENEW_REQUESTS: &str = "ants.renew.*";
+    /// Every answer to a renewal request.
+    pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
 
     /// Live progress of an ant on a thread ([`StatusEvent`](super::StatusEvent)s; core NATS, not stored).
     pub fn status(ant: &UserId, thread: &ThreadId) -> String {
@@ -908,6 +936,10 @@ impl Permissions {
         if role.is_human() {
             let notify = notify_consumer(user);
             publish.extend([
+                // Its own renewal, and that of its machine's leaf node uplink, which connects as no client; the
+                // request proves the credentials it renews by signature, whoever carries it. It hears the answers
+                // with everything under `ants.>`.
+                subject::ALL_RENEW_REQUESTS.to_owned(),
                 // Stream info lists every subject stored (who messages whom), so only a human may ask for it.
                 format!("$JS.API.STREAM.INFO.{STREAM}"),
                 // The consumer of its notifications: one filter puts it in the subject, several leave it out.
@@ -995,6 +1027,7 @@ impl Permissions {
                 // Put of the links it passed on, and the same in the leaf's outbox.
                 format!("$KV.{LINKS_BUCKET}.{user}.>"),
                 format!("ants.out.links.{user}.>"),
+                subject::renew(user.as_str()),
             ]);
             // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
             // filter pinned; no ack, so the spares of the inbox consumer only read it.
@@ -1017,6 +1050,7 @@ impl Permissions {
                 subject::cancel_of(user),
                 // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
                 subject::inbox_of(user),
+                subject::renew_reply(user.as_str()),
             ]);
         }
         Self { publish, subscribe }
@@ -1064,7 +1098,9 @@ impl Permissions {
     /// answers to it ([`subject::ALL_ENROLL_REPLIES`]), for an ant new to the machine: never other machines' requests,
     /// nor answers from the machine, which only the approver gives. A request proves its enrollment credentials by
     /// signature ([`EnrollRequest::signed`]), so the uplink cannot ask for an ant itself; an answer holds no secret, the
-    /// seed of the key it completes staying on the asking machine.
+    /// seed of the key it completes staying on the asking machine. Likewise renewal requests from the machine
+    /// ([`subject::ALL_RENEW_REQUESTS`]), its own among them, and their answers ([`subject::ALL_RENEW_REPLIES`]): each
+    /// request proves the credentials it renews by signature ([`RenewRequest::signed`]).
     pub fn for_leaf<'a>(machine: &Machine, users: impl IntoIterator<Item = (&'a UserId, Role)>) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         let mut setup = vec![UserId::human()];
@@ -1101,15 +1137,24 @@ impl Permissions {
             format!("{api}.CONSUMER.DELETE.{OUTBOX_STREAM}.>"),
             format!("$JS.FC.{OUTBOX_STREAM}.>"),
         ]);
-        leaf.publish.push(subject::ALL_ENROLL_REQUESTS.to_owned());
-        leaf.subscribe.push(subject::ALL_ENROLL_REPLIES.to_owned());
+        for (all, new) in [
+            (&mut leaf.publish, [subject::ALL_ENROLL_REQUESTS, subject::ALL_RENEW_REQUESTS]),
+            (&mut leaf.subscribe, [subject::ALL_ENROLL_REPLIES, subject::ALL_RENEW_REPLIES]),
+        ] {
+            for s in new {
+                if !all.iter().any(|known| known == s) {
+                    all.push(s.to_owned());
+                }
+            }
+        }
         leaf
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
     /// request, reading the roster and the humans, reading and writing the channels bucket, and posting in any channel
     /// as [`UserId::channel_manager`]. Its JWT also lets it answer each request it hears once, on the request's reply
-    /// subject, so it needs no right to publish on any ant's reply inboxes.
+    /// subject, so it needs no right to publish on any ant's reply inboxes. It asks for its own renewal
+    /// ([`subject::renew`]) and hears the answer.
     pub fn for_channel_manager() -> Self {
         let user = UserId::channel_manager();
         let (roster, channels, humans) =
@@ -1128,7 +1173,13 @@ impl Permissions {
                 format!("$JS.FC.{stream}.>"),
             ]);
         }
-        Self { publish, subscribe: vec![subject::ALL_CHANADM.to_owned(), format!("{}.>", inbox_prefix(&user))] }
+        publish.push(subject::renew(user.as_str()));
+        let subscribe = vec![
+            subject::ALL_CHANADM.to_owned(),
+            format!("{}.>", inbox_prefix(&user)),
+            subject::renew_reply(user.as_str()),
+        ];
+        Self { publish, subscribe }
     }
 
     /// What the enrollment credentials of `ant` allow: asking for its credentials on [`subject::enroll`] and
@@ -1142,7 +1193,8 @@ impl Permissions {
     /// [`Destination::subject`], remembering the events it delivered, under its own keys of [`WEBHOOKS_BUCKET`]
     /// only, and recording the owner its config names for each thread it starts in an ant's inbox ([`OWNERS_BUCKET`],
     /// under that ant's keys only). It reads the entry of each channel among `destinations`, for the members a
-    /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. Nothing else: it neither writes
+    /// broadcast mentions, and hears its own reply inboxes, for the stream's acks. It asks for its own renewal
+    /// ([`subject::renew`]) and hears the answer. Nothing else: it neither writes
     /// `ants_channels` nor `ants_humans`, so it can neither change a channel nor become a human, nor reads any message.
     /// It gets no stream info, which lists every subject stored: it reads and records its events by key alone.
     pub fn for_webhook(webhook: &UserId, destinations: &[Destination]) -> Self {
@@ -1173,25 +1225,34 @@ impl Permissions {
         });
         // Recording the owner of the threads it starts in an ant's inbox, under that ant's keys, where no record is.
         publish.extend(ants.map(|ant| format!("$KV.{OWNERS_BUCKET}.*.{ant}")));
+        publish.push(subject::renew(webhook.as_str()));
         publish.dedup();
-        Self { publish, subscribe: vec![format!("{}.>", inbox_prefix(webhook))] }
+        Self {
+            publish,
+            subscribe: vec![format!("{}.>", inbox_prefix(webhook)), subject::renew_reply(webhook.as_str())],
+        }
     }
 
-    /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment request and
-    /// answering it, and admitting an ant new to a leaf node into the hub's stream and links bucket from the leaf's
+    /// What `ants enroll` allows itself on the machine holding the account key: hearing every enrollment and renewal
+    /// request and answering it, and admitting an ant new to a leaf node into the hub's stream and links bucket from the leaf's
     /// outbox, as `ants leaf outbox` does, with the replies of its JetStream requests under [`ENROLL_INBOX`].
     pub fn for_enroll_approver() -> Self {
         let links = kv_stream(LINKS_BUCKET);
         Self {
             publish: vec![
                 subject::ALL_ENROLL_REPLIES.to_owned(),
+                subject::ALL_RENEW_REPLIES.to_owned(),
                 format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.INFO.{STREAM}"),
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.INFO.{links}"),
                 format!("$JS.API.STREAM.UPDATE.{links}"),
             ],
-            subscribe: vec![subject::ALL_ENROLL_REQUESTS.to_owned(), format!("{ENROLL_INBOX}.>")],
+            subscribe: vec![
+                subject::ALL_ENROLL_REQUESTS.to_owned(),
+                subject::ALL_RENEW_REQUESTS.to_owned(),
+                format!("{ENROLL_INBOX}.>"),
+            ],
         }
     }
 }
@@ -1456,7 +1517,11 @@ impl FromStr for DeviceId {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
+
+/// The first permissions version whose credentials ask for their own renewal over NATS ([`subject::renew`],
+/// [`RenewRequest`]); older ones are renewed on the machine holding the team keys.
+pub const RENEW_SINCE: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -2890,6 +2955,77 @@ impl EnrollReply {
     }
 }
 
+/// A holder of credentials asking for them renewed on [`subject::renew`] (`ants renew`): the public key of the user
+/// NKey it generated, whose seed stays with it. The machine holding the account key signs a user JWT for that key with
+/// the same name and kind as the credentials renewed, with the permissions their kind has now, and answers with a
+/// [`RenewReply`].
+///
+/// The request carries the user JWT of the credentials renewed (`current`) and their key's `signature` of
+/// [`RenewRequest::signed`], so the approver renews only credentials whose holder asks, whatever connection carried the
+/// request: a human's carries the uplink credentials of its machine's leaf node, which connect as no client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewRequest {
+    /// The name the credentials carry ([`subject::renewable_name`]).
+    pub name: String,
+    /// The new user's public NKey, `U...`.
+    pub public_key: String,
+    /// Host name of the asking machine, as it reports it.
+    pub host: String,
+    pub sent_at: DateTime<Utc>,
+    /// The user JWT of the credentials renewed.
+    pub current: String,
+    /// Signature of [`RenewRequest::signed`] by the key of the credentials renewed, base64url without padding.
+    pub signature: String,
+}
+
+impl RenewRequest {
+    /// A request sent now, to be completed with the current credentials' JWT and signature.
+    pub fn new(name: impl Into<String>, public_key: impl Into<String>, host: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            public_key: public_key.into(),
+            host: host.into(),
+            sent_at: Utc::now(),
+            current: String::new(),
+            signature: String::new(),
+        }
+    }
+
+    /// What the key of the credentials renewed signs: every field but the signature, one per line.
+    pub fn signed(&self) -> Vec<u8> {
+        let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        ["ants-renew", &self.name, &self.public_key, &sent_at, &self.current, &self.host].join("\n").into_bytes()
+    }
+
+    pub fn subject(&self) -> String {
+        subject::renew(&self.name)
+    }
+
+    /// Check that the request names credentials renewable over NATS and arrived on its own
+    /// [`RenewRequest::subject`].
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject::renewable_name(&self.name) && subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignRenewal { name: self.name.clone(), at: subject.to_owned() })
+    }
+}
+
+/// The answer to a [`RenewRequest`], on [`subject::renew_reply`]: the user JWT of `public_key`, which completes the
+/// renewed credentials with the seed kept by the asking holder. A request the approver refuses gets no answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewReply {
+    pub name: String,
+    pub public_key: String,
+    pub jwt: String,
+}
+
+impl RenewReply {
+    pub fn subject(&self) -> String {
+        subject::renew_reply(&self.name)
+    }
+}
+
 /// Where an ant stands on a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -3142,6 +3278,68 @@ mod tests {
     }
 
     #[test]
+    fn a_renewal_request_signs_all_but_its_signature_and_names_renewable_credentials() {
+        let mut request = RenewRequest::new("dev-a", "UKEY", "macbook");
+        request.current = "c.j.s".into();
+        let bare = request.signed();
+        let back: RenewRequest = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(back.signed(), bare, "the same bytes after the wire");
+        request.signature = "sig".into();
+        assert_eq!(request.signed(), bare);
+        for change in [
+            |r: &mut RenewRequest| r.public_key = "UOTHER".into(),
+            |r: &mut RenewRequest| r.name = "dev-b".into(),
+            |r: &mut RenewRequest| r.host = "other".into(),
+            |r: &mut RenewRequest| r.current = "x.y.z".into(),
+            |r: &mut RenewRequest| r.sent_at += chrono::TimeDelta::nanoseconds(1),
+        ] {
+            let mut changed = request.clone();
+            change(&mut changed);
+            assert_ne!(changed.signed(), bare);
+        }
+        assert_eq!(request.check_subject("ants.renew.dev-a"), Ok(()));
+        assert!(request.check_subject("ants.renew.dev-b").is_err());
+        let leaf = RenewRequest::new("leaf-Mac_1", "UKEY", "macbook");
+        assert_eq!(leaf.check_subject("ants.renew.leaf-Mac_1"), Ok(()));
+        for name in ["a.b", "*", ">", "", "leaf-a.b", "Upper"] {
+            let odd = RenewRequest::new(name, "UKEY", "macbook");
+            assert!(odd.check_subject(&odd.subject()).is_err(), "{name:?}");
+        }
+        let reply = RenewReply { name: "leaf-m1".into(), public_key: "UKEY".into(), jwt: "j".into() };
+        assert_eq!(reply.subject(), "ants.renew.leaf-m1.reply");
+    }
+
+    #[test]
+    fn credentials_ask_only_for_their_own_renewal_and_leaf_nodes_carry_any() {
+        let (dev_a, alice) = (p("dev-a"), p("alice"));
+        let ant = Permissions::for_user(&dev_a, Role::Ant);
+        let renewals = |list: &[String]| -> Vec<String> {
+            list.iter().filter(|s| s.starts_with("ants.renew.") || *s == subject::ALL).cloned().collect()
+        };
+        assert_eq!(renewals(&ant.publish), ["ants.renew.dev-a"]);
+        assert_eq!(renewals(&ant.subscribe), ["ants.renew.dev-a.reply"]);
+        // A human carries the renewal of its machine's leaf node uplink, and hears every answer anyway.
+        let human = Permissions::for_user(&alice, Role::Human);
+        assert_eq!(renewals(&human.publish), [subject::ALL_RENEW_REQUESTS]);
+        assert_eq!(renewals(&human.subscribe), [subject::ALL]);
+        let manager = Permissions::for_channel_manager();
+        assert_eq!(
+            (renewals(&manager.publish), renewals(&manager.subscribe)),
+            (vec!["ants.renew.channel-manager".to_owned()], vec!["ants.renew.channel-manager.reply".to_owned()])
+        );
+        let enrollment = Permissions::for_enrollment(&dev_a);
+        assert!(renewals(&enrollment.publish).is_empty() && renewals(&enrollment.subscribe).is_empty());
+        let m1: Machine = "m1".parse().unwrap();
+        let leaf = Permissions::for_leaf(&m1, [(&dev_a, Role::Ant), (&alice, Role::Human)]);
+        assert_eq!(leaf.publish.iter().filter(|s| *s == subject::ALL_RENEW_REQUESTS).count(), 1);
+        assert!(leaf.subscribe.iter().any(|s| s == subject::ALL_RENEW_REPLIES));
+        let approver = Permissions::for_enroll_approver();
+        assert!(approver.subscribe.iter().any(|s| s == subject::ALL_RENEW_REQUESTS));
+        assert!(approver.publish.iter().any(|s| s == subject::ALL_RENEW_REPLIES));
+        assert!(!approver.publish.iter().any(|s| s == subject::ALL_RENEW_REQUESTS));
+    }
+
+    #[test]
     fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
         let domain: JsDomain = "hub".parse().unwrap();
         let plain = Permissions::for_user(&p("dev-a"), Role::Ant);
@@ -3195,11 +3393,13 @@ mod tests {
                 "$JS.S.m1.>",
                 "$JSC.R.m1.*.ANTS_OUT.>",
                 "_INBOX.human.leaf.m1.>",
-                // Asking for a new ant's credentials.
+                // Asking for a new ant's credentials, and for any renewal on the machine.
                 "ants.enroll.*",
+                "ants.renew.*",
             ]
         );
         let mut extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
+        assert_eq!(extra.pop().map(String::as_str), Some("ants.renew.*.reply"), "hearing the renewals");
         assert_eq!(extra.pop().map(String::as_str), Some("ants.enroll.*.reply"), "hearing the answer");
         assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || s.starts_with("$JS.FC.ANTS_OUT.")), "{extra:?}");
         assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
@@ -3805,9 +4005,10 @@ mod tests {
                 "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.github.>",
                 "$KV.ants_webhooks.github.>",
                 "$KV.ants_owners.*.dev-a",
+                "ants.renew.github",
             ]
         );
-        assert_eq!(perms.subscribe, ["_INBOX.github.>"]);
+        assert_eq!(perms.subscribe, ["_INBOX.github.>", "ants.renew.github.reply"]);
         let to_channel = Permissions::for_webhook(&hook, &[Destination::Channel("ops".parse().unwrap())]);
         assert!(!to_channel.publish.iter().any(|s| s.contains("ants_owners")), "posts' owners come from the posts");
         let domain: JsDomain = "hub".parse().unwrap();
@@ -3980,7 +4181,10 @@ mod tests {
     #[test]
     fn the_channel_manager_hears_requests_and_writes_channels_only() {
         let manager = Permissions::for_channel_manager();
-        assert_eq!(manager.subscribe, ["ants.chanadm.*.*", "_INBOX.channel-manager.>"]);
+        assert_eq!(
+            manager.subscribe,
+            ["ants.chanadm.*.*", "_INBOX.channel-manager.>", "ants.renew.channel-manager.reply"]
+        );
         for s in [
             "ants.chan.*.channel-manager",
             "$KV.ants_channels.>",
@@ -3992,7 +4196,7 @@ mod tests {
         }
         let writes: Vec<_> =
             manager.publish.iter().filter(|s| s.starts_with("$KV.") || s.starts_with("ants.")).collect();
-        assert_eq!(writes, ["ants.chan.*.channel-manager", "$KV.ants_channels.>"]);
+        assert_eq!(writes, ["ants.chan.*.channel-manager", "$KV.ants_channels.>", "ants.renew.channel-manager"]);
         assert!(!manager.publish.iter().any(|s| s.starts_with("_INBOX") || s.contains("STREAM.CREATE")));
 
         let a = Permissions::for_user(&p("dev-a"), Role::Ant);

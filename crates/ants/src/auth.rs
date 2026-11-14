@@ -15,7 +15,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ants_proto::{DeviceId, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
+use ants_daemon::creds::{Finding, Kind as CredsKind};
+use ants_proto::{Destination, DeviceId, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::KeyPair;
@@ -378,7 +379,9 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
         bail!("{} are {}'s, not {webhook}'s", path.display(), claims.name);
     }
     let permissions = allowed(&body);
-    if permissions.subscribe != [format!("{}.>", ants_proto::inbox_prefix(webhook))] {
+    let (inbox, renewal) =
+        (format!("{}.>", ants_proto::inbox_prefix(webhook)), ants_proto::subject::renew_reply(webhook.as_str()));
+    if !permissions.subscribe.contains(&inbox) || permissions.subscribe.iter().any(|s| *s != inbox && *s != renewal) {
         bail!("{} are no webhook's: issue them with `ants auth user {webhook} --webhook`", path.display());
     }
     Ok(permissions)
@@ -435,6 +438,123 @@ pub fn sign_device(
     let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, None)?;
     revoke::record(dir, &with_device(Issued::new(public_key, user.as_str(), kind, None)?, device, label))?;
     Ok((jwt, device))
+}
+
+/// Credentials renewed by [`renew`].
+#[derive(Debug)]
+pub struct Renewed {
+    /// The user JWT for the new key.
+    pub jwt: String,
+    /// What the renewed credentials are, as the earlier ones: same name, kind, device and JetStream domain.
+    pub finding: Finding,
+    /// The public key of the earlier credentials.
+    pub previous: String,
+}
+
+/// Renew `current`, the user JWT of credentials the account key in `dir` issued, for `public_key`, a new user NKey
+/// generated where they are used: a JWT with the same name, kind, members, device and JetStream domain, permissions as
+/// this version of ants gives them (so an upgrade applies), and as long a lifetime as `current` had, if it had an
+/// expiry. Recorded in the registry as renewed from the earlier key ([`Issued::renewed_from`]).
+///
+/// Refused for credentials of another account, expired or revoked ones, enrollment and leaf system credentials, and
+/// for a new key revoked or already issued to other credentials. Proving that the holder has the seed of `current` is
+/// the caller's part.
+pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
+    check_user_key(public_key)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let (claims, body) = verified_body(current)?;
+    if claims.iss != account.public_key() {
+        bail!("issued by {}, not by the team's account {}", claims.iss, account.public_key());
+    }
+    if claims.sub == public_key {
+        bail!("the new key {public_key} is the key of the credentials to renew; generate a new one");
+    }
+    let now = now()?;
+    if claims.exp.is_some_and(|exp| exp <= now) {
+        bail!("the credentials of {} expired; issue new ones with `ants auth`", claims.name);
+    }
+    let revoked = revoke::revoked(dir)?;
+    if revoked.iter().any(|r| r.key == claims.sub) {
+        bail!("the credentials of {} ({}) are revoked", claims.name, claims.sub);
+    }
+    if revoked.iter().any(|r| r.key == public_key) {
+        bail!("the new key {public_key} is revoked");
+    }
+    let finding = Finding::from_claims(&body)?;
+    let issued = revoke::issued(dir)?;
+    let kind = registry_kind(&finding.kind)
+        .with_context(|| format!("{} cannot be renewed: issue new ones with `ants auth`", finding.holder()))?;
+    if issued.iter().any(|i| i.key == public_key && (i.name != claims.name || i.kind != kind)) {
+        bail!("the new key {public_key} was issued to other credentials; generate a new one");
+    }
+    let name = &claims.name;
+    let user = || name.parse::<UserId>().map_err(|e| anyhow!("credentials named {name:?}: {e}"));
+    let (permissions, extra) = match &finding.kind {
+        CredsKind::Ant => (Permissions::for_user(&user()?, Role::Ant), json!({})),
+        CredsKind::Human => {
+            let tags: Vec<String> = finding.device.iter().map(DeviceId::tag).collect();
+            (Permissions::for_user(&user()?, Role::Human), json!({ "tags": tags }))
+        }
+        CredsKind::Webhook { to, channels } => {
+            let to = to.iter().cloned().map(Destination::Ant);
+            let destinations: Vec<Destination> = to.chain(channels.iter().cloned().map(Destination::Channel)).collect();
+            (Permissions::for_webhook(&user()?, &destinations), json!({}))
+        }
+        CredsKind::ChannelManager => {
+            let ttl = u64::try_from(ants_proto::CHANADM_TTL.as_nanos())?;
+            (Permissions::for_channel_manager(), json!({ "resp": { "max": 1, "ttl": ttl } }))
+        }
+        CredsKind::Leaf { machine, ants, humans, webhooks, enroll_approver } => {
+            let members = members(ants, humans);
+            let mut permissions = Permissions::for_leaf(machine, members.iter().map(|(m, r)| (m, *r)));
+            let publish = allowed(&body).publish;
+            for webhook in webhooks {
+                let to = publish.iter().filter_map(|s| ants_proto::subject::parse_inbox(s));
+                let to = to.filter(|(_, from)| from == webhook).map(|(to, _)| Destination::Ant(to));
+                let channels = publish.iter().filter_map(|s| ants_proto::subject::parse_chan(s));
+                let channels = channels.filter(|(_, from)| from == webhook).map(|(c, _)| Destination::Channel(c));
+                let destinations: Vec<Destination> = to.chain(channels).collect();
+                merge(&mut permissions, Permissions::for_webhook(webhook, &destinations));
+            }
+            if *enroll_approver {
+                merge(&mut permissions, Permissions::for_enroll_approver());
+            }
+            (permissions, json!({ "allowed_connection_types": LEAF_CONNECTIONS }))
+        }
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => unreachable!("no registry kind"),
+    };
+    let mut permissions = permissions.with_js_domain(finding.js_domain.as_ref());
+    dedup(&mut permissions);
+    let lifetime = claims.exp.map(|exp| exp.saturating_sub(body["iat"].as_u64().unwrap_or(now)));
+    let exp = lifetime.map(|lifetime| now + lifetime.max(1));
+    let jwt = user_jwt(&account, public_key, name, permissions, extra, exp)?;
+    if let CredsKind::Leaf { machine, .. } = &finding.kind {
+        check_uplink_size(&jwt, machine)?;
+    }
+    let renewed = Finding::from_jwt(&jwt)?;
+    if !finding.same_credentials(&renewed) {
+        bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
+    }
+    let previous = issued.iter().rev().find(|i| i.key == claims.sub);
+    let mut record = Issued::new(public_key, name, kind, exp)?;
+    record.renewed_from = Some(claims.sub.clone());
+    if let Some(device) = finding.device {
+        record = record.for_device(device, previous.and_then(|p| p.label.clone()));
+    }
+    revoke::record(dir, &record)?;
+    Ok(Renewed { jwt, finding: renewed, previous: claims.sub })
+}
+
+/// The registry's kind of credentials of `kind`, if they may be renewed ([`renew`]).
+fn registry_kind(kind: &CredsKind) -> Option<Kind> {
+    match kind {
+        CredsKind::Ant => Some(Kind::Ant),
+        CredsKind::Human => Some(Kind::Human),
+        CredsKind::Webhook { .. } => Some(Kind::Webhook),
+        CredsKind::ChannelManager => Some(Kind::ChannelManager),
+        CredsKind::Leaf { .. } => Some(Kind::Leaf),
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => None,
+    }
 }
 
 /// Fail unless `public_key` is a user's public NKey, `U...`.
@@ -663,6 +783,21 @@ fn load(path: &Path) -> Result<KeyPair> {
     KeyPair::from_seed(seed.trim()).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
+/// Replace the `.creds` file at `path` with that of `jwt` and the seed of `user` at once: written beside it, readable by
+/// its owner only, then renamed over it, so what reads it finds either the earlier credentials or the new ones.
+pub fn replace_creds(path: &Path, jwt: &str, user: &KeyPair) -> Result<()> {
+    let name = path.file_name().with_context(|| format!("{} names no file", path.display()))?;
+    let mut temporary = name.to_owned();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(temporary);
+    let written = write_secret(&temporary, &creds(jwt, &seed(user)?))
+        .and_then(|()| fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display())));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
 /// Write a file only its owner can read, replacing any earlier one.
 fn write_secret(path: &Path, contents: &str) -> Result<()> {
     let mut options = fs::OpenOptions::new();
@@ -832,6 +967,108 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn renewed_credentials_keep_what_they_are_for_a_new_key() {
+        use ants_daemon::creds;
+        let dir = ants_test_support::scratch_dir("renew");
+        let team = dir.join("auth");
+        init(&team).unwrap();
+        let hub: JsDomain = "hub".parse().unwrap();
+        let out = |name: &str| team.join(format!("{name}.creds"));
+        let renewed = |name: &str| {
+            let (jwt, key) = read_creds(&out(name)).unwrap();
+            let new = KeyPair::new_user();
+            let renewed = renew(&team, &jwt, &new.public_key()).unwrap();
+            assert!(creds::Finding::from_jwt(&jwt).unwrap().same_credentials(&renewed.finding), "{name}");
+            assert_eq!(renewed.finding.version, Some(PERMISSIONS_VERSION), "{name}");
+            assert_eq!(
+                (verified(&renewed.jwt).unwrap().sub, renewed.previous.as_str()),
+                (new.public_key(), &*key.public_key())
+            );
+            let line = revoke::issued(&team).unwrap().pop().unwrap();
+            assert_eq!((line.key, line.renewed_from), (new.public_key(), Some(key.public_key())), "{name}");
+            renewed
+        };
+        issue(&team, &p("dev-a"), Role::Ant, Some(&hub), &out("dev-a")).unwrap();
+        assert_eq!(renewed("dev-a").finding.js_domain, Some(hub.clone()));
+        let device = issue_device(
+            &team,
+            &p("alice"),
+            Kind::Human,
+            Permissions::for_user(&p("alice"), Role::Human),
+            Some("laptop"),
+            &out("alice"),
+        )
+        .unwrap();
+        assert_eq!(renewed("alice").finding.device, device);
+        let devices = revoke::devices(&team, "alice").unwrap();
+        assert_eq!(devices.len(), 1, "one device, renewed: {devices:?}");
+        assert_eq!(devices[0].label.as_deref(), Some("laptop"));
+        let destinations = [Destination::Ant(p("dev-a")), Destination::Channel("ops".parse().unwrap())];
+        let hook = Permissions::for_webhook(&p("hook"), &destinations);
+        issue_with(&team, &p("hook"), Kind::Webhook, hook, &out("hook")).unwrap();
+        renewed("hook");
+        issue_channel_manager(&team, None, &out("channel-manager")).unwrap();
+        renewed("channel-manager");
+        let m1: Machine = "m1".parse().unwrap();
+        let members = members(&[p("dev-a"), p("dev-b")], &[p("alice")]);
+        issue_leaf(&team, &m1, &members, &[p("hook")], true, Some(&hub), &out("leaf-m1")).unwrap();
+        let leaf = renewed("leaf-m1");
+        check_leaf(&account_key(&team).unwrap(), &leaf.jwt, &m1).unwrap();
+
+        // A lifetime carries over: as long from now as the earlier credentials had from their issue.
+        let account = load(&team.join(ACCOUNT_SEED)).unwrap();
+        let key = KeyPair::new_user().public_key();
+        let ant = Permissions::for_user(&p("dev-c"), Role::Ant);
+        let expiring = user_jwt(&account, &key, "dev-c", ant.clone(), json!({}), Some(now().unwrap() + 3600)).unwrap();
+        let exp = verified(&renew(&team, &expiring, &KeyPair::new_user().public_key()).unwrap().jwt).unwrap().exp;
+        assert!(exp.is_some_and(|exp| exp.abs_diff(now().unwrap() + 3600) <= 2), "{exp:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed() {
+        let dir = ants_test_support::scratch_dir("renew-refused");
+        let (team, other) = (dir.join("auth"), dir.join("other"));
+        init(&team).unwrap();
+        init(&other).unwrap();
+        let out = |name: &str| dir.join(format!("{name}.creds"));
+        let jwt = |name: &str| read_creds(&out(name)).unwrap();
+        let refused = |jwt: &str, key: &str| renew(&team, jwt, key).unwrap_err().to_string();
+        let new = || KeyPair::new_user().public_key();
+
+        issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
+        let (dev_a, dev_a_key) = jwt("dev-a");
+        assert!(refused(&dev_a, &dev_a_key.public_key()).contains("generate a new one"));
+        assert!(refused(&dev_a, &account_key(&team).unwrap()).contains("not the public key of a user"));
+        issue(&team, &p("dev-b"), Role::Ant, None, &out("dev-b")).unwrap();
+        let (_, dev_b_key) = jwt("dev-b");
+        let err = refused(&dev_a, &dev_b_key.public_key());
+        assert!(err.contains("issued to other credentials"), "a key already dev-b's: {err}");
+        let stolen = new();
+        revoke::revoke(&team, None, std::slice::from_ref(&stolen)).unwrap();
+        assert!(refused(&dev_a, &stolen).contains("revoked"));
+
+        issue(&other, &p("dev-a"), Role::Ant, None, &out("foreign")).unwrap();
+        assert!(refused(&jwt("foreign").0, &new()).contains("not by the team's account"));
+
+        let account = load(&team.join(ACCOUNT_SEED)).unwrap();
+        let ant = Permissions::for_user(&p("dev-c"), Role::Ant);
+        let expired = user_jwt(&account, &new(), "dev-c", ant, json!({}), Some(now().unwrap() - 1)).unwrap();
+        assert!(refused(&expired, &new()).contains("expired"));
+
+        issue_enrollment(&team, &p("dev-c"), Duration::from_secs(60), &out("enroll-dev-c")).unwrap();
+        assert!(refused(&jwt("enroll-dev-c").0, &new()).contains("cannot be renewed"));
+        let m1: Machine = "m1".parse().unwrap();
+        issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], false, None, &out("leaf-m1")).unwrap();
+        let system = read_creds(&leaf_system_creds(&out("leaf-m1"))).unwrap().0;
+        assert!(refused(&system, &new()).contains("team's account"), "the system account's");
+
+        revoke::revoke(&team, Some("dev-a"), &[]).unwrap();
+        assert!(refused(&dev_a, &new()).contains("revoked"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn issued_credentials_carry_the_current_permissions_version_and_name_their_renewal() {
         use ants_daemon::creds::{self, VersionStatus};
         let dir = ants_test_support::scratch_dir("creds-check");
@@ -841,7 +1078,11 @@ pub(crate) mod tests {
         let renewal = |name: &str| {
             let finding = creds::check(&team.join(format!("{name}.creds"))).unwrap();
             assert_eq!(finding.version_status(), VersionStatus::Current, "{name}");
-            assert!(finding.warnings(now().unwrap()).is_empty(), "{name}: {:?}", finding.warnings(now().unwrap()));
+            assert!(
+                finding.warnings(None, now().unwrap()).is_empty(),
+                "{name}: {:?}",
+                finding.warnings(None, now().unwrap())
+            );
             finding.renew()
         };
         let out = |name: &str| team.join(format!("{name}.creds"));

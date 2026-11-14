@@ -223,8 +223,15 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
         };
         return Check::ok(check, format!("{holder}: {version}, {expires}"));
     }
-    let detail = format!("{holder}: {}; renew them on the machine holding the team keys", problems.join("; "));
     let status = if expiry == Expiry::Expired { Status::Fail } else { Status::Warn };
+    if finding.renewable(now) {
+        let detail = format!(
+            "{holder}: {}; renew them over NATS, approved on the machine holding the account key",
+            problems.join("; ")
+        );
+        return Check::new(check, status, detail, finding.renew_over_nats(path));
+    }
+    let detail = format!("{holder}: {}; renew them on the machine holding the team keys", problems.join("; "));
     Check::new(check, status, detail, finding.renew())
 }
 

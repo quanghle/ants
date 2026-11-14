@@ -205,7 +205,7 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
 }
 
 /// `outcome` of a failed command, as the start of a message.
-fn failure(outcome: Outcome) -> String {
+pub(crate) fn failure(outcome: Outcome) -> String {
     match outcome {
         Outcome::Failed(command, error) => format!("`{command}` failed ({error}): "),
         _ => String::new(),
