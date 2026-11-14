@@ -321,17 +321,14 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let (user_home, home) = (dir.join("user"), dir.join("dev-a"));
     std::fs::create_dir_all(&user_home).unwrap();
     let config = dir.join("config.toml");
-    std::fs::write(
-        &config,
-        format!(
-            "harness = \"stubby\"\n\
-             [harnesses.stubby]\ncommand = \"bin/stub-adapter\"\nargs = [\"--flag\", \"two words\"]\n\
-             env = {{ ANTS_TEST_ADAPTER = \"1\", OVERRIDDEN = \"definition\" }}\n\
-             [harnesses.strict]\ncommand = \"bin/stub-adapter\"\nmode = \"default\"\n\
-             [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\nenv = {{ OVERRIDDEN = \"ant\" }}\n"
-        ),
-    )
-    .unwrap();
+    let original = format!(
+        "harness = \"stubby\"\n\
+         [harnesses.stubby]\ncommand = \"bin/stub-adapter\"\nargs = [\"--flag\", \"two words\"]\n\
+         env = {{ ANTS_TEST_ADAPTER = \"1\", OVERRIDDEN = \"definition\" }}\n\
+         [harnesses.strict]\ncommand = \"bin/stub-adapter\"\nmode = \"default\"\n\
+         [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\nenv = {{ OVERRIDDEN = \"ant\" }}\n"
+    );
+    std::fs::write(&config, &original).unwrap();
     // Neither the daemon nor the CLI finds the adapter on PATH: the definition's path, relative to the file, does.
     let ants = |args: &[&str]| {
         let mut command = Command::new(ANTS);
@@ -388,6 +385,49 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     let text = std::fs::read_to_string(&config).unwrap();
     let dev_b = text.split("name = \"dev-b\"").nth(1).unwrap_or_default();
     assert!(dev_b.contains("harness = \"stubby\"\n"), "{text}");
+
+    // SIGHUP reloads the file: dev-c newly listed starts, dev-a changed restarts, the messenger carries on.
+    let wait_for = |text: &str, times: usize| {
+        let start = Instant::now();
+        while daemon_log().matches(text).count() < times {
+            assert!(start.elapsed() < WAIT, "daemon log lacks {text:?} {times} times:\n{}", daemon_log());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let hangup =
+        || assert!(Command::new("kill").arg("-HUP").arg(_daemon.0.id().to_string()).status().unwrap().success());
+    let listed = |text: &str| {
+        let changed = original.replace("OVERRIDDEN = \"ant\"", "OVERRIDDEN = \"changed\"");
+        std::fs::write(&config, format!("{changed}{text}")).unwrap();
+    };
+    wait_for("serving inbox", 2);
+    listed(&format!("[[ant]]\nname = \"dev-c\"\nworkdir = {dir:?}\n"));
+    hangup();
+    wait_for("config reloaded", 1);
+    ask(&["@dev-c", "hi"], "dev-c: stub: hi\nargs=--flag two words; OVERRIDDEN=definition");
+    wait_for("serving inbox", 4);
+    ask(&["@dev-a", "hi"], "dev-a: stub: hi\nargs=--flag two words; OVERRIDDEN=changed");
+    let restarts: Vec<_> =
+        daemon_log().lines().filter(|l| l.contains("restarting the ant")).map(str::to_owned).collect();
+    assert!(restarts.len() == 1 && restarts[0].contains("dev-a"), "{}", daemon_log());
+    assert_eq!(daemon_log().matches("serving inbox").count(), 4, "{}", daemon_log());
+
+    // A file that does not parse leaves the ants served as they are.
+    std::fs::write(&config, "[[ant]\n").unwrap();
+    hangup();
+    wait_for("reload failed", 1);
+    ask(&["@dev-c", "again"], "dev-c: stub: again");
+
+    // An ant no longer listed stops and leaves the roster.
+    listed("");
+    hangup();
+    wait_for("config reloaded", 2);
+    wait_for("stopping the ant no longer listed", 1);
+    let start = Instant::now();
+    while stdout(&run(ants(&["roster", "--json"]))).contains("\"dev-c\"") {
+        assert!(start.elapsed() < WAIT, "dev-c still in the roster\ndaemon log:\n{}", daemon_log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }

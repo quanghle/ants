@@ -210,6 +210,8 @@ Flag and file precedence on `ants daemon`:
 - `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger), with CLI ant flags overriding `FILE`.
 - Per-ant and top-level `nats`, `js_domain` and `creds` in the file take precedence over `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant).
 
+`SIGHUP` reloads the config file without a restart: ants newly listed start, ants no longer listed stop as on Ctrl-C (prompts in flight finish, waiting messages go back for redelivery), and ants whose resolved settings changed (including a `[harnesses.NAME]` they use or a top-level default) stop the same way and start again with the new settings; unchanged ants keep running untouched. An ant that failed earlier and is still listed starts again. A file that fails to load is logged and the ants served stay as they were.
+
 ## Harnesses
 
 A harness definition specifies an ACP stdio executable, arguments, environment additions, required ACP session mode and valid `context` options. Built-in definitions live in `crates/ants-daemon/src/harnesses.toml`:
@@ -469,7 +471,7 @@ ants enroll list --nats wss://hub.example/nats  # auth machine: inspect pending 
 ants enroll approve dev-c --nats wss://hub.example/nats --js-domain hub
 ```
 
-Restart `ants daemon` after adding an ant, and update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
+Reload `ants daemon` (`SIGHUP`, see [Services](#services)) after adding an ant, and update `ants auth leaf` + `ants leaf outbox` if running behind a leaf node.
 
 ## Leaf nodes
 
@@ -520,6 +522,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | Dev Tunnel (`devtunnel connect`) | `ants.devtunnel` (`devtunnel.log`) | `ants-devtunnel.service` | `--devtunnel TUNNEL` |
 
 - **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux).
+- **Reload daemon config (`ants add`):** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.

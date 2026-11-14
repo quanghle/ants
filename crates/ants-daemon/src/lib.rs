@@ -23,6 +23,6 @@ pub mod roster;
 pub mod status;
 pub mod webhooks;
 
-pub use daemon::{Config, run};
+pub use daemon::{Config, Stop, run, run_until};
 pub use harness::{Harness, Harnesses, Launch};
 pub use permission::{Allowlist, Approver, PermissionPolicy};

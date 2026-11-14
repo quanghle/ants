@@ -1,12 +1,14 @@
 //! `ants daemon`: which ants to serve, from the config file and the command line, and serving them together.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::{self, Ant, Summary};
-use ants_daemon::{Config, Harnesses};
+use ants_daemon::{Config, Harnesses, Stop};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use tracing::Instrument as _;
 
 #[derive(clap::Args, Debug)]
@@ -268,29 +270,141 @@ pub fn configs(
         .collect()
 }
 
-/// Serve every ant until Ctrl-C, each over its own NATS connection. An ant that fails is reported and the
-/// others keep running; it is an error only when none is left.
-pub async fn run(mut configs: Vec<Config>) -> Result<()> {
-    if configs.len() == 1 {
-        return ants_daemon::run(configs.remove(0)).await;
-    }
-    let total = configs.len();
-    let runs = configs.into_iter().map(|config| {
-        let span = tracing::info_span!("ant", name = %config.ant);
-        async move {
-            let result = ants_daemon::run(config).await;
-            if let Err(e) = &result {
-                tracing::error!(error = format!("{e:#}"), "ant stopped");
-            }
-            result.is_ok()
+/// Serve every ant until Ctrl-C or SIGTERM, each over its own NATS connection. An ant that fails is reported and the
+/// others keep running; it is an error only when none is left. On SIGHUP `reload` lists the ants again and the
+/// daemon serves those ([`reconcile`]); a list it cannot read is reported and the ants served stay as they are.
+pub async fn run(configs: Vec<Config>, reload: impl Fn() -> Result<Vec<Config>>) -> Result<()> {
+    let mut hangup = Hangup::new()?;
+    let mut running = HashMap::new();
+    let mut tasks: FuturesUnordered<_> = reconcile(&mut running, configs).into_iter().map(serve).collect();
+    let shutdown = async {
+        if let Err(e) = ants_daemon::daemon::stop_signal().await {
+            tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
+            std::future::pending::<()>().await;
         }
-        .instrument(span)
-    });
-    let served = futures::future::join_all(runs).await.into_iter().filter(|ok| *ok).count();
-    if served == 0 {
-        bail!("none of the {total} ants could be served");
+    };
+    tokio::pin!(shutdown);
+    let (mut stopping, mut served, mut errors) = (false, 0, Vec::new());
+    while !tasks.is_empty() {
+        tokio::select! {
+            Some((ant, result)) = tasks.next() => {
+                match result {
+                    Ok(()) => served += 1,
+                    Err(e) => {
+                        tracing::error!(%ant, error = format!("{e:#}"), "ant stopped");
+                        errors.push(e);
+                    }
+                }
+                let next = running.remove(&ant).and_then(|r| r.next);
+                if let Some(config) = next.filter(|_| !stopping) {
+                    tracing::info!(%ant, "serving the ant again with its listed entry");
+                    tasks.push(serve(Running::insert(&mut running, config)));
+                }
+            }
+            () = &mut shutdown, if !stopping => stopping = true,
+            () = hangup.recv(), if !stopping => match reload() {
+                Ok(configs) => {
+                    tracing::info!("config reloaded");
+                    tasks.extend(reconcile(&mut running, configs).into_iter().map(serve));
+                }
+                Err(e) => tracing::error!(error = format!("{e:#}"), "reload failed; serving the ants as before"),
+            },
+        }
     }
-    Ok(())
+    match (served, errors.len()) {
+        (0, 1) => Err(errors.remove(0)),
+        (0, n) if n > 0 => bail!("none of the {n} ants could be served"),
+        _ => Ok(()),
+    }
+}
+
+/// Serve one ant until it stops, reporting which.
+fn serve((config, stop): (Config, Stop)) -> impl Future<Output = (UserId, Result<()>)> {
+    let ant = config.ant.clone();
+    let span = tracing::info_span!("ant", name = %ant);
+    async move { (ant, ants_daemon::run_until(config, &stop).await) }.instrument(span)
+}
+
+/// An ant being served.
+#[derive(Debug)]
+struct Running {
+    config: Config,
+    stop: Stop,
+    /// Asked to stop, as it is no longer listed or its entry changed.
+    stopping: bool,
+    /// What to serve the ant with once it stopped.
+    next: Option<Config>,
+}
+
+impl Running {
+    /// Note `config` as served, returning it with the stop to serve it until.
+    fn insert(running: &mut HashMap<UserId, Running>, config: Config) -> (Config, Stop) {
+        let stop = Stop::default();
+        let entry = Running { config: config.clone(), stop: stop.clone(), stopping: false, next: None };
+        running.insert(config.ant.clone(), entry);
+        (config, stop)
+    }
+
+    fn ask_to_stop(&mut self) {
+        if !self.stopping {
+            self.stop.request();
+            self.stopping = true;
+        }
+    }
+}
+
+/// Bring the ants `running` in line with those `wanted`, returning the ants to start: those newly listed. An ant no
+/// longer listed is asked to stop, finishing its prompts in flight; one whose config changed is asked to stop and is
+/// served again with its new config once it stopped; the others carry on untouched.
+fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec<(Config, Stop)> {
+    let listed: HashSet<UserId> = wanted.iter().map(|c| c.ant.clone()).collect();
+    for (ant, r) in running.iter_mut().filter(|(ant, _)| !listed.contains(*ant)) {
+        if !r.stopping || r.next.is_some() {
+            tracing::info!(%ant, "stopping the ant no longer listed");
+        }
+        r.next = None;
+        r.ask_to_stop();
+    }
+    let mut start = Vec::new();
+    for config in wanted {
+        let ant = config.ant.clone();
+        let Some(r) = running.get_mut(&ant) else {
+            tracing::info!(%ant, "serving the ant newly listed");
+            start.push(Running::insert(running, config));
+            continue;
+        };
+        if r.stopping {
+            r.next = Some(config);
+        } else if r.config != config {
+            tracing::info!(%ant, "restarting the ant: its entry changed");
+            r.next = Some(config);
+            r.ask_to_stop();
+        }
+    }
+    start
+}
+
+/// SIGHUP, which `systemctl reload` sends.
+struct Hangup(#[cfg(unix)] tokio::signal::unix::Signal);
+
+impl Hangup {
+    fn new() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self(signal(SignalKind::hangup()).context("listening for SIGHUP")?))
+        }
+        #[cfg(not(unix))]
+        Ok(Self())
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        if self.0.recv().await.is_some() {
+            return;
+        }
+        std::future::pending().await
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +503,36 @@ mod tests {
         let two = configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
+    }
+
+    #[test]
+    fn a_reload_starts_new_ants_and_stops_or_restarts_the_others() {
+        let config = |name: &str, model: Option<&str>| {
+            let mut p = ant(name);
+            p.model = model.map(str::to_owned);
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+        };
+        let names = |start: Vec<(Config, Stop)>| start.into_iter().map(|(c, _)| c.ant.to_string()).collect::<Vec<_>>();
+        let state = |running: &HashMap<UserId, Running>, name: &str| {
+            let r = &running[&name.parse::<UserId>().unwrap()];
+            (r.stopping, r.next.as_ref().map(|c| c.model_settings.model.clone()))
+        };
+        let mut running = HashMap::new();
+        let (a, b) = (config("dev-a", None), config("dev-b", None));
+        assert_eq!(names(reconcile(&mut running, vec![a.clone(), b.clone()])), ["dev-a", "dev-b"]);
+        assert!(names(reconcile(&mut running, vec![a.clone(), b.clone()])).is_empty());
+        assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((false, None), (false, None)));
+
+        let changed = config("dev-a", Some("smart"));
+        assert_eq!(names(reconcile(&mut running, vec![changed.clone(), config("dev-c", None)])), ["dev-c"]);
+        assert_eq!(state(&running, "dev-a"), (true, Some(Some("smart".to_owned()))));
+        assert_eq!(state(&running, "dev-b"), (true, None));
+        assert_eq!(state(&running, "dev-c"), (false, None));
+
+        // Listed again before it stopped, an ant is served again once it did.
+        assert!(names(reconcile(&mut running, vec![a, b, config("dev-c", None)])).is_empty());
+        assert_eq!((state(&running, "dev-a"), state(&running, "dev-b")), ((true, Some(None)), (true, Some(None))));
+        assert_eq!(state(&running, "dev-c"), (false, None));
     }
 
     #[test]

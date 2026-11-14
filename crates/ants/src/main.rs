@@ -144,7 +144,7 @@ enum Command {
     Daemon(Box<serve::DaemonArgs>),
     /// Add an ant to the machine: list it in the config file and give it credentials. Its user NKey is generated here
     /// and the seed stays here. Without --jwt or --enroll, print the public key for the machine holding the account
-    /// key to sign; run again with --jwt or --enroll to complete the credentials. Restart the daemon to serve the ant.
+    /// key to sign; run again with --jwt or --enroll to complete the credentials. Reload the daemon (SIGHUP) to serve the ant.
     Add(Box<add::AddArgs>),
     /// Enrollment requests (credentials asked for with `ants add --enroll`), on the machine holding the account key:
     /// list them, approve or reject one.
@@ -701,8 +701,12 @@ async fn main() -> Result<()> {
         Command::Tools(ToolsCommand::Reject { id }) => tools::decide_request(&nats()?, &id, Verdict::Reject).await,
         Command::Dead(command) => dead_letters(&nats()?, command).await,
         Command::Daemon(args) => {
-            let (ants, harnesses) = serve::ants(&args, &ants_daemon::config::default_path()?)?;
-            serve::run(serve::configs(ants, &harnesses, &cli.nats, cli.creds, domain.cloned())?).await
+            let default_path = ants_daemon::config::default_path()?;
+            let configs = || {
+                let (ants, harnesses) = serve::ants(&args, &default_path)?;
+                serve::configs(ants, &harnesses, &cli.nats, cli.creds.clone(), domain.cloned())
+            };
+            serve::run(configs()?, configs).await
         }
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(HarnessCommand::Check { pick }) => {

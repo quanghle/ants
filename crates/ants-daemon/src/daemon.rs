@@ -59,7 +59,7 @@ const fn ack_wait(progress_every: Duration) -> Duration {
     progress_every.saturating_mul(3)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub ant: UserId,
     pub nats_url: String,
@@ -106,7 +106,24 @@ pub struct Config {
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
 /// that defers to others ([`Config::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
-    while serve(&config).await? == Served::HandedOver {
+    run_until(config, &Stop::default()).await
+}
+
+/// A request to stop serving one ant, as the first Ctrl-C does: it takes no more messages, hands back those waiting
+/// and finishes the prompts in flight; a later Ctrl-C or SIGTERM stops it at once.
+#[derive(Debug, Clone, Default)]
+pub struct Stop(std::sync::Arc<tokio::sync::Notify>);
+
+impl Stop {
+    /// Ask the daemon to stop, also before it started serving.
+    pub fn request(&self) {
+        self.0.notify_one();
+    }
+}
+
+/// [`run`], also stopping on `stop`'s request.
+pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
+    while serve(&config, stop).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
     Ok(())
@@ -120,8 +137,8 @@ enum Served {
     HandedOver,
 }
 
-/// Serve the ant's inbox until Ctrl-C, or until another daemon takes over its roster entry.
-async fn serve(config: &Config) -> Result<Served> {
+/// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
+async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = bus::connect_retrying(
         &config.nats_url,
@@ -129,11 +146,7 @@ async fn serve(config: &Config) -> Result<Served> {
         config.js_domain.as_ref(),
         &config.ant,
         &format!("antsd-{}", config.ant),
-        async {
-            if stop_signal().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        },
+        stopped(stop),
     )
     .await?
     else {
@@ -146,11 +159,7 @@ async fn serve(config: &Config) -> Result<Served> {
         let kv = bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
         tokio::select! {
             revision = roster::wait_for_turn(&kv, &mut entry, ants_proto::ROSTER_HEARTBEAT) => claimed = Some(revision?),
-            () = async {
-                if stop_signal().await.is_err() {
-                    std::future::pending::<()>().await;
-                }
-            } => {
+            () = stopped(stop) => {
                 tracing::info!("stopped before serving");
                 return Ok(Served::Stopped);
             }
@@ -265,20 +274,15 @@ async fn serve(config: &Config) -> Result<Served> {
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
     };
-    let ctrl_c = || async {
-        if let Err(e) = stop_signal().await {
-            tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
-            std::future::pending::<()>().await;
-        }
-    };
     let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
-    // The first stop is Ctrl-C or the hand-over, after which the prompts in flight finish; the second only Ctrl-C.
-    let stop = || {
+    // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
+    // only Ctrl-C or a stop request.
+    let stop_or_hand_over = || {
         asked += 1;
         let (first, stopping, registration) = (asked == 1, &stopping, &registration);
         async move {
             tokio::select! {
-                () = ctrl_c() => stopping.set(true),
+                () = stopped(stop) => stopping.set(true),
                 () = registration.lost(), if first => {
                     tracing::info!("another daemon took over the ant; taking no more messages");
                 }
@@ -286,7 +290,7 @@ async fn serve(config: &Config) -> Result<Served> {
         }
     };
     tokio::select! {
-        () = inbox.serve(messages, channels, config.idle_timeout, stop) => {}
+        () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
         () = escalator.deadlines() => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
@@ -311,8 +315,22 @@ async fn channels(
     Ok((channels, posts))
 }
 
+/// Ctrl-C, SIGTERM or a request on `stop`, whichever comes first.
+async fn stopped(stop: &Stop) {
+    let signal = async {
+        if let Err(e) = stop_signal().await {
+            tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        () = signal => {}
+        () = stop.0.notified() => {}
+    }
+}
+
 /// Ctrl-C, or SIGTERM, which launchd and systemd send to stop a service.
-async fn stop_signal() -> std::io::Result<()> {
+pub async fn stop_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
