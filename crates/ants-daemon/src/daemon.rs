@@ -134,6 +134,7 @@ impl Stop {
 
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
+    let _serving = crate::metrics::ant(&config.ant).serving();
     while serve(&config, stop).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
@@ -164,6 +165,9 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
     };
+    let metrics = crate::metrics::ant(&config.ant);
+    let workload = std::sync::Arc::new(roster::Workload::default());
+    let _connected = metrics.connected(client.clone(), workload.clone());
     let mut entry = roster::entry(config).await;
     let mut claimed = None;
     if config.defer_to_others {
@@ -249,7 +253,6 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         }
     };
     let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
-    let workload = std::sync::Arc::new(roster::Workload::default());
     let registration = match claimed {
         Some(revision) => roster::hold(&js, entry, revision, workload.clone()).await?,
         None => roster::register(&js, entry, workload.clone()).await?,
@@ -284,6 +287,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         mcp: Some(&mcp),
         approvals: Some(&approver),
         workload: &workload,
+        metrics,
         limits: config.limits,
         ledger: &ledger,
         escalator: &escalator,
@@ -467,6 +471,8 @@ struct Inbox<'a> {
     approvals: Option<&'a NatsApprover>,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
+    /// The ant's counters, for monitoring.
+    metrics: std::sync::Arc<crate::metrics::Ant>,
     limits: PromptLimits,
     ledger: &'a Ledger,
     /// Sends what the ant cannot settle up its chain, and notes the answers.
@@ -958,11 +964,14 @@ impl Inbox<'_> {
     /// Dead-letter a message that is never to be prompted with, keeping only an excerpt of its payload.
     async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
         tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
-        if let Err(e) = dead::bury(self.js, self.ant, msg, None, error).await {
-            // Never redelivered, dead letter or not.
-            tracing::warn!(error = format!("{e:#}"), "dead-lettering");
-            if let Err(e) = msg.ack_with(AckKind::Term).await {
-                tracing::warn!(error = %e, "terminating the message");
+        match dead::bury(self.js, self.ant, msg, None, error).await {
+            Ok(_) => self.metrics.buried(),
+            Err(e) => {
+                // Never redelivered, dead letter or not.
+                tracing::warn!(error = format!("{e:#}"), "dead-lettering");
+                if let Err(e) = msg.ack_with(AckKind::Term).await {
+                    tracing::warn!(error = %e, "terminating the message");
+                }
             }
         }
     }
@@ -1048,6 +1057,7 @@ impl Inbox<'_> {
             }
         }
         nak(&msg, Some(self.retry_delay)).await;
+        self.metrics.retried();
         let retry = (delivered < MAX_DELIVER).then(|| Retry {
             seq,
             // Redelivery may lag behind the delay; past this the thread goes on without the message.
@@ -1134,6 +1144,9 @@ impl Inbox<'_> {
         } else {
             dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?
         };
+        if !kept {
+            self.metrics.buried();
+        }
         match burial {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => {
@@ -1288,6 +1301,7 @@ impl Inbox<'_> {
             Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
+        let prompting = self.metrics.prompting();
         let prompt = self.pool.run(thread, prompt);
         tokio::pin!(prompt);
         let mut progress = self.progress();
@@ -1328,7 +1342,7 @@ impl Inbox<'_> {
             status.push(update);
         }
         status.flush();
-        drop(cancellable);
+        drop((cancellable, prompting));
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
             Err(e) if cancelled_by.is_some() => {
@@ -1816,6 +1830,7 @@ mod tests {
                 mcp: self.mcp.as_ref(),
                 approvals: None,
                 workload: &self.workload,
+                metrics: crate::metrics::ant(&self.dev),
                 limits: self.limits,
                 ledger: &self.ledger,
                 escalator: &escalator,

@@ -25,7 +25,9 @@ mod tools;
 mod upgrade;
 mod webhook;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -408,6 +410,10 @@ enum WebhookCommand {
         /// Address for the reverse proxy (default: the file's `listen`, else 127.0.0.1:8424).
         #[arg(long)]
         listen: Option<String>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: the file's `metrics`, else off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
@@ -432,6 +438,10 @@ enum BridgeCommand {
         /// command line and environment.
         #[arg(long, value_name = "FILE", conflicts_with = "token")]
         token_file: Option<PathBuf>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
@@ -456,6 +466,10 @@ enum BridgeCommand {
         /// HTTP CONNECT forward proxy, http://[user:password@]host:port.
         #[arg(long, value_name = "URL")]
         proxy: Option<String>,
+        /// Serve GET /healthz and GET /metrics (Prometheus text format) on this address, such as 127.0.0.1:9464
+        /// (default: off).
+        #[arg(long, value_name = "ADDR")]
+        metrics: Option<SocketAddr>,
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
@@ -922,7 +936,7 @@ async fn main() -> Result<()> {
                 let configs =
                     serve::configs(listed.ants, &listed.harnesses, &cli.nats, cli.creds.clone(), domain.cloned())?;
                 let schedules = scheduler::resolve(listed.schedules, &cli.nats, domain)?;
-                Ok(serve::Served { configs, schedules })
+                Ok(serve::Served { configs, schedules, metrics: listed.metrics })
             };
             match serve::run(served()?, served, upgrade::replaced(args.upgrade.upgrade_check)).await? {
                 serve::Ended::Stopped => Ok(()),
@@ -1194,19 +1208,22 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file, upgrade }) => {
+        Command::Bridge(BridgeCommand::Serve { listen, upstream, token, token_file, metrics, upgrade }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let addr = bridge::listen_addr(&listen, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let server = bridge::Server::new(upstream.clone(), token);
+            let _metrics = serve_metrics(metrics, server.traffic()).await?;
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
-            upgrade::or_exit(bridge::Server::new(upstream, token).run(listener), &upgrade).await
+            upgrade::or_exit(server.run(listener), &upgrade).await
         }
-        Command::Webhook(WebhookCommand::Serve { config, listen, upgrade }) => {
+        Command::Webhook(WebhookCommand::Serve { config, listen, metrics, upgrade }) => {
             let path = match config {
                 Some(path) => path,
                 None => webhook::default_path()?,
             };
-            let config = webhook::Config::load(&path)?;
+            let mut config = webhook::Config::load(&path)?;
+            config.metrics = metrics.or(config.metrics);
             let listen = listen.or_else(|| config.listen.clone()).unwrap_or_else(|| webhook::DEFAULT_LISTEN.to_owned());
             let addr = bridge::listen_addr(&listen, false)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
@@ -1218,11 +1235,21 @@ async fn main() -> Result<()> {
             }
             upgrade::or_exit(webhook::serve(config, &nats, domain.as_ref(), listener), &upgrade).await
         }
-        Command::Bridge(BridgeCommand::Connect { url, listen, token, token_file, headers, proxy, upgrade }) => {
+        Command::Bridge(BridgeCommand::Connect {
+            url,
+            listen,
+            token,
+            token_file,
+            headers,
+            proxy,
+            metrics,
+            upgrade,
+        }) => {
             let token = bridge::token(token, token_file.as_deref())?;
             let remote = bridge::Remote::new(&url, token.as_deref(), &headers, proxy.as_deref())?;
             let addr = bridge::listen_addr(&listen, true)?;
             let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("listening on {addr}"))?;
+            let _metrics = serve_metrics(metrics, remote.traffic()).await?;
             tracing::info!("bridging {addr} to {url}; leaf uplink: nats-leaf://{addr}");
             upgrade::or_exit(remote.run(listener), &upgrade).await
         }
@@ -1307,6 +1334,17 @@ impl<'a> Nats<'a> {
 /// ([`hub::check`]), saying what was done. Those the credentials may not fix are reported as needing `ants init`;
 /// those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach), are left
 /// alone. Returns what was fixed.
+/// Serve health and metrics from `source` on `addr`, if given, for as long as the result is kept.
+async fn serve_metrics(
+    addr: Option<SocketAddr>,
+    source: Arc<dyn ants_daemon::metrics::Source>,
+) -> Result<Option<ants_daemon::metrics::Listening>> {
+    match addr {
+        Some(addr) => Ok(Some(ants_daemon::metrics::start(addr, source).await?)),
+        None => Ok(None),
+    }
+}
+
 async fn upgrade_hub(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut fixed = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
