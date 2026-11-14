@@ -15,6 +15,7 @@ mod members;
 mod notify;
 mod outbox;
 mod presence;
+mod progress;
 mod renew;
 mod revoke;
 mod roster;
@@ -329,6 +330,7 @@ impl Replies {
             bail!("no reply on thread {thread} within {within}");
         }
         if shown == 0 {
+            progress::clear();
             eprintln!("no reply on thread {thread} within {within}");
         }
         Ok(())
@@ -921,7 +923,7 @@ async fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ANTS_LOG").unwrap_or_else(|_| "info,rmcp=warn".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(progress::log_writer)
         .init();
     let cli = defaults::parse()?;
     let domain = cli.js_domain.as_ref();
@@ -1580,9 +1582,11 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
         false => bus::live_inbox(&client, &nats.me.id).await?,
     };
     // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
-    let unserved = roster::unserved_warnings(&js, &[&envelope.to]).await;
-    if !unserved.is_empty() && !humans::load(&js, &nats.me).await.contains(&envelope.to) {
-        for warning in unserved {
+    let warnings = roster::unserved_warnings(&js, &[&envelope.to]).await;
+    let to_human = !warnings.is_empty() && humans::load(&js, &nats.me).await.contains(&envelope.to);
+    let unserved = !warnings.is_empty() && !to_human;
+    if unserved {
+        for warning in warnings {
             tracing::warn!("{warning}");
         }
         if replies.wait || replies.follow {
@@ -1590,6 +1594,10 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
             tracing::warn!("a reply waits for a daemon to serve {}: {flag} may not end until one does", envelope.to);
         }
     }
+    let status = match (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
+        true => client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok(),
+        false => None,
+    };
     if let Some(owner) = &envelope.owner {
         owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
     }
@@ -1600,6 +1608,11 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
     if !replies.wait && !replies.follow {
         return Ok(());
     }
+    let _shown = status.map(|sub| {
+        let stand = if unserved { progress::Stand::Unserved } else { progress::Stand::Waiting };
+        let status = progress::Status::new(vec![envelope.id]).with(envelope.to.clone(), stand);
+        progress::start(sub, status, replies.wait)
+    });
     let thread = envelope.thread_id.clone();
     let on_thread = inbox.filter_map(move |msg| {
         let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
@@ -1616,6 +1629,7 @@ async fn ask(nats: &Nats<'_>, thread: Option<thread::Pick>, replies: &Replies, w
     });
     replies
         .show(&envelope.thread_id, on_thread, async |reply: Envelope| {
+            progress::clear();
             println!("{}: {}", reply.from, reply.text);
             // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
             // consumer is its daemon's.
@@ -1674,6 +1688,10 @@ async fn post(
     } else {
         None
     };
+    let status = match room.is_some() && progress::wanted(nats.me.role.is_human()) {
+        true => client.subscribe(subject::status_on(&post.thread_id)).await.ok(),
+        false => None,
+    };
     let stored = bus::store_acked(&js, post.subject(), &post, &post.id.to_string()).await?.map(|ack| ack.sequence);
     if stored.is_none() {
         println!("kept in this machine's outbox until the hub is reachable");
@@ -1688,12 +1706,14 @@ async fn post(
     }
     println!("thread {}", post.thread_id);
     let Some(room) = room else { return Ok(()) };
+    let _shown = status.map(|sub| progress::start(sub, progress::Status::new(vec![post.id]), replies.wait));
     // Waiting is for an answer, so the poster's own posts from elsewhere do not count; following shows them all. What
     // never comes live, as while the leaf's uplink is down, is read back from the hub's stream.
     let posts = channel::caught_up_posts(room, &js, &nats.me, &post, stored);
     let on_thread = channel::thread_posts(posts, &post, replies.wait);
     replies
         .show(&post.thread_id, on_thread, async |reply: ChannelPost| {
+            progress::clear();
             println!("{}: {}", reply.from, reply.text);
             Ok(())
         })
@@ -2177,6 +2197,15 @@ impl Printer {
                     })
                     .collect();
                 return self.line(&format!("[{thread}] {who}{forged} plan: {}", steps.join("; ")));
+            }
+            StatusUpdate::Queued { message, ahead: 0 } => {
+                return self.line(&format!("[{thread}] {who}{forged}: message {message} starts"));
+            }
+            StatusUpdate::Queued { message, ahead } => {
+                return self.line(&format!("[{thread}] {who}{forged}: message {message} queued behind {ahead}"));
+            }
+            StatusUpdate::Approval { request_id } => {
+                return self.line(&format!("[{thread}] {who}{forged} waits for approval {who}/{request_id}"));
             }
         };
         let key = (who.clone(), thread.clone(), verb);

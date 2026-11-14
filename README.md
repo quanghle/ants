@@ -194,6 +194,7 @@ A check that cannot run, such as one needing a file that does not exist or right
 - `--wait` prints the first reply on the thread (to the CLI human for `ants ask`; by another author for `ants post`) and exits `0`.
 - `-f`, `--follow` prints every arriving reply or post on the thread until `--timeout` or Ctrl-C, then exits `0`.
 - `--timeout DURATION` (requires `--wait` or `--follow`) bounds the wait. If `--wait` times out, `ants` prints `no reply on thread <thread> within <timeout>` to stderr and exits `1`. Ctrl-C during `--wait` exits immediately as interrupted (`130`). `ants ask --wait` and `--follow` mark only printed replies read, and warn up front that the wait may not end while no daemon serves the ant.
+- With human credentials and stderr on a terminal, `--wait` and `--follow` keep one status line on stderr, rewritten in place from `ants.status.<ant>.<thread>` (every ant on the thread for `ants post`) and cleared before any reply, log line or error is printed. It shows `not served` while no daemon serves the ant, `queued behind N` while earlier messages of the thread go first, `working`, `thinking`, `writing`, `running <tool>`, `waiting for approval` with the `ants tools approve <ant>/<id>` command answering the request, and `harness signed out` while the messages wait for a sign-in. An idle ant drops off the line. Off a terminal, or with ant credentials, nothing is shown.
 
 ### Inbox consumers, pool and retries
 
@@ -207,7 +208,7 @@ Held messages send 20s progress acks against a 60s `ack_wait` (ignoring duplicat
 2. When the harness finishes, the reply is saved in `<ant>.<seq>` before publishing with dedup ID `reply-<ant>-<envelope_id>` (24 h window), so a post-generation cut-off republishes without re-prompting.
 3. Stored replies are also noted in `<home>/answered` until acked, avoiding re-prompts when an offline leaf buffers replies in its outbox. Markers clear on ack or dead-lettering (30d TTL).
 
-During prompts, the daemon streams unpersisted `StatusEvent` JSON to `ants.status.<ant>.<thread>` (`working`, `waiting_approval`, `idle`, `failed`, 250ms batched text/reasoning, tool calls, execution plan), dropping backpressured frames.
+During prompts, the daemon streams unpersisted `StatusEvent` JSON to `ants.status.<ant>.<thread>` (`working`, `waiting_approval`, `idle`, `failed`, `signed_out`, 250ms batched text/reasoning, tool calls, execution plan), dropping backpressured frames. A message arriving while earlier ones of its thread are in flight or waiting gets `queued` with its envelope id and the number `ahead` of it, again each time one starts, and `ahead: 0` when its own turn comes; `approval` carries the request id just before `waiting_approval`; `signed_out` comes when a message arrives while the harness is signed out, or its prompt finds the harness signed out. `ants watch <ant>` prints them all.
 
 ## Config file
 

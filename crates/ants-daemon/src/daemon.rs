@@ -4,7 +4,7 @@
 //! harness from the pool.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ants_proto::{
     CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
-    Humans, JsDomain, Role, State, ThreadId, ThreadOrigin, UserId, subject,
+    Humans, JsDomain, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -426,6 +426,8 @@ struct Thread {
     /// A failed message that is to be redelivered. Until it is back (or the deadline passes) the rest of the thread
     /// waits rather than overtake it.
     retry: Option<Retry>,
+    /// The messages told they wait behind others ([`StatusUpdate::Queued`]), to tell when their turn comes.
+    queued: HashSet<Uuid>,
 }
 
 #[derive(Clone, Copy)]
@@ -606,7 +608,15 @@ impl Inbox<'_> {
                             t.retry = None;
                             t.waiting.push_front((incoming, msg));
                         } else {
+                            let (message, ahead) = (incoming.envelope.id, t.ahead());
                             t.waiting.push_back((incoming, msg));
+                            if ahead > 0 {
+                                t.queued.insert(message);
+                                status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
+                            }
+                            if self.sign_in.is_out() {
+                                status::state(self.client, self.ant, &thread, State::SignedOut);
+                            }
                         }
                         ready = Some(vec![thread]);
                     }
@@ -616,7 +626,10 @@ impl Inbox<'_> {
             // them stops deliveries.
             let held = self.sign_in.is_out() || self.throttle.is_held();
             for thread in ready.into_iter().flatten().filter(|_| !held) {
-                if let Some((incoming, msg)) = next_turn(&mut threads, thread) {
+                if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
+                    if let Some(t) = threads.get_mut(&thread) {
+                        self.queue_moved(&thread, t, incoming.envelope.id);
+                    }
                     running.push(self.handle(incoming, msg));
                 }
             }
@@ -637,6 +650,19 @@ impl Inbox<'_> {
                 () = drain => {}
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
             }
+        }
+    }
+
+    /// Tell the messages waiting on `thread` where they stand now that `started` left the queue, and `started` that
+    /// its turn came if it was told it waits.
+    fn queue_moved(&self, thread: &ThreadId, t: &mut Thread, started: Uuid) {
+        if t.queued.remove(&started) {
+            status::publish(self.client, self.ant, thread, StatusUpdate::Queued { message: started, ahead: 0 });
+        }
+        for (before, (incoming, _)) in t.waiting.iter().enumerate() {
+            let message = incoming.envelope.id;
+            t.queued.insert(message);
+            status::publish(self.client, self.ant, thread, StatusUpdate::Queued { message, ahead: before + 1 });
         }
     }
 
@@ -1114,7 +1140,7 @@ impl Inbox<'_> {
     /// The notice goes to the human directly: no ant up the chain can sign the harness in.
     async fn wait_for_sign_in(&self, incoming: &Incoming, signed_out: &SignedOut) {
         let thread = &incoming.envelope.thread_id;
-        status::state(self.client, self.ant, thread, State::Idle);
+        status::state(self.client, self.ant, thread, State::SignedOut);
         let tell = self.sign_in.out();
         if let Some(since) = self.sign_in.out_since() {
             let sign_in = signed_out.sign_in.clone();
@@ -1673,6 +1699,11 @@ impl Thread {
     fn holds(&self, seq: Option<u64>) -> bool {
         seq.is_some() && (self.in_flight == seq || self.waiting.iter().any(|(_, msg)| stream_seq(msg) == seq))
     }
+
+    /// How many messages one arriving now waits behind: the one in flight or to be redelivered, and those waiting.
+    fn ahead(&self) -> usize {
+        usize::from(self.busy) + usize::from(self.retry.is_some()) + self.waiting.len()
+    }
 }
 
 /// The thread's next message to prompt, unless one is in flight or it waits for a redelivery. Forgets a thread with
@@ -2199,6 +2230,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_waiting_on_their_thread_hear_where_they_stand() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, _, gate) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
+        bus.client.flush().await.unwrap();
+        bus.send(&t1, "hold a").await;
+        let (b, _) = bus.send(&t1, "b").await;
+        let (c, _) = bus.send(&t1, "c").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let mut queued = Vec::new();
+            while queued.len() < 5 {
+                let msg = timeout(WAIT, statuses.next()).await.expect("no status").unwrap();
+                let event: StatusEvent = serde_json::from_slice(&msg.payload).unwrap();
+                if let StatusUpdate::Queued { message, ahead } = event.update {
+                    queued.push((message, ahead));
+                }
+                if queued.len() == 2 {
+                    gate.add_permits(1);
+                }
+            }
+            // As they arrive, then as the queue moves: b's turn comes, c waits behind it, then c's turn comes.
+            assert_eq!(queued, [(b.id, 1), (c.id, 2), (b.id, 0), (c.id, 1), (c.id, 0)]);
+            for _ in 0..3 {
+                next_reply(&mut replies).await;
+            }
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
     async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
         let Some((bus, mut replies)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
@@ -2226,6 +2292,8 @@ mod tests {
         log.lock().unwrap().signed_out = true;
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let mut statuses = bus.client.subscribe(subject::status_of(&bus.dev)).await.unwrap();
+        bus.client.flush().await.unwrap();
         let (_, seq) = bus.send(&t1, "a").await;
         bus.send(&t1, "b").await;
         bus.send(&t2, "c").await;
@@ -2240,6 +2308,13 @@ mod tests {
             let notice = next_envelope(&mut replies).await;
             signed_out(&notice);
             assert!([&t1, &t2].contains(&&notice.thread_id));
+            loop {
+                let msg = timeout(WAIT, statuses.next()).await.expect("no signed_out state").unwrap();
+                let event: StatusEvent = serde_json::from_slice(&msg.payload).unwrap();
+                if event.update == (StatusUpdate::State { state: State::SignedOut }) {
+                    break;
+                }
+            }
             let shown = bus.workload.signed_out().expect("the roster shows the harness signed out");
             assert_eq!(shown.sign_in, None, "the test harness names no sign-in command");
             // Several checks of the harness pass, telling nobody again and spending no attempt.
