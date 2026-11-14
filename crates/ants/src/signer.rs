@@ -1,7 +1,9 @@
 //! Ants added by manager ants, signed on the machine holding the account key: a manager asks for an ant from a
 //! template over NATS ([`ask`], behind its `request_ant` tool), and `ants signer` there ([`serve`]) signs its
 //! credentials when the request keeps within the signer's own copy of the template's policy, asks the humans through
-//! the approvals path otherwise, and refuses what it can never sign.
+//! the approvals path otherwise, and refuses what it can never sign. A manager retires an ant it added the same way
+//! ([`retire`], behind its `retire_ant` tool): the signer revokes the ant's keys ([`revoke_added`]) and pushes the
+//! account to the hub, so the name and its place under the template's `max_ants` are free again.
 //!
 //! Requests are core NATS messages and stored nowhere, as enrollment requests are ([`crate::enroll`]): the manager's
 //! machine repeats its request every [`ENROLL_REPEAT`] until an answer comes or it stops waiting
@@ -60,10 +62,27 @@ pub enum Event {
     Refused(String),
     /// Asked the humans with approval request `id`, as the request is outside the policy for the reason given.
     Asked { id: ants_proto::Uuid, why: String },
+    /// Retired, revoking `revoked` keys, the push of the account to the hub failing with `push_error` if it did.
+    Retired { revoked: usize, push_error: Option<String> },
 }
 
 /// Print what the signer did with `request`.
 pub fn print(request: &AntRequest, event: &Event) {
+    if request.retire {
+        let asked = format!(
+            "{} retiring {} (key {}, host {})",
+            request.manager, request.name, request.public_key, request.host
+        );
+        match event {
+            Event::Retired { revoked, push_error: None } => println!("retired for {asked}: {revoked} keys revoked"),
+            Event::Retired { revoked, push_error: Some(e) } => println!(
+                "retired for {asked}: {revoked} keys revoked, but pushing the account failed ({e}): `ants auth push`"
+            ),
+            Event::Refused(reason) => println!("refused {asked}: {reason}"),
+            other => println!("{asked}: {other:?}"),
+        }
+        return;
+    }
     let asked = format!(
         "{} for {} from template {} (key {}, host {})",
         request.manager, request.name, request.template, request.public_key, request.host
@@ -75,6 +94,7 @@ pub fn print(request: &AntRequest, event: &Event) {
         Event::Asked { id, why } => {
             println!("asked the humans about {asked}, as {why}: `ants tools approve|reject {}/{id}`", request.manager)
         }
+        Event::Retired { .. } => println!("retired {asked}"),
     }
 }
 
@@ -103,7 +123,7 @@ pub async fn serve(
     mut report: impl FnMut(&AntRequest, &Event),
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
-    let mut signer = Signer { dir, options, answered: HashMap::new(), waiting: Vec::new() };
+    let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect(url, dir, js_domain, crate::enroll::LISTEN).await?;
@@ -127,15 +147,19 @@ pub async fn serve(
 }
 
 struct Signer<'a> {
+    url: &'a str,
     dir: &'a Path,
     options: &'a Options<'a>,
-    /// The answer to each manager, ant and key: a machine that missed it asks again and gets the same.
-    answered: HashMap<(UserId, UserId, String), (AntReply, DateTime<Utc>)>,
+    /// The answer to each manager, ant, key and whether to retire it: a machine that missed it asks again and gets
+    /// the same.
+    answered: HashMap<Key, (AntReply, DateTime<Utc>)>,
     waiting: Vec<Waiting>,
 }
 
-fn key(request: &AntRequest) -> (UserId, UserId, String) {
-    (request.manager.clone(), request.name.clone(), request.public_key.clone())
+type Key = (UserId, UserId, String, bool);
+
+fn key(request: &AntRequest) -> Key {
+    (request.manager.clone(), request.name.clone(), request.public_key.clone(), request.retire)
 }
 
 impl Signer<'_> {
@@ -163,6 +187,9 @@ impl Signer<'_> {
         }
         if self.waiting.iter().any(|w| key(&w.request) == key(&request)) {
             return Ok(());
+        }
+        if request.retire {
+            return self.retire(approver, &request, report).await;
         }
         let judgement = match self.judge(&request) {
             Ok(judgement) => judgement,
@@ -260,6 +287,32 @@ impl Signer<'_> {
             .await
             .with_context(|| format!("admitting {name} from the outbox of {}", leaf.machine))?;
         Ok((jwt, Some(renewed)))
+    }
+
+    /// Retire the ant `request` names, if its manager added it: revoke its live keys, push the account to the hub
+    /// when any were, and answer.
+    async fn retire(
+        &mut self,
+        approver: &Approver,
+        request: &AntRequest,
+        report: &mut impl FnMut(&AntRequest, &Event),
+    ) -> Result<()> {
+        let (name, public_key) = (&request.name, Some(request.public_key.as_str()));
+        let revoked = match revoke_added(self.dir, name, Some(&request.manager), public_key) {
+            Ok(revoked) => revoked,
+            Err(e) => return self.refuse(approver, request, format!("{e:#}"), report).await,
+        };
+        let push_error = match revoked.is_empty() {
+            true => None,
+            false => crate::revoke::push(self.url, self.dir).await.err().map(|e| format!("{e:#}")),
+        };
+        report(request, &Event::Retired { revoked: revoked.len(), push_error: push_error.clone() });
+        let (manager, name, public_key) = (request.manager.clone(), request.name.clone(), request.public_key.clone());
+        let revoked = revoked.into_iter().map(|r| r.key).collect();
+        let reply = AntReply::Retired { manager, name, public_key, revoked, push_error };
+        answer(approver, &reply).await?;
+        self.answered.insert(key(request), (reply, request.expires_at));
+        Ok(())
     }
 
     async fn refuse(
@@ -376,6 +429,43 @@ fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
             .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
     }
     Ok(())
+}
+
+/// Revoke the live keys of ant `name`, added from a template (by `manager` when given), and write `server.conf`
+/// again ([`revoke::revoke`]); returns the keys revoked, none when none is live. Given the `key` of the ant's
+/// credentials, only it and the keys issued before it go (those it renewed): keys issued after it, for the ant added
+/// again, stay. Fails, revoking nothing, when the team never issued `key` (or with none, any key of `name`) for an ant
+/// added so, or holds live keys of `name` issued otherwise.
+pub fn revoke_added(
+    dir: &Path,
+    name: &UserId,
+    manager: Option<&UserId>,
+    key: Option<&str>,
+) -> Result<Vec<revoke::Revoked>> {
+    let added = |i: &revoke::Issued| {
+        i.name == name.as_str() && i.template.is_some() && manager.is_none_or(|m| i.added_by.as_ref() == Some(m))
+    };
+    let by = manager.map(|m| format!(" by {m}")).unwrap_or_default();
+    let issued = revoke::issued(dir)?;
+    let before = match key {
+        Some(key) => {
+            issued.iter().filter(|i| i.key == key && added(i)).map(|i| i.issued_at).max().with_context(|| {
+                format!("the team issued no key {key} of {name} as an ant added from a template{by}")
+            })?
+        }
+        None if issued.iter().any(added) => u64::MAX,
+        None => bail!("the team issued no credentials of {name} as an ant added from a template{by}"),
+    };
+    let live: Vec<revoke::Issued> =
+        live(dir)?.into_iter().filter(|i| i.name == name.as_str() && i.issued_at <= before).collect();
+    if let Some(other) = live.iter().find(|i| !added(i)) {
+        bail!("the team holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
+    }
+    if live.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys: Vec<String> = live.into_iter().map(|i| i.key).collect();
+    revoke::revoke(dir, None, &keys)
 }
 
 /// The keys the team issued that are neither revoked nor expired.
@@ -519,6 +609,69 @@ pub async fn ask(
                         }
                     }
                     AntReply::Refused { reason, .. } => bail!("the signer refused {name}: {reason}"),
+                    AntReply::Retired { .. } => continue,
+                }
+            }
+            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the team's account key) in time"),
+        }
+    }
+}
+
+/// What [`retire`] got: the keys the signer revoked, and the error of pushing them to the hub, if it failed.
+#[derive(Debug)]
+pub struct Retired {
+    pub revoked: Vec<String>,
+    pub push_error: Option<String>,
+}
+
+/// Ask, over the manager's connection `client`, as the manager its credentials' user JWT `jwt` and key `key` name, to
+/// retire ant `name`, added from `template`, whose credentials on this machine have `public_key`: repeat the request
+/// every `repeat` until an answer arrives or `until` passes. A refusal is an error carrying the signer's reason.
+#[allow(clippy::too_many_arguments)]
+pub async fn retire(
+    client: &async_nats::Client,
+    jwt: &str,
+    key: &KeyPair,
+    template: &str,
+    thread: &ThreadId,
+    name: &UserId,
+    public_key: &str,
+    repeat: Duration,
+    until: DateTime<Utc>,
+) -> Result<Retired> {
+    let claims = auth::verified(jwt).context("the manager's credentials")?;
+    let manager: UserId = claims.name.parse().with_context(|| format!("credentials named {}", claims.name))?;
+    let mut replies = client.subscribe(subject::antreq_reply(&manager)).await?;
+    let host = roster::machine().await;
+    let mut asking =
+        AntRequest::new(manager.clone(), name.clone(), template, "{}", "", thread.clone(), public_key, host, until);
+    asking.retire = true;
+    asking.credentials = jwt.to_owned();
+    asking.signature = auth::sign(key, &asking.signed())?;
+    let mut repeats = tokio::time::interval(repeat);
+    let left = (until - Utc::now()).to_std().unwrap_or_default();
+    let deadline = tokio::time::sleep(left);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = repeats.tick() => {
+                client.publish(asking.subject(), serde_json::to_vec(&asking)?.into()).await?;
+                client.flush().await?;
+            }
+            msg = replies.next() => {
+                let msg = msg.context("the NATS connection closed")?;
+                let reply = match serde_json::from_slice::<AntReply>(&msg.payload) {
+                    Ok(reply) if reply.manager() == &manager && reply.answers(name, public_key) => reply,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ignoring a malformed answer to an ant request");
+                        continue;
+                    }
+                };
+                match reply {
+                    AntReply::Retired { revoked, push_error, .. } => return Ok(Retired { revoked, push_error }),
+                    AntReply::Refused { reason, .. } => bail!("the signer refused to retire {name}: {reason}"),
+                    AntReply::Approved { .. } => continue,
                 }
             }
             () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the team's account key) in time"),

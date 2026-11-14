@@ -176,9 +176,24 @@ pub struct AntAsk {
     pub wait: Duration,
 }
 
+/// What a manager ant's `retire_ant` asks for: retire ant `name`, one it added, on the manager's `thread`.
+#[derive(Debug, Clone)]
+pub struct RetireAsk {
+    pub manager: UserId,
+    pub thread: ThreadId,
+    pub name: UserId,
+}
+
+/// What a manager ant asks for.
+#[derive(Debug, Clone)]
+pub enum ManagerAsk {
+    Add(Box<AntAsk>),
+    Retire(RetireAsk),
+}
+
 /// Adds the ant a manager asks for ([`AntAsk`]) once its credentials are signed, listing it in the config file for the
-/// daemon to serve; returns what it did, or why not.
-pub type AntRequester = Arc<dyn Fn(AntAsk) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
+/// daemon to serve, or retires one it added ([`RetireAsk`]); returns what it did, or why not.
+pub type AntRequester = Arc<dyn Fn(ManagerAsk) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
 
 /// The [`AntRequester`] of a manager ant, which only managers have. Two compare equal when both have one or neither
 /// has, so a reload does not restart a manager for a new one.
@@ -279,7 +294,8 @@ impl Mcp {
         let _ = self.hub.lookup.set(lookup);
     }
 
-    /// Serve `request_ant` through `requester`, for a manager ant; without one the tool is not offered.
+    /// Serve `request_ant` and `retire_ant` through `requester`, for a manager ant; without one neither tool is
+    /// offered.
     pub fn with_requester(&self, requester: AntRequester) {
         let _ = self.hub.requester.set(requester);
     }
@@ -792,7 +808,7 @@ impl Hub {
             reason: args.reason,
             wait,
         };
-        let added = requester(ask).await?;
+        let added = requester(ManagerAsk::Add(Box::new(ask))).await?;
         let Some(lookup) = self.lookup.get() else { return Ok(added) };
         let deadline = tokio::time::Instant::now() + LISTED_WAIT;
         loop {
@@ -806,6 +822,13 @@ impl Hub {
             }
             tokio::time::sleep(LISTED_POLL).await;
         }
+    }
+
+    /// Retire the ant `args` names through the requester ([`AntRequester`]).
+    async fn retire_ant(&self, thread: &ThreadId, args: RetireAnt) -> Result<String, String> {
+        let requester = self.requester.get().ok_or("retire_ant is for the managers of an ant template")?;
+        let name: UserId = args.name.trim().parse().map_err(|e| format!("name {:?}: {e}", args.name))?;
+        requester(ManagerAsk::Retire(RetireAsk { manager: self.ant.clone(), thread: thread.clone(), name })).await
     }
 
     /// Send `envelope` and wait up to `wait` (or until `cancelled`) for its reply.
@@ -1133,6 +1156,12 @@ struct RequestAnt {
     timeout: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RetireAnt {
+    /// The ant to retire, one this ant added with request_ant.
+    name: String,
+}
+
 /// The tools, served to one MCP connection. Over HTTP the caller's thread comes with each request instead.
 #[derive(Clone)]
 struct Tools {
@@ -1146,6 +1175,7 @@ impl Tools {
         let mut tool_router = Self::tool_router();
         if hub.requester.get().is_none() {
             tool_router.remove_route("request_ant");
+            tool_router.remove_route("retire_ant");
         }
         Self { hub, caller, tool_router }
     }
@@ -1621,6 +1651,21 @@ impl Tools {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.request_ant(&thread, args).await))
     }
+
+    #[tool(description = "Retire a worker ant this ant added with request_ant, once its work is done: its entry \
+        leaves the config file, this machine's daemon stops it once its prompts in flight end (waiting up to 5 \
+        minutes, past which they are cut off), and its credentials are revoked where the team's account key is. \
+        Its home stays, memory, task database and worktrees included: a later request_ant of the same name from \
+        the same template brings it back with them. A retired ant no longer counts toward the template's max_ants \
+        or its pool's daily spend. Only ants this ant added can be retired.")]
+    async fn retire_ant(
+        &self,
+        Parameters(args): Parameters<RetireAnt>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.retire_ant(&thread, args).await))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1649,7 +1694,8 @@ fn instructions(ant: &UserId, manager: bool) -> String {
     if manager {
         text.push_str(
             " As a manager of ant templates, request_ant adds a worker ant from one when the work needs more hands \
-             than the roster has; give the reason a human would need to approve it.",
+             than the roster has; give the reason a human would need to approve it. retire_ant retires one it \
+             added once its work is done, keeping its memory for a later request_ant of the same name.",
         );
     }
     if *ant == UserId::messenger() {
@@ -2093,18 +2139,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_ant_is_offered_to_managers_and_returns_once_the_ant_is_in_the_roster() {
+    async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once_the_ant_is_in_the_roster() {
         let (mcp, _sent) = start(&home("request")).await;
         let thread = ThreadId::generate();
         let (url, token) = http_server(&mcp, &thread);
         let names = async |client: &Client| -> Vec<String> {
             client.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect()
         };
-        assert!(!names(&http_client(&url, &token).await).await.contains(&"request_ant".to_owned()));
+        let offered = names(&http_client(&url, &token).await).await;
+        assert!(!offered.contains(&"request_ant".to_owned()) && !offered.contains(&"retire_ant".to_owned()));
 
         let asked = Arc::new(StdMutex::new(Vec::<AntAsk>::new()));
-        let seen = asked.clone();
-        mcp.with_requester(Arc::new(move |ask: AntAsk| {
+        let retired = Arc::new(StdMutex::new(Vec::<RetireAsk>::new()));
+        let (seen, seen_retired) = (asked.clone(), retired.clone());
+        mcp.with_requester(Arc::new(move |ask: ManagerAsk| {
+            let ask = match ask {
+                ManagerAsk::Add(ask) => *ask,
+                ManagerAsk::Retire(ask) => {
+                    seen_retired.lock().unwrap().push(ask);
+                    return Box::pin(async { Ok("Retired dev-a-docs.".to_owned()) });
+                }
+            };
             seen.lock().unwrap().push(ask.clone());
             Box::pin(async move {
                 match ask.name.as_str() {
@@ -2115,7 +2170,8 @@ mod tests {
         }));
         mcp.with_lookup(lookup_in(vec![listed("dev-a-docs", &[])]));
         let client = http_client(&url, &token).await;
-        assert!(names(&client).await.contains(&"request_ant".to_owned()));
+        let offered = names(&client).await;
+        assert!(offered.contains(&"request_ant".to_owned()) && offered.contains(&"retire_ant".to_owned()));
 
         let args = serde_json::json!({
             "name": "dev-a-docs", "template": "worker", "reason": "docs",
@@ -2126,7 +2182,7 @@ mod tests {
         let ask = asked.lock().unwrap()[0].clone();
         assert_eq!(
             (ask.manager, ask.thread, ask.template, ask.wait),
-            (user("dev-a"), thread, "worker".to_owned(), DEFAULT_REQUEST_WAIT)
+            (user("dev-a"), thread.clone(), "worker".to_owned(), DEFAULT_REQUEST_WAIT)
         );
         assert_eq!(ask.request.model.as_deref(), Some("gpt-5"));
         assert_eq!(ask.request.prompt_timeout, Some(Duration::from_mins(10)));
@@ -2139,6 +2195,11 @@ mod tests {
         let (ok, text) = call(&client, "request_ant", args).await;
         assert!(!ok && text.contains("overrides"), "{text}");
         assert_eq!(asked.lock().unwrap().len(), 2, "a malformed request goes nowhere");
+
+        let (ok, text) = call(&client, "retire_ant", serde_json::json!({"name": " dev-a-docs "})).await;
+        assert!(ok && text == "Retired dev-a-docs.", "{text}");
+        let ask = retired.lock().unwrap()[0].clone();
+        assert_eq!((ask.manager, ask.thread, ask.name), (user("dev-a"), thread, user("dev-a-docs")));
     }
 
     #[test]

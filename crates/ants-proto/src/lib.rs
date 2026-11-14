@@ -3289,6 +3289,11 @@ impl RenewReply {
 /// signs a user JWT for that key when the request keeps within its own copy of the template's policy, asks the humans
 /// otherwise, and answers with an [`AntReply`].
 ///
+/// With `retire` set, the manager asks instead to retire ant `name`, one it added (its `retire_ant` tool): the signer
+/// revokes the ant's live keys if the team issued them all for the manager to add, and answers
+/// [`AntReply::Retired`]; `public_key` is then that of the ant's credentials on the manager's machine, `template` the
+/// ant's, `request` and `reason` unused.
+///
 /// The request carries the manager's user JWT (`credentials`) and its key's `signature` of [`AntRequest::signed`], so
 /// the signer takes only requests the manager made, whatever connection carried them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3317,6 +3322,9 @@ pub struct AntRequest {
     /// The leaf node the asking machine reaches the hub through, whose uplink an approval extends to the ant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf: Option<EnrollLeaf>,
+    /// Retire ant `name` instead of adding it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retire: bool,
 }
 
 impl AntRequest {
@@ -3347,17 +3355,19 @@ impl AntRequest {
             credentials: String::new(),
             signature: String::new(),
             leaf: None,
+            retire: false,
         }
     }
 
     /// What the manager's key and the leaf's uplink key sign: every field but the signatures, one per line, the
-    /// free texts prefixed with their length in bytes, so that none can pass for the next.
+    /// free texts prefixed with their length in bytes, so that none can pass for the next; a retirement under
+    /// another first line than an addition, so that neither passes for the other.
     pub fn signed(&self) -> Vec<u8> {
         let at = |t: &DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let quoted = |t: &str| format!("{}:{t}", t.len());
         let (machine, leaf) = self.leaf.as_ref().map_or(("", ""), |l| (l.machine.as_str(), l.jwt.as_str()));
         let fields = [
-            "ants-antreq",
+            if self.retire { "ants-antretire" } else { "ants-antreq" },
             self.manager.as_str(),
             self.name.as_str(),
             &quoted(&self.template),
@@ -3404,14 +3414,25 @@ pub enum AntReply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         leaf_jwt: Option<String>,
     },
-    /// No credentials, and why.
+    /// No credentials, or for a retirement nothing revoked, and why.
     Refused { manager: UserId, name: UserId, public_key: String, reason: String },
+    /// Ant `name` retired ([`AntRequest::retire`]): the keys of it revoked now (none when an earlier request revoked
+    /// them all), and the error of pushing the revocations to the hub, if it failed; the hub then refuses the keys
+    /// only once it reloads its `server.conf`.
+    Retired {
+        manager: UserId,
+        name: UserId,
+        public_key: String,
+        revoked: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push_error: Option<String>,
+    },
 }
 
 impl AntReply {
     pub fn manager(&self) -> &UserId {
         match self {
-            Self::Approved { manager, .. } | Self::Refused { manager, .. } => manager,
+            Self::Approved { manager, .. } | Self::Refused { manager, .. } | Self::Retired { manager, .. } => manager,
         }
     }
 
@@ -3422,9 +3443,9 @@ impl AntReply {
     /// Whether the answer is meant for the request of ant `name` with `public_key`.
     pub fn answers(&self, name: &UserId, public_key: &str) -> bool {
         match self {
-            Self::Approved { name: n, public_key: key, .. } | Self::Refused { name: n, public_key: key, .. } => {
-                n == name && key == public_key
-            }
+            Self::Approved { name: n, public_key: key, .. }
+            | Self::Refused { name: n, public_key: key, .. }
+            | Self::Retired { name: n, public_key: key, .. } => n == name && key == public_key,
         }
     }
 }
@@ -3799,6 +3820,8 @@ mod tests {
         let mut moved = request.clone();
         moved.reason = "more hands\n".into();
         assert_ne!(moved.signed(), request.signed());
+        let retiring = AntRequest { retire: true, ..request.clone() };
+        assert_ne!(retiring.signed(), request.signed(), "an addition never passes for a retirement");
         let reply =
             AntReply::Refused { manager: lead, name: p("lead-w1"), public_key: "UKEY".into(), reason: "no".into() };
         assert_eq!(reply.subject(), "ants.antreq.lead.reply");
