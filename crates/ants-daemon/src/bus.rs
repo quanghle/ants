@@ -26,6 +26,11 @@ use crate::reading::{self, Reading};
 /// message can be redelivered for as long as the stream keeps it.
 pub const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// How long the `ANTS` stream drops a message repeating the `Nats-Msg-Id` of one it stored. A copy kept in a leaf's
+/// outbox lands up to about two and a half minutes after the uplink is back, so it may follow its twin stored
+/// directly by the length of an outage plus that: a day covers outages overnight.
+pub const DUPLICATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
 /// sleep, dropped tunnel) is noticed within about a minute instead of three, and proxies with a 60 s idle timeout see
 /// traffic. Reconnects are unlimited by default.
@@ -253,8 +258,8 @@ pub async fn open_stream(js: &jetstream::Context, user: &UserId) -> Result<strea
 }
 
 /// Create the `ANTS` stream, or return it as it is, with its info: only the human's credentials allow both. A stream from an older
-/// version that lacks some of [`STREAM_SUBJECTS`], direct gets or the republishing of inbox messages is returned with a
-/// warning: [`init_stream`] upgrades it.
+/// version that lacks some of [`STREAM_SUBJECTS`], direct gets, the republishing of inbox messages or a duplicate
+/// window of [`DUPLICATE_WINDOW`] is returned with a warning: [`init_stream`] upgrades it.
 pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = js
         .get_or_create_stream(hub::stream_config())
@@ -273,11 +278,21 @@ pub async fn ensure_stream(js: &jetstream::Context) -> Result<stream::Stream> {
              consumers; `ants init` as the human sets it up"
         );
     }
+    let config = &stream.cached_info().config;
+    let window = hub::duplicate_window(config);
+    if config.duplicate_window < window {
+        tracing::warn!(
+            "stream {STREAM} drops repeated message ids for only {}, so a message kept in a leaf's outbox can land \
+             twice; `ants init` as the human widens the window to {}",
+            ants_proto::duration::format(config.duplicate_window),
+            ants_proto::duration::format(window)
+        );
+    }
     Ok(stream)
 }
 
-/// Create the `ANTS` stream, or add the subjects an older version did not capture, allow direct gets and republish
-/// inbox messages. Needs the human's credentials.
+/// Create the `ANTS` stream, or add the subjects an older version did not capture, allow direct gets, republish
+/// inbox messages and widen the duplicate window. Needs the human's credentials.
 pub async fn init_stream(js: &jetstream::Context) -> Result<stream::Stream> {
     let stream = ensure_stream(js).await?;
     let mut config = stream.cached_info().config.clone();
@@ -461,7 +476,8 @@ pub async fn publish(js: &jetstream::Context, envelope: &Envelope) -> Result<Sto
 /// Publish `value` as JSON to `subject` in the hub's stream and wait until it is stored. When no stream answers (the
 /// leaf node's uplink is down) or none answers in time, store it in the leaf node's outbox instead, under
 /// [`subject::outbox`], for the hub to source once the uplink is back. Both copies carry `msg_id`, so the hub's stream
-/// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window.
+/// keeps one if the first publish did land after all, as long as the second arrives within its duplicate window
+/// ([`DUPLICATE_WINDOW`]).
 pub async fn store<T: serde::Serialize>(
     js: &jetstream::Context,
     subject: String,
