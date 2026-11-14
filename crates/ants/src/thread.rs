@@ -534,6 +534,11 @@ async fn last(js: &jetstream::Context, user: &UserId) -> Result<ThreadId> {
     latest.map(|e| e.thread_id).ok_or_else(|| anyhow!("no message to or from {user} in the stream, so no last thread"))
 }
 
+/// The latest message of each thread `user` took part in ([`own_subjects`]) in the last [`RECENT`], most recent first.
+pub async fn recent_threads(js: &jetstream::Context, user: &UserId) -> Result<Vec<Entry>> {
+    recent(js, user, window(RECENT)).await
+}
+
 /// The latest message of each thread `user` took part in ([`own_subjects`]) stored from `start` on, most recent first.
 async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::DeliverPolicy) -> Result<Vec<Entry>> {
     let mut parser = Parser::default();

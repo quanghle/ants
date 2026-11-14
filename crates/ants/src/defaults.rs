@@ -19,7 +19,7 @@ pub fn parse() -> Result<Cli> {
 }
 
 /// The config file `ANTS_CONFIG` names, else `~/.ants/config.toml`.
-fn path() -> Result<PathBuf> {
+pub(crate) fn path() -> Result<PathBuf> {
     match std::env::var_os(config::ENV) {
         Some(path) if !path.is_empty() => Ok(path.into()),
         _ => config::default_path(),
