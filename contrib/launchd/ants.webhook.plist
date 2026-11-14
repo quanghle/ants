@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: the webhook ingress (`ants webhook serve`), on the hub machine behind its TLS-terminating reverse proxy.
+     scripts/install-units.sh --webhook fills in the @...@ placeholders and installs it as
+     ~/Library/LaunchAgents/ants.webhook.plist. Until ants.nats listens, requests answer 503 and the ingress retries
+     the connection. Secrets come from secret_file entries of the config file. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.webhook</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@ANTS@</string>
+		<string>webhook</string>
+		<string>serve</string>
+		<string>--config</string>
+		<string>@WEBHOOK_CONFIG@</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>NO_COLOR</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/webhook.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/webhook.log</string>
+</dict>
+</plist>

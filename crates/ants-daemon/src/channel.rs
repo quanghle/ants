@@ -6,7 +6,7 @@
 //! stream sequence of the last post shown is kept per thread in the sessions bucket, so a restarted daemon goes on from
 //! there. The reply is posted on the same thread, spending one of its turns.
 //!
-//! A post of a human that @mentions nobody goes to the channel's messenger instead, to triage: its answer @mentions
+//! A post of a human or a webhook that @mentions nobody goes to the channel's messenger instead, to triage: its answer @mentions
 //! the members the post is relevant to, which wakes them ([`triage_prompt`]). Who is a human is the daemon's
 //! [`crate::humans::Registry`]'s to say.
 
@@ -124,12 +124,13 @@ pub enum Wake {
     Skip,
     /// An answer: the post @mentions the ant, a member.
     Mentioned,
-    /// A triage: the post is a human's, mentions nobody, and the ant is the channel's messenger.
+    /// A triage: the post is a human's or a webhook's, mentions nobody, and the ant is the channel's messenger.
     Triage,
 }
 
 /// What `post` asks of `ant`, given the entry of its channel and the `humans`: a prompt only when it @mentions the
-/// ant, a member, or when the ant is the channel's messenger and it is a post of a human that mentions nobody;
+/// ant, a member, or when the ant is the channel's messenger and it is a post of a human or a webhook that mentions
+/// nobody;
 /// never for the ant's own.
 pub fn wake(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost, humans: &Humans) -> Wake {
     let Some(entry) = entry else { return Wake::Skip };
@@ -241,7 +242,7 @@ pub fn resume_note(channel: &ChannelId, thread: &ThreadId, left: u32) -> String 
     )
 }
 
-/// The prompt of the channel's messenger for `post`, a post of a human that mentions nobody, after the `context` of
+/// The prompt of the channel's messenger for `post`, a post of a human or a webhook that mentions nobody, after the `context` of
 /// its thread: the [`TRIAGE_RULES`], and the members of `entry` as `roster` shows them. `left` is the turns the thread
 /// keeps after the answer.
 pub fn triage_prompt(
@@ -254,7 +255,8 @@ pub fn triage_prompt(
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    text.push_str(&format!("[ants] Post from {} mentioning nobody:\n{}\n\n", post.from, post.text));
+    let kind = if post.webhook { " (a webhook)" } else { "" };
+    text.push_str(&format!("[ants] Post from {}{kind} mentioning nobody:\n{}\n\n", post.from, post.text));
     text.push_str(TRIAGE_RULES);
     text.push_str(&format!("\n\n[ants] Members of #{channel}:\n"));
     if entry.members.is_empty() {
@@ -464,6 +466,9 @@ mod tests {
         assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("alice", "the build")), Wake::Triage, "any human's");
         assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("bob", "the build")), Wake::Skip, "bob is no human");
         assert_eq!(wakes(&p("dev-b"), Some(&entry), &post("dev-a", "@alice the build")), Wake::Skip, "a human");
+        let hook = post("github", "@dev-a push").from_webhook(Vec::new());
+        assert_eq!(wakes(&p("dev-b"), Some(&entry), &hook), Wake::Triage, "a webhook's");
+        assert_eq!(wakes(&p("dev-a"), Some(&entry), &hook), Wake::Skip, "its text mentions nobody");
     }
 
     #[test]

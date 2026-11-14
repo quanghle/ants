@@ -115,9 +115,10 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants add NAME` | Lists an ant in the config file and gives it credentials whose seed never leaves the machine (`--jwt`, `--enroll`); see [Adding an ant](#adding-an-ant). |
 | `ants enroll list` / `approve NAME` / `reject NAME` | On the machine holding the account key: lists the enrollment requests of `ants add --enroll`, signs one or refuses it. |
 | `ants harness check` / `prompt TEXT` | Talks to a harness directly, without NATS. |
-| `ants auth init` / `user NAME [--human] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` | Issues the team's operator and account, ant or human credentials (or with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, and leaf uplink credentials. |
+| `ants auth init` / `user NAME [--human \| --webhook] [--public-key KEY]` / `enroll NAME` / `leaf MACHINE` | Issues the team's operator and account, ant, human or webhook credentials (`--webhook` with `--to ANT` or `--channel CHANNEL`; with `--public-key`, only the JWT of a key generated elsewhere), enrollment credentials, and leaf uplink credentials. |
 | `ants leaf config MACHINE` / `outbox MACHINE` | Writes the machine's leaf node configuration; sets up its store-and-forward outbox. |
 | `ants bridge serve` / `connect URL` | Carries a leaf uplink over plain HTTPS where WebSocket is blocked. |
+| `ants webhook serve` | Takes events from outside services over HTTP and delivers each to the ant or channel its webhook names (see [Webhooks](#webhooks)). |
 | `ants mcp` | Bridges stdio to a daemon's MCP socket; the daemon configures it for harnesses without HTTP MCP. |
 
 Every command takes `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`) and
@@ -433,6 +434,8 @@ An uplink through a private Dev Tunnel (`--uplink nats-leaf://127.0.0.1:7422`) a
 `devtunnel.log` on macOS), authorized by the CLI login of the user (`devtunnel user login -g -d`) or, with
 `--devtunnel-token FILE`, by a connect token read from FILE at each start. Both expire; renewal is in
 docs/transport.md, "`devtunnel connect` as a service". Other tunnels, such as `ants bridge connect`, need a service of their own.
+On the hub, `--webhook` adds a service running `ants webhook serve --config ~/.ants/webhooks.toml` (`--webhook-config
+FILE` names another; `ants.webhook`, `ants-webhook`; log `webhook.log` on macOS), see [Webhooks](#webhooks).
 
 ## Roster
 
@@ -679,7 +682,7 @@ This agent is the messenger of an ants team. It routes each request instead of d
 4. When no ant has the capability, say so and name the capabilities there are.
 ```
 
-In channels the messenger triages humans' posts that @mention nobody (see Channel delivery).
+In channels the messenger triages the posts of humans and webhooks that mention nobody (see Channel delivery).
 
 `route` picks deterministically: the first ant by name with the tag, so the same roster always routes the same
 way; `list_ants` and `ask_agent` reach any other. Routed requests follow the thread's turn budget like `ask_agent`
@@ -749,7 +752,8 @@ ants watch 'ants.chan.>'                       # every channel, live
 warns about a mention of an ant that is not a member, which wakes nobody. An agent's post that @mentions nobody wakes
 nobody.
 
-**Messenger triage.** A post of any human that @mentions nobody goes to the channel's messenger: the ant
+**Messenger triage.** A post of any human or webhook (see [Webhooks](#webhooks)) that mentions nobody goes to the
+channel's messenger: the ant
 `--messenger` names, else the default ant `messenger` (`ants channel list` shows `messenger (default)`, and
 `ants channel set --default-messenger` goes back to it). The messenger decides which members the post concerns and
 wakes them by @mentioning them in a post on the thread. The messenger need not be a member.
@@ -815,13 +819,85 @@ so the members it @mentions, and later posts, go on from there. The channel is k
 Replies racing each other on one thread may overshoot the budget slightly, but fan-out does not multiply it. Spending
 caps apply as to inbox messages.
 
-A post of any human (`human` or one `ants_humans` lists) that @mentions nobody prompts the channel's messenger instead:
+A post of any human (`human` or one `ants_humans` lists) or webhook (a post carrying `"webhook": true`, see
+[Webhooks](#webhooks)) that mentions nobody prompts the channel's messenger instead:
 the ant its entry assigns, or else `messenger` (built in or configured), a member or not. Its prompt adds the triage
 rules of ants and lists the channel's members with their capabilities and `whoami` from the roster, members missing from
 the roster as offline; the messenger's own instructions add to the rules. It answers on the post's thread with a short
 post that @mentions the members the post is relevant to, saying briefly why, or says none are and mentions nobody; it
 does not answer the request itself. The answer goes on `ants.chan.<channel>.<messenger>` and spends a turn like any
 agent's post. Its mentions wake members only: a mention of a non-member stays in the post's `mentions` but wakes nobody.
+
+## Webhooks
+
+`ants webhook serve` takes events from outside services (CI, monitoring, GitHub) over HTTP and delivers each to one
+ant's inbox or one channel, on a new thread. Each `[[webhook]]` of `~/.ants/webhooks.toml` (`--config FILE`) is its
+own NATS user, sending as itself and only to the destination its credentials allow; the request cannot choose another.
+The server speaks plain HTTP on `127.0.0.1:8424` (`listen`, or `--listen`), for the TLS-terminating reverse proxy of
+the hub (Caddy: `handle /hooks/* { reverse_proxy 127.0.0.1:8424 }`), and takes `POST /hooks/<webhook>` (`path`).
+
+```toml
+# ~/.ants/webhooks.toml
+# listen = "127.0.0.1:8424"
+# path = "/hooks"
+# nats = "nats://127.0.0.1:4222"         # else --nats; connect to the hub directly, not through a leaf node
+# js_domain = "hub"                      # else --js-domain
+
+[[webhook]]
+name = "github"                          # POST /hooks/github, sending as the user github
+creds = "~/.config/ants/auth/github.creds"   # from `ants auth user github --webhook --to dev-a`
+auth = "hmac-sha256"                     # X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body>
+secret_file = "~/.ants/github.secret"    # mode 0600; or secret_env = "VAR"
+id = "header:X-GitHub-Delivery"          # or "json:/pointer", default "body-sha256"
+ant = "dev-a"
+owner = "alice"                          # the threads' owner, a human; default none
+text = "GitHub {header:X-GitHub-Event} on {json:/repository/full_name}\n\n{body}"
+
+[[webhook]]
+name = "alerts"                          # `ants auth user alerts --webhook --channel ops`
+creds = "alerts.creds"                   # relative to this file's directory
+auth = "bearer"                          # Authorization: Bearer <secret>
+secret_env = "ANTS_ALERTS_TOKEN"
+id = "json:/alert/id"
+channel = "ops"
+# mention = ["dev-a"]                    # wake these members; or broadcast = true: every member
+```
+
+- **Authentication** comes first: `hmac-sha256` checks the signature in `signature_header` (default
+  `X-Hub-Signature-256`, `sha256=<hex>`) against the raw body, `bearer` the `Authorization` header, both in constant
+  time. A failure answers 401 and touches nothing. The secret comes from `secret_env` or a `secret_file` only its
+  owner may read.
+- **Answers**: 202 with `{"thread": ..., "duplicate": false}` once the hub's stream stored the event; 200 with
+  `"duplicate": true` for an event already delivered; 503 with `Retry-After` while NATS is unreachable or does not
+  store it, as nothing is kept locally; 400 for a body the `id` or `text` cannot read (not JSON, no id), 413 past
+  256 KiB, 415 for a `{body}` that is no UTF-8 text, 404 for an unknown webhook, 405 for a method other than
+  `POST`. Requests are limited to 15 s and to 64 at once (503 beyond).
+- **Retries** deliver nothing new for 7 days: the event's id is kept in the KV bucket `ants_webhooks` (`ants init`
+  creates it) under the webhook's name, and the stream also drops a repeated `Nats-Msg-Id`
+  `webhook.<webhook>.<hash>` for 2 minutes.
+- **Text**: `text` is a template, default `[webhook {webhook}] {id}` and the body. `{body}`, `{id}`, `{webhook}`,
+  `{header:Name}` and `{json:/pointer}` (a JSON string unquoted, a missing field empty) are replaced; `{{` and `}}`
+  are literal braces. The text is untrusted input for the ant's prompt: give a webhook a destination whose tools
+  and approvals suit what outsiders can write.
+- **Mentions** are never read from the event. A channel post mentions nobody by default, so the channel's
+  messenger triages it, as a human's post (see [Channels](#channels)); `mention` lists the members it wakes, and
+  `broadcast = true` mentions every member of the channel when the event arrives.
+- **Threads**: each event starts a thread, owned by `owner` if set. A webhook is no human: its posts never renew the
+  turn budget, and escalations on its threads go to `owner`, else the daemon's default human. An ant's reply to a
+  webhook's message goes to the webhook's inbox, which nobody reads; a channel's thread keeps the conversation.
+
+Credentials: `ants auth user NAME --webhook` with `--to ANT` or `--channel CHANNEL` (repeatable) issues a webhook's
+(`Permissions::for_webhook`): it publishes only to its destinations and its own keys in `ants_webhooks`, reads only
+those keys and its channels' entries (for `broadcast`), and writes neither channels nor humans. The name `human` is
+refused; `ants webhook serve` refuses credentials naming another user, a human's, or ones without the configured
+destination. A webhook joins no roster and needs no `ants_humans` entry; a human registered under the same name would
+make its posts a human's.
+
+```sh
+ants auth user github --webhook --to dev-a --js-domain hub   # on the machine holding the team directory
+ants init                                                   # once, as a human: creates ants_webhooks
+ants webhook serve                                          # or scripts/install-units.sh --webhook, see Services
+```
 
 ## Ant memory
 
@@ -941,10 +1017,11 @@ ants auth init                         # operator + account keys and server.conf
 ants auth user human                   # ~/.config/ants/auth/human.creds, for the CLI
 ants auth user alice --human           # alice.creds: another human, with the same rights
 ants auth user dev-a                   # copy to the machine that runs dev-a
+ants auth user github --webhook --to dev-a   # github.creds: a webhook, sending to dev-a only (see Webhooks)
 ```
 
 Add `include "server.conf"` to the nats-server configuration (with JetStream enabled), run `ants init` once
-with a human's credentials to create the stream and the roster, sessions, attempts, channels, humans and chains buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
+with a human's credentials to create the stream and the roster, sessions, attempts, channels, humans, chains and webhooks buckets, then pass `--creds` (or `ANTS_CREDS`) to every `ants` command.
 Credentials carry their permissions in the CONNECT line, past the 4 KB nats-server allows by default, so `server.conf`
 sets `max_control_line: 16384`; add that line to a `server.conf` written before channels.
 `ANTS_AUTH_DIR` (or `--dir`) moves the team directory. Keep it private: the seeds in it sign every credential.
@@ -1217,7 +1294,7 @@ allow-list in `deny.toml`, a security advisory, a yanked crate or a source other
 |---|---|
 | `crates/ants-proto` | Wire contract: ids, subjects, envelope, turn budget, permissions; no I/O |
 | `crates/ants-daemon` | NATS/JetStream bus, ACP harness pool, inbox loop, tool permissions, MCP server |
-| `crates/ants` | The `ants` binary: CLI, `ants daemon`, `ants auth`, `ants leaf` |
+| `crates/ants` | The `ants` binary: CLI, `ants daemon`, `ants auth`, `ants leaf`, `ants bridge`, `ants webhook` |
 | `crates/ants-test-support` | Test helpers (dev-only): tools on PATH, a throwaway nats-server |
 | `contrib/` | launchd and systemd unit templates, the agent skill for the CLI |
 | `scripts/` | `install-units.sh` (services), `footprint.sh` (memory check) |

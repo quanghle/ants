@@ -1,0 +1,18 @@
+# ants: the webhook ingress (`ants webhook serve`), on the hub machine behind its TLS-terminating reverse proxy.
+# User unit: scripts/install-units.sh --webhook fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user. Until ants-nats listens, requests answer 503 and the ingress retries the connection.
+# Secrets come from secret_file entries of the config file.
+
+[Unit]
+Description=ants: webhook ingress
+Wants=ants-nats.service
+After=ants-nats.service
+
+[Service]
+ExecStart="@ANTS@" webhook serve --config "@WEBHOOK_CONFIG@"
+Environment=NO_COLOR=1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

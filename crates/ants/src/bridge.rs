@@ -328,7 +328,7 @@ fn session_id() -> String {
 }
 
 /// Equal, in time independent of where they differ.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
