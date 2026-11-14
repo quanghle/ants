@@ -855,6 +855,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_human_creates_and_reads_its_own_notification_consumer() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let (_, h_js) = server.connect(&UserId::human()).await;
+        bus::init_stream(&h_js).await.unwrap();
+        let config = |of: &UserId| jetstream::consumer::pull::Config {
+            durable_name: Some(ants_proto::notify_consumer(of)),
+            filter_subjects: vec![subject::ALL_APPROVAL_REQUESTS.to_owned(), subject::inbox_of(of)],
+            ..Default::default()
+        };
+        let (_, a_js) = server.connect_as(&alice, Role::Human).await;
+        let a_stream = a_js.get_stream(STREAM).await.unwrap();
+        let mine: jetstream::consumer::PullConsumer = a_stream.create_consumer(config(&alice)).await.unwrap();
+        let one =
+            jetstream::consumer::pull::Config { filter_subjects: vec![subject::inbox_of(&alice)], ..config(&alice) };
+        a_stream.create_consumer::<jetstream::consumer::pull::Config>(one).await.unwrap();
+        let (_, d_js) = server.connect(&dev_a).await;
+        bus::publish_json(
+            &d_js,
+            subject::inbox(&alice, &dev_a),
+            &Envelope::new(dev_a.clone(), alice.clone(), "hi"),
+            None,
+        )
+        .await
+        .unwrap();
+        let msg = mine.messages().await.unwrap().next().await.unwrap().unwrap();
+        msg.ack().await.unwrap();
+
+        let (_, b_js) = server.connect_as(&bob, Role::Human).await;
+        let b_stream = b_js.get_stream(STREAM).await.unwrap();
+        assert!(b_stream.create_consumer::<jetstream::consumer::pull::Config>(config(&alice)).await.is_err());
+        let d_stream = d_js.get_stream_no_info(STREAM).await.unwrap();
+        assert!(d_stream.create_consumer::<jetstream::consumer::pull::Config>(config(&dev_a)).await.is_err());
+    }
+
+    #[tokio::test]
     async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
         let Some(server) = Server::start() else { return };
         let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));

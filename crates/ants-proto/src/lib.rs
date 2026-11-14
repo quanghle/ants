@@ -573,6 +573,13 @@ pub fn inbox_consumer(user: &UserId) -> String {
     format!("inbox-{user}")
 }
 
+/// Durable JetStream consumer `ants webhook serve` takes a human's notifications from: the tool requests of every ant
+/// and the human's own inbox, each delivered to one process listing the human, which pushes it to the human's
+/// notification sinks. Only the human's credentials create it.
+pub fn notify_consumer(human: &UserId) -> String {
+    format!("notify-{human}")
+}
+
 /// Prefix of the reply subjects a user's connections use, so its credentials need not let it read others' replies.
 pub fn inbox_prefix(user: &UserId) -> String {
     format!("_INBOX.{user}")
@@ -849,9 +856,16 @@ impl Permissions {
         ]);
         let mut subscribe = vec![format!("{}.>", inbox_prefix(user))];
         if role.is_human() {
+            let notify = notify_consumer(user);
             publish.extend([
                 // Stream info lists every subject stored (who messages whom), so only a human may ask for it.
                 format!("$JS.API.STREAM.INFO.{STREAM}"),
+                // The consumer of its notifications: one filter puts it in the subject, several leave it out.
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}"),
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}.>"),
+                format!("$JS.API.CONSUMER.INFO.{STREAM}.{notify}"),
+                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notify}"),
+                format!("$JS.ACK.{STREAM}.{notify}.>"),
                 format!("$JS.API.STREAM.CREATE.{STREAM}"),
                 // Creating a KV bucket first looks up the account's JetStream limits.
                 "$JS.API.INFO".to_owned(),

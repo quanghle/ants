@@ -8,6 +8,7 @@ mod enroll;
 mod humans;
 mod inbox;
 mod leaf;
+mod notify;
 mod outbox;
 mod revoke;
 mod roster;
@@ -362,7 +363,9 @@ enum ChannelCommand {
 #[derive(Subcommand)]
 enum WebhookCommand {
     /// On the hub, behind the TLS-terminating reverse proxy: take `POST <path>/<webhook>` for each webhook of the
-    /// config file and deliver its events, each webhook as itself with its own credentials.
+    /// config file and deliver its events, each webhook as itself with its own credentials. Also push the tool
+    /// requests and escalations of each `[[human]]` to its ntfy, Slack or Telegram, with approve and reject links
+    /// answered at `<path>/_approval`.
     Serve {
         /// The webhooks' config file (default: ~/.ants/webhooks.toml).
         #[arg(long)]
@@ -1037,6 +1040,9 @@ async fn main() -> Result<()> {
             let nats = config.nats.clone().unwrap_or_else(|| cli.nats.clone());
             let domain = config.js_domain.clone().or_else(|| domain.cloned());
             tracing::info!("webhooks on http://{addr}{}/<webhook>", config.path);
+            if config.links.is_some() {
+                tracing::info!("approval links on http://{addr}{}/_approval", config.path);
+            }
             webhook::serve(config, &nats, domain.as_ref(), listener).await
         }
         Command::Bridge(BridgeCommand::Connect { url, listen, token, token_file, headers, proxy }) => {

@@ -11,6 +11,9 @@
 //!   names, never taken from the event;
 //! - answers 202 once the hub's stream stored it, else 503 with `Retry-After`: nothing is kept here.
 //!
+//! Each `[[human]]` is notified of tool requests and escalations through its sinks, with approve and reject links
+//! answered at `<path>/_approval` ([`crate::notify`]).
+//!
 //! The server speaks plain HTTP, for a TLS-terminating reverse proxy in front of it.
 
 use std::collections::HashMap;
@@ -40,6 +43,8 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{OnceCell, Semaphore, mpsc};
 use tokio::task::JoinSet;
+
+use crate::notify;
 
 /// Where `ants webhook serve` listens unless told otherwise: loopback, behind the reverse proxy.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8424";
@@ -99,8 +104,13 @@ struct File {
     path: Option<String>,
     nats: Option<String>,
     js_domain: Option<JsDomain>,
+    public_url: Option<String>,
+    action_secret_env: Option<String>,
+    action_secret_file: Option<PathBuf>,
     #[serde(default, rename = "webhook")]
     webhooks: Vec<Entry>,
+    #[serde(default, rename = "human")]
+    humans: Vec<notify::HumanEntry>,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +147,10 @@ pub struct Config {
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
     pub webhooks: Vec<Webhook>,
+    /// The humans to notify.
+    pub humans: Vec<notify::Human>,
+    /// Signs and checks approval links, with `public_url`.
+    pub links: Option<notify::Links>,
 }
 
 /// One `[[webhook]]`.
@@ -184,6 +198,9 @@ impl Config {
         for hook in &config.webhooks {
             hook.check_creds().with_context(|| format!("webhook config {}", path.display()))?;
         }
+        for human in &config.humans {
+            human.check_creds().with_context(|| format!("webhook config {}: human {}", path.display(), human.name))?;
+        }
         Ok(config)
     }
 
@@ -201,8 +218,8 @@ impl Config {
         if !path.is_empty() && !path.starts_with('/') {
             bail!("webhook config {shown}: path {path:?} must start with /");
         }
-        if file.webhooks.is_empty() {
-            bail!("webhook config {shown}: no [[webhook]] entries: nothing to serve");
+        if file.webhooks.is_empty() && file.humans.is_empty() {
+            bail!("webhook config {shown}: no [[webhook]] or [[human]] entries: nothing to serve");
         }
         if let Some(url) = &file.nats {
             bus::check_url(url).with_context(|| format!("webhook config {shown}"))?;
@@ -217,7 +234,41 @@ impl Config {
                 .with_context(|| format!("webhook config {shown}: webhook {name}"))?;
             webhooks.push(hook);
         }
-        Ok(Self { listen: file.listen, path, nats: file.nats, js_domain: file.js_domain, webhooks })
+        let mut humans: Vec<notify::Human> = Vec::with_capacity(file.humans.len());
+        for entry in file.humans {
+            let human = notify::Human::from_entry(entry, &resolve, &env)
+                .with_context(|| format!("webhook config {shown}: human"))?;
+            let name = &human.name;
+            if humans.iter().any(|h| &h.name == name) {
+                bail!("webhook config {shown}: human {name} is listed twice");
+            }
+            if webhooks.iter().any(|w| &w.name == name) {
+                bail!("webhook config {shown}: {name} is both a webhook and a human");
+            }
+            humans.push(human);
+        }
+        let secret = match (&file.action_secret_env, &file.action_secret_file) {
+            (Some(var), None) => Some(
+                env(var).with_context(|| format!("webhook config {shown}: environment variable {var} is not set"))?,
+            ),
+            (None, Some(file)) => Some(read_secret(&resolve(file)).with_context(|| format!("webhook config {shown}"))?),
+            (None, None) => None,
+            _ => bail!("webhook config {shown}: give at most one of action_secret_env and action_secret_file"),
+        };
+        let links = match (file.public_url, secret) {
+            (None, None) => None,
+            (Some(_), _) | (_, Some(_)) if humans.is_empty() => {
+                bail!("webhook config {shown}: public_url and the action secret go with [[human]] entries")
+            }
+            (Some(url), Some(secret)) => {
+                Some(notify::Links::new(&url, secret.trim()).with_context(|| format!("webhook config {shown}"))?)
+            }
+            (Some(_), None) => {
+                bail!("webhook config {shown}: public_url needs action_secret_file or action_secret_env")
+            }
+            (None, Some(_)) => bail!("webhook config {shown}: the action secret needs public_url"),
+        };
+        Ok(Self { listen: file.listen, path, nats: file.nats, js_domain: file.js_domain, webhooks, humans, links })
     }
 }
 
@@ -308,7 +359,7 @@ pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destin
     Ok(())
 }
 
-fn read_secret(path: &Path) -> Result<String> {
+pub(crate) fn read_secret(path: &Path) -> Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -517,20 +568,29 @@ struct Server {
     /// `<path>/`, before each webhook's name.
     prefix: String,
     hooks: HashMap<String, Arc<Hook>>,
+    /// Answers approval links, at `<path>/_approval`.
+    answers: Option<notify::Answers>,
     in_flight: Arc<Semaphore>,
 }
 
-/// Serve the webhooks of `config` on `listener` until a webhook's credentials fail. Each webhook connects to `nats`
-/// as itself; until it is connected, its requests answer 503.
+/// Serve the webhooks of `config` on `listener`, and notify its humans, until a webhook's or a human's credentials
+/// fail. Each webhook and human connects to `nats` as itself; until it is connected, its requests answer 503.
 pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, listener: TcpListener) -> Result<()> {
     bus::check_url(nats)?;
     let hooks = config.webhooks.into_iter().map(|config| {
         let hook = Hook { config, bus: OnceCell::new(), last_warned: Mutex::default() };
         (hook.config.name.to_string(), Arc::new(hook))
     });
+    let humans: Vec<_> = config.humans.into_iter().map(|human| Arc::new(notify::Notified::new(human))).collect();
+    let links = config.links.map(Arc::new);
+    let answers = links.clone().map(|links| notify::Answers {
+        humans: humans.iter().map(|human| (human.config.name.clone(), human.clone())).collect(),
+        links,
+    });
     let server = Arc::new(Server {
         prefix: format!("{}/", config.path),
         hooks: hooks.collect(),
+        answers,
         in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
     });
     let mut tasks = JoinSet::new();
@@ -540,6 +600,15 @@ pub async fn serve(config: Config, nats: &str, js_domain: Option<&JsDomain>, lis
         tasks.spawn(async move {
             if let Err(e) = connect(&hook, &nats, domain.as_ref()).await {
                 let _ = failed_tx.send(e.context(format!("webhook {}", hook.config.name)));
+            }
+        });
+    }
+    for human in humans {
+        let (links, nats, domain, failed_tx) = (links.clone(), nats.to_owned(), js_domain.cloned(), failed_tx.clone());
+        tasks.spawn(async move {
+            let name = human.config.name.clone();
+            if let Err(e) = notify::run(human, links, nats, domain).await {
+                let _ = failed_tx.send(e.context(format!("human {name}")));
             }
         });
     }
@@ -695,7 +764,14 @@ impl Server {
 
     async fn accept(&self, request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Refusal> {
         let (parts, body) = request.into_parts();
-        let hook = parts.uri.path().strip_prefix(&self.prefix).and_then(|name| self.hooks.get(name));
+        let name = parts.uri.path().strip_prefix(&self.prefix);
+        if let Some(answers) = self.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
+            if let Err(e) = read_body(body, false).await {
+                return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
+            }
+            return Ok(answers.answer(&parts.method, parts.uri.query()).await);
+        }
+        let hook = name.and_then(|name| self.hooks.get(name));
         let refused = match hook {
             None => Some(Refusal(StatusCode::NOT_FOUND, "no such webhook".to_owned())),
             Some(_) if parts.method != Method::POST => {
@@ -828,6 +904,7 @@ pub(crate) mod tests {
     use ants_proto::{ChannelEntry, Permissions, STREAM};
     use futures::TryStreamExt as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -895,6 +972,39 @@ pub(crate) mod tests {
         assert!(error("nats = \"nats://hub:4222\"\n").contains("nothing to serve"));
         let err = error(&format!("nats = \"nats://dev:secret@hub\"\n{HOOK}ant = \"dev-a\"\n"));
         assert!(err.contains("NATS URL nats://***@hub") && !err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn humans_are_notified_and_answer_links_with_public_url_and_the_action_secret() {
+        const ALICE: &str = "[[human]]\nname = \"alice\"\n[[human.notify]]\nkind = \"ntfy\"\ntopic = \"a\"\n";
+        let env = |name: &str| match name {
+            "ACTION_SECRET" => Some("0123456789abcdef-secret\n".to_owned()),
+            "HOOK_SECRET" => Some("s3cret".to_owned()),
+            _ => None,
+        };
+        let parse = |text: &str| Config::parse(text, Path::new("/etc/ants/webhooks.toml"), Path::new("/home/q"), env);
+        let error = |text: &str| format!("{:#}", parse(text).err().expect("an error"));
+        let config = parse(ALICE).unwrap();
+        assert_eq!((config.webhooks.len(), config.humans.len(), config.links.is_some()), (0, 1, false));
+        let linked =
+            format!("public_url = \"https://hub.example/hooks\"\naction_secret_env = \"ACTION_SECRET\"\n{ALICE}");
+        assert!(parse(&linked).unwrap().links.is_some());
+
+        let url = "public_url = \"https://hub.example/hooks\"\n";
+        let secret = "action_secret_env = \"ACTION_SECRET\"\n";
+        for (text, why) in [
+            (format!("{url}{ALICE}"), "public_url needs action_secret_file"),
+            (format!("{secret}{ALICE}"), "the action secret needs public_url"),
+            (format!("{url}{secret}{HOOK}ant = \"dev-a\"\n"), "go with [[human]] entries"),
+            (format!("{url}{secret}action_secret_file = \"s\"\n{ALICE}"), "at most one of action_secret_env"),
+            (format!("public_url = \"https://hub.example/hooks?x=1\"\n{secret}{ALICE}"), "no user, password or query"),
+            (format!("{ALICE}{ALICE}"), "human alice is listed twice"),
+            (format!("{HOOK}ant = \"dev-a\"\n{}", ALICE.replace("alice", "github")), "both a webhook and a human"),
+            ("[[human]]\nname = \"alice\"\n".to_owned(), "nowhere to send"),
+        ] {
+            let e = error(&text);
+            assert!(e.contains(why), "{text}: {e}");
+        }
     }
 
     #[test]
@@ -1183,5 +1293,148 @@ pub(crate) mod tests {
         let down = request(addr, "POST", "/hooks/github", &[("Authorization", "Bearer s3cret")], b"x").await;
         assert_eq!(down.status, 503);
         assert!(down.headers.contains(&format!("retry-after: {RETRY_AFTER}")), "{}", down.headers);
+    }
+
+    /// A notification service on loopback that takes every `POST`, handing over its path and JSON body.
+    async fn sink() -> (SocketAddr, mpsc::UnboundedReceiver<(String, Value)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                    let tx = tx.clone();
+                    async move {
+                        let path = request.uri().path().to_owned();
+                        let body = request.into_body().collect().await.unwrap().to_bytes();
+                        let _ = tx.send((path, serde_json::from_slice(&body).unwrap()));
+                        Ok::<_, Infallible>(reply(StatusCode::OK, "{}"))
+                    }
+                });
+                tokio::spawn(
+                    hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), service),
+                );
+            }
+        });
+        (addr, rx)
+    }
+
+    async fn next(posts: &mut mpsc::UnboundedReceiver<(String, Value)>) -> (String, Value) {
+        tokio::time::timeout(Duration::from_secs(10), posts.recv()).await.expect("a notification").unwrap()
+    }
+
+    fn private(path: &Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_human_is_notified_of_tool_requests_and_escalations_and_decides_on_a_link() {
+        let Some((server, js, _)) = hub().await else { return };
+        let (alice, dev_a) = (p("alice"), p("dev-a"));
+        let creds = server.creds_as(&alice, ants_proto::Role::Human);
+        let (action_secret, bot_token) = (server.dir().join("action.secret"), server.dir().join("bot.token"));
+        private(&action_secret, "0123456789abcdef-secret");
+        private(&bot_token, "123:abc");
+        let (sink, mut posts) = sink().await;
+        let config = server.dir().join("webhooks.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "public_url = \"https://hub.example/hooks\"\naction_secret_file = {action_secret:?}\n\
+                 [[human]]\nname = \"alice\"\ncreds = {creds:?}\n\
+                 [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice-ants\"\n\
+                 [[human.notify]]\nkind = \"telegram\"\nurl = \"http://{sink}\"\nchat = \"42\"\nsecret_file = {bot_token:?}\n"
+            ),
+        )
+        .unwrap();
+        let (_ingress, addr) = start(&config, &server.url).await;
+        let (_, own) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        let stream = own.get_stream(STREAM).await.unwrap();
+        let consumer = ants_proto::notify_consumer(&alice);
+        for _ in 0..100 {
+            if stream.consumer_info(&consumer).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let (_, ant) = server.connect(&dev_a).await;
+        let tool = ants_proto::ToolCall {
+            kind: "execute".to_owned(),
+            title: "cargo publish".to_owned(),
+            locations: Vec::new(),
+            input: None,
+        };
+        let options = vec![ants_proto::Verdict::AllowOnce, ants_proto::Verdict::AllowAlways];
+        let asked = ants_proto::ApprovalRequest::new(
+            dev_a.clone(),
+            ThreadId::generate(),
+            tool,
+            options,
+            Duration::from_secs(600),
+        );
+        ant.publish(asked.subject(), serde_json::to_vec(&asked).unwrap().into()).await.unwrap().await.unwrap();
+
+        let mut sent = HashMap::new();
+        for _ in 0..2 {
+            let (path, body) = next(&mut posts).await;
+            sent.insert(path, body);
+        }
+        let ntfy = &sent["/"];
+        assert_eq!(
+            (ntfy["topic"].as_str(), ntfy["title"].as_str()),
+            (Some("alice-ants"), Some("dev-a asks to run a tool"))
+        );
+        let telegram = &sent["/bot123:abc/sendMessage"];
+        assert_eq!(telegram["chat_id"], "42");
+        let link = |i: usize| {
+            let url = ntfy["actions"][i]["url"].as_str().unwrap();
+            assert_eq!(telegram["reply_markup"]["inline_keyboard"][0][i]["url"].as_str(), Some(url));
+            url.strip_prefix("https://hub.example").unwrap().to_owned()
+        };
+        let (approve, reject) = (link(0), link(2));
+        assert!(approve.starts_with("/hooks/_approval?") && approve.contains("verdict=allow_once"), "{approve}");
+
+        let shown = request(addr, "GET", &approve, &[], b"").await;
+        assert_eq!(shown.status, 200, "{}", shown.body);
+        assert!(shown.body.contains("cargo publish") && shown.body.contains("<form method=\"post\""), "{}", shown.body);
+        let decisions = |js: jetstream::Context| {
+            let subject = asked.decision_subject();
+            async move { stored::<ants_proto::ApprovalDecision>(&js, &subject).await }
+        };
+        assert!(decisions(js.clone()).await.is_empty(), "showing decides nothing");
+        let forged = approve.replace("verdict=allow_once", "verdict=allow_always");
+        assert_eq!(request(addr, "POST", &forged, &[], b"").await.status, 403);
+        assert_eq!(request(addr, "POST", "/hooks/_approval?ant=dev-a", &[], b"").await.status, 400);
+        assert_eq!(request(addr, "PUT", &approve, &[], b"").await.status, 405);
+
+        let approved = request(addr, "POST", &approve, &[], b"").await;
+        assert_eq!(approved.status, 200, "{}", approved.body);
+        let [decision] = &decisions(js.clone()).await[..] else { panic!("one decision") };
+        assert_eq!((decision.request_id, decision.verdict), (asked.id, ants_proto::Verdict::AllowOnce));
+        let late = request(addr, "POST", &reject, &[], b"").await;
+        assert_eq!(late.status, 409, "the first answer stands: {}", late.body);
+        assert_eq!(decisions(js.clone()).await.len(), 1);
+        let settled = request(addr, "GET", &reject, &[], b"").await;
+        assert!(settled.body.contains("Already answered") && !settled.body.contains("<form"), "{}", settled.body);
+
+        let plain = Envelope::new(dev_a.clone(), alice.clone(), "done");
+        ant.publish(plain.subject(), serde_json::to_vec(&plain).unwrap().into()).await.unwrap().await.unwrap();
+        let escalation =
+            ants_proto::Escalation::new(dev_a.clone(), plain.thread_id.clone(), ants_proto::EscalationReason::Asked);
+        let escalated =
+            Envelope::new(dev_a.clone(), alice.clone(), "which database?").with_escalation(Some(escalation));
+        ant.publish(escalated.subject(), serde_json::to_vec(&escalated).unwrap().into()).await.unwrap().await.unwrap();
+        let (path, body) = next(&mut posts).await;
+        assert_eq!(path, "/", "plain messages are not notified");
+        assert_eq!(body["title"], "dev-a escalates: asked on dev-a");
+        assert!(body["message"].as_str().unwrap().starts_with("which database?"), "{body}");
+        assert!(body.get("actions").is_none());
     }
 }
