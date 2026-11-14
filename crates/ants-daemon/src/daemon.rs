@@ -214,7 +214,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     )
     .with_instructions(config.instructions.clone())
     .with_mcp(mcp.servers());
-    let stream = bus::ensure_stream(&js).await?;
+    let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
     let webhooks = Webhooks::new(js.clone());
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
@@ -309,9 +309,9 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
 }
 
 /// The channels, and the posts to them through the ant's channel consumer.
-async fn channels(
+async fn channels<I>(
     js: &jetstream::Context,
-    stream: &jetstream::stream::Stream,
+    stream: &jetstream::stream::Stream<I>,
     ant: &UserId,
     in_hand: i64,
 ) -> Result<(Channels, jetstream::consumer::pull::Stream)> {

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, ThreadId, UserId,
@@ -486,7 +487,8 @@ struct Bus {
     client: async_nats::Client,
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
-    seen: kv::Store,
+    /// Without stream info, which would list the events of every webhook.
+    seen: DirectKv,
 }
 
 struct Hook {
@@ -565,17 +567,18 @@ async fn connect(hook: &Hook, nats: &str, js_domain: Option<&JsDomain>) -> Resul
     let (client, mut js) =
         bus::connect_retrying(nats, creds, js_domain, name, "ants-webhook", pending).await?.context("stopped")?;
     js.set_timeout(ACK_TIMEOUT);
+    let seen = DirectKv::new(&js, js_domain, WEBHOOKS_BUCKET).await?;
     let mut delay = Duration::from_secs(1);
-    let seen = loop {
-        match js.get_key_value(WEBHOOKS_BUCKET).await {
-            Ok(seen) => break seen,
-            Err(e) => {
-                tracing::warn!(webhook = %name, error = %e, retry_in = ?delay, "no bucket {WEBHOOKS_BUCKET} yet: `ants init` creates it");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
-            }
-        }
-    };
+    loop {
+        let error = match seen.exists(name).await {
+            Ok(true) => break,
+            Ok(false) => format!("no bucket {WEBHOOKS_BUCKET}"),
+            Err(e) => format!("{e:#}"),
+        };
+        tracing::warn!(webhook = %name, error, retry_in = ?delay, "no bucket {WEBHOOKS_BUCKET} yet: `ants init` creates it");
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
     tracing::info!(webhook = %name, to = ?hook.config.destination, "webhook ready");
     let _ = hook.bus.set(Bus { client, js, js_domain: js_domain.cloned(), seen });
     Ok(())
@@ -701,11 +704,10 @@ impl Hook {
         }
         let seen = serde_json::to_vec(&Seen { thread: thread.clone(), seq: ack.sequence })?;
         for attempt in 1..=3 {
-            match bus.seen.create(&key, seen.clone().into()).await {
+            match bus.seen.create(&key, seen.clone()).await {
                 Ok(_) => break,
-                Err(e) if e.kind() == kv::CreateErrorKind::AlreadyExists => break,
                 Err(e) => {
-                    tracing::warn!(webhook = %hook.name, error = %e, attempt, "recording a delivered event");
+                    tracing::warn!(webhook = %hook.name, error = format!("{e:#}"), attempt, "recording a delivered event");
                     tokio::time::sleep(Duration::from_millis(200 * attempt)).await;
                 }
             }
@@ -721,10 +723,7 @@ impl Hook {
             return Ok(());
         }
         let name = &self.config.name;
-        bus.seen
-            .put(webhook_marker_key(name), name.to_string().into())
-            .await
-            .context("putting the webhook's marker")?;
+        bus.seen.put(webhook_marker_key(name), name.to_string()).await.context("putting the webhook's marker")?;
         *self.marked.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
@@ -1057,7 +1056,7 @@ mod tests {
         let after = deliver(addr, "/hooks/github", &event, body).await;
         assert_eq!((after.status, after.json()["thread"].as_str()), (200, Some(thread.as_str())));
         let (_, own) = bus::connect(&server.url, Some(&creds), None, &github, "test").await.unwrap();
-        let seen = own.get_key_value(WEBHOOKS_BUCKET).await.unwrap();
+        let seen = DirectKv::new(&own, None, WEBHOOKS_BUCKET).await.unwrap();
         let hash = &HEXLOWER.encode(digest::digest(&digest::SHA256, b"d1").as_ref())[..ID_HASH_LEN];
         seen.delete(webhook_seen_key(&github, hash)).await.unwrap();
         let forgotten = request(addr, "POST", "/hooks/github", &event, body).await;
