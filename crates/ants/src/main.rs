@@ -176,8 +176,8 @@ enum Command {
     Cancel { ant: UserId, thread: ThreadId },
     /// Create the ANTS stream and the roster, sessions, attempts, channels, humans, chains, links, owners, webhooks,
     /// read and presence buckets on the server, or upgrade those an older version set up (stream subjects, direct gets, the
-    /// republishing of inbox messages, the owners bucket's duplicate window), keeping the rest of their settings. Needs
-    /// a human's credentials. Every other command run with them does the same on connecting.
+    /// republishing of inbox messages, the stream's and the owners bucket's duplicate windows), keeping the rest of
+    /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
     /// sees every request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
