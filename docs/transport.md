@@ -66,7 +66,7 @@ Clients connect to `wss://hub.example.com/nats` (`/nats`); leaves configured wit
 
 ## Client connections
 
-- Every `ants` command accepts `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`), and `--js-domain` (`ANTS_JS_DOMAIN`).
+- Every `ants` command accepts `--nats` (`ANTS_NATS_URL`, default `nats://127.0.0.1:4222`), `--creds` (`ANTS_CREDS`), and `--js-domain` (`ANTS_JS_DOMAIN`). Client URLs (`--nats`, `--hub`, `nats` in the daemon and webhook configs) carrying a user and password or a token are refused before connecting, as async-nats would connect without them; authentication uses `.creds` files. Leaf uplink URLs go to nats-server and are not checked.
 - `tls://` and `wss://` use `rustls` with platform root certificates. `SSL_CERT_FILE=/path/to/ca.pem` replaces the root store on direct client connections and `ants bridge connect`. Behind a local leaf, clients use `nats://127.0.0.1:4222` and private CA trust goes in `ants leaf config --ca-file`.
 - Direct clients preserve URL paths and query strings on WebSocket upgrades, send no custom HTTP headers, and ignore `HTTPS_PROXY` and `HTTP_PROXY`. HTTP `CONNECT` proxies require a local leaf node or `ants bridge connect`.
 - `ants add --enroll` and `ants enroll` use core NATS subjects (`ants.enroll.*`), which leaf uplinks exclude. Pass `--hub <hub-url>` to `ants add` on a leaf machine and `--nats <hub-url>` to `ants enroll` on the signing machine.

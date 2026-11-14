@@ -12,7 +12,7 @@ use ants_proto::{
     Role, SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, UserId,
     inbox_prefix, subject,
 };
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
 use async_nats::jetstream::context::{GetStreamErrorKind, PublishErrorKind, RequestErrorKind};
 use async_nats::jetstream::{self, kv, stream};
@@ -40,6 +40,7 @@ pub async fn connect(
     user: &UserId,
     name: &str,
 ) -> Result<(async_nats::Client, jetstream::Context)> {
+    check_url(url)?;
     let client = options(creds, user, name)
         .await?
         .connect(url)
@@ -57,7 +58,7 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// [`RETRY_FIRST`] and then twice as long each time up to [`RETRY_MAX`], with a warning each time. Once connected it
 /// waits the same way for JetStream to answer, as a leaf node that listens before its uplink has joined the hub
 /// answers JetStream requests with no responders or not at all. What another attempt cannot cure fails at once: an
-/// unreadable credentials file, a malformed URL, credentials the server rejects, a TLS error, a JetStream request the
+/// unreadable credentials file, a malformed URL or one carrying a user and password ([`check_url`]), credentials the server rejects, a TLS error, a JetStream request the
 /// credentials do not permit. None when `stop` completes first.
 pub async fn connect_retrying(
     url: &str,
@@ -67,6 +68,7 @@ pub async fn connect_retrying(
     name: &str,
     stop: impl Future<Output = ()>,
 ) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
+    check_url(url)?;
     // A denied request just times out; the server's error naming it arrives through the event callback.
     let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
     let options = options(creds, user, name).await?.event_callback(move |event| {
@@ -156,19 +158,34 @@ fn jetstream_not_answering(e: &jetstream::context::GetStreamError) -> bool {
             .is_some_and(|e| matches!(e.kind(), RequestErrorKind::TimedOut | RequestErrorKind::NoResponders))
 }
 
+/// Fail when `url`, or one in a comma-separated list, carries a user and password (or a token): async-nats would
+/// connect without them, as no one. ants authenticates with `.creds` files only.
+pub fn check_url(url: &str) -> Result<()> {
+    match url.split(',').find(|one| userinfo(one).is_some()) {
+        Some(one) => bail!(
+            "NATS URL {} carries a user and password, which are not used; authenticate with a .creds file instead",
+            redacted(one)
+        ),
+        None => Ok(()),
+    }
+}
+
 /// `url`, a comma-separated list of server URLs too, with any user and password masked, for logs and errors.
 fn redacted(url: &str) -> String {
     url.split(',')
-        .map(|one| {
-            let start = one.find("://").map_or(0, |i| i + 3);
-            let end = one[start..].find(['/', '?', '#']).map_or(one.len(), |i| start + i);
-            match one[start..end].rfind('@') {
-                Some(at) => format!("{}***{}", &one[..start], &one[start + at..]),
-                None => one.to_owned(),
-            }
+        .map(|one| match userinfo(one) {
+            Some(at) => format!("{}***{}", &one[..at.start], &one[at.end..]),
+            None => one.to_owned(),
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Where the `user:password` of `user:password@` is in one server URL, if it has any.
+fn userinfo(one: &str) -> Option<std::ops::Range<usize>> {
+    let start = one.find("://").map_or(0, |i| i + 3);
+    let end = one[start..].find(['/', '?', '#']).map_or(one.len(), |i| start + i);
+    one[start..end].rfind('@').map(|at| start..start + at)
 }
 
 /// The JetStream context every ants process uses. With a domain, requests go to `$JS.<domain>.API`, which reaches the
@@ -793,11 +810,12 @@ mod tests {
         let Some(server) = NatsServer::start_with(|_| "authorization { user: dev, password: right }".to_owned()) else {
             return;
         };
-        // async-nats sends no credentials from the URL, so the server rejects the connection; the URL's are masked.
+        // async-nats would send no credentials from the URL, so it is refused; the URL's are masked.
         let wrong = server.url.replacen("nats://", "nats://dev:wrong@", 1);
         let missing = Path::new("no-such.creds");
         let cases = [
-            (wrong.as_str(), None, "authorization violation"),
+            (server.url.as_str(), None, "authorization violation"),
+            (wrong.as_str(), None, "authenticate with a .creds file"),
             (server.url.as_str(), Some(missing), "reading credentials"),
             ("nats://[::1", None, "NATS server URL is invalid"),
         ];
@@ -818,6 +836,21 @@ mod tests {
         assert_eq!(redacted("nats://127.0.0.1:4222"), "nats://127.0.0.1:4222");
         assert_eq!(redacted("wss://dev:secret@hub.example.com/nats?x=a@b"), "wss://***@hub.example.com/nats?x=a@b");
         assert_eq!(redacted("nats://t0ken@a:4222,tls://u:p@b"), "nats://***@a:4222,tls://***@b");
+    }
+
+    #[test]
+    fn refuses_urls_with_users_and_passwords() {
+        for url in ["nats://127.0.0.1:4222", "wss://hub.example.com/nats?x=a@b", "nats://a:4222,tls://b", "a:4222"] {
+            check_url(url).unwrap();
+        }
+        for (url, shown) in [
+            ("nats://dev:secret@hub:4222", "nats://***@hub:4222"),
+            ("nats://a:4222,wss://secret@hub/nats", "wss://***@hub/nats"),
+            ("dev:secret@hub:4222", "***@hub:4222"),
+        ] {
+            let err = check_url(url).unwrap_err().to_string();
+            assert!(err.contains(shown) && err.contains(".creds file") && !err.contains("secret"), "{err}");
+        }
     }
 
     /// A waiter takes each message once, live, as the stream stored it, or both in either order, and nothing the

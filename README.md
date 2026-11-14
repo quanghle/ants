@@ -114,7 +114,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 
 ### Identity and human registration
 
-Every command accepts `--nats`, `--creds` and `--js-domain`. The CLI acts as the user named in the `--creds` JWT, or `human` without credentials. With human credentials (`ants auth user NAME --human`, or `human`), connecting ensures `ants_humans` exists and registers `<name>` (direct get first, put if absent; `human` needs no entry; warns and continues on failure, though daemons treat unregistered senders as agents until registered). With ant credentials, the CLI acts as that ant, skips `ants_humans`, warns, refuses `ants inbox` and leaves replies unread during `ants ask --wait` or `--follow`.
+Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying a user and password or a token (`nats://user:pass@host`), on the command line or in a config file, is refused: credentials come only from `.creds` files. The CLI acts as the user named in the `--creds` JWT, or `human` without credentials. With human credentials (`ants auth user NAME --human`, or `human`), connecting ensures `ants_humans` exists and registers `<name>` (direct get first, put if absent; `human` needs no entry; warns and continues on failure, though daemons treat unregistered senders as agents until registered). With ant credentials, the CLI acts as that ant, skips `ants_humans`, warns, refuses `ants inbox` and leaves replies unread during `ants ask --wait` or `--follow`.
 
 ### Environment variables
 

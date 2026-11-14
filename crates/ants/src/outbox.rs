@@ -36,6 +36,7 @@ pub const SOURCE_WAIT: Duration = Duration::from_secs(10);
 /// Connect as `human` to set up the outbox of `machine`, with the machine's own inbox prefix
 /// ([`Machine::setup_inbox`]): the leaf node may answer there and nowhere else.
 pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &Machine) -> Result<async_nats::Client> {
+    ants_daemon::bus::check_url(url)?;
     let mut options =
         async_nats::ConnectOptions::new().name("ants-cli").custom_inbox_prefix(machine.setup_inbox(human));
     if let Some(path) = creds {

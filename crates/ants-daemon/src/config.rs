@@ -243,8 +243,10 @@ impl Ant {
             Some(home) => home,
             None => home_dir()?.join(".ants").join(self.name.as_str()),
         };
+        let nats_url = self.nats.unwrap_or_else(|| default_nats.to_owned());
+        crate::bus::check_url(&nats_url).with_context(|| format!("ant {}", self.name))?;
         Ok(Config {
-            nats_url: self.nats.unwrap_or_else(|| default_nats.to_owned()),
+            nats_url,
             creds: self.creds,
             js_domain: self.js_domain,
             human: self.human.unwrap_or_else(UserId::human),
@@ -374,6 +376,9 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<(Vec<Ant>, Harnesse
         }
         if ant.nats.is_none() {
             ant.nats.clone_from(&file.nats);
+        }
+        if let Some(url) = &ant.nats {
+            crate::bus::check_url(url).with_context(|| format!("config {}: ant {}", path.display(), ant.name))?;
         }
         if ant.js_domain.is_none() {
             ant.js_domain.clone_from(&file.js_domain);
@@ -774,6 +779,19 @@ Review changes for correctness."""
         assert_eq!((config.nats_url.as_str(), config.human), ("nats://leaf:4222", UserId::human()));
         let err = parse_here("human = \"Not A Name\"").unwrap_err();
         assert!(format!("{err:#}").contains("human"), "{err:#}");
+    }
+
+    #[test]
+    fn refuses_a_server_with_a_user_and_password() {
+        let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
+        for text in [format!("nats = \"nats://dev:secret@hub\"\n{ant}"), format!("{ant}\nnats = \"wss://secret@hub\"")]
+        {
+            let err = format!("{:#}", parse_here(&text).unwrap_err());
+            assert!(err.contains("ant dev-a: NATS URL") && err.contains(".creds") && !err.contains("secret"), "{err}");
+        }
+        let ants = parse_here(ant).unwrap();
+        let err = ants[0].clone().into_config("nats://dev:secret@leaf", &Harnesses::builtin()).unwrap_err();
+        assert!(format!("{err:#}").contains("ant dev-a: NATS URL nats://***@leaf"), "{err:#}");
     }
 
     #[test]
