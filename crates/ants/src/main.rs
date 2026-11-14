@@ -10,6 +10,7 @@ mod inbox;
 mod leaf;
 mod notify;
 mod outbox;
+mod presence;
 mod revoke;
 mod roster;
 mod scheduler;
@@ -26,8 +27,8 @@ use ants_daemon::reading::Reading;
 use ants_daemon::{Launch, PermissionPolicy, bus, dead, harness, notes, owners};
 use ants_proto::{
     ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost, DeadLetter, Destination,
-    Envelope, Escalation, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId, UserId,
-    Verdict, subject,
+    Envelope, Escalation, Following, JsDomain, Machine, NotesPost, Permissions, StatusEvent, StatusUpdate, ThreadId,
+    UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -843,9 +844,10 @@ async fn main() -> Result<()> {
             humans::ensure(&js).await?;
             webhook::ensure_bucket(&js).await?;
             inbox::ensure_bucket(&js).await?;
+            presence::ensure_bucket(&js).await?;
             humans::register_or_warn(&js, &nats.me).await;
             println!(
-                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+                "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
                 ants_proto::STREAM,
                 ants_proto::ROSTER_BUCKET,
                 ants_proto::SESSIONS_BUCKET,
@@ -856,7 +858,8 @@ async fn main() -> Result<()> {
                 ants_proto::LINKS_BUCKET,
                 ants_proto::OWNERS_BUCKET,
                 ants_proto::WEBHOOKS_BUCKET,
-                ants_proto::READ_BUCKET
+                ants_proto::READ_BUCKET,
+                ants_proto::PRESENCE_BUCKET
             );
             Ok(())
         }
@@ -1483,8 +1486,19 @@ async fn show_inbox(nats: &Nats<'_>, select: &inbox::Select, follow: bool, json:
             }
             std::future::pending::<()>().await
         };
+        let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });
+        // Following one thread shows no escalation on the others, so only following them all counts as reading.
+        let followed = async {
+            match select.thread {
+                None => {
+                    let device = nats.device.id;
+                    presence::while_following(&js, nats.domain, me, device, Following::Inbox, followed).await
+                }
+                Some(_) => followed.await,
+            }
+        };
         tokio::select! {
-            followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await }) => followed?,
+            followed = followed => followed?,
             () = watch => {}
         }
     }

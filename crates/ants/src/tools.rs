@@ -24,8 +24,8 @@ use std::collections::HashMap;
 
 use ants_daemon::chains;
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, ROSTER_BUCKET, RosterEntry, STREAM, UserId, Uuid,
-    Verdict, subject,
+    ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, Following, ROSTER_BUCKET, RosterEntry, STREAM, UserId,
+    Uuid, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -497,7 +497,8 @@ pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()
         println!("no pending tool requests");
     }
     listed.iter().try_for_each(print)?;
-    if let Some(live) = &mut live {
+    let Some(live) = &mut live else { return Ok(()) };
+    let follow = async {
         while let Some(msg) = live.next().await {
             let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&msg.payload) else { continue };
             if let Err(e) = request.check_subject(&msg.subject) {
@@ -508,8 +509,17 @@ pub async fn list(nats: &crate::Nats<'_>, follow: bool, json: bool) -> Result<()
                 print(&request)?;
             }
         }
-    }
-    Ok(())
+        Ok(())
+    };
+    // Ctrl-C ends the following cleanly, so the device's presence goes at once.
+    let follow = async {
+        tokio::select! {
+            followed = follow => followed,
+            _ = tokio::signal::ctrl_c() => Ok(()),
+        }
+    };
+    let (me, device) = (&nats.me.id, nats.device.id);
+    crate::presence::while_following(&js, nats.domain, me, device, Following::Approvals, follow).await
 }
 
 /// `ants tools show ID`: one request in full, with where it stands.
