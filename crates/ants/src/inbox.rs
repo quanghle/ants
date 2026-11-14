@@ -29,7 +29,7 @@ pub struct Select {
 
 enum Fetched {
     /// A message seen for the first time, and its envelope unless malformed.
-    New(u64, Option<Envelope>),
+    New(u64, Option<Box<Envelope>>),
     /// A held message the server offered again.
     Again,
 }
@@ -67,7 +67,7 @@ impl Inbox {
             while let Some(msg) = batch.next().await {
                 if let Fetched::New(sequence, envelope) = self.hold(msg.map_err(|e| anyhow!(e))?, select.peek).await? {
                     fresh = true;
-                    found.extend(envelope.map(|e| (sequence, e)));
+                    found.extend(envelope.map(|e| (sequence, *e)));
                 }
             }
             // Held messages come back only after ACK_WAIT, so a batch with nothing new means nothing is left.
@@ -124,7 +124,7 @@ impl Inbox {
             .map_err(|e| e.to_string())
             .and_then(|e| e.check_subject(&msg.subject).map(|()| e).map_err(|e| format!("forged sender: {e}")));
         match envelope {
-            Ok(envelope) => Ok(Fetched::New(sequence, Some(envelope))),
+            Ok(envelope) => Ok(Fetched::New(sequence, Some(Box::new(envelope)))),
             Err(e) => {
                 if !peek {
                     tracing::warn!(error = %e, sequence, "dropping a malformed message");

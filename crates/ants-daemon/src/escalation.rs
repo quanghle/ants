@@ -1,7 +1,10 @@
-//! Escalations up the ant's chain.
+//! Escalations up the thread's origin chain.
 //!
 //! What an ant cannot settle on a thread (its turn budget spent, a limit or cap reached, its thread notes out of
-//! turns, a dead letter) goes to its `escalate_to` chain before any human: every member gets it, the first one leads.
+//! turns, a dead letter) goes to the thread's origin chain before any human: every member gets it, the first one
+//! leads. The origin is the ant that created the thread with a channel post, when another ant did (its creator
+//! leads level 0 in the stuck ant's place, [`Escalation::new_from`]), else the stuck ant: level 1 is the origin's
+//! `escalate_to`.
 //! The members coordinate in the thread's notes; only the leader resolves it, by answering the ant on the
 //! thread, or escalates it further. The leader's answer gives the thread a fresh turn budget and allowance once per
 //! level ([`Escalator::arrived`]); on a channel thread, the ant's answer to it goes back to the channel with that
@@ -170,7 +173,8 @@ impl Escalator {
     }
 
     /// Escalate `stuck`, the ant's issue on the thread of its notice, one level up and return where it went. The
-    /// first escalation of a thread goes to the ant's own chain. One that carries an escalation, met while working
+    /// first escalation of a thread goes to its origin chain: that of the thread's creator the notice names, when
+    /// another ant, else the ant's own. One that carries an escalation, met while working
     /// on it for another ant, goes one level above it, to its leader's chain. A thread whose escalation was
     /// answered by its leader goes one level higher too; one still waiting for its leader goes to the same members
     /// again. The escalation is stored before it is sent, so a retry sends the same messages.
@@ -186,8 +190,9 @@ impl Escalator {
         let pending = self.ledger.pending(&thread).await?;
         let channel = stuck.channel.clone().or_else(|| pending.as_ref().and_then(|p| p.channel.clone()));
         let stuck = Stuck { channel, ..stuck };
-        let step =
-            next_step(&self.ant, &thread, stuck.reason, stuck.request_id, stuck.carried.as_ref(), pending.as_ref());
+        let origin = self.humans.ant_creator(stuck.notice.creator.as_ref());
+        let fresh = Fresh { ant: &self.ant, origin: origin.as_ref(), thread: &thread, reason: stuck.reason };
+        let step = next_step(fresh, stuck.request_id, stuck.carried.as_ref(), pending.as_ref());
         tracing::info!(%thread, reason = stuck.reason.as_str(), ?step, "escalating");
         match step {
             Step::Again(pending) if pending.at_owner() => self.to_owner(&pending.escalation, None, &stuck).await,
@@ -309,8 +314,9 @@ impl Escalator {
                 escalation.leader, pending.summary
             );
             let human = self.humans.owner_or_default(pending.owner.as_ref());
-            let notice =
-                Envelope::on_thread(thread.clone(), self.ant.clone(), human, text).with_owner(pending.owner.clone());
+            let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), human, text)
+                .with_owner(pending.owner.clone())
+                .with_creator(pending.creator.clone());
             let stuck = Stuck {
                 reason: escalation.reason,
                 request_id: escalation.request_id,
@@ -338,7 +344,7 @@ impl Escalator {
         let thread = &stuck.notice.thread_id;
         let chain = self.chain_of(&from.leader).await;
         let summary: String = summary.chars().take(SUMMARY_CHARS).collect();
-        let owner = stuck.notice.owner.clone();
+        let (owner, creator) = (stuck.notice.owner.clone(), stuck.notice.creator.clone());
         match from.up(&chain, self.chain.max_hops) {
             Hop::Chain { escalation, to } => {
                 let ours = escalation.stuck == self.ant;
@@ -354,6 +360,7 @@ impl Escalator {
                     renewed_by: None,
                     deadline,
                     owner,
+                    creator,
                     summary,
                     channel: stuck.channel.clone(),
                 };
@@ -372,6 +379,7 @@ impl Escalator {
                         renewed_by: None,
                         deadline: None,
                         owner,
+                        creator,
                         summary,
                         channel: stuck.channel.clone(),
                     };
@@ -395,6 +403,7 @@ impl Escalator {
             );
             let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), escalation.stuck.clone(), text)
                 .with_owner(stuck.notice.owner.clone())
+                .with_creator(stuck.notice.creator.clone())
                 .with_escalation(Some(escalation.clone()));
             (self.send)(notice, format!("{}-{}", stuck.id, escalation.stuck)).await?;
         }
@@ -403,6 +412,7 @@ impl Escalator {
             let mut envelope =
                 Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), target.clone(), text.clone())
                     .with_owner(stuck.notice.owner.clone())
+                    .with_creator(stuck.notice.creator.clone())
                     .with_escalation(Some(escalation.clone()));
             envelope.in_reply_to = stuck.notice.in_reply_to;
             (self.send)(envelope, format!("{}-{target}", stuck.id)).await?;
@@ -464,17 +474,27 @@ enum Step {
     Climb(Escalation),
 }
 
-/// What `ant`'s escalation for `reason` on `thread` does next, given the escalation `carried` by the message it
-/// got stuck on and the thread's `pending` one. A carried escalation the ant started itself, with none pending,
-/// was ended by a human: it starts afresh.
-fn next_step(
-    ant: &UserId,
-    thread: &ThreadId,
+/// Whose escalation for what, should it start afresh.
+#[derive(Debug, Clone, Copy)]
+struct Fresh<'a> {
+    /// The stuck ant.
+    ant: &'a UserId,
+    /// The ant that created the thread, if one did: the origin of a fresh escalation unless it is the stuck one.
+    origin: Option<&'a UserId>,
+    thread: &'a ThreadId,
     reason: EscalationReason,
+}
+
+/// What `fresh.ant`'s escalation for `fresh.reason` on `fresh.thread` does next, given the escalation `carried` by
+/// the message it got stuck on and the thread's `pending` one. A carried escalation the ant started itself, with none
+/// pending, was ended by a human: it starts afresh, from the thread's origin ([`Escalation::new_from`]).
+fn next_step(
+    fresh: Fresh<'_>,
     request_id: Option<Uuid>,
     carried: Option<&Escalation>,
     pending: Option<&Pending>,
 ) -> Step {
+    let Fresh { ant, origin, thread, reason } = fresh;
     let carried = carried.filter(|c| &c.thread_id == thread);
     let retarget = |e: &Escalation| Escalation { reason, request_id, ..e.clone() };
     match (carried, pending) {
@@ -482,7 +502,7 @@ fn next_step(
         (Some(c), None) if c.stuck != *ant => Step::Climb(retarget(c)),
         (_, Some(p)) if p.renewed_by.is_some() => Step::Climb(retarget(&p.escalation)),
         (_, Some(p)) => Step::Again(p.clone()),
-        _ => Step::Climb(retarget(&Escalation::new(ant.clone(), thread.clone(), reason))),
+        _ => Step::Climb(retarget(&Escalation::new_from(ant.clone(), thread.clone(), reason, origin))),
     }
 }
 
@@ -594,7 +614,11 @@ fn why_text(escalation: &Escalation, because: &OwnerBecause) -> String {
 fn owner_text(escalation: &Escalation, because: &OwnerBecause) -> Option<String> {
     let (stuck, level) = (&escalation.stuck, escalation.level);
     match because {
-        OwnerBecause::NoChain if level == 0 => None,
+        OwnerBecause::NoChain if level == 0 && escalation.leader == *stuck => None,
+        OwnerBecause::NoChain if level == 0 => Some(format!(
+            "[ants] The escalation of {stuck} starts at {}, which created thread {} and has no escalate_to.",
+            escalation.leader, escalation.thread_id
+        )),
         OwnerBecause::NoChain => Some(format!(
             "[ants] The escalation of {stuck} reached level {level}; {} has no escalate_to above it.",
             escalation.leader
@@ -659,6 +683,7 @@ mod tests {
             renewed_by: renewed.then(Uuid::new_v4),
             deadline: None,
             owner: None,
+            creator: None,
             summary: String::new(),
             channel: None,
         }
@@ -673,7 +698,13 @@ mod tests {
     }
 
     fn step(ant: &str, carried: Option<&Escalation>, pending: Option<&Pending>) -> Step {
-        next_step(&p(ant), &t(), EscalationReason::Cap, None, carried, pending)
+        step_from(ant, None, carried, pending)
+    }
+
+    fn step_from(ant: &str, origin: Option<&str>, carried: Option<&Escalation>, pending: Option<&Pending>) -> Step {
+        let (ant, origin, thread) = (p(ant), origin.map(p), t());
+        let fresh = Fresh { ant: &ant, origin: origin.as_ref(), thread: &thread, reason: EscalationReason::Cap };
+        next_step(fresh, None, carried, pending)
     }
 
     #[test]
@@ -719,6 +750,27 @@ mod tests {
         assert_eq!(
             step("dev-a", Some(&one), None),
             Step::Climb(Escalation::new(p("dev-a"), t(), EscalationReason::Cap))
+        );
+    }
+
+    #[test]
+    fn on_a_thread_another_ant_created_a_fresh_escalation_starts_at_the_creator() {
+        let from_lead = Escalation::new_from(p("dev-a"), t(), EscalationReason::Cap, Some(&p("lead")));
+        assert_eq!(step_from("dev-a", Some("lead"), None, None), Step::Climb(from_lead.clone()));
+        let own = Escalation::new(p("lead"), t(), EscalationReason::Cap);
+        assert_eq!(step_from("lead", Some("lead"), None, None), Step::Climb(own), "the creator stuck on its own");
+
+        // Climbing on, and starting at the creator again once a human ended one.
+        let one = level(&from_lead, &["boss"]);
+        assert_eq!(members_at(&from_lead), [p("lead")]);
+        let climb = step_from("boss", Some("lead"), Some(&one), None);
+        assert_eq!(climb, Step::Climb(Escalation { reason: EscalationReason::Cap, ..one.clone() }));
+        assert_eq!(step_from("dev-a", Some("lead"), Some(&one), None), Step::Climb(from_lead.clone()));
+
+        let text = owner_text(&from_lead, &OwnerBecause::NoChain).unwrap();
+        assert_eq!(
+            text,
+            "[ants] The escalation of dev-a starts at lead, which created thread t1 and has no escalate_to."
         );
     }
 

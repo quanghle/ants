@@ -26,7 +26,7 @@ pub enum Marker {
     /// It started prompting and stored no reply.
     Started,
     /// It had its reply, which may not have reached the stream.
-    Replied(Reply),
+    Replied(Box<Reply>),
 }
 
 /// The reply to a message: an envelope to its sender, a post on the thread of a channel post, or a post to the notes
@@ -92,7 +92,7 @@ impl Attempts {
         if record.message != envelope.id {
             return Ok(None);
         }
-        Ok(Some(record.reply.map_or(Marker::Started, Marker::Replied)))
+        Ok(Some(record.reply.map_or(Marker::Started, |r| Marker::Replied(Box::new(r)))))
     }
 
     /// Mark an attempt at `envelope` as started.

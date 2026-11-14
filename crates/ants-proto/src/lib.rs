@@ -1006,6 +1006,10 @@ pub struct Envelope {
     /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
+    /// The ant whose top-level channel post started the thread ([`ChannelPost::thread_creator`]), kept like `owner`.
+    /// Its escalate_to is the thread's origin chain ([`Escalation::new_from`]); a creator that is a human is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<UserId>,
     /// The escalation the message carries up a chain, or answers. Never copied by [`Envelope::reply`] or
     /// [`Envelope::follow_up`]: the daemon sets it with [`Envelope::with_escalation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1034,6 +1038,7 @@ impl Envelope {
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
             owner: None,
+            creator: None,
             escalation: None,
             approval: None,
             sent_at: Utc::now(),
@@ -1043,6 +1048,11 @@ impl Envelope {
     /// The envelope with `owner` as the human who started its thread.
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The envelope with `creator` as the ant that started its thread with a channel post.
+    pub fn with_creator(self, creator: Option<UserId>) -> Self {
+        Self { creator, ..self }
     }
 
     /// The envelope carrying `escalation`.
@@ -1073,13 +1083,16 @@ impl Envelope {
             .then(|| request.decide(decision.verdict))
     }
 
-    /// A message on this envelope's thread, with a fresh budget and the same owner.
+    /// A message on this envelope's thread, with a fresh budget and the same owner and creator.
     pub fn follow_up(&self, from: UserId, to: UserId, text: impl Into<String>) -> Self {
-        Self::on_thread(self.thread_id.clone(), from, to, text).with_owner(self.owner.clone())
+        Self::on_thread(self.thread_id.clone(), from, to, text)
+            .with_owner(self.owner.clone())
+            .with_creator(self.creator.clone())
     }
 
-    /// Reply to the sender, whose role is `to`, keeping the thread's owner. Replies to a human are free; agent-to-agent
-    /// replies spend one turn, and fail when none are left, so the caller escalates to a human instead of looping.
+    /// Reply to the sender, whose role is `to`, keeping the thread's owner and creator. Replies to a human are free;
+    /// agent-to-agent replies spend one turn, and fail when none are left, so the caller escalates to a human instead
+    /// of looping.
     pub fn reply(&self, from: UserId, text: impl Into<String>, to: Role) -> Result<Self, Error> {
         let turn_budget = if to.is_human() {
             self.turn_budget
@@ -1095,6 +1108,7 @@ impl Envelope {
             turn_budget,
             in_reply_to: Some(self.id),
             owner: self.owner.clone(),
+            creator: self.creator.clone(),
             escalation: None,
             approval: None,
             sent_at: Utc::now(),
@@ -1165,11 +1179,12 @@ pub struct Escalation {
     /// The approval request awaiting a decision, for [`EscalationReason::Approval`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<Uuid>,
-    /// The chain level: 1 for the stuck ant's own escalate_to, 0 before the escalation went anywhere.
+    /// The chain level: 1 for the escalate_to of the thread's origin (its creator when another ant, else the stuck
+    /// ant: [`Escalation::new_from`]), 0 before the escalation went anywhere.
     pub level: u32,
-    /// Who leads at this level: the first of the chain it went to, the stuck ant at level 0.
+    /// Who leads at this level: the first of the chain it went to, the origin at level 0.
     pub leader: UserId,
-    /// Every ant the escalation went through, in order, the stuck one first.
+    /// Every ant the escalation went through, in order, the stuck one first and the origin next when another ant.
     pub visited: Vec<UserId>,
 }
 
@@ -1206,6 +1221,18 @@ impl Escalation {
             request_id: None,
             level: 0,
         }
+    }
+
+    /// `stuck`'s issue on `thread_id`, before it goes anywhere, from the thread's `origin`: an ant other than `stuck`
+    /// that created the thread leads level 0 in its place and follows it in the ants visited, so level 1 is the
+    /// origin's escalate_to and a chain back to either goes to the owner. Else the same as [`Escalation::new`].
+    pub fn new_from(stuck: UserId, thread_id: ThreadId, reason: EscalationReason, origin: Option<&UserId>) -> Self {
+        let mut escalation = Self::new(stuck, thread_id, reason);
+        if let Some(origin) = origin.filter(|o| **o != escalation.stuck) {
+            escalation.leader = origin.clone();
+            escalation.visited.push(origin.clone());
+        }
+        escalation
     }
 
     /// The escalation of the tool request `request`, before it goes anywhere.
@@ -1424,7 +1451,7 @@ impl ChannelEntry {
 /// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn of what the
 /// thread has left ([`ChannelPost::turns_left`]), and at zero the thread goes to its owner, the human whose post started
 /// it, else the default human; any human's post gives the thread a fresh budget. Each post carries the turns the thread
-/// has left after it, and the thread's owner when known.
+/// has left after it, the thread's owner when known, and the ant that created the thread when an ant did.
 ///
 /// Who is a human is the caller's to say, from the [`HUMANS_BUCKET`], as [`Humans`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1445,6 +1472,10 @@ pub struct ChannelPost {
     /// The human who started the thread. Replies keep it ([`ChannelPost::reply`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
+    /// The ant whose top-level post started the thread, never a human. Replies keep it ([`ChannelPost::reply`]); a
+    /// reader takes it from a top-level post's author only ([`ChannelPost::thread_creator`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<UserId>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -1471,6 +1502,7 @@ impl ChannelPost {
             turn_budget: DEFAULT_TURN_BUDGET,
             in_reply_to: None,
             owner: None,
+            creator: None,
             sent_at: Utc::now(),
         }
     }
@@ -1478,6 +1510,19 @@ impl ChannelPost {
     /// The post with `owner` as the human who started its thread.
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The post with `creator` as the ant that started its thread.
+    pub fn with_creator(self, creator: Option<UserId>) -> Self {
+        Self { creator, ..self }
+    }
+
+    /// The ant that created the post's thread, none of the `humans`: of a top-level post its author, whatever the
+    /// post says, so only the author's credentials make an ant a thread's creator; of a later post the one it
+    /// carries. Trust it only once the post passed [`ChannelPost::check_subject`].
+    pub fn thread_creator(&self, humans: &Humans) -> Option<UserId> {
+        let creator = if self.starts_thread() { Some(&self.from) } else { self.creator.as_ref() };
+        creator.filter(|c| !humans.contains(c)).cloned()
     }
 
     /// The owner of the post's thread, one of the `humans`: the one it carries, else its author, as for a post stored
@@ -1505,7 +1550,8 @@ impl ChannelPost {
     }
 
     /// A reply on the same channel and thread, after the posts stored on it `later` than this one, keeping the
-    /// thread's owner ([`ChannelPost::thread_owner`]); a human's reply on a thread with no known owner takes it. A
+    /// thread's owner ([`ChannelPost::thread_owner`]) and creator ([`ChannelPost::thread_creator`]); a human's reply on
+    /// a thread with no known owner takes it. A
     /// human's reply has a fresh budget; an agent's spends one of the [`ChannelPost::turns_left`].
     pub fn reply(
         &self,
@@ -1517,6 +1563,7 @@ impl ChannelPost {
         let mut reply = Self::on_thread(self.channel.clone(), self.thread_id.clone(), from, text);
         reply.in_reply_to = Some(self.id);
         reply.owner = self.thread_owner(humans).or_else(|| reply.thread_owner(humans));
+        reply.creator = self.thread_creator(humans);
         if humans.contains(&reply.from) { Ok(reply) } else { reply.spend(self.turns_left(later, humans)) }
     }
 
@@ -2677,6 +2724,58 @@ mod tests {
         let Hop::Chain { escalation: three, .. } = two.up(&[p("cto")], 3) else { panic!("level 3 is within 3 hops") };
         assert_eq!(three.up(&[p("board")], 3), Hop::Owner(OwnerBecause::HopLimit(3)));
         assert_eq!(stuck.up(&[p("lead")], 0), Hop::Owner(OwnerBecause::HopLimit(0)));
+    }
+
+    #[test]
+    fn an_escalation_from_the_thread_s_creator_climbs_the_creator_s_chain() {
+        let thread: ThreadId = "t1".parse().unwrap();
+        let reason = EscalationReason::TurnBudget;
+        let new = Escalation::new(p("dev-a"), thread.clone(), reason);
+        assert_eq!(Escalation::new_from(p("dev-a"), thread.clone(), reason, None), new);
+        assert_eq!(Escalation::new_from(p("dev-a"), thread.clone(), reason, Some(&p("dev-a"))), new, "its own");
+
+        let from = Escalation::new_from(p("dev-a"), thread.clone(), reason, Some(&p("lead")));
+        assert_eq!((from.level, &from.stuck, &from.leader), (0, &p("dev-a"), &p("lead")));
+        assert_eq!(from.visited, [p("dev-a"), p("lead")]);
+        let Hop::Chain { escalation: one, to } = from.up(&[p("boss"), p("dev-a")], 3) else { panic!("level 1") };
+        assert_eq!((one.level, &one.leader, &to[..]), (1, &p("boss"), &[p("boss")][..]), "the stuck ant is no member");
+        assert_eq!(one.visited, [p("dev-a"), p("lead"), p("boss")]);
+        // A chain back to the stuck ant or to the creator loops; the hop limit counts from the creator's chain.
+        assert_eq!(from.up(&[p("dev-a")], 3), Hop::Owner(OwnerBecause::Visited(p("dev-a"))));
+        assert_eq!(one.up(&[p("lead")], 3), Hop::Owner(OwnerBecause::Visited(p("lead"))));
+        assert_eq!(one.up(&[p("cto")], 1), Hop::Owner(OwnerBecause::HopLimit(1)));
+    }
+
+    #[test]
+    fn threads_keep_the_ant_that_created_them_and_only_its_own_post_makes_it_so() {
+        let (c, alice) = ("ops".parse::<ChannelId>().unwrap(), p("alice"));
+        let mut humans = Humans::default();
+        humans.add(alice.as_str(), HumanEntry::new(alice.clone())).unwrap();
+        // A top-level post's creator is its author, whatever it says.
+        let top = ChannelPost::new(c.clone(), p("lead"), "@dev-a fix it").with_creator(Some(p("boss")));
+        assert_eq!(top.thread_creator(&humans), Some(p("lead")));
+        assert_eq!(ChannelPost::new(c.clone(), alice.clone(), "hi").thread_creator(&humans), None, "humans own");
+        let answer = top.reply(p("dev-a"), "@dev-b help", &[], &humans).unwrap();
+        assert_eq!((answer.creator.as_ref(), answer.owner.as_ref()), (Some(&p("lead")), None));
+        let by_alice = answer.reply(alice.clone(), "@dev-a go on", &[], &humans).unwrap();
+        assert_eq!((by_alice.creator.as_ref(), by_alice.owner.as_ref()), (Some(&p("lead")), Some(&alice)));
+        assert_eq!(by_alice.reply(p("dev-b"), "ok", &[], &humans).unwrap().creator, Some(p("lead")));
+        // A later post keeps the creator it carries, unless a human.
+        let named = ChannelPost::on_thread(c, top.thread_id.clone(), p("dev-b"), "x").with_creator(Some(alice.clone()));
+        assert_eq!(named.thread_creator(&humans), None);
+
+        // Messages on or from the thread keep it too.
+        let msg = Envelope::new(p("lead"), p("dev-a"), "q").with_creator(Some(p("lead")));
+        assert_eq!(msg.reply(p("dev-a"), "a", Role::Ant).unwrap().creator, Some(p("lead")));
+        assert_eq!(msg.follow_up(p("dev-a"), p("human"), "n").creator, Some(p("lead")));
+
+        let json = serde_json::to_string(&ChannelPost::new("ops".parse().unwrap(), p("lead"), "x")).unwrap();
+        assert!(!json.contains("creator"), "{json}");
+        assert!(serde_json::to_string(&top).unwrap().contains(r#""creator":"boss""#));
+        assert_eq!(serde_json::from_str::<ChannelPost>(&json).unwrap().creator, None, "older posts read");
+        let older = r#"{"id":"0190a5c4-1d2e-7f00-8000-000000000001","thread_id":"t1","from":"human","to":"dev-a",
+            "text":"hi","turn_budget":8,"sent_at":"2026-01-01T00:00:00Z"}"#;
+        assert_eq!(serde_json::from_str::<Envelope>(older).unwrap().creator, None);
     }
 
     #[test]

@@ -79,7 +79,8 @@ ants notes <thread>         # the thread's notes: a passive shared board; posts 
 A channel is a named group of ants. A post @mentioning members wakes only them; a post mentioning nobody goes to
 the channel's messenger, which @mentions the members it concerns. Posts go out as the CLI's human, who owns the
 threads it starts: when the agents' turns on a thread run out, the thread escalates (see Escalations), in the end to
-that owner. Replies land in the
+that owner. A thread an ant starts (the MCP tool `post_channel`, or `ants post` with an ant's credentials) has that
+ant as its creator and no owner: its escalations go up the creator's chain. Replies land in the
 channel on the post's thread, not in the inbox.
 
 ```sh
@@ -99,7 +100,8 @@ Quote `#channel`, or drop the `#`: an unquoted `#` starts a shell comment. Creat
 An ant may name other ants to escalate to: the `escalate_to` key of its config, a chain whose first ant leads.
 `ants roster` shows it in the `ESCALATE_TO` column (`escalate_to` in `--json`), leader first. What an ant cannot
 settle on a thread (its turn budget spent, a limit or cap reached, a dead letter, thread notes out of turns, or
-an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human. The
+an issue its agent raises with the MCP tool `escalate`) goes to every member of its chain before any human; on a
+thread another ant created, of the creator's chain. The
 members coordinate in the thread's notes (`ants notes <thread>`), which get a fresh turn budget at each level; only
 the leader resolves it, by answering the stuck ant on its thread, or sends it one level higher, to its own chain.
 A chain that is empty, loops back or climbs past `max_escalation_hops` (default 3) hands the thread to its owner, the

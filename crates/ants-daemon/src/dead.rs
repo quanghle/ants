@@ -382,7 +382,8 @@ fn notice(ant: &UserId, envelope: &Envelope, dead: &DeadLetter, dead_seq: u64, h
             envelope.from, dead.deliveries, dead.error
         ),
     )
-    .with_owner(owner);
+    .with_owner(owner)
+    .with_creator(humans.ant_creator(envelope.creator.as_ref()));
     notice.in_reply_to = Some(envelope.id);
     notice
 }
@@ -401,6 +402,7 @@ fn post_notice(ant: &UserId, post: &ChannelPost, dead: &DeadLetter, humans: &Reg
         ),
     )
     .with_owner(owner)
+    .with_creator(post.thread_creator(&humans.humans()))
 }
 
 /// Every dead letter in the stream, oldest first, with its stream sequence. Needs the human's credentials.

@@ -2,8 +2,9 @@
 //! CLI's human (`ants post`), and reading them back by thread (`ants channel read`).
 //!
 //! A channel thread's owner is the human whose post started it. A human's top-level post owns its thread. A post on an
-//! existing thread (`--thread`) keeps the owner the thread's first posts name ([`thread_owner`]); only when none is
-//! known, as on a thread no longer kept or unreachable, does the posting human take it.
+//! existing thread (`--thread`) keeps the owner the thread's first posts name ([`thread_origin`]); only when none is
+//! known, as on a thread no longer kept or unreachable, does the posting human take it. A thread an ant starts with
+//! `ants post` under its own credentials has the ant as its creator, which later posts keep ([`thread_origin`]).
 
 use std::ops::ControlFlow;
 
@@ -233,8 +234,8 @@ pub fn human_post(
 }
 
 /// What `ants post` posts as `me` to `channel`, or on its `thread`. A human owns the thread it starts, and one on an
-/// existing thread keeps its owner ([`thread_owner`]), or takes it when none is known; an ant's post owns nothing
-/// and keeps a known owner.
+/// existing thread keeps its owner ([`thread_origin`]), or takes it when none is known; an ant's post owns nothing
+/// and keeps a known owner. An ant creates the thread it starts, and a post on an existing thread keeps its creator.
 pub async fn compose(
     js: &jetstream::Context,
     me: &crate::humans::Me,
@@ -243,38 +244,44 @@ pub async fn compose(
     thread: Option<ThreadId>,
     text: String,
 ) -> ChannelPost {
-    let known = match &thread {
-        Some(thread) => thread_owner(js, &me.id, &channel, thread, humans).await.unwrap_or_else(|e| {
+    let (known, creator) = match &thread {
+        Some(thread) => thread_origin(js, &me.id, &channel, thread, humans).await.unwrap_or_else(|e| {
             tracing::warn!("reading the owner of thread {thread} in #{channel}: {e:#}");
-            None
+            (None, None)
         }),
-        None => None,
+        None => (None, (!me.role.is_human()).then(|| me.id.clone())),
     };
     let owner = known.or_else(|| me.role.is_human().then(|| me.id.clone()));
-    human_post(channel, thread, me.id.clone(), owner, text)
+    human_post(channel, thread, me.id.clone(), owner, text).with_creator(creator)
 }
 
-/// The owner of `thread` in `channel`, read through the reader consumer of `reader`: the one the first of its posts
-/// still kept names ([`ChannelPost::thread_owner`] with `humans`), or None when none does. A thread named after the
-/// post that started it is read from its start; any other from the channel's oldest post kept.
-pub async fn thread_owner(
+/// The owner and creator of `thread` in `channel`, read through the reader consumer of `reader`: those the first of
+/// its posts still kept name ([`ChannelPost::thread_owner`] and [`ChannelPost::thread_creator`] with `humans`), or
+/// None when none does. A thread named after the post that started it is read from its start; any other from the
+/// channel's oldest post kept.
+pub async fn thread_origin(
     js: &jetstream::Context,
     reader: &UserId,
     channel: &ChannelId,
     thread: &ThreadId,
     humans: &Humans,
-) -> Result<Option<UserId>> {
+) -> Result<(Option<UserId>, Option<UserId>)> {
     let start = match ants_daemon::channel::thread_start(thread) {
         Some(time) => consumer::DeliverPolicy::ByStartTime { start_time: time.into() },
         None => consumer::DeliverPolicy::All,
     };
-    let mut owner = None;
+    let (mut owner, mut creator, mut root) = (None, None, false);
     scan(js, reader, channel, start, |post| {
-        owner = (post.thread_id == *thread).then(|| post.thread_owner(humans)).flatten();
-        if owner.is_some() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        if post.thread_id == *thread {
+            owner = owner.take().or_else(|| post.thread_owner(humans));
+            creator = creator.take().or_else(|| post.thread_creator(humans));
+            // The post that started the thread says whether an ant created it.
+            root |= post.starts_thread();
+        }
+        if owner.is_some() && (creator.is_some() || root) { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
     })
     .await?;
-    Ok(owner)
+    Ok((owner, creator))
 }
 
 /// The posts on the thread of `post` that `room`, a subscription to its channel, receives after it: those of others
@@ -640,7 +647,15 @@ mod tests {
 
         // On a thread nothing names an owner of, bob takes it.
         let lost = compose(&b_js, &me(&bob), &humans, ops(), Some("t1".parse().unwrap()), "hi".to_owned()).await;
-        assert_eq!(lost.owner, Some(bob.clone()));
+        assert_eq!((lost.owner, lost.creator), (Some(bob.clone()), None));
         assert_eq!(read(&b_js, &bob, &ops()).await.unwrap(), [top, answer, on]);
+
+        // An ant creates the thread it starts, and owns none; a human's post on it keeps the creator.
+        let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };
+        let started = compose(&d_js, &ant, &humans, ops(), None, "@dev-b look".to_owned()).await;
+        assert_eq!((&started.creator, &started.owner), (&Some(dev_a.clone()), &None));
+        bus::publish_json(&d_js, started.subject(), &started, None).await.unwrap();
+        let on = compose(&b_js, &me(&bob), &humans, ops(), Some(started.thread_id.clone()), "ok".to_owned()).await;
+        assert_eq!((&on.creator, &on.owner), (&Some(dev_a.clone()), &Some(bob.clone())));
     }
 }

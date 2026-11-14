@@ -104,7 +104,7 @@ the ants ([Config file](#config-file)) and services ([Services](#services)).
 | `ants inbox` | Prints unread replies to the CLI's human and marks them read (`--peek`, `--thread`, `--limit`, `--follow`, `--json`). |
 | `ants roster` | Lists the ants being served, live or stale, idle or working, with their escalation chains (`--json`). |
 | `ants notes THREAD [TEXT]` | Shows a thread's notes, or posts TEXT to them as the CLI's human, which gives them a fresh turn budget; a post wakes nobody (see [Thread notes](#thread-notes)). Distinct from the execution plan `ants watch <ant>` shows. |
-| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread; `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
+| `ants post CHANNEL TEXT` | Posts to a channel (`ops` or `'#ops'`) as the CLI's human and prints the thread (with an ant's credentials, as that ant, which creates the thread it starts; see Channels); `@ant` wakes that member only. `--thread` posts on a thread; `--wait` prints the first post on the thread by someone else and exits, `-f`/`--follow` prints each post on it as it arrives; `--timeout DURATION` bounds them (see [Waiting for replies](#waiting-for-replies)). |
 | `ants channel create` / `set` / `add` / `remove` / `delete` / `list` | Manages channels: members (`--member`) and messenger (`--messenger ANT`, or `--default-messenger` for the default ant `messenger`). |
 | `ants channel read CHANNEL` | Prints a channel's posts by thread (`--thread`, `--limit`). |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Prints traffic as it happens (default `ants.>`), escalations with their level, reason, leader and ants visited; with an ant, its streamed harness progress. |
@@ -278,10 +278,19 @@ How flags and the file combine:
 ### Escalations
 
 What an ant cannot settle on a thread (a spent turn budget, a reached limit or cap, a dead letter's notice, thread
-notes out of turns, or what its harness escalates with the `escalate` tool) goes up its escalation chain (tool requests
-outside the allowlist go to its own chain only; see Tool permissions), in the end to the thread's owner (the envelope's
-`owner`, the human who started the thread), else to the daemon's default human, the config file key `human` (default
-`human`; top-level or per ant). Without a chain it goes to the owner at once.
+notes out of turns, or what its harness escalates with the `escalate` tool) goes up the thread's origin chain (tool
+requests outside the allowlist go to the ant's own chain only; see Tool permissions), in the end to the thread's owner
+(the envelope's `owner`, the human who started the thread or took it), else to the daemon's default human, the config
+file key `human` (default `human`; top-level or per ant). Without a chain it goes to the owner at once.
+
+The origin chain is the stuck ant's own escalation chain, except on a thread another ant created (its `creator`, the
+ant whose top-level channel post started it; see Channels): there the creator leads level 0 as if it were the one
+stuck, and level 1 goes to the creator's `escalate_to`. The stuck ant and the creator both count as visited, so a
+chain leading back to either hands the thread to the owner, and `max_escalation_hops` counts from the creator's
+chain. The creator never receives an escalation of its own thread at level 0: with no `escalate_to` it goes to the
+owner at once, with an `[ants]` notice naming the creator. A channel's membership or messenger never picks the chain:
+an ant-created thread has no owner until a human posts on it, so until then its escalations end at the default human
+of the stuck ant's daemon.
 
 The chain is the ant's `escalate_to` key, a list of other ants whose first one leads; the roster publishes it,
 and the daemon also keeps it on start in the KV bucket `ants_chains` under the ant id, whose entries never expire,
@@ -306,7 +315,7 @@ or a leader without a chain hands the thread to the owner, with the escalation a
 an ant stuck again on the thread sends the same members the new notice. Members offline are not skipped: their
 inboxes keep the escalation. When the leader does not answer within `escalate_after` (default 30m, as long as a
 prompt may run; 0 waits indefinitely), the ant that escalated sends it one level higher. Only a human's message on
-the thread ends its escalation, and the next one starts at the ant's own chain again. The thread's escalation, its
+the thread ends its escalation, and the next one starts at the thread's origin chain again. The thread's escalation, its
 level, whether the leader's answer was used and the deadline live with the thread's spend in the KV bucket `ants_sessions`, so restarts
 keep them.
 
@@ -366,7 +375,7 @@ and a limit on the tool calls it starts, `--max-tool-calls` (default 300). Spend
 A prompt that passes a limit or a cap is cancelled with ACP `session/cancel` (a harness that does not stop within 30 s
 is restarted, and its session resumes on the next message). The reply carries what the harness wrote so far and an
 `[ants]` notice naming the limit. When the message came from another agent, the thread then escalates (see Escalations)
-like a spent turn budget: the ant's chain, else the owner, gets the notice, "needs a decision", and the last
+like a spent turn budget: the thread's origin chain, else the owner, gets the notice, "needs a decision", and the last
 message. While a cap is reached, later messages on the thread are not prompted; each escalates the same way.
 
 - Per-prompt limits start afresh with every prompt.
@@ -484,7 +493,7 @@ Memory and task instructions remain separate and are not published in the roster
 
 A message gets five attempts. When the last one fails, the daemon stores the message as a dead letter on
 `ants.dead.<ant>` (with the error and delivery count), escalates a notice on the same thread (see
-Escalations: up the ant's chain, else to the thread's owner), and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
+Escalations: up the thread's origin chain, else to the thread's owner), and only then terminates it. If the last attempt never finishes (the daemon stopped, or the ack wait ran
 out), the consumer's one extra delivery dead-letters it without another prompt (or, when that attempt recorded its
 reply, sends the reply). A payload that is not an envelope becomes a dead letter at once. While a leaf node's uplink
 is down the dead letter waits in the machine's outbox, and the notice and termination wait for the message's next
@@ -614,7 +623,8 @@ speak as the ant, on the thread the session serves:
 | `post_notes(text)` | Posts to the notes of the current thread, spending one turn; the post notifies and wakes nobody (see Thread notes). |
 | `read_notes(thread?)` | Returns the posts of the current thread's notes, or of `thread`, oldest first (the last 50), and the turns they have left. Agents see the notes only by calling it. |
 | `decide_approval(verdict)` | Decides the tool request that the message being handled brings up the chain (see Tool permissions): `allow_once`, `allow_always` or `reject`, sent to the requesting ant. |
-| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the ant's chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
+| `post_channel(channel, text)` | Posts to `channel` (`ops` or `#ops`) a top-level post starting a new thread, which the ant creates (see Channels): it has no owner and the turns the message being handled leaves, one fewer unless that message is a human's, refused when none are left. `@ant` wakes that member only. Only a member or the messenger of the channel may post. Returns the new thread and whom the post wakes. |
+| `escalate(issue)` | Escalates the current thread for `issue`, as being stuck does (reason `asked`; see Escalations): up the thread's origin chain one level, or to the thread's owner without one. On an escalation group's message, its leader sends that escalation one level higher; other members are refused and post to the thread notes instead. Refused on a tool request brought up the chain, which climbs no further. Returns the level, members and leader, or the owner and why. Asking again while on the same message sends nothing twice. |
 
 Messages follow on from the one the thread is handling, so they spend its turn budget like replies: free after a message
 from a human or to one, one turn after a message from an agent, refused when none is left (a new thread inherits the
@@ -635,9 +645,9 @@ calling thread; requests without a known token get 401. Harnesses whose ACP `mcp
 server instead, `ants mcp --socket <home>/mcp.sock` with the token in `ANTS_MCP_TOKEN`, which forwards stdio to the
 socket: one small process per session, only for those harnesses. Tool requests go through the ant's allowlist like
 any other (`other:send_message`, `other:ask_agent`, `other:check_inbox`, `other:list_ants`, `other:route`,
-`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:escalate`, or `other`). Ant credentials
-issued before the MCP tools existed lack the subscription to the ant's own inbox; issue them again with `ants auth
-user`.
+`other:post_notes`, `other:read_notes`, `other:decide_approval`, `other:post_channel`, `other:escalate`, or
+`other`). Ant credentials issued before the MCP tools existed lack the subscription to the ant's own inbox; issue them
+again with `ants auth user`.
 
 ## Messenger
 
@@ -705,10 +715,10 @@ Posts go on `ants.notes.<thread>.<from>` and are kept in the stream like message
 Posts spend the thread's turn budget like messages between agents. Each post carries the turns the notes have left: one
 less than the lower of the budget of the message its ant is handling and what the last post left. The post
 that spends the last turn escalates the thread (see Escalations): its ant sends a notice on the thread with the
-last post up its chain, else to the owner, and the notes refuse further agent posts until a human posts there or the
-escalation goes up a level of a chain, which posts there with a fresh budget, once per level. Two ants spending the
-same turn cannot both succeed: a post states the notes' last message it saw (`Nats-Expected-Last-Subject-Sequence`,
-nats-server 2.11 or later), and the loser reads the notes again.
+last post up the thread's origin chain, else to the owner, and the notes refuse further agent posts until a human
+posts there or the escalation goes up a level of a chain, which posts there with a fresh budget, once per level. Two
+ants spending the same turn cannot both succeed: a post states the notes' last message it saw
+(`Nats-Expected-Last-Subject-Sequence`, nats-server 2.11 or later), and the loser reads the notes again.
 
 ```sh
 ants notes <thread>                     # the notes' posts: time, author, turns left, text
@@ -758,13 +768,19 @@ wakes them by @mentioning them in a post on the thread. The messenger need not b
 post` prints. The ants a post wakes reply in the channel on that thread, and `--thread` lets any human answer there
 too. A thread's owner is the human whose post started it: each post carries it as `owner`, every later post on the
 thread keeps it, whoever writes it, and `ants post --thread` reads it back from the thread's first posts kept. Only when
-no post kept names one, the posting human takes the thread. `ants post --wait` prints the first post on the thread by
-someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)). `ants channel
-read` prints each thread under its id: the post that started it, then the replies, indented.
+no post kept names one, the posting human takes the thread. An ant can start a thread too, with the MCP tool
+`post_channel` or `ants post` under its own credentials, in a channel it is a member or the messenger of: the thread
+has no owner until a human posts on it, and the ant is its `creator`, which every later post and message on the thread
+keeps, like `owner`. The creator of a thread is always the author of its top-level post, whatever that post says, and
+never a human. An escalation on a thread an ant created goes up the creator's chain, whichever ant gets stuck (see
+Escalations). `ants watch` shows `created by <ant>` on such a thread's posts. `ants post --wait` prints the first post
+on the thread by someone else, `--follow` each post as it arrives (see [Waiting for replies](#waiting-for-replies)).
+`ants channel read` prints each thread under its id: the post that started it, then the replies, indented.
 
 **Turn budget.** Channel posts spend a thread's turn budget like messages between agents: every agent's post spends a
-turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the ant's chain,
-else to its owner) when none are left. So the agents one post wakes spend from the same turns, and agents
+turn of the thread's budget, whichever post it answers, and the thread escalates (see Escalations: up the thread's
+origin chain, else to its owner) when none are left. A thread an ant starts gets the turns the message the ant handles
+leaves. So the agents one post wakes spend from the same turns, and agents
 mentioning each other cannot multiply them. Any human's post gives the thread a fresh budget (8 turns), and so does the
 answer of the escalation's leader, once per level: the ant that got stuck posts its answer to it back on the thread,
 carrying the fresh budget. `ants watch` shows the turns the thread has left after each post.
@@ -807,7 +823,7 @@ carries the turns the thread has left after it, and the daemon reads the posts s
 answers, before prompting and again before posting, taking the lowest of their turns, or the latest human post's, which
 gives a fresh budget. A post that reaches an ant with no turns left is not prompted, and an answer whose thread ran
 out of turns during the prompt is not posted: either way a notice on the thread with the post, and the unposted answer if
-any, escalates as in the inbox: up the ant's chain, else to the thread's owner, else the default human
+any, escalates as in the inbox: up the thread's origin chain, else to the thread's owner, else the default human
 (`ants.inbox.<human>.<ant>`). The leader's reply to such an escalation gives the thread its fresh budget in the
 channel: the ant's answer to it is posted to the thread (not sent to the leader's inbox) with 7 turns left after it,
 so the members it @mentions, and later posts, go on from there. The channel is kept with the thread's escalation in
@@ -890,7 +906,9 @@ Channels work the same way too. A channel is a named group of ants; its id follo
 `<from>` to channel `<channel>` goes on `ants.chan.<channel>.<from>` (kept in the stream), every credential posts only
 on `ants.chan.*.<own name>` (and `ants.out.chan.*.<own name>` in a leaf's outbox), and readers drop a post whose `from` or
 channel disagrees with its subject. A post carries its thread id and the ants it @mentions; a top-level post starts
-a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it. A
+a new thread, named after the post's own id, and a post carries the thread's `owner`, the human whose post started it,
+and its `creator`, the ant whose top-level post started it: readers take the creator of a top-level post from its
+subject-checked sender, ignore a human one, and posts without one stay valid. A
 channel's members and optional messenger are a `ChannelEntry` in the KV bucket `ants_channels`, under the channel id:
 only humans write it, ants read it, and readers skip an entry whose channel disagrees with its key. An ant takes
 channel posts through its own consumer `chan-<ant>` and reads channels back through `chanread-<ant>`;
@@ -919,7 +937,10 @@ issues its own credentials with `ants auth user NAME --human`. A human joins `an
 credentials are issued: until then daemons take its messages for an agent's. The CLI acts as the human its credentials
 name (see CLI); daemons read the bucket (see Escalations). An envelope may carry `owner`, the human who started its
 thread: replies, messages an agent sends on or from the thread, escalations and notices on it keep it; envelopes
-without one stay valid, and daemons ignore an `owner` that is no human. Credentials issued before `ants_humans` need `ants auth user` again.
+without one stay valid, and daemons ignore an `owner` that is no human. An envelope may carry `creator` the same way,
+the ant whose channel post started the thread (see Channels); daemons ignore a `creator` that is a human. A daemon or
+CLI from before `creator` drops it, and an escalation on such a thread goes up the stuck ant's chain. Credentials
+issued before `ants_humans` need `ants auth user` again.
 
 Escalation chains (see Escalations and Tool permissions): a roster entry may carry `escalate_to`, the
 ant's chain in order, whose first ant leads. The KV bucket `ants_chains` keeps it past the roster entry, as a
@@ -928,9 +949,10 @@ skip an entry whose ant disagrees with its key. Credentials issued before `ants_
 `ants auth leaf`) again, and `ants init` creates the bucket; until then daemons follow chains through the roster only.
 An envelope may carry `escalation`
 (`Escalation` in `ants-proto`): the stuck ant and its thread, the reason (`turn_budget`, `cap`, `notes`,
-`dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the stuck ant's own chain), the
-level's leader and the ants visited. One level up goes to every ant of the leader's chain not visited yet; an
-empty chain, a leader already visited, or a level past `max_escalation_hops` (default 3) hands it to the thread's owner
+`dead_letter`, `approval` with the request id, or `asked`), the chain level (1 for the thread's origin chain: the
+stuck ant's own, or the chain of the thread's creator, who leads level 0), the level's leader and the ants visited.
+One level up goes to every ant of the leader's chain not visited yet; an empty chain, a leader already visited, or a
+level past `max_escalation_hops` (default 3) hands it to the thread's owner
 instead. An agent's decision
 on another ant's approval request travels as an envelope's `approval` on `ants.inbox.<requester>.<decider>`, so the
 subject pins the decider and ant credentials need no rights on `ants.approvals.*`; the requester takes it only from

@@ -78,6 +78,9 @@ pub struct Pending {
     /// The thread's owner, a human, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
+    /// The ant that created the thread with a channel post, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<UserId>,
     /// What the escalation is about, for the escalations that follow it up.
     #[serde(default)]
     pub summary: String,
@@ -438,7 +441,8 @@ mod tests {
         let chain: Vec<UserId> = ["lead", "dev-b"].iter().map(|p| p.parse().unwrap()).collect();
         let ants_proto::Hop::Chain { escalation, .. } = start.up(&chain, 3) else { unreachable!() };
         let to = to.iter().map(|p| p.parse().unwrap()).collect();
-        Pending { escalation, to, renewed_by: None, deadline, owner: None, summary: "stuck".to_owned(), channel: None }
+        let summary = "stuck".to_owned();
+        Pending { escalation, to, renewed_by: None, deadline, owner: None, creator: None, summary, channel: None }
     }
 
     #[tokio::test]

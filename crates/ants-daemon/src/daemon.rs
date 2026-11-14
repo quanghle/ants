@@ -189,6 +189,7 @@ async fn serve(config: &Config) -> Result<Served> {
     )
     .await?;
     mcp.listen(bus::live_inbox(&client, &config.ant).await?);
+    mcp.with_channels(crate::mcp::jetstream_channels(js.clone()));
     let launch = Launch::new(
         config.harness,
         config.workdir.clone(),
@@ -495,7 +496,7 @@ impl Inbox<'_> {
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
     /// `ask_agent` call is handed over, and so is an approval decision, which is acked and never prompted with
     /// ([`NatsApprover::offer`]). An owner that is no human is dropped ([`Registry::human_owner`]), so neither the
-    /// escalations nor the messages that follow on from this one name it.
+    /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
     async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
         let mut envelope: Envelope = match serde_json::from_slice(&msg.payload) {
             Ok(e) => e,
@@ -519,6 +520,7 @@ impl Inbox<'_> {
             return None;
         }
         envelope.owner = self.humans.human_owner(envelope.owner.as_ref());
+        envelope.creator = self.humans.ant_creator(envelope.creator.as_ref());
         if self.claim(&envelope, msg).await {
             return None;
         }
@@ -528,7 +530,8 @@ impl Inbox<'_> {
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
     /// ant's own, one in a channel it is not a member of, one that does not @mention it and is not for it to
     /// triage. A malformed or forged one is dropped, with no dead letter: every daemon sees it. The post kept names
-    /// its thread's owner ([`ChannelPost::thread_owner`]), a human.
+    /// its thread's owner ([`ChannelPost::thread_owner`]), a human, and its creator ([`ChannelPost::thread_creator`]),
+    /// an ant.
     async fn admit_post(&self, msg: &jetstream::Message, channels: &mut Channels) -> Option<Incoming> {
         let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
             .map_err(|e| e.to_string())
@@ -559,6 +562,7 @@ impl Inbox<'_> {
         }
         let triage = (wake == Wake::Triage).then(|| channels.get(&post.channel).cloned()).flatten();
         post.owner = post.thread_owner(&humans);
+        post.creator = post.thread_creator(&humans);
         let envelope = channel::as_envelope(&post, self.ant);
         Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage })), resume: None })
     }
@@ -879,7 +883,8 @@ impl Inbox<'_> {
             }
             _ if let Some(channel) = &incoming.resume => {
                 let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
-                Reply::Post(post.with_owner(envelope.owner.clone()).spend(envelope.turn_budget)?)
+                let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
+                Reply::Post(post.spend(envelope.turn_budget)?)
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
@@ -978,7 +983,7 @@ impl Inbox<'_> {
         })
     }
 
-    /// Escalate the thread for `reason` up the ant's chain, in the end to its owner, else the default human
+    /// Escalate the thread for `reason` up its origin chain, in the end to its owner, else the default human
     /// ([`Escalator::escalate`]): `why` it needs a decision, and the message or post it was on, and an `unposted`
     /// answer. Its message id, from the stream sequence `seq` of the message, keeps a redelivery from escalating twice.
     async fn escalate(
@@ -2432,6 +2437,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_ant_that_started_a_channel_thread_is_its_creator_whatever_its_post_says() {
+        let Some((bus, _)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (ops, mut replies) = bus.channel("ops", &["dev-a", "lead"]).await;
+        let root =
+            ChannelPost::new(ops, "lead".parse().unwrap(), "@dev-a fix it").with_creator(Some("boss".parse().unwrap()));
+        let seq = bus.post(&root).await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let reply = next_post(&mut replies).await;
+            assert_eq!(
+                (&reply.thread_id, &reply.creator, &reply.owner),
+                (&root.thread_id, &Some("lead".parse().unwrap()), &None)
+            );
+            bus.until_posts_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    }
+
+    #[tokio::test]
     async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
         let Some((bus, mut human)) = Bus::start().await else { return };
         let (launch, log, _) = fake::launch(true);
@@ -2454,10 +2482,10 @@ mod tests {
         let check = async {
             let escalation = next_envelope(&mut human).await;
             assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&spent.thread_id, Some(spent.id)));
-            assert_eq!(
-                escalation.text,
-                "Turn budget spent; needs a decision. Last post from dev-b in #ops:\n@dev-a no turns left"
-            );
+            // dev-b started the thread, so the escalation starts at dev-b, which has no chain.
+            let last = "Turn budget spent; needs a decision. Last post from dev-b in #ops:\n@dev-a no turns left";
+            let created = format!("starts at dev-b, which created thread {} and has no escalate_to.", spent.thread_id);
+            assert_eq!(escalation.text, format!("{last}\n\n[ants] The escalation of dev-a {created}"));
             assert_eq!(next_post(&mut replies).await.text, "@dev-a its own");
             assert_eq!(next_post(&mut replies).await.in_reply_to, Some(ask.id));
             bus.until_posts_acked(seq).await;

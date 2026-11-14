@@ -5,6 +5,9 @@
 //!
 //! `decide_approval` answers another ant's tool request that came up its chain (see [`crate::approvals`]).
 //!
+//! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
+//! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
+//!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
 //! own bearer token, which tells the tools which thread calls them.
@@ -20,8 +23,8 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
-    ApprovalDecision, Envelope, EscalationReason, NotesPost, ROSTER_BUCKET, Role, RosterEntry, ThreadId, UserId, Uuid,
-    Verdict,
+    ApprovalDecision, CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, EscalationReason, NotesPost,
+    ROSTER_BUCKET, Role, RosterEntry, ThreadId, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -75,6 +78,37 @@ pub fn jetstream_outbox(js: async_nats::jetstream::Context) -> Outbox {
         let js = js.clone();
         Box::pin(async move { bus::publish(&js, &envelope).await.map(drop) })
     })
+}
+
+/// What `post_channel` needs: a channel's entry, None when there is no such channel, and a store for posts, which
+/// resolves once JetStream has the post.
+#[derive(Clone)]
+pub struct ChannelAccess {
+    pub entry: Arc<dyn Fn(ChannelId) -> BoxFuture<'static, Result<Option<ChannelEntry>>> + Send + Sync>,
+    pub post: Arc<dyn Fn(ChannelPost) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+}
+
+/// Reads the channels bucket and posts through JetStream.
+pub fn jetstream_channels(js: async_nats::jetstream::Context) -> ChannelAccess {
+    let reader = js.clone();
+    ChannelAccess {
+        entry: Arc::new(move |channel| {
+            let js = reader.clone();
+            Box::pin(async move {
+                let kv = js.get_key_value(CHANNELS_BUCKET).await.context("opening the channels")?;
+                let Some(value) = kv.get(channel.as_str()).await.context("reading the channel")? else {
+                    return Ok(None);
+                };
+                let entry: ChannelEntry = serde_json::from_slice(&value).context("reading the channel")?;
+                entry.check_key(channel.as_str())?;
+                Ok(Some(entry))
+            })
+        }),
+        post: Arc::new(move |post| {
+            let js = js.clone();
+            Box::pin(async move { bus::store(&js, post.subject(), &post, &post.id.to_string()).await.map(drop) })
+        }),
+    }
 }
 
 /// Reads the ants in the roster.
@@ -134,6 +168,7 @@ impl Mcp {
             notes,
             humans,
             escalator,
+            channels: std::sync::OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -158,6 +193,11 @@ impl Mcp {
         };
         tracing::info!(%url, "serving MCP tools");
         Ok(Self { hub, url, socket, tasks })
+    }
+
+    /// Serve `post_channel` through `channels`; without them it is refused.
+    pub fn with_channels(&self, channels: ChannelAccess) {
+        let _ = self.hub.channels.set(channels);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -294,6 +334,7 @@ struct Hub {
     notes: Arc<dyn NotesStore>,
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
+    channels: std::sync::OnceLock<ChannelAccess>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -354,13 +395,14 @@ impl Hub {
     }
 
     /// Post `text` to the notes of `thread`, spending one of its turns. The post that spends the last one escalates
-    /// the thread up the ant's chain, in the end to its owner, else the default human.
+    /// the thread up its origin chain, in the end to its owner, else the default human.
     async fn post_notes(&self, thread: &ThreadId, text: String) -> Result<String, String> {
         let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
-            (e.turn_budget, self.humans.human_owner(e.owner.as_ref()), self.humans.owner_of(e), carried)
+            let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone());
+            (e.turn_budget, owner, self.humans.owner_of(e), carried)
         });
-        let (budget, owner, human, carried) =
+        let (budget, (owner, creator), human, carried) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         for _ in 0..POST_TRIES {
             let notes = self.notes.read(thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
@@ -384,7 +426,8 @@ impl Hub {
                     post.from, post.text
                 ),
             )
-            .with_owner(owner.clone());
+            .with_owner(owner.clone())
+            .with_creator(creator.clone());
             let Some(escalator) = &self.escalator else {
                 tracing::info!(%thread, %human, "thread notes out of turns; handing the thread to its owner");
                 self.send(&notice).await.map_err(|e| {
@@ -412,7 +455,7 @@ impl Hub {
         Err(format!("the notes of thread {thread} kept changing; read_notes and post again"))
     }
 
-    /// Escalate `thread` for `issue`: up the ant's chain or, for the leader of the escalation group the thread's
+    /// Escalate `thread` for `issue`: up its origin chain or, for the leader of the escalation group the thread's
     /// message is from, one level above that escalation. Returns where it went.
     async fn escalate(&self, thread: &ThreadId, issue: String) -> Result<String, String> {
         let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
@@ -464,6 +507,43 @@ impl Hub {
         })
     }
 
+    /// Post `text` to `channel` as the ant, a member or the channel's messenger: a top-level post starting a thread
+    /// the ant creates, with no owner and the turns the message `thread` is handling leaves, as `send_message` spends
+    /// them. Returns the new thread and whom the post wakes.
+    async fn post_channel(&self, thread: &ThreadId, channel: &str, text: String) -> Result<String, String> {
+        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
+        let channel: ChannelId = channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
+        let access = self.channels.get().ok_or("channels are not served here; post_channel is unavailable")?;
+        let entry = (access.entry)(channel.clone())
+            .await
+            .map_err(|e| format!("cannot read #{channel}: {e:#}"))?
+            .ok_or_else(|| format!("there is no channel #{channel}"))?;
+        if !entry.is_member(&self.ant) && entry.messenger() != self.ant {
+            return Err(format!(
+                "{} is neither a member nor the messenger of #{channel}; only members and the messenger start \
+                 threads there",
+                self.ant
+            ));
+        }
+        let left = current
+            .reply(self.ant.clone(), "", self.humans.role(&current.from))
+            .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?
+            .turn_budget;
+        let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text).with_creator(Some(self.ant.clone()));
+        post.turn_budget = left;
+        (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
+        let woken = entry.woken(&post, &self.humans.humans());
+        let wakes = match woken.is_empty() {
+            true => "it wakes nobody: only @mentions of members wake anyone".to_owned(),
+            false => format!("it wakes {}", woken.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ")),
+        };
+        Ok(format!(
+            "Posted to #{channel}, starting thread {} that {} created ({left} turns left); {wakes}.",
+            post.thread_id, self.ant
+        ))
+    }
+
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
         (self.outbox)(envelope.clone()).await.map_err(|e| format!("not sent: {e:#}"))
     }
@@ -485,7 +565,8 @@ impl Hub {
         }
         let decision = ApprovalDecision::new(id, escalation.stuck.clone(), verdict);
         let envelope = Envelope::decision(escalation.thread_id.clone(), self.ant.clone(), decision)
-            .with_owner(current.owner.clone());
+            .with_owner(current.owner.clone())
+            .with_creator(current.creator.clone());
         self.send(&envelope).await?;
         Ok(format!(
             "Sent {} on approval request {id} to {}; the first decision wins, a human's included.",
@@ -748,6 +829,14 @@ struct DecideApproval {
 #[derive(Deserialize, schemars::JsonSchema)]
 struct PostNotes {
     /// The post.
+    text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct PostChannel {
+    /// Channel to post to, such as `ops` or `#ops`.
+    channel: String,
+    /// The post; an @ant in it wakes that member of the channel.
     text: String,
 }
 
@@ -1040,9 +1129,24 @@ impl Tools {
         Ok(text(result))
     }
 
+    #[tool(description = "Start a thread in `channel` with a top-level post, as its creator: the @mentioned \
+        members of the channel wake and answer on the thread, and an escalation on the thread goes up this ant's \
+        escalation chain, whichever ant gets stuck. Only a member or the messenger of the channel may post. The \
+        thread has no owner and gets the turns the current message leaves, one fewer unless it is a human's; with \
+        none left it is refused. Returns the thread id.")]
+    async fn post_channel(
+        &self,
+        Parameters(args): Parameters<PostChannel>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.post_channel(&thread, &args.channel, args.text).await))
+    }
+
     #[tool(description = "Escalate the current thread when stuck on it: `issue` says what blocks it and what is \
-        needed. It goes up this ant's escalation chain one level at a time, to the escalate_to ants (the \
-        first leads and answers on the thread), and to the thread's owner when no chain is left. On an escalation \
+        needed. It goes up the thread's origin chain one level at a time: the escalation chain of the ant that \
+        created the thread with a channel post, else this ant's, to the escalate_to ants (the first leads and \
+        answers on the thread), and to the thread's owner when no chain is left. On an escalation \
         group's message only its leader escalates, one level higher; the other members post to the thread notes. \
         Returns where it went.")]
     async fn escalate(
@@ -1073,7 +1177,8 @@ fn instructions(ant: &UserId) -> String {
          the thread's notes, one board per thread, with the other ants on it: a post there wakes nobody, so post a \
          proposal, ask them with send_message or ask_agent to read it with read_notes and answer, and settle it \
          before the work starts. \
-         escalate sends the thread up the ant's escalation chain when stuck on it. Memory and task \
+         post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain. \
+         escalate sends the thread up its origin chain when stuck on it. Memory and task \
          tools follow the ant's configured instructions."
     );
     if *ant == UserId::messenger() {
@@ -1222,7 +1327,7 @@ mod tests {
         let (url, token) = http_server(&mcp, &current.thread_id);
         let client = http_client(&url, &token).await;
         let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-        assert_eq!(tools.len(), 9, "{tools:?}");
+        assert_eq!(tools.len(), 10, "{tools:?}");
 
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
         assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1448,6 +1553,14 @@ mod tests {
 
     /// An MCP server for `dev-a` escalating up `escalate_to`, whose sent envelopes come out of the receiver.
     async fn start_escalating(home: &Path, escalate_to: &[&str]) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
+        start_escalating_with(home, escalate_to, Vec::new()).await
+    }
+
+    async fn start_escalating_with(
+        home: &Path,
+        escalate_to: &[&str],
+        roster: Vec<RosterEntry>,
+    ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (outbox_tx, send_tx) = (tx.clone(), tx);
         let outbox: Outbox = Arc::new(move |envelope| {
@@ -1458,7 +1571,10 @@ mod tests {
             let _ = send_tx.send(envelope);
             Box::pin(async { Ok(()) })
         });
-        let roster: Roster = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
+        let roster: Roster = Arc::new(move || {
+            let roster = roster.clone();
+            Box::pin(async move { Ok(roster) })
+        });
         let chain = crate::escalation::Chain {
             escalate_to: escalate_to.iter().map(|p| user(p)).collect(),
             ..Default::default()
@@ -1525,6 +1641,108 @@ mod tests {
         assert_eq!(notice.escalation.as_deref().map(|e| (e.level, &e.leader)), Some((2, &user("lead"))));
         let to: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).map(|e| e.to).collect();
         assert_eq!(to, [user("lead"), user("dev-b")]);
+    }
+
+    #[tokio::test]
+    async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() {
+        let lead = RosterEntry { escalate_to: vec![user("boss")], ..listed("lead", &[]) };
+        let (mcp, mut sent) = start_escalating_with(&home("escalate-creator"), &["dev-b"], vec![lead]).await;
+        let current = Envelope::new(user("lead"), user("dev-a"), "fix it").with_creator(Some(user("lead")));
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
+        assert!(ok && text.contains("to level 1: sent to boss; boss leads"), "{text}");
+        let envelope = sent.try_recv().unwrap();
+        assert_eq!((&envelope.to, &envelope.creator), (&user("boss"), &Some(user("lead"))));
+        let escalation = envelope.escalation.as_deref().unwrap();
+        assert_eq!((escalation.level, &escalation.stuck), (1, &user("dev-a")));
+        assert_eq!(escalation.visited, [user("dev-a"), user("lead"), user("boss")]);
+        assert!(sent.try_recv().is_err(), "dev-a's own chain is not used");
+
+        // A creator with no chain sends it to the owner, else the default human.
+        let (mcp, mut sent) = start_escalating_with(&home("escalate-creator-none"), &["dev-b"], vec![]).await;
+        let current = Envelope::new(user("lead"), user("dev-a"), "fix it").with_creator(Some(user("lead")));
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let _turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
+        assert!(ok && text.contains("to its owner human"), "{text}");
+        let notice = sent.try_recv().unwrap();
+        assert_eq!(notice.to, UserId::human());
+        assert!(notice.text.contains("starts at lead, which created thread"), "{}", notice.text);
+    }
+
+    fn channels(entries: Vec<ChannelEntry>, posted: Arc<StdMutex<Vec<ChannelPost>>>) -> ChannelAccess {
+        ChannelAccess {
+            entry: Arc::new(move |channel| {
+                let entry = entries.iter().find(|e| e.channel == channel).cloned();
+                Box::pin(async move { Ok(entry) })
+            }),
+            post: Arc::new(move |post| {
+                posted.lock().unwrap().push(post);
+                Box::pin(async { Ok(()) })
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
+        let (mcp, _sent) = start(&home("post-channel")).await;
+        let current = from_human();
+        let client = {
+            let (url, token) = http_server(&mcp, &current.thread_id);
+            http_client(&url, &token).await
+        };
+        let post = |channel: &str, text: &str| serde_json::json!({"channel": channel, "text": text});
+        let (ok, text) = call(&client, "post_channel", post("ops", "hi")).await;
+        assert!(!ok && text.contains("no message is being handled"), "{text}");
+        let turn = mcp.begin(&current);
+        let (ok, text) = call(&client, "post_channel", post("ops", "hi")).await;
+        assert!(!ok && text.contains("channels are not served here"), "{text}");
+
+        let mut ops = ChannelEntry::new("ops".parse().unwrap());
+        ops.add_member(user("dev-a"));
+        ops.add_member(user("dev-b"));
+        let mut dev = ChannelEntry::new("dev".parse().unwrap());
+        dev.add_member(user("dev-b"));
+        let mut triage = ChannelEntry::new("triage".parse().unwrap());
+        triage.messenger = Some(user("dev-a"));
+        let posted = Arc::new(StdMutex::new(Vec::new()));
+        mcp.with_channels(channels(vec![ops, dev, triage], posted.clone()));
+
+        let (ok, text) = call(&client, "post_channel", post("#ops", "@dev-b check the build")).await;
+        assert!(ok && text.contains("that dev-a created (8 turns left); it wakes dev-b."), "{text}");
+        let got = posted.lock().unwrap().pop().unwrap();
+        assert_eq!((got.channel.as_str(), &got.from, got.in_reply_to), ("ops", &user("dev-a"), None));
+        assert_eq!((&got.creator, &got.owner), (&Some(user("dev-a")), &None));
+        assert_eq!(got.turn_budget, ants_proto::DEFAULT_TURN_BUDGET, "a human's message spends no turn");
+        assert!(text.contains(&format!("starting thread {}", got.thread_id)) && got.thread_id != current.thread_id);
+
+        let (ok, text) = call(&client, "post_channel", post("triage", "noted")).await;
+        assert!(ok && text.contains("it wakes nobody"), "the messenger posts: {text}");
+        let (ok, text) = call(&client, "post_channel", post("dev", "hi")).await;
+        assert!(!ok && text.contains("dev-a is neither a member nor the messenger of #dev"), "{text}");
+        let (ok, text) = call(&client, "post_channel", post("qa", "hi")).await;
+        assert!(!ok && text.contains("there is no channel #qa"), "{text}");
+
+        // Between ants, the post gets the turns the message leaves, and none left refuses it.
+        drop(turn);
+        let mut asked = Envelope::on_thread(current.thread_id.clone(), user("dev-b"), user("dev-a"), "post it");
+        asked.turn_budget = 2;
+        let turn = mcp.begin(&asked);
+        let (ok, text) = call(&client, "post_channel", post("ops", "@dev-b go")).await;
+        assert!(ok && text.contains("(1 turns left)"), "{text}");
+        drop(turn);
+        asked.turn_budget = 0;
+        let _turn = mcp.begin(&asked);
+        let (ok, text) = call(&client, "post_channel", post("ops", "@dev-b go")).await;
+        assert!(!ok && text.contains("has no turns left"), "{text}");
+        assert_eq!(posted.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

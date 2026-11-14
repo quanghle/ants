@@ -142,8 +142,8 @@ pub fn wake(ant: &UserId, entry: Option<&ChannelEntry>, post: &ChannelPost, huma
     }
 }
 
-/// `post` as an inbox message from its author to `ant`, owned by the thread's owner the post carries: what the
-/// attempt markers, caps, escalations and tools of the thread go by.
+/// `post` as an inbox message from its author to `ant`, owned by the thread's owner the post carries, and created by
+/// its creator: what the attempt markers, caps, escalations and tools of the thread go by.
 pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
     Envelope {
         id: post.id,
@@ -154,6 +154,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         turn_budget: post.turn_budget,
         in_reply_to: None,
         owner: post.owner.clone(),
+        creator: post.creator.clone(),
         escalation: None,
         approval: None,
         sent_at: post.sent_at,

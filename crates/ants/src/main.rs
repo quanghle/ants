@@ -1230,7 +1230,8 @@ fn request_line(r: &ApprovalRequest, forged: &str) -> String {
 /// A channel post as `ants watch` prints it.
 fn channel_line(post: &ChannelPost, forged: &str) -> String {
     let (thread, from, channel, left) = (&post.thread_id, &post.from, &post.channel, post.turn_budget);
-    format!("[{thread}] {from} -> #{channel} ({left} turns left){forged}: {}", post.text)
+    let created = post.creator.as_ref().map(|c| format!(", created by {c}")).unwrap_or_default();
+    format!("[{thread}] {from} -> #{channel} ({left} turns left{created}){forged}: {}", post.text)
 }
 
 /// Renders watched traffic, continuing an ant's streamed text on one line until something else arrives.
@@ -1387,6 +1388,8 @@ mod tests {
         assert_eq!(channel_line(&post, ""), "[t1] dev-a -> #ops (3 turns left): @dev-b ready?");
         let forged = " (forged: sent on ants.chan.ops.dev-b)";
         assert_eq!(channel_line(&post, forged), format!("[t1] dev-a -> #ops (3 turns left){forged}: @dev-b ready?"));
+        let created = post.with_creator(Some("lead".parse().unwrap()));
+        assert_eq!(channel_line(&created, ""), "[t1] dev-a -> #ops (3 turns left, created by lead): @dev-b ready?");
     }
 
     #[test]

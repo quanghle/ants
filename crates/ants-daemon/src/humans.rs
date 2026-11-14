@@ -50,6 +50,11 @@ impl Registry {
         owner.filter(|owner| self.is_human(owner)).cloned()
     }
 
+    /// `creator`, the creator a message names for its thread, when it is no human: only an ant creates a thread.
+    pub fn ant_creator(&self, creator: Option<&UserId>) -> Option<UserId> {
+        creator.filter(|creator| !self.is_human(creator)).cloned()
+    }
+
     /// The human who gets what is meant for the owner `owner` names: it when a human ([`Registry::human_owner`]),
     /// else the default human.
     pub fn owner_or_default(&self, owner: Option<&UserId>) -> UserId {
