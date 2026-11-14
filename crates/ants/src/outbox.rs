@@ -540,6 +540,9 @@ pub(crate) mod tests {
         eventually("the uplink is down", async || bus::open_stream(&a_js, &dev_a).await.is_err()).await;
         let kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
         assert_eq!(bus::publish(&a_js, &kept).await.unwrap(), bus::Stored::Outbox);
+        // A waiter that never reads back, as a daemon's, gets it only as the hub's stream republishes it.
+        let mut live = bus::live_inbox(&h, &human).await.unwrap();
+        h.flush().await.unwrap();
         let thread: ThreadId = "t1".parse().unwrap();
         assert!(notes::publish(&a_js, &NotesPost::new(thread.clone(), dev_a.clone(), "notes"), None).await.unwrap());
         let chan = ChannelPost::new("ops".parse().unwrap(), dev_a.clone(), "@dev-b kept");
@@ -591,6 +594,7 @@ pub(crate) mod tests {
         for replies in &mut waiters {
             assert_eq!(next(replies).await, kept, "a waiter gets the kept message, once the hub stores it");
         }
+        assert_eq!(next(&mut live).await, kept, "and one that never reads back");
         let passed_on = async || links::passed_on(&h_js, &channel_thread).await.unwrap();
         eventually("the links bucket takes dev-a's link", async || !passed_on().await.is_empty()).await;
         assert_eq!(passed_on().await, [(dev_a.clone(), dev_b.clone())]);

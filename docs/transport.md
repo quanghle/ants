@@ -207,7 +207,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 
 ### Republishing and live waiters
 
-Sourced messages enter `ANTS` without a core NATS publish on `ants.inbox.*`. `ants init` configures `ANTS` to republish stored `ants.inbox.*.*` messages to `_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}` with `Nats-Subject` intact, readable only by the recipient and its leaf uplink (daemons warn on older streams until upgraded). Live inbox waiters subscribe to both `ants.inbox.<user>.*` and `_INBOX.<user>.stored.*`, deduplicating the last 1,024 messages by `Nats-Msg-Id` (or payload).
+Sourced messages enter `ANTS` without a core NATS publish on `ants.inbox.*`. `ants init` configures `ANTS` to republish stored `ants.inbox.*.*` messages to `_INBOX.{{wildcard(1)}}.stored.{{wildcard(2)}}` with `Nats-Subject` intact, readable only by the recipient and its leaf uplink (daemons warn on older streams until upgraded). Live inbox waiters subscribe to both `ants.inbox.<user>.*` and `_INBOX.<user>.stored.*`, deduplicating the last 1,024 messages by `Nats-Msg-Id` (or payload). Any client can also have the server answer a direct get, or deliver a push consumer's messages, on such a subject with headers that client stored, and the stream adds its headers after any a publisher set, so waiters take a message from `_INBOX.<user>.stored.<from>` only with no reply subject, a single `Nats-Stream: ANTS` header and a single `Nats-Subject: ants.inbox.<user>.<from>` header; anything else there is dropped.
 
 Core NATS republishes do not cross a down leaf uplink. Waiter behavior across an uplink or client outage depends on the caller:
 
