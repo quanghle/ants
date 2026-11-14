@@ -1126,7 +1126,7 @@ async fn channels(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
             if channel::get(&kv, &channel).await?.is_none() {
                 tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
             }
-            let mut threads = channel::threads(channel::read(&js, &nats.me.id, &channel).await?);
+            let mut threads = channel::threads(channel::read(&js, &nats.me, &channel).await?);
             if let Some(thread) = &thread {
                 threads.retain(|t| t.id == *thread);
             }

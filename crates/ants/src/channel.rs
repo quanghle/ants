@@ -11,23 +11,19 @@
 
 use std::ops::ControlFlow;
 
-use std::time::Duration;
-
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
-use ants_daemon::channel::{Stored, load};
+use ants_daemon::channel::{Reading, Stored, load, read_back};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, STREAM, ThreadId, ThreadOrigin, UserId, Uuid, subject,
+    ChannelEntry, ChannelId, ChannelPost, Humans, RosterEntry, ThreadId, ThreadOrigin, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv::{self, UpdateErrorKind};
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
-/// How long a reader consumer left behind by an interrupted read lives on.
-const INACTIVE: Duration = Duration::from_secs(30);
-/// Messages asked for at once when reading a channel.
-const BATCH: u64 = 256;
+use crate::humans::Me;
+
 /// Attempts at a compare-and-set update before giving up on a channel that keeps changing.
 const ATTEMPTS: usize = 10;
 
@@ -248,14 +244,14 @@ pub fn human_post(
 /// and keeps a known owner. An ant creates the thread it starts, and a post on an existing thread keeps its creator.
 pub async fn compose(
     js: &jetstream::Context,
-    me: &crate::humans::Me,
+    me: &Me,
     humans: &Humans,
     channel: ChannelId,
     thread: Option<ThreadId>,
     text: String,
 ) -> ChannelPost {
     let (known, creator) = match &thread {
-        Some(thread) => thread_origin(js, &me.id, &channel, thread, humans).await.unwrap_or_else(|e| {
+        Some(thread) => thread_origin(js, me, &channel, thread, humans).await.unwrap_or_else(|e| {
             tracing::warn!("reading the owner of thread {thread} in #{channel}: {e:#}");
             (None, None)
         }),
@@ -265,12 +261,12 @@ pub async fn compose(
     human_post(channel, thread, me.id.clone(), owner, text).with_creator(creator)
 }
 
-/// The owner and creator of `thread` in `channel`, read through the reader consumer of `reader`: as its posts still
+/// The owner and creator of `thread` in `channel`, read as `reader` reads channels back ([`read`]): as its posts still
 /// kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
 /// start; any other from the channel's oldest post kept.
 pub async fn thread_origin(
     js: &jetstream::Context,
-    reader: &UserId,
+    reader: &Me,
     channel: &ChannelId,
     thread: &ThreadId,
     humans: &Humans,
@@ -315,10 +311,11 @@ pub fn thread_posts(
     })
 }
 
-/// The posts of `channel` kept in the stream, oldest first, read through the reader consumer of `reader`, created for
-/// the read and deleted after it. Only one read per reader may run at a time. Posts whose sender or channel disagrees
-/// with their subject are dropped with a warning.
-pub async fn read(js: &jetstream::Context, reader: &UserId, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
+/// The posts of `channel` kept in the stream, oldest first, read as `reader` reads channels back ([`Reading`]): a
+/// human by message gets, so any number of reads may run at once, an ant through its reader consumer, created for the
+/// read and deleted after it, one read at a time. Posts whose sender or channel disagrees with their subject are
+/// dropped with a warning.
+pub async fn read(js: &jetstream::Context, reader: &Me, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
     let mut posts = Vec::new();
     scan(js, reader, channel, consumer::DeliverPolicy::All, |post| {
         posts.push(post);
@@ -332,61 +329,21 @@ pub async fn read(js: &jetstream::Context, reader: &UserId, channel: &ChannelId)
 /// [`read`] does.
 async fn scan(
     js: &jetstream::Context,
-    reader: &UserId,
+    reader: &Me,
     channel: &ChannelId,
     start: consumer::DeliverPolicy,
-    take: impl FnMut(ChannelPost) -> ControlFlow<()>,
-) -> Result<()> {
-    let name = ants_proto::chan_reader(reader);
-    // A consumer left by an interrupted read would carry on where it stopped.
-    let _ = js.delete_consumer_from_stream(&name, STREAM).await;
-    let config = consumer::pull::Config {
-        name: Some(name.clone()),
-        filter_subject: subject::chan_room(channel),
-        deliver_policy: start,
-        ack_policy: consumer::AckPolicy::None,
-        inactive_threshold: INACTIVE,
-        ..Default::default()
-    };
-    let consumer: consumer::PullConsumer =
-        js.create_consumer_on_stream(config, STREAM).await.with_context(|| format!("reading channel {channel}"))?;
-    let scanned = collect(&consumer, channel, take).await;
-    if let Err(e) = js.delete_consumer_from_stream(&name, STREAM).await {
-        tracing::debug!(error = %e, consumer = name, "deleting the channel reader");
-    }
-    scanned
-}
-
-async fn collect(
-    consumer: &consumer::PullConsumer,
-    channel: &ChannelId,
     mut take: impl FnMut(ChannelPost) -> ControlFlow<()>,
 ) -> Result<()> {
-    let mut left = consumer.cached_info().num_pending;
-    while left > 0 {
-        let mut batch = consumer.fetch().max_messages(left.min(BATCH) as usize).messages().await?;
-        let mut got = 0;
-        while let Some(msg) = batch.next().await {
-            let msg = msg.map_err(|e| anyhow::anyhow!(e))?;
-            got += 1;
-            let post = serde_json::from_slice::<ChannelPost>(&msg.payload)
-                .map_err(|e| e.to_string())
-                .and_then(|post| post.check_subject(&msg.subject).map(|()| post).map_err(|e| e.to_string()));
-            match post {
-                Ok(post) => {
-                    if take(post).is_break() {
-                        return Ok(());
-                    }
-                }
-                Err(error) => tracing::warn!(%channel, subject = %msg.subject, error, "dropping a channel post"),
-            }
+    let reading = Reading::of(reader.role);
+    read_back(js, &reader.id, reading, &subject::chan_room(channel), start, |_, _, subject, post| match post {
+        Ok(post) => take(post),
+        Err(error) => {
+            tracing::warn!(%channel, subject, error, "dropping a channel post");
+            ControlFlow::Continue(())
         }
-        if got == 0 {
-            break;
-        }
-        left = left.saturating_sub(got);
-    }
-    Ok(())
+    })
+    .await
+    .with_context(|| format!("reading channel {channel}"))
 }
 
 /// The posts of one thread: the post that started it first, when the stream still has it, then the rest in order.
@@ -456,6 +413,10 @@ pub fn render(threads: &[Thread]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use ants_proto::{STREAM, chan_reader};
+
     use super::*;
     use crate::auth::tests::Server;
 
@@ -612,9 +573,10 @@ mod tests {
         let next = tokio::time::timeout(Duration::from_secs(2), waiting.next()).await.unwrap().unwrap();
         assert_eq!(next.text, "on it", "waiting skips the poster's own posts");
 
-        let posts = read(&js, &human, &ops()).await.unwrap();
+        let me = Me { id: human.clone(), role: ants_proto::Role::Human };
+        let posts = read(&js, &me, &ops()).await.unwrap();
         assert_eq!(posts, [top, again, answer]);
-        assert!(read(&js, &human, &"dev".parse().unwrap()).await.unwrap().is_empty());
+        assert!(read(&js, &me, &"dev".parse().unwrap()).await.unwrap().is_empty());
 
         delete(&kv, &ops()).await.unwrap();
         assert!(delete(&kv, &ops()).await.is_err());
@@ -660,7 +622,26 @@ mod tests {
         // On a thread nothing names an owner of, bob takes it.
         let lost = compose(&b_js, &me(&bob), &humans, ops(), Some("t1".parse().unwrap()), "hi".to_owned()).await;
         assert_eq!((lost.owner, lost.creator), (Some(bob.clone()), None));
-        assert_eq!(read(&b_js, &bob, &ops()).await.unwrap(), [top, answer, on]);
+        assert_eq!(read(&b_js, &me(&bob), &ops()).await.unwrap(), [top.clone(), answer.clone(), on.clone()]);
+
+        // bob's reads get the posts one by one: many at once all read the whole channel, and none touches a reader
+        // consumer, here one an older ants is reading through.
+        let older = consumer::pull::Config {
+            name: Some(chan_reader(&bob)),
+            filter_subject: subject::chan_room(&ops()),
+            ack_policy: consumer::AckPolicy::None,
+            ..Default::default()
+        };
+        let older: consumer::PullConsumer = b_js.create_consumer_on_stream(older, STREAM).await.unwrap();
+        let next = || async { older.fetch().max_messages(1).messages().await.unwrap().next().await.unwrap().unwrap() };
+        let post = |msg: jetstream::Message| serde_json::from_slice::<ChannelPost>(&msg.payload).unwrap();
+        assert_eq!(post(next().await), top);
+        let (as_bob, room) = (me(&bob), ops());
+        let reads = futures::future::join_all((0..8).map(|_| read(&b_js, &as_bob, &room))).await;
+        for posts in reads {
+            assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
+        }
+        assert_eq!(post(next().await), answer, "the older read carries on where it was");
 
         // An ant creates the thread it starts, and owns none; a human's post on it keeps the creator.
         let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };
