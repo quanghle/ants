@@ -3,7 +3,10 @@
 # `quota_exhausted` add phrases of the harness's errors that mean a provider rate limit or an exhausted quota to the
 # common ones (HTTP 429/529, "rate limit", "overloaded", "quota exceeded", "usage limit" and the like).
 # `context_overflow` lists phrases of its prompt errors that mean the session outgrew the model's context window,
-# besides those every harness shares.
+# besides those every harness shares. `window` is the model's context window in tokens, when known, and
+# `history_budget` the bytes of the thread's history a rebuilt session is seeded with; a `context` value may set
+# either over the harness's. Unset, the budget is a twelfth of the window (at 4 bytes a token), else 64 KiB, and no
+# budget exceeds a quarter of the window.
 
 # GitHub Copilot CLI.
 [harnesses.copilot]
@@ -25,10 +28,11 @@ mode = "default"
 sign_in = "claude login"
 quota_exhausted = ["hit your session limit", "hit your weekly limit", "hit your opus limit", "limit reached - resets"]
 context_overflow = ["exceed context limit"]
+window = 200000
 
 [harnesses.claude.context]
 default = {}
-1m = { model_suffix = "[1m]" }
+1m = { model_suffix = "[1m]", window = 1000000 }
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key. Its saved `agentMode`
 # (auto unless set) runs what it deems safe unasked, so sessions are switched to `default`. No context selector: the

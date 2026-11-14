@@ -733,7 +733,8 @@ mod tests {
     }
 
     fn with_history(text: &str) -> Prompt {
-        Prompt { history: Some(Box::pin(async { "HISTORY".to_owned() })), ..Prompt::new(text) }
+        let history = crate::history::from_fn(|budget| async move { format!("HISTORY {budget}") });
+        Prompt { history: Some(history), ..Prompt::new(text) }
     }
 
     #[tokio::test]
@@ -747,7 +748,7 @@ mod tests {
 
         let pool = Pool::new(launch, store.clone(), 4, IDLE);
         let seeded = "[ants] The earlier session of this thread could not be resumed, so this one starts over, its \
-                      context rebuilt from the thread's history.\n\nHISTORY\n\nb";
+                      context rebuilt from the thread's history.\n\nHISTORY 65536\n\nb";
         assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, format!("s2: {seeded}"));
         assert_eq!(pool.run(&thread(1), with_history("c")).await.unwrap().text, "s2: c", "only the first prompt");
         assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")));
@@ -762,7 +763,7 @@ mod tests {
         pool.run(&thread(1), with_history("a")).await.unwrap();
         let reply = pool.run(&thread(1), with_history("overflow")).await.unwrap();
         let seeded = "[ants] The session of this thread outgrew the model's context window, so this one starts over, \
-                      its context rebuilt from the thread's history.\n\nHISTORY\n\noverflow";
+                      its context rebuilt from the thread's history.\n\nHISTORY 32768\n\noverflow";
         assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None });
         assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")), "resumed from now on");
         assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s2: b");

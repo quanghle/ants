@@ -64,6 +64,10 @@ pub struct Harness {
     /// harness shares ([`crate::overflow`]).
     #[serde(default)]
     pub(crate) context_overflow: Vec<String>,
+    /// Tokens of the model's context window, when known: sizes the history a rebuilt session is seeded with.
+    pub(crate) window: Option<u64>,
+    /// Bytes of the thread's history a rebuilt session is seeded with ([`crate::history::budget`]).
+    pub(crate) history_budget: Option<usize>,
 }
 
 /// What one `context` value selects.
@@ -75,6 +79,10 @@ pub struct ContextValue {
     pub(crate) args: Vec<String>,
     /// Appended to the model ID selected through ACP. A value with a suffix requires an explicit model.
     pub(crate) model_suffix: Option<String>,
+    /// Tokens of the context window it selects, over the harness's.
+    pub(crate) window: Option<u64>,
+    /// Bytes of history a rebuilt session is seeded with, over the harness's.
+    pub(crate) history_budget: Option<usize>,
 }
 
 impl Harness {
@@ -131,8 +139,27 @@ impl Harness {
             if selects.model_suffix.as_ref().is_some_and(String::is_empty) {
                 bail!("harness {name}: context {value}: model_suffix must not be empty");
             }
+            if selects.window == Some(0) {
+                bail!("harness {name}: context {value}: window must be above 0; omit it when unknown");
+            }
+        }
+        if self.window == Some(0) {
+            bail!("harness {name}: window must be above 0; omit it when unknown");
         }
         Ok(())
+    }
+
+    /// Bytes of the thread's history a session rebuilt for an ant with `settings` is seeded with: the ant's
+    /// `history_budget`, else the one of its `context` value or one derived from that value's window, else the
+    /// harness's, else one derived from the harness's window ([`crate::history::budget`]).
+    pub(crate) fn history_budget(&self, settings: &ModelSettings) -> usize {
+        let selected = settings.context.as_ref().and_then(|value| self.context.get(value));
+        let window = selected.and_then(|value| value.window).or(self.window);
+        let set = match selected {
+            Some(value) if value.history_budget.is_some() || value.window.is_some() => value.history_budget,
+            _ => self.history_budget,
+        };
+        crate::history::budget(settings.history_budget.or(set), window)
     }
 
     /// The harness process: its arguments with those of the ant's `context`, its environment with the ant's `env`
@@ -261,6 +288,8 @@ pub struct ModelSettings {
     pub reasoning_effort: Option<String>,
     /// Provider-native context selection, not a token spending cap.
     pub context: Option<String>,
+    /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's.
+    pub history_budget: Option<usize>,
 }
 
 impl ModelSettings {
@@ -553,6 +582,8 @@ impl Launch {
             rate_limited: Vec::new(),
             quota_exhausted: Vec::new(),
             context_overflow: Vec::new(),
+            window: None,
+            history_budget: None,
         };
         Self {
             harness: Arc::new(harness),
@@ -923,7 +954,10 @@ async fn serve(
                         });
                     }
                     let seed = match rebuild {
-                        Some(why) => crate::history::seed(why, history.take()).await,
+                        Some(why) => {
+                            let budget = launch.harness.history_budget(&launch.settings);
+                            crate::history::seed(why, history.take(), budget).await
+                        }
                         None => String::new(),
                     };
                     let text = [launch.instructions.as_str(), &seed, &text]
@@ -1456,6 +1490,27 @@ mod tests {
     }
 
     #[test]
+    fn the_history_budget_follows_the_ant_then_its_context_then_the_harness() {
+        let context = |value: &str| ModelSettings { context: Some(value.to_owned()), ..Default::default() };
+        let own = |budget| ModelSettings { history_budget: Some(budget), ..context("1m") };
+        let claude = builtin("claude");
+        assert_eq!(builtin("copilot").history_budget(&ModelSettings::default()), crate::history::DEFAULT_BUDGET);
+        assert_eq!(claude.history_budget(&context("default")), 66_666, "from the harness's window");
+        assert_eq!(claude.history_budget(&context("1m")), 333_333, "from the 1m context's window");
+        assert_eq!(claude.history_budget(&own(4096)), 4096);
+        assert_eq!(claude.history_budget(&own(usize::MAX)), 1_000_000, "a quarter of the 1m window at most");
+
+        let harness = custom(
+            "command = \"x\"\nhistory_budget = 1000\n[harnesses.custom.context]\n\
+             plain = {}\nwide = { window = 120000 }\nset = { history_budget = 3000 }",
+        );
+        assert_eq!(harness.history_budget(&ModelSettings::default()), 1000);
+        assert_eq!(harness.history_budget(&context("plain")), 1000);
+        assert_eq!(harness.history_budget(&context("wide")), 40_000, "the context's window over the harness's budget");
+        assert_eq!(harness.history_budget(&context("set")), 3000);
+    }
+
+    #[test]
     fn definitions_are_checked_and_replace_builtins_whole() {
         let define = |text: &str| parse_definitions(text).and_then(|defs| Harnesses::builtin().define(defs));
         let err = |text: &str| format!("{:#}", define(text).unwrap_err());
@@ -1472,6 +1527,7 @@ mod tests {
         assert!(err("[harnesses.\"My Agent\"]\ncommand = \"x\"").contains("use lowercase letters"));
         let suffix = err("[harnesses.custom]\ncommand = \"x\"\ncontext = { big = { model_suffix = \"\" } }");
         assert!(suffix.contains("model_suffix must not be empty"), "{suffix}");
+        assert!(err("[harnesses.custom]\ncommand = \"x\"\nwindow = 0").contains("window must be above 0"));
 
         let harnesses = define("[harnesses.copilot]\ncommand = \"/usr/local/bin/copilot-acp\"").unwrap();
         let copilot = harnesses.get("copilot").unwrap();
@@ -1586,8 +1642,11 @@ mod tests {
 
     #[tokio::test]
     async fn model_then_effort_are_applied_to_new_and_resumed_sessions() {
-        let settings =
-            ModelSettings { model: Some("smart".to_owned()), reasoning_effort: Some("high".to_owned()), context: None };
+        let settings = ModelSettings {
+            model: Some("smart".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            ..Default::default()
+        };
         for harness in ["copilot", "claude", "antigravity"] {
             let (launch, calls) = configurable(harness, settings.clone(), ConfigBehavior::Apply);
             Session::start(&launch, None).await.unwrap().close().await;
@@ -1617,7 +1676,7 @@ mod tests {
             let settings = ModelSettings {
                 model: Some(model.to_owned()),
                 reasoning_effort: effort.map(str::to_owned),
-                context: None,
+                ..Default::default()
             };
             let (launch, _) = configurable("copilot", settings, behavior);
             for resume in [None, Some("s1".into())] {

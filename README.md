@@ -243,6 +243,7 @@ harness = "claude"                         # overrides top-level harness
 model = "claude-sonnet-4-5"                # optional exact ACP model ID
 reasoning_effort = "high"                  # optional effort ID offered by the model
 context = "1m"                             # optional key from the harness's context table
+history_budget = 131072                    # optional bytes of thread history seeding a rebuilt session
 home = "~/.ants/dev-a"                     # default: ~/.ants/<name>
 whoami = "Maintain Rust backend services." # published in roster and prepended to prompts
 memory = "Use notes MCP for durable memory."
@@ -305,11 +306,13 @@ sign_in = "custom-acp login"                   # named when the harness reports 
 context_overflow = ["context too long"]        # prompt errors meaning the session outgrew the context window
 rate_limited = ["slow down"]                   # error phrases of a rate limit, besides the common ones
 quota_exhausted = ["monthly cap reached"]      # error phrases of an exhausted quota, besides the common ones
+window = 200000                                # optional context window in tokens; sizes the history seed
+history_budget = 65536                         # optional bytes of thread history seeding a rebuilt session
 
 [harnesses.custom-acp.context]
 default = {}
-large = { args = ["--context-window", "1m"] }  # appended to launch args
-huge = { model_suffix = "-1m" }                # appended to explicit `model`
+large = { args = ["--context-window", "1m"], window = 1000000 }  # appended to launch args; its window
+huge = { model_suffix = "-1m", history_budget = 262144 }         # appended to explicit `model`; its budget
 ```
 
 Codex runs through its ACP adapter as a custom definition (`npm install -g @agentclientprotocol/codex-acp`; sign in with `codex-acp login`, or set `OPENAI_API_KEY` or `CODEX_API_KEY` together with `DEFAULT_AUTH_REQUEST`):
@@ -352,10 +355,12 @@ Either way the daemon holds the message in hand exactly as for [sign-in](#sign-i
 When `session/load` fails (the harness was upgraded, its session store cleared, or it cannot load sessions), the daemon starts a new session, logs a warning and stores the new session ID. Its first prompt starts with an `[ants]` line saying the earlier session could not be resumed, followed by the thread's history read back from `ANTS` with the ant's own credentials, oldest first:
 
 - messages to the ant on the thread received before the one being answered, the ant's own messages on the thread (through consumer `sentread-<ant>`), the thread's notes, and the posts of the channel thread;
-- the most recent entries within 64 KiB, each cut to 8 KiB, with an `[ants]` line counting the older ones left out;
+- the most recent entries within the history budget, each cut to an eighth of it, after an `[ants]` line telling what older ones were left out: how many of each kind (messages, thread notes, channel posts), their senders (up to 8 named) and the time span they cover;
 - an `[ants]` line instead when part or all of the history cannot be read (credentials older than permissions version 3 cannot read the ant's own messages back).
 
-A prompt error that says the session outgrew the model's context window (`context_length_exceeded`, `maximum context length`, `prompt is too long`, `exceeds the context window` and the like, plus the definition's `context_overflow` phrases, matched case-insensitively) moves the harness to a new session at once: the prompt runs again there, seeded the same way with an `[ants]` line saying why, without spending a delivery attempt. A prompt that overflows a new session too (a retried one, or the first after a lost session) is not retried: the daemon escalates `context_window` on the thread with the harness's error, acks the message and dead-letters nothing.
+A prompt error that says the session outgrew the model's context window (`context_length_exceeded`, `maximum context length`, `prompt is too long`, `exceeds the context window` and the like, plus the definition's `context_overflow` phrases, matched case-insensitively) moves the harness to a new session at once: the prompt runs again there, seeded the same way with an `[ants]` line saying why, without spending a delivery attempt. A prompt that overflows a new session too (a retried one, or the first after a lost session) is not retried: the daemon escalates `context_window` on the thread with the harness's error, acks the message and dead-letters nothing. A session rebuilt after an overflow is seeded with half the history budget, leaving room for the prompt.
+
+The history budget, in bytes, is the ant's `history_budget`; else that of the ant's `context` value, or one derived from that value's `window`; else the harness's `history_budget`, or one derived from its `window` (the model's context window in tokens); else 64 KiB. A budget derived from a window is a twelfth of it at 4 bytes a token (about 65 KB for 200k tokens, 333 KB for 1m), and no budget exceeds a quarter of the window (window × 1 byte). The built-in Claude definition sets a window of 200k tokens, and 1m for `context = "1m"`; Copilot and Antigravity set none, so their ants get 64 KiB unless `history_budget` says otherwise. `history_budget = 0` seeds only the line about what was left out.
 
 ### Model, reasoning effort and context
 
@@ -365,7 +370,7 @@ Set `model`, `reasoning_effort` and `context` per ant or via `--model`, `--reaso
 - **Claude:** `context` takes `default`, or `1m` with an explicit `model` (selects exact `<model>[1m]` variant). A `model` already ending in `[1m]` must omit or match `context`.
 - **Antigravity:** no `context` table; pick a model with the desired window.
 
-`context` selects a provider-native tier/window; `ants` never truncates or compacts history.
+`context` selects a provider-native tier/window; `ants` never truncates or compacts a live session's history (a rebuilt session's seed follows the [history budget](#lost-sessions-and-the-context-window)).
 
 ### Prompt limits and spending caps
 

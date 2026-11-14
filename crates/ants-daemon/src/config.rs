@@ -130,6 +130,8 @@ pub struct Ant {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context: Option<String>,
+    /// Bytes of the thread's history a rebuilt session is seeded with, over the harness's and its context's.
+    pub history_budget: Option<usize>,
     /// Same as `allow = ["*"]`.
     #[serde(default)]
     pub allow_tools: bool,
@@ -242,6 +244,7 @@ impl Ant {
             model: None,
             reasoning_effort: None,
             context: None,
+            history_budget: None,
             allow_tools: false,
             allow: Vec::new(),
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
@@ -273,8 +276,12 @@ impl Ant {
         let harness = harnesses
             .get(self.harness.as_deref().unwrap_or(DEFAULT_HARNESS))
             .with_context(|| format!("ant {}", self.name))?;
-        let model_settings =
-            ModelSettings { model: self.model, reasoning_effort: self.reasoning_effort, context: self.context };
+        let model_settings = ModelSettings {
+            model: self.model,
+            reasoning_effort: self.reasoning_effort,
+            context: self.context,
+            history_budget: self.history_budget,
+        };
         model_settings.validate(&harness).with_context(|| format!("ant {}", self.name))?;
         if self.builtin {
             std::fs::create_dir_all(&self.workdir)
@@ -758,7 +765,12 @@ pub fn entry(ant: &Ant) -> Result<String> {
             set(key, toml_string(&ants_proto::duration::format(value)));
         }
     }
-    for (key, value) in [("max_thread_tokens", ant.max_thread_tokens), ("max_daily_tokens", ant.max_daily_tokens)] {
+    let counts = [
+        ("history_budget", ant.history_budget.map(|n| n as u64)),
+        ("max_thread_tokens", ant.max_thread_tokens),
+        ("max_daily_tokens", ant.max_daily_tokens),
+    ];
+    for (key, value) in counts {
         if let Some(value) = value {
             set(key, value.to_string());
         }
@@ -850,6 +862,7 @@ Review changes for correctness."""
             model = "test-model"
             reasoning_effort = "high"
             context = "long_context"
+            history_budget = 131072
             allow = ["read", "search"]
             capabilities = ["rust", "review"]
             max_harnesses = 2
@@ -891,6 +904,7 @@ Review changes for correctness."""
                 model: Some("test-model".to_owned()),
                 reasoning_effort: Some("high".to_owned()),
                 context: Some("long_context".to_owned()),
+                history_budget: Some(131072),
             }
         );
         assert_eq!(config.whoami.as_deref(), Some("Maintain the Rust backend.\nReview changes for correctness."));
@@ -1309,6 +1323,7 @@ Review changes for correctness."""
         full.env.insert("A B".to_owned(), "x=\"y\"".to_owned());
         full.harness = Some("claude".to_owned());
         full.model = Some("m".to_owned());
+        full.history_budget = Some(20_000);
         full.allow_tools = true;
         full.allow = vec!["execute:cargo test*".to_owned()];
         full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
