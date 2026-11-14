@@ -81,6 +81,10 @@ pub struct Pending {
     /// The ant that created the thread with a channel post, if one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<UserId>,
+    /// The channel thread the thread was spun off, whose creator it has
+    /// ([`ants_proto::Envelope::origin_thread`]), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_thread: Option<ThreadId>,
     /// What the escalation is about, for the escalations that follow it up.
     #[serde(default)]
     pub summary: String,
@@ -442,7 +446,17 @@ mod tests {
         let ants_proto::Hop::Chain { escalation, .. } = start.up(&chain, 3) else { unreachable!() };
         let to = to.iter().map(|p| p.parse().unwrap()).collect();
         let summary = "stuck".to_owned();
-        Pending { escalation, to, renewed_by: None, deadline, owner: None, creator: None, summary, channel: None }
+        Pending {
+            escalation,
+            to,
+            renewed_by: None,
+            deadline,
+            owner: None,
+            creator: None,
+            origin_thread: None,
+            summary,
+            channel: None,
+        }
     }
 
     #[tokio::test]

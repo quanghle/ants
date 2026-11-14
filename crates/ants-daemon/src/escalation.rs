@@ -34,11 +34,11 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use crate::bus;
 use crate::caps::{Ledger, Pending};
 use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
+use crate::{bus, links};
 
 /// Default of `escalate_after`: as long as a prompt may run by default.
 pub const DEFAULT_ESCALATE_AFTER: Duration = Duration::from_secs(1800);
@@ -50,11 +50,15 @@ const SUMMARY_CHARS: usize = 4000;
 /// Stores an envelope under a message id, resolving once JetStream has it.
 pub type Sender = Arc<dyn Fn(Envelope, String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
-/// Stores through JetStream ([`bus::store`]).
+/// Stores through JetStream ([`bus::store`]), first recording the link to a channel thread the envelope passes on, if
+/// any ([`links::pass_on`]).
 pub fn jetstream_sender(js: async_nats::jetstream::Context) -> Sender {
     Arc::new(move |envelope, id| {
         let js = js.clone();
-        Box::pin(async move { bus::store(&js, envelope.subject(), &envelope, &id).await.map(drop) })
+        Box::pin(async move {
+            links::passing_on(&js, &envelope).await;
+            bus::store(&js, envelope.subject(), &envelope, &id).await.map(drop)
+        })
     })
 }
 
@@ -316,7 +320,8 @@ impl Escalator {
             let human = self.humans.owner_or_default(pending.owner.as_ref());
             let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), human, text)
                 .with_owner(pending.owner.clone())
-                .with_creator(pending.creator.clone());
+                .with_creator(pending.creator.clone())
+                .with_origin_thread(pending.origin_thread.clone());
             let stuck = Stuck {
                 reason: escalation.reason,
                 request_id: escalation.request_id,
@@ -345,6 +350,7 @@ impl Escalator {
         let chain = self.chain_of(&from.leader).await;
         let summary: String = summary.chars().take(SUMMARY_CHARS).collect();
         let (owner, creator) = (stuck.notice.owner.clone(), stuck.notice.creator.clone());
+        let origin_thread = stuck.notice.origin_thread.clone();
         match from.up(&chain, self.chain.max_hops) {
             Hop::Chain { escalation, to } => {
                 let ours = escalation.stuck == self.ant;
@@ -361,6 +367,7 @@ impl Escalator {
                     deadline,
                     owner,
                     creator,
+                    origin_thread,
                     summary,
                     channel: stuck.channel.clone(),
                 };
@@ -380,6 +387,7 @@ impl Escalator {
                         deadline: None,
                         owner,
                         creator,
+                        origin_thread,
                         summary,
                         channel: stuck.channel.clone(),
                     };
@@ -404,6 +412,7 @@ impl Escalator {
             let notice = Envelope::on_thread(thread.clone(), self.ant.clone(), escalation.stuck.clone(), text)
                 .with_owner(stuck.notice.owner.clone())
                 .with_creator(stuck.notice.creator.clone())
+                .with_origin_thread(stuck.notice.origin_thread.clone())
                 .with_escalation(Some(escalation.clone()));
             (self.send)(notice, format!("{}-{}", stuck.id, escalation.stuck)).await?;
         }
@@ -413,6 +422,7 @@ impl Escalator {
                 Envelope::on_thread(escalation.thread_id.clone(), self.ant.clone(), target.clone(), text.clone())
                     .with_owner(stuck.notice.owner.clone())
                     .with_creator(stuck.notice.creator.clone())
+                    .with_origin_thread(stuck.notice.origin_thread.clone())
                     .with_escalation(Some(escalation.clone()));
             envelope.in_reply_to = stuck.notice.in_reply_to;
             (self.send)(envelope, format!("{}-{target}", stuck.id)).await?;
@@ -684,6 +694,7 @@ mod tests {
             deadline: None,
             owner: None,
             creator: None,
+            origin_thread: None,
             summary: String::new(),
             channel: None,
         }

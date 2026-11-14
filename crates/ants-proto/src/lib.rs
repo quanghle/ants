@@ -269,6 +269,14 @@ impl Machine {
             })
             .collect()
     }
+
+    /// What the hub's [`LINKS_BUCKET`] admits from the machine's outbox for ant `user`, as an [`INTAKE_STREAM`] subject
+    /// filter and the subject it is stored under: exactly the links `user` passed on ([`link_outbox`]), under its own
+    /// keys.
+    pub fn admitted_links(&self, user: &UserId) -> (String, String) {
+        let filter = format!("ants.in.{self}.ants.out.links.{user}.*.*");
+        (filter, format!("$KV.{LINKS_BUCKET}.{user}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
+    }
 }
 
 impl FromStr for Machine {
@@ -573,6 +581,13 @@ pub fn link_key(from: &UserId, thread: &ThreadId, to: &UserId) -> String {
     format!("{from}.{thread}.{to}")
 }
 
+/// Where a client on a leaf node records a link passed on ([`link_key`]) while the hub is out of reach: the leaf's
+/// outbox ([`OUTBOX_STREAM`]) keeps it, and the hub's [`LINKS_BUCKET`] sources it from the hub's intake under the key,
+/// for the ants of the machine only ([`Machine::admitted_links`]).
+pub fn link_outbox(from: &UserId, thread: &ThreadId, to: &UserId) -> String {
+    format!("ants.out.links.{}", link_key(from, thread, to))
+}
+
 /// Every key in [`LINKS_BUCKET`] of a link to `thread` passed on, whoever passed it on to whom.
 pub fn links_to(thread: &ThreadId) -> String {
     format!("*.{thread}.*")
@@ -697,7 +712,8 @@ impl Permissions {
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
     ///
     /// Each inbox, notes and channel subject an ant may publish, and its own dead letter subject, it may also publish
-    /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps. Only a human sets up leaf outboxes and the hub's
+    /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
+    /// ([`link_outbox`]). Only a human sets up leaf outboxes and the hub's
     /// intake: a stream's configuration can copy, transform and republish any subject of the account, so no ant
     /// may create or change one.
     pub fn for_user(user: &UserId, role: Role) -> Self {
@@ -789,6 +805,8 @@ impl Permissions {
                 format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
                 format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+                // And the links bucket's sources from the intake.
+                format!("$JS.API.STREAM.UPDATE.{links}"),
             ]);
             for op in ["CREATE", "UPDATE", "INFO"] {
                 publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
@@ -822,8 +840,9 @@ impl Permissions {
                 // Put and delete of its own roster entry, and of its own escalation chain.
                 subject::roster(user),
                 subject::chain(user),
-                // Put of the links it passed on.
+                // Put of the links it passed on, and the same in the leaf's outbox.
                 format!("$KV.{LINKS_BUCKET}.{user}.>"),
+                format!("ants.out.links.{user}.>"),
             ]);
             // The spares of its notes and channel readers, for the CLI, each with the same filter pinned.
             for (reader, filter) in [(&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)] {
@@ -1315,6 +1334,13 @@ impl Envelope {
     /// The envelope with `creator` as the ant that started its thread with a channel post.
     pub fn with_creator(self, creator: Option<UserId>) -> Self {
         Self { creator, ..self }
+    }
+
+    /// The envelope linking to `origin_thread`, the channel thread its creator comes from ([`Envelope::origin_thread`]):
+    /// none without a creator, set first, or on that thread itself.
+    pub fn with_origin_thread(self, origin_thread: Option<ThreadId>) -> Self {
+        let origin_thread = origin_thread.filter(|t| self.creator.is_some() && *t != self.thread_id);
+        Self { origin_thread, ..self }
     }
 
     /// The envelope carrying `escalation`.
