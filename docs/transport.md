@@ -255,6 +255,7 @@ scripts/install-units.sh --bridge https://hub.example.com/bridge --bridge-token 
 - **Units**: `--bridge-serve` installs `contrib/launchd/ants.bridge-serve.plist` or `contrib/systemd/ants-bridge-serve.service` (`ants bridge serve --token-file FILE`, default `--listen` and `--upstream`); `--bridge URL` installs `contrib/launchd/ants.bridge.plist` or `contrib/systemd/ants-bridge.service` (`ants bridge connect --token-file FILE [--proxy URL] URL`, `SSL_CERT_FILE` from `--bridge-ca`). Both restart at most every 10 s after a failure (`~/Library/Logs/ants/bridge.log`, `bridge-serve.log`, or `journalctl --user -u ants-bridge -u ants-bridge-serve`). `--bridge` excludes `--devtunnel`: both listen on `127.0.0.1:7422`.
 - **Start order**: systemd starts `ants-nats` after `ants-bridge` on the worker, and `ants-bridge-serve` after `ants-nats` (pulling it in) on the hub. launchd has no start order: the worker's leaf node retries its uplink until `ants.bridge` listens, and on the hub, sessions opened before `ants.nats` listens fail and the leaves retry them.
 - **Token rotation**: the token file is read at each start; replace it on both ends and restart `ants.bridge-serve` / `ants-bridge-serve` and `ants.bridge` / `ants-bridge` (`launchctl kickstart -k gui/$(id -u)/<label>` or `systemctl --user restart <unit>`).
+- **Checks**: `ants doctor` finds the installed units and checks that each runs, that its token file exists with mode `0600`, and that its bridge answers within 5 s and takes the token (`bridge url` through the unit's proxy and `SSL_CERT_FILE`, `bridge serve url` on the listen address), naming the fix of each problem.
 - **Proxy credentials**: `--bridge-proxy` credentials appear in the installed unit and the process arguments. `--header` values (e.g. `X-Tunnel-Authorization`) and other `--listen` or `--upstream` addresses need an edit of the installed unit.
 
 ## Dev Tunnels
@@ -287,6 +288,7 @@ On the hub, `scripts/install-units.sh --devtunnel-host ants-hub` (`--devtunnel-b
 
 - **Sign in** as the service user before installing: `devtunnel user login -g -d` (GitHub, device code; `-e` for Microsoft Entra). Check the login with `devtunnel user show`.
 - **Renew the login** before it expires (keychain credentials last several days): re-run `devtunnel user login -g -d` as the same user. An expired login makes `devtunnel host` exit or fail to start; after a new login the next 30 s restart recovers, without reinstalling. Restart immediately with `launchctl kickstart -k gui/$(id -u)/ants.devtunnel-host` or `systemctl --user restart ants-devtunnel-host`.
+- **Checks**: `ants doctor` runs `devtunnel user show` for an installed `ants.devtunnel-host` / `ants-devtunnel-host` and fails without a login, warning within a day of an expiry the CLI reports.
 - **Headless hubs**: sign in with an Entra service principal (`devtunnel user login --sp-tenant-id ID --sp-client-id ID --sp-certificate-file FILE`) or managed identity (`--mi-client-id ID`) that owns or may host the tunnel, avoiding interactive renewal.
 - **While the host is down**: worker `devtunnel connect` and leaf uplinks fail and retry; leaves queue outbound traffic in `ANTS_OUT` (see "Store and forward").
 
@@ -296,6 +298,7 @@ On the hub, `scripts/install-units.sh --devtunnel-host ants-hub` (`--devtunnel-b
 
 - **CLI login (default)**: run `devtunnel user login -g -d` as the service user with the tunnel owner or an authorized org/tenant account (`devtunnel access create ants-hub --org ORG` or `--tenant`). Keychain credentials last several days; re-running `devtunnel user login -g -d` after expiry recovers on the next 30 s retry without restart. Headless workers can use Entra service principals (`--sp-tenant-id`, `--sp-client-id`, `--sp-certificate-file`) or managed identities (`--mi-client-id`).
 - **Connect token (`--devtunnel-token FILE`)**: issue a 24 h token (`devtunnel token ants-hub --scopes connect`), write `FILE` (`0600`), and install with `--devtunnel-token FILE` (`--access-token -` on stdin). Replace `FILE` before expiry and restart `ants.devtunnel` / `ants-devtunnel`.
+- **Checks**: `ants doctor` checks the installed unit: running, and either the CLI login (as for `devtunnel host`) or the token file, present with mode `0600` and failing once its token expired, warning 6 h before (the JWT's `exp`; a day after the file was written for a token that is no JWT).
 
 Stopping `devtunnel connect` leaves the hub-side socket from `devtunnel host` to `nats-server` open until hub `ping_interval: "30s"` reaps it.
 

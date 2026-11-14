@@ -16,11 +16,14 @@ use ants_daemon::keystore::{self, Store};
 use ants_daemon::{Launch, PermissionPolicy, bus, hub};
 use ants_proto::{INTAKE_STREAM, JsDomain, Machine, PERMISSIONS_VERSION, STREAM, UserId, inbox_consumer};
 use async_nats::jetstream;
+use hyper::StatusCode;
 use serde::Serialize;
 
+use crate::bridge::{self, Probe};
 use crate::humans::{Me, Rights};
-use crate::service::{Service, Services, State};
-use crate::{auth, leaf, outbox, revoke, versions};
+use crate::service::{Action, Service, Services, State, Unit};
+use crate::webhook::{self, SecretSource};
+use crate::{auth, leaf, notify, outbox, revoke, versions};
 
 /// How long a network check may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,11 +100,16 @@ pub struct Setup {
     /// The team directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
     /// pushed accounts.
     pub team: PathBuf,
+    /// The config file of `ants webhook serve`, checked when it is there.
+    pub webhooks: PathBuf,
+    /// The home directory whose installed services are checked; None for none.
+    pub home: Option<PathBuf>,
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the team, each ant's credentials, harness and workdir, the hub's
-/// account resolver, the leaf node and outbox, and the installed services.
+/// account resolver, the leaf node and outbox, the installed services, the webhooks' config file and notification
+/// sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -126,7 +134,13 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.push(resolver);
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
-    checks.extend(check_services(setup, &mut Services::local()));
+    let (services, transports) = {
+        let mut services = Services::under(setup.home.clone());
+        (check_services(setup, &mut services), installed_transports(&mut services))
+    };
+    checks.extend(services);
+    checks.extend(check_webhooks(&setup.webhooks).await);
+    checks.extend(check_transports(transports, now).await);
     checks
 }
 
@@ -997,8 +1011,12 @@ async fn check_outbox(
 fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
     let daemon = ("daemon service", Service::Daemon, &setup.config, "--config");
     let nats = ("leaf node service", Service::Nats, &setup.leaf_config, "--nats-conf");
-    [daemon, nats]
+    // Only a machine with the webhooks' config file serves them.
+    let webhook = ("webhook service", Service::Webhook, &setup.webhooks, "--webhook --webhook-config");
+    let webhook = setup.webhooks.exists().then_some(webhook);
+    [Some(daemon), Some(nats), webhook]
         .into_iter()
+        .flatten()
         .map(|(check, service, file, flag)| {
             let install = format!("scripts/install-units.sh {flag} {}", file.display());
             let file_shown = file.display();
@@ -1019,6 +1037,401 @@ fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
             }
         })
         .collect()
+}
+
+/// The webhooks' config file at `path`, when it is there: its secret files, present and private to their owner, the
+/// file itself as `ants webhook serve` reads it, and whether `public_url` reaches it.
+async fn check_webhooks(path: &Path) -> Vec<Check> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let shown = path.display();
+    let refused = || format!("correct {shown}; `ants webhook serve --config {shown}` refuses it as it is");
+    let outline = match webhook::outline(path) {
+        Ok(outline) => outline,
+        Err(e) => return vec![Check::fail("webhooks", format!("{e:#}"), vec![refused()])],
+    };
+    let mut checks = Vec::new();
+    let mut unset = Vec::new();
+    for (what, source) in &outline.secrets {
+        match source {
+            SecretSource::File(file) => {
+                let fix = format!("write the secret into {} (mode 0600)", file.display());
+                match private_file(file, fix) {
+                    Ok(_) => {}
+                    Err(problem) => checks.push(problem.named("webhook secrets", what, Status::Fail)),
+                }
+            }
+            SecretSource::Env(var) if std::env::var_os(var).is_none() => unset.push((what, var)),
+            SecretSource::Env(_) => {}
+        }
+    }
+    let files = outline.secrets.iter().filter(|(_, s)| matches!(s, SecretSource::File(_))).count();
+    if checks.is_empty() && files > 0 {
+        checks.push(Check::ok("webhook secrets", format!("{files} secret files of {shown}, each with mode 0600")));
+    }
+    for (what, var) in &unset {
+        let detail = format!("{what}: {var} is not set here, only the environment of `ants webhook serve` may hold it");
+        checks.push(Check::warn("webhook secrets", detail, vec![format!("export {var}, or name a secret_file")]));
+    }
+    if checks.iter().any(|c| c.status != Status::Ok) {
+        checks.push(Check::skip("webhooks", format!("{shown} not read: its secrets are not all readable here")));
+    } else {
+        checks.push(match webhook::Config::read(path) {
+            Ok(config) => {
+                let humans: Vec<&str> = config.humans.iter().map(|h| h.name.as_str()).collect();
+                let hooks = config.webhooks.len();
+                match humans.as_slice() {
+                    [] => Check::ok("webhooks", format!("{shown} lists {hooks} webhooks and no human to notify")),
+                    _ => Check::ok(
+                        "webhooks",
+                        format!(
+                            "{shown} lists {hooks} webhooks and notifies {}; `ants webhook notify-test HUMAN` tries \
+                             each sink",
+                            humans.join(", ")
+                        ),
+                    ),
+                }
+            }
+            Err(e) => Check::fail("webhooks", format!("{e:#}"), vec![refused()]),
+        });
+    }
+    if let Some(public_url) = &outline.public_url {
+        checks.push(check_public_url(public_url).await);
+    }
+    checks
+}
+
+/// Whether `public_url`, the approval links' address, reaches `ants webhook serve`: its page for a link without a
+/// query.
+async fn check_public_url(public_url: &str) -> Check {
+    let check = "public_url";
+    let url = format!("{}{}", public_url.trim_end_matches('/'), notify::APPROVAL_PATH);
+    let fix = || {
+        vec![format!("route {public_url} to `ants webhook serve` (its listen address and path), or correct public_url")]
+    };
+    match notify::probe_links(public_url, NETWORK_TIMEOUT).await {
+        Ok((StatusCode::BAD_REQUEST, page)) if page.contains("The link is incomplete.") => {
+            Check::ok(check, format!("{url} answers as `ants webhook serve` does"))
+        }
+        Ok((status, _)) => {
+            Check::warn(check, format!("{url} answered {status}, not as `ants webhook serve` does"), fix())
+        }
+        Err(e) => Check::warn(check, format!("{url}: {e:#}; approval links from notices may not open"), fix()),
+    }
+}
+
+/// Why a secret file does not do: its check's detail and fix, and how bad it is.
+struct Problem {
+    detail: String,
+    fix: String,
+    /// The file is there, readable by others.
+    exposed: bool,
+}
+
+impl Problem {
+    /// The check `check` of the file holding `what`: `exposed` warns or fails as `status` says.
+    fn named(self, check: &str, what: &str, exposed: Status) -> Check {
+        let status = if self.exposed { exposed } else { Status::Fail };
+        Check::new(check, status, format!("{what}: {}", self.detail), vec![self.fix])
+    }
+}
+
+/// The modification time of `file`, a regular file only its owner may read; else what to do about it, `write`
+/// when it is missing.
+fn private_file(file: &Path, write: String) -> Result<std::fs::Metadata, Problem> {
+    let shown = file.display();
+    let metadata = match std::fs::metadata(file) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Err(Problem { detail: format!("{shown} is not a file"), fix: write, exposed: false }),
+        Err(e) => return Err(Problem { detail: format!("{shown}: {e}"), fix: write, exposed: false }),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            let detail = format!("{shown} has mode {mode:04o}, readable by others");
+            return Err(Problem { detail, fix: format!("chmod 600 {shown}"), exposed: true });
+        }
+    }
+    Ok(metadata)
+}
+
+/// A Dev Tunnel or HTTPS bridge service installed, read before any check waits.
+struct Transport {
+    service: Service,
+    state: State,
+    unit: Unit,
+    restart: String,
+}
+
+/// The Dev Tunnel and HTTPS bridge services installed.
+fn installed_transports(services: &mut Services) -> Vec<Transport> {
+    [Service::DevTunnel, Service::DevTunnelHost, Service::Bridge, Service::BridgeServe]
+        .into_iter()
+        .filter_map(|service| {
+            let unit = services.unit(service)?;
+            let restart = services.by_hand(service, Action::Restart)?;
+            Some(Transport { service, state: services.status(service), unit, restart })
+        })
+        .collect()
+}
+
+/// When a Dev Tunnel login has this little left, warn.
+const LOGIN_WARN: Duration = Duration::from_hours(24);
+/// When a Dev Tunnel connect token has this little left, warn.
+const TOKEN_WARN: Duration = Duration::from_hours(6);
+/// How long a Dev Tunnel connect token lasts, for a token file whose expiry cannot be read.
+const TOKEN_LIFE: Duration = Duration::from_hours(24);
+
+/// The Dev Tunnel and HTTPS bridge services `transports`: whether each runs, the Dev Tunnel login or connect token,
+/// and whether each bridge answers and takes its token. Nothing without such services.
+async fn check_transports(transports: Vec<Transport>, now: u64) -> Vec<Check> {
+    let mut checks = Vec::new();
+    let mut login = None;
+    for Transport { service, state, unit, restart } in &transports {
+        let (check, what) = match service {
+            Service::DevTunnel => ("devtunnel service", "devtunnel connect"),
+            Service::DevTunnelHost => ("devtunnel host service", "devtunnel host"),
+            Service::Bridge => ("bridge service", "ants bridge connect"),
+            _ => ("bridge serve service", "ants bridge serve"),
+        };
+        checks.push(match state {
+            State::Running => Check::ok(check, format!("running `{what}`")),
+            State::Stopped(start) => {
+                Check::fail(check, format!("`{what}` installed, not running"), vec![start.clone()])
+            }
+            State::Unknown(command, e) => Check::warn(check, format!("{command}: {e}"), Vec::new()),
+            _ => Check::skip(check, "not installed"),
+        });
+        match service {
+            Service::DevTunnel | Service::DevTunnelHost => {
+                let program = unit.args.first().map(PathBuf::from).unwrap_or_default();
+                if !program.is_file() {
+                    let detail = format!("no devtunnel at {}", program.display());
+                    let fix = "scripts/install-units.sh again with --devtunnel-bin PATH".to_owned();
+                    checks.push(Check::fail("devtunnel", detail, vec![fix]));
+                    continue;
+                }
+                let tunnel = unit.args.get(2).map_or("TUNNEL", String::as_str);
+                match (&unit.stdin, *service) {
+                    (Some(token), Service::DevTunnel) => {
+                        checks.push(check_devtunnel_token(token, tunnel, restart, now));
+                    }
+                    _ => {
+                        login.get_or_insert((program, restart.clone()));
+                    }
+                }
+            }
+            _ => checks.extend(check_bridge(*service, unit, restart).await),
+        }
+    }
+    if let Some((program, restart)) = login {
+        checks.push(check_devtunnel_login(&program, &restart, now).await);
+    }
+    checks
+}
+
+/// The Dev Tunnel login of `devtunnel user show`, run with `program`: there, and not expiring within
+/// [`LOGIN_WARN`].
+async fn check_devtunnel_login(program: &Path, restart: &str, now: u64) -> Check {
+    let check = "devtunnel login";
+    let fix =
+        || vec![format!("devtunnel user login -g -d (GitHub, device code; -e for Microsoft Entra), then {restart}")];
+    let mut command = tokio::process::Command::new(program);
+    command.args(["user", "show", "--json"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let output = match tokio::time::timeout(NETWORK_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Check::fail(check, format!("running {}: {e}", program.display()), fix()),
+        Err(_) => {
+            let detail = format!("`devtunnel user show` gave no answer within {}s", NETWORK_TIMEOUT.as_secs());
+            return Check::warn(check, detail, Vec::new());
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let shown: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+        Ok(shown) => shown,
+        Err(_) => {
+            let said = if stdout.trim().is_empty() { String::from_utf8_lossy(&output.stderr) } else { stdout };
+            let detail = format!("`devtunnel user show` said: {}", said.trim());
+            return Check::warn(check, detail, fix());
+        }
+    };
+    let status = shown.get("status").and_then(|s| s.as_str()).unwrap_or_default();
+    if !status.eq_ignore_ascii_case("logged in") {
+        let status = if status.is_empty() { "no login" } else { status };
+        return Check::fail(check, format!("{status}: the tunnel goes down at its next connection"), fix());
+    }
+    let user = ["username", "userName", "user", "name"]
+        .iter()
+        .find_map(|key| shown.get(key).and_then(|v| v.as_str()))
+        .map_or(String::new(), |user| format!(" as {user}"));
+    match expiry(&shown) {
+        Some(expires) if expires <= now => Check::fail(check, format!("logged in{user}, expired"), fix()),
+        Some(expires) if expires - now < LOGIN_WARN.as_secs() => {
+            Check::warn(check, format!("logged in{user}, expiring in {}", left(expires - now)), fix())
+        }
+        Some(expires) => Check::ok(check, format!("logged in{user} for {}", left(expires - now))),
+        None => Check::ok(check, format!("logged in{user}; a login lasts some days, then devtunnel user login again")),
+    }
+}
+
+/// The connect token of `tunnel` in `file`, read by the devtunnel service at each start: there, private to its owner
+/// and not expiring within [`TOKEN_WARN`] (its `exp`, or [`TOKEN_LIFE`] after it was written).
+fn check_devtunnel_token(file: &Path, tunnel: &str, restart: &str, now: u64) -> Check {
+    let check = "devtunnel token";
+    let shown = file.display();
+    let renew =
+        format!("devtunnel token {tunnel} --scopes connect, its token into {shown} (mode 0600), then {restart}");
+    let metadata = match private_file(file, renew.clone()) {
+        Ok(metadata) => metadata,
+        Err(problem) => return problem.named(check, "the connect token", Status::Warn),
+    };
+    let token = std::fs::read_to_string(file).unwrap_or_default();
+    let (expires, said) = match jwt_expiry(token.trim()) {
+        Some(expires) => (expires, format!("expiring in {}", left(expires.saturating_sub(now)))),
+        None => {
+            let written = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            let written = written.map_or(0, |t| t.as_secs());
+            let age = left(now.saturating_sub(written));
+            (written + TOKEN_LIFE.as_secs(), format!("written {age} ago, and a connect token lasts a day"))
+        }
+    };
+    match expires.saturating_sub(now) {
+        0 => Check::fail(check, format!("{shown}: expired"), vec![renew]),
+        rest if rest < TOKEN_WARN.as_secs() => Check::warn(check, format!("{shown}: {said}"), vec![renew]),
+        _ => Check::ok(check, format!("{shown}: {said}")),
+    }
+}
+
+/// The `exp` of a JSON Web Token.
+fn jwt_expiry(token: &str) -> Option<u64> {
+    let mut parts = token.split('.');
+    let (_, payload, _) = (parts.next()?, parts.next()?, parts.next()?);
+    let payload = data_encoding::BASE64URL_NOPAD.decode(payload.trim_end_matches('=').as_bytes()).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&payload).ok()?.get("exp")?.as_u64()
+}
+
+/// The time, as seconds since the epoch, of a field of `value` whose name speaks of expiry.
+fn expiry(value: &serde_json::Value) -> Option<u64> {
+    let object = value.as_object()?;
+    object.iter().find_map(|(key, value)| match value {
+        serde_json::Value::Object(_) => expiry(value),
+        _ if !key.to_ascii_lowercase().contains("expir") => None,
+        serde_json::Value::String(text) => {
+            chrono::DateTime::parse_from_rfc3339(text).ok().and_then(|t| u64::try_from(t.timestamp()).ok())
+        }
+        serde_json::Value::Number(n) => n.as_u64().map(|t| if t > 100_000_000_000 { t / 1000 } else { t }),
+        _ => None,
+    })
+}
+
+/// `seconds`, rounded down, as minutes, hours or days.
+fn left(seconds: u64) -> String {
+    match seconds / 60 {
+        minutes @ 0..60 => format!("{minutes}m"),
+        minutes @ 60..2880 => format!("{}h", minutes / 60),
+        minutes => format!("{} days", minutes / 1440),
+    }
+}
+
+/// The bridge of `service`, `ants bridge connect` or `ants bridge serve` run as `unit`: its token file, and whether
+/// the bridge answers as one taking it.
+async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check> {
+    let serving = service == Service::BridgeServe;
+    let (token_check, url_check) = match serving {
+        true => ("bridge serve token", "bridge serve url"),
+        false => ("bridge token", "bridge url"),
+    };
+    let mut checks = Vec::new();
+    let token = match unit.flag("--token-file") {
+        Some(file) => {
+            let file = Path::new(file);
+            let write = match serving {
+                true => format!("write a long random token into {} (mode 0600), then {restart}", file.display()),
+                false => format!(
+                    "the token of the hub's `ants bridge serve` into {} (mode 0600), then {restart}",
+                    file.display()
+                ),
+            };
+            match private_file(file, write) {
+                Ok(_) => checks.push(Check::ok(token_check, format!("{}, mode 0600", file.display()))),
+                Err(problem) => checks.push(problem.named(token_check, "the bridge token", Status::Warn)),
+            }
+            bridge::token(None, Some(file)).ok().flatten()
+        }
+        None if serving => {
+            let detail = "none: anyone reaching the bridge may carry a connection to the hub";
+            checks.push(Check::warn(
+                token_check,
+                detail,
+                vec!["scripts/install-units.sh with --bridge-token FILE".to_owned()],
+            ));
+            None
+        }
+        None => None,
+    };
+    let url = match serving {
+        true => format!("http://{}", unit.flag("--listen").unwrap_or(bridge::DEFAULT_SERVE_LISTEN)),
+        false => match bridge_url(&unit.args) {
+            Some(url) => url.to_owned(),
+            None => {
+                checks.push(Check::fail(url_check, "the service names no bridge URL", Vec::new()));
+                return checks;
+            }
+        },
+    };
+    let remote = bridge::Remote::new(&url, token.as_deref(), &[], unit.flag("--proxy"));
+    let remote = match (remote, unit.env("SSL_CERT_FILE")) {
+        (Ok(remote), Some(ca)) => remote.trusting(Path::new(ca)),
+        (remote, _) => remote,
+    };
+    let probed = match remote {
+        Ok(remote) => remote.probe(NETWORK_TIMEOUT).await,
+        Err(e) => Err(e),
+    };
+    let unreachable = match serving {
+        true => restart.to_owned(),
+        false => {
+            format!("check that the hub's `ants bridge serve` runs and is reached at {url}, through the proxy if any")
+        }
+    };
+    checks.push(match probed {
+        Ok(Probe::Answers) => Check::ok(url_check, format!("{url} answers as a bridge taking the token")),
+        Ok(Probe::Refused(answer)) => {
+            let fix = match unit.flag("--token-file") {
+                Some(file) => {
+                    format!("the same token in {file} as the hub's `ants bridge serve` takes, then {restart}")
+                }
+                None => "scripts/install-units.sh with --bridge-token FILE holding the hub's bridge token".to_owned(),
+            };
+            Check::fail(url_check, format!("{url} refuses the token: {answer}"), vec![fix])
+        }
+        Ok(Probe::Other(status, answer)) => Check::fail(
+            url_check,
+            format!("{url} answered {status} {answer:?}, not as a bridge does"),
+            vec![unreachable],
+        ),
+        Err(e) => Check::fail(url_check, format!("{url}: {e:#}"), vec![unreachable]),
+    });
+    checks
+}
+
+/// The URL `ants bridge connect` runs with, among its arguments `args`.
+fn bridge_url(args: &[String]) -> Option<&str> {
+    let start = args.iter().position(|a| a == "connect")? + 1;
+    let mut rest = args[start..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--token-file" | "--token" | "--proxy" | "--header" | "--listen" => {
+                rest.next();
+            }
+            a if a.starts_with('-') => {}
+            url => return Some(url),
+        }
+    }
+    None
 }
 
 /// Whether the NATS URL `url` names the host and port `listen`, a loopback address.
@@ -1050,6 +1463,8 @@ mod tests {
             leaf_config: server.dir().join("no-leaf.conf"),
             harnesses: false,
             team: server.dir().join("no-team"),
+            webhooks: server.dir().join("no-webhooks.toml"),
+            home: None,
         }
     }
 
@@ -1198,6 +1613,8 @@ mod tests {
             leaf_config: dir.join("leaf.conf"),
             harnesses: true,
             team: dir.join("no-team"),
+            webhooks: dir.join("no-webhooks.toml"),
+            home: None,
         };
         let checks = check_ants(&loaded.ants, &loaded.harnesses, &setup, 0).await;
         let harness = named(&checks, "ant dev-a harness")[0];
@@ -1272,6 +1689,8 @@ mod tests {
             leaf_config: leaf_config.clone(),
             harnesses: false,
             team: dir.clone(),
+            webhooks: dir.join("no-webhooks.toml"),
+            home: None,
         };
 
         let checks = check_leaf(&setup, Leaf::read(&leaf_config), &loaded.ants, None, None, 0).await;
@@ -1311,6 +1730,8 @@ mod tests {
                 leaf_config: hub.dir().join("no-leaf.conf"),
                 harnesses: false,
                 team: hub.dir().join("auth"),
+                webhooks: hub.dir().join("no-webhooks.toml"),
+                home: None,
             };
             let check = check_resolver(&setup, false).await;
             match full {
@@ -1389,5 +1810,237 @@ mod tests {
         assert!(same_address("127.0.0.1", "127.0.0.1:4222"));
         assert!(!same_address("nats://127.0.0.1:4223", "127.0.0.1:4222"));
         assert!(!same_address("wss://hub.example/nats", "127.0.0.1:4222"));
+    }
+
+    fn private(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// The unit files scripts/install-units.sh writes for `args`, installed under `home` for this platform's
+    /// manager; false where it has none.
+    fn install_units(home: &Path, args: &[&str]) -> bool {
+        let dest = match std::env::consts::OS {
+            "macos" => home.join("Library/LaunchAgents"),
+            "linux" => home.join(".config/systemd/user"),
+            _ => return false,
+        };
+        let out = std::process::Command::new("sh")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/install-units.sh"))
+            .arg("--out")
+            .arg(&dest)
+            .args(["--nats-server", "/bin/sh", "--no-daemon", "--nats-conf"])
+            .arg(home.join("leaf.conf"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        true
+    }
+
+    /// The services under `home`, every one running.
+    fn running(home: &Path) -> Services {
+        Services::answering(home, |command| {
+            let stdout = match command {
+                "id -u" => "501\n",
+                c if c.starts_with("launchctl print") => "\tstate = running\n\tpid = 7\n",
+                _ => "",
+            };
+            crate::service::Ran { ok: true, stdout: stdout.to_owned(), stderr: String::new() }
+        })
+    }
+
+    async fn transports(home: &Path) -> Vec<Check> {
+        let installed = installed_transports(&mut running(home));
+        check_transports(installed, auth::now().unwrap()).await
+    }
+
+    fn one<'a>(checks: &'a [Check], name: &str) -> &'a Check {
+        let found = named(checks, name);
+        assert_eq!(found.len(), 1, "one {name} check: {checks:#?}");
+        found[0]
+    }
+
+    #[tokio::test]
+    async fn a_dev_tunnel_needs_a_login_or_a_connect_token_far_from_expiring() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = ants_test_support::scratch_dir("doctor-devtunnel").canonicalize().unwrap();
+        assert!(transports(&home).await.is_empty(), "nothing without the services");
+        let devtunnel = home.join("devtunnel");
+        let user_show = |json: &str| {
+            std::fs::write(&devtunnel, format!("#!/bin/sh\nprintf '%s\\n' '{json}'\n")).unwrap();
+            std::fs::set_permissions(&devtunnel, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        user_show(r#"{"status": "Not logged in"}"#);
+        let token = home.join("connect-token");
+        let now = auth::now().unwrap();
+        let jwt = |exp: u64| {
+            let payload = data_encoding::BASE64URL_NOPAD.encode(format!("{{\"exp\":{exp}}}").as_bytes());
+            format!("eyJhbGciOiJSUzI1NiJ9.{payload}.c2ln\n")
+        };
+        private(&token, &jwt(now + 3 * 3600 + 1800));
+        let (bin, file) = (devtunnel.to_str().unwrap(), token.to_str().unwrap());
+        let args = ["--devtunnel", "hub", "--devtunnel-bin", bin, "--devtunnel-token", file, "--devtunnel-host", "hub"];
+        if !install_units(&home, &args) {
+            return;
+        }
+        let restart = running(&home).by_hand(Service::DevTunnel, Action::Restart).unwrap();
+
+        let checks = transports(&home).await;
+        assert_eq!(one(&checks, "devtunnel service").status, Status::Ok, "{checks:#?}");
+        assert_eq!(one(&checks, "devtunnel host service").status, Status::Ok, "{checks:#?}");
+        let expiring = one(&checks, "devtunnel token");
+        assert_eq!((expiring.status, expiring.detail.as_str()), (Status::Warn, &*format!("{file}: expiring in 3h")));
+        let renew = format!("devtunnel token hub --scopes connect, its token into {file} (mode 0600), then {restart}");
+        assert_eq!(expiring.fix, std::slice::from_ref(&renew));
+        let login = one(&checks, "devtunnel login");
+        assert_eq!(
+            (login.status, login.detail.as_str()),
+            (Status::Fail, "Not logged in: the tunnel goes down at its next connection")
+        );
+        assert!(login.fix[0].starts_with("devtunnel user login"), "{login}");
+
+        let in_days = (chrono::Utc::now() + chrono::Duration::hours(80)).to_rfc3339();
+        user_show(&format!(r#"{{"status": "Logged in", "username": "alice", "expiration": "{in_days}"}}"#));
+        private(&token, &jwt(now + 10 * 3600));
+        let checks = transports(&home).await;
+        assert_eq!(one(&checks, "devtunnel token").status, Status::Ok, "{checks:#?}");
+        let login = one(&checks, "devtunnel login");
+        assert_eq!((login.status, login.detail.as_str()), (Status::Ok, "logged in as alice for 3 days"));
+        let in_hours = (chrono::Utc::now() + chrono::Duration::hours(5)).to_rfc3339();
+        user_show(&format!(r#"{{"status": "Logged in", "expiration": "{in_hours}"}}"#));
+        assert_eq!(one(&transports(&home).await, "devtunnel login").status, Status::Warn);
+
+        private(&token, &jwt(now - 1));
+        assert_eq!(one(&transports(&home).await, "devtunnel token").status, Status::Fail);
+        private(&token, "an-opaque-token\n");
+        let written = one(&transports(&home).await, "devtunnel token").clone();
+        assert_eq!(
+            (written.status, written.detail),
+            (Status::Ok, format!("{file}: written 0m ago, and a connect token lasts a day"))
+        );
+        chmod(&token, 0o644);
+        let exposed = one(&transports(&home).await, "devtunnel token").clone();
+        assert_eq!((exposed.status, exposed.fix), (Status::Warn, vec![format!("chmod 600 {file}")]));
+        std::fs::remove_file(&token).unwrap();
+        let missing = one(&transports(&home).await, "devtunnel token").clone();
+        assert_eq!((missing.status, missing.fix), (Status::Fail, vec![renew]));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bridge_must_answer_and_take_the_token_of_its_file() {
+        let home = ants_test_support::scratch_dir("doctor-bridge").canonicalize().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(bridge::Server::new("127.0.0.1:1".to_owned(), Some("s3cret".to_owned())).run(listener));
+        let token = home.join("bridge-token");
+        private(&token, "s3cret\n");
+        let url = format!("http://127.0.0.1:{port}/bridge");
+        let file = token.to_str().unwrap();
+        let args = ["--ants", "/bin/sh", "--bridge", &url, "--bridge-token", file, "--bridge-serve"];
+        if !install_units(&home, &args) {
+            return;
+        }
+        // The bridge this test serves, not the default port.
+        let (serve, from, to) = match std::env::consts::OS {
+            "macos" => (
+                home.join("Library/LaunchAgents/ants.bridge-serve.plist"),
+                "<string>serve</string>".to_owned(),
+                format!("<string>serve</string><string>--listen</string><string>127.0.0.1:{port}</string>"),
+            ),
+            _ => (
+                home.join(".config/systemd/user/ants-bridge-serve.service"),
+                "bridge serve --token-file".to_owned(),
+                format!("bridge serve --listen 127.0.0.1:{port} --token-file"),
+            ),
+        };
+        let text = std::fs::read_to_string(&serve).unwrap();
+        assert!(text.contains(&from), "{text}");
+        std::fs::write(&serve, text.replace(&from, &to)).unwrap();
+
+        let checks = transports(&home).await;
+        for check in ["bridge service", "bridge token", "bridge serve service", "bridge serve token"] {
+            assert_eq!(one(&checks, check).status, Status::Ok, "{checks:#?}");
+        }
+        assert_eq!(one(&checks, "bridge url").detail, format!("{url} answers as a bridge taking the token"));
+        let serving = one(&checks, "bridge serve url");
+        assert_eq!(serving.detail, format!("http://127.0.0.1:{port} answers as a bridge taking the token"));
+
+        private(&token, "guess\n");
+        let checks = transports(&home).await;
+        let refused = one(&checks, "bridge url");
+        assert_eq!(
+            (refused.status, refused.detail.as_str()),
+            (Status::Fail, &*format!("{url} refuses the token: missing or wrong bridge token"))
+        );
+        chmod(&token, 0o644);
+        let exposed = one(&transports(&home).await, "bridge token").clone();
+        assert_eq!((exposed.status, exposed.fix), (Status::Warn, vec![format!("chmod 600 {file}")]));
+        std::fs::remove_file(&token).unwrap();
+        let checks = transports(&home).await;
+        assert_eq!(one(&checks, "bridge token").status, Status::Fail, "{checks:#?}");
+        assert_eq!(one(&checks, "bridge url").status, Status::Fail, "{checks:#?}");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_webhook_config_needs_private_secrets_and_a_public_url_reaching_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let dir = ants_test_support::scratch_dir("doctor-webhooks").canonicalize().unwrap();
+        let path = dir.join("webhooks.toml");
+        assert!(check_webhooks(&path).await.is_empty(), "nothing without the file");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = [0; 4096];
+                let n = stream.read(&mut head).await.unwrap_or_default();
+                let page = "<h1>Bad link</h1><p>The link is incomplete.</p>";
+                let answer = match head[..n].starts_with(b"GET /hooks/_approval HTTP/1.1") {
+                    true => format!("HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\n\r\n{page}", page.len()),
+                    false => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_owned(),
+                };
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        private(&dir.join("action"), "0123456789abcdef-secret\n");
+        std::fs::write(dir.join("ntfy"), "tk_secret\n").unwrap();
+        chmod(&dir.join("ntfy"), 0o644);
+        let config = |public_url: &str| {
+            let text = format!(
+                "public_url = \"{public_url}\"\naction_secret_file = \"action\"\n[[human]]\nname = \"alice\"\n\
+                 [[human.notify]]\nkind = \"ntfy\"\ntopic = \"a\"\nsecret_file = \"ntfy\"\n"
+            );
+            std::fs::write(&path, text).unwrap();
+        };
+        config(&format!("http://{addr}/hooks"));
+
+        let checks = check_webhooks(&path).await;
+        let exposed = one(&checks, "webhook secrets");
+        let ntfy = dir.join("ntfy").display().to_string();
+        assert_eq!(exposed.status, Status::Fail);
+        assert_eq!(exposed.detail, format!("human alice notify #1: {ntfy} has mode 0644, readable by others"));
+        assert_eq!(exposed.fix, [format!("chmod 600 {ntfy}")]);
+        assert_eq!(one(&checks, "webhooks").status, Status::Skip);
+
+        chmod(&dir.join("ntfy"), 0o600);
+        let checks = check_webhooks(&path).await;
+        assert!(checks.iter().all(|c| c.status == Status::Ok), "{checks:#?}");
+        assert!(one(&checks, "webhooks").detail.contains("notifies alice"), "{checks:#?}");
+        assert_eq!(
+            one(&checks, "public_url").detail,
+            format!("http://{addr}/hooks/_approval answers as `ants webhook serve` does")
+        );
+
+        config(&format!("http://{addr}/elsewhere"));
+        assert_eq!(one(&check_webhooks(&path).await, "public_url").status, Status::Warn);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
