@@ -64,6 +64,26 @@ jobs:
       - name: Footprint (idle antsd under 20 MB RSS)
         run: scripts/footprint.sh --ants target/release/ants --port 14722 --max-mb 20
 
+  # Windows: lints and a release build, and the MCP named pipe, which replaces the Unix socket there. The rest of the
+  # suite assumes Unix paths and tools.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-11
+        with:
+          toolchain: "1.100"
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - run: cargo clippy --all-targets
+      - run: cargo test -p ants-daemon --lib -- mcp::tests::the_socket_serves_the_tools_after_the_token
+      - run: cargo build --release
+
   # Licenses, security advisories, banned crates and sources, as configured in deny.toml.
   deny:
     runs-on: ubuntu-latest
