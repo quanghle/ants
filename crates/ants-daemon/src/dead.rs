@@ -1,11 +1,13 @@
 //! Dead letters: inbox messages and channel posts an ant gave up on, kept on `ants.dead.<ant>` until a human
 //! replays or drops them. The ant's daemon escalates them up its chain, in the end to the thread's owner, else the
-//! default human ([`crate::escalation`]); the human's side tells the owner directly. A channel post is kept as a payload,
+//! default human ([`crate::escalation`]); the human's side tells the owner directly, with a level-0 `dead_letter`
+//! escalation so push sinks and `ants thread list --escalated` see it. A channel post is kept as a payload,
 //! which is not replayed: a human posts again instead.
 //!
 //! The human's side skips the chain on purpose: it only stores what the ant's daemon failed to store, so that daemon
 //! is in trouble, which no chain member can fix, and human credentials can neither read nor write the escalation the
-//! ant keeps in `ants_sessions` (level, visited ants, renewal, deadline) that a step up the chain must follow.
+//! ant keeps in `ants_sessions` (level, visited ants, renewal, deadline, reminder) that a step up the chain must
+//! follow, so no reminder follows its notice either.
 //!
 //! The daemon writes a dead letter itself, with the message in hand: after its last attempt fails, or on the one
 //! extra delivery the consumer allows when the last attempt never finished (the daemon stopped, or the ack wait ran
@@ -34,8 +36,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelPost, DeadLetter, Envelope, EscalationReason, SESSIONS_BUCKET, STREAM, ThreadOrigin, UserId, Uuid,
-    chan_consumer, dead_reader, inbox_consumer, subject,
+    ChannelPost, DeadLetter, Envelope, Escalation, EscalationReason, SESSIONS_BUCKET, STREAM, ThreadOrigin, UserId,
+    Uuid, chan_consumer, dead_reader, inbox_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::message::PublishMessage;
@@ -378,10 +380,27 @@ async fn tell(
             escalator.escalate(Stuck { channel: post.map(|p| p.channel.clone()), ..stuck }).await?;
         }
         None => {
+            let notice = direct(notice, humans);
             bus::publish_json(js, notice.subject(), &notice, Some(&id)).await?;
         }
     }
     Ok(())
+}
+
+/// `notice` as it goes to a human directly, past the ant's chain: carrying the level-0 `dead_letter` escalation the
+/// ant's daemon would start from ([`Escalation::new_from`]), so `ants webhook serve` pushes it and `ants thread list
+/// --escalated` lists it. It is the same for every burial of the message, so the notices of the ant's daemon
+/// ([`finish`]) and of [`watch`] stay one under their shared message id. No reminder follows: those are kept in the
+/// ant's escalation ledger, which the human's side cannot write.
+fn direct(notice: Envelope, humans: &Registry) -> Envelope {
+    let origin = humans.ant_creator(notice.creator.as_ref());
+    let escalation = Escalation::new_from(
+        notice.from.clone(),
+        notice.thread_id.clone(),
+        EscalationReason::DeadLetter,
+        origin.as_ref(),
+    );
+    notice.with_escalation(Some(escalation))
 }
 
 /// What a max-deliveries advisory of JetStream says (`io.nats.jetstream.advisory.v1.max_deliver`).
@@ -462,7 +481,8 @@ pub async fn watch(
 
 /// Dead-letter the message `advisory` names, unless it is not an ant's inbox message or channel post, is gone, or
 /// already is a dead letter. Returns the new dead letter and its stream sequence. The notice goes to the thread's owner,
-/// else the default human of `claims`, not up the ant's escalation chain. The owner and creator are checked as the
+/// else the default human of `claims`, not up the ant's escalation chain, carrying a level-0 escalation ([`direct`]).
+/// The owner and creator are checked as the
 /// ant's daemon checks them: an envelope's against `claims` ([`Claims::sender_claims`]), and a channel post's as the
 /// posts of its thread say ([`Threads::origin`]).
 pub async fn bury_undelivered(
@@ -720,5 +740,21 @@ mod tests {
         assert_eq!((told.to.as_str(), told.owner), ("alice", owned.owner));
         let by_ant = post.with_owner(Some("dev-c".parse().unwrap()));
         assert_eq!(post_notice(&ant, &by_ant, &dead, &humans).to, human, "an ant owns no thread");
+    }
+
+    #[test]
+    fn a_notice_sent_directly_carries_a_level_0_dead_letter_escalation_from_the_thread_s_origin() {
+        let (ant, lead) = ("dev-a".parse::<UserId>().unwrap(), "lead".parse::<UserId>().unwrap());
+        let humans = Registry::with(UserId::human(), &["alice"]);
+        let ask = Envelope::new("dev-b".parse().unwrap(), ant.clone(), "build it");
+        let dead = DeadLetter::of_envelope(ant.clone(), 3, 5, "harness crashed", ask.clone());
+        let told = direct(notice(&ant, &ask, &dead, 9, &humans), &humans);
+        let escalation = told.escalation.as_deref().expect("an escalation");
+        let fresh = Escalation::new(ant.clone(), ask.thread_id.clone(), EscalationReason::DeadLetter);
+        assert_eq!(escalation, &fresh);
+        let created = ask.with_creator(Some(lead.clone()));
+        let again = direct(notice(&ant, &created, &dead, 9, &humans), &humans);
+        let escalation = again.escalation.as_deref().unwrap();
+        assert_eq!((escalation.level, &escalation.leader, &escalation.visited), (0, &lead, &vec![ant, lead.clone()]));
     }
 }

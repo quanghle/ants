@@ -2249,7 +2249,10 @@ pub(crate) mod tests {
             assert_eq!((notice.from.clone(), notice.in_reply_to), (dev_a.clone(), Some(ask.id)));
             assert!(notice.text.contains(&format!("ants dead replay {dead_seq}")), "{}", notice.text);
             assert!(notice.text.contains("told to a human directly, past the escalation chain"), "{}", notice.text);
-            assert_eq!(notice.escalation, None, "the human's side skips the ant's chain");
+            let escalation = notice.escalation.as_deref().expect("a level-0 escalation, past the ant's chain");
+            let reason = ants_proto::EscalationReason::DeadLetter;
+            let fresh = ants_proto::Escalation::new(dev_a.clone(), ask.thread_id.clone(), reason);
+            assert_eq!(escalation, &fresh);
 
             // A later advisory of the same message, past the duplicate window, finds the dead letter.
             let advisory = dead::MaxDeliveries {
@@ -2273,6 +2276,14 @@ pub(crate) mod tests {
             assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
             let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();
             assert_eq!(notices.sequence, dead_seq + 1, "one notice, right after the dead letter");
+            let mut listed = crate::thread::Threads::new(None).escalated(ants_proto::Humans::default());
+            let entry = crate::thread::Parser::default()
+                .entry(notices.sequence, chrono::Utc::now(), &notices.subject, &notices.payload)
+                .unwrap();
+            listed.add(&entry);
+            let select = crate::thread::Select { escalated: true, ..Default::default() };
+            let (open, _) = listed.finish(&select);
+            assert_eq!(open.iter().map(|t| &t.thread_id).collect::<Vec<_>>(), [&ask.thread_id], "listed escalated");
             pulling.abort();
         };
         tokio::select! {
