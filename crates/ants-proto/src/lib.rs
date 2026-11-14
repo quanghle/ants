@@ -560,6 +560,11 @@ pub mod subject {
         format!("ants.status.{ant}.*")
     }
 
+    /// Live progress of every ant on a thread.
+    pub fn status_on(thread: &ThreadId) -> String {
+        format!("ants.status.*.{thread}")
+    }
+
     /// Where a human asks the daemon of `ant` to cancel the prompt running on `thread`
     /// ([`CancelRequest`](super::CancelRequest); core NATS, not stored). Only humans publish here.
     pub fn cancel(ant: &UserId, thread: &ThreadId) -> String {
@@ -3104,6 +3109,8 @@ pub enum State {
     Idle,
     /// An attempt failed; it may be retried.
     Failed,
+    /// The harness is signed out: the thread's messages wait for it to be signed in.
+    SignedOut,
 }
 
 impl State {
@@ -3113,6 +3120,7 @@ impl State {
             State::WaitingApproval => "waiting_approval",
             State::Idle => "idle",
             State::Failed => "failed",
+            State::SignedOut => "signed_out",
         }
     }
 }
@@ -3155,6 +3163,17 @@ pub enum StatusUpdate {
     /// The harness's whole plan, replacing the previous one.
     Plan {
         steps: Vec<PlanStep>,
+    },
+    /// Message `message` waits on the thread behind `ahead` others: the one in flight and those that came before it.
+    /// Sent as it arrives and as the queue moves; `ahead` 0 means its turn came.
+    Queued {
+        message: Uuid,
+        ahead: usize,
+    },
+    /// The tool request `<ant>/<request_id>` waits for a decision, as `ants tools` names it; sent just before the
+    /// [`State::WaitingApproval`] state.
+    Approval {
+        request_id: Uuid,
     },
 }
 
@@ -3544,6 +3563,7 @@ mod tests {
         assert!(STREAM_SUBJECTS.contains(&subject::ALL_NOTES), "thread notes are durable");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
+        assert_eq!(subject::status_on(&t), "ants.status.*.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
         assert!(STREAM_SUBJECTS.contains(&subject::DEAD_ALL), "dead letters are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
@@ -3590,7 +3610,11 @@ mod tests {
         );
         let json = serde_json::to_string(&tool).unwrap();
         assert!(json.contains(r#""type":"tool""#) && !json.contains("title"), "{json}");
-        for event in [state, tool] {
+        let queued = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Queued { message: Uuid::nil(), ahead: 2 });
+        let json = serde_json::to_value(&queued).unwrap();
+        assert_eq!((json["type"].as_str(), json["ahead"].as_u64()), (Some("queued"), Some(2)));
+        let approval = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Approval { request_id: Uuid::nil() });
+        for event in [state, tool, queued, approval] {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
         }

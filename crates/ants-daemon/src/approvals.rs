@@ -212,6 +212,8 @@ impl NatsApprover {
             Ok(to) => tracing::info!(request = %request.id, ?to, "asked the ant's chain too"),
             Err(e) => tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain"),
         }
+        let waits = ants_proto::StatusUpdate::Approval { request_id: request.id };
+        crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
         let wait = async {
             // The first decision heard for the request, acted on only if the stream cannot be asked.
@@ -464,9 +466,14 @@ mod tests {
         let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
         assert_eq!((&request.ant, &request.thread_id, &request.tool), (&ant, &thread, &tool()));
         assert_eq!(request.options, [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
-        let status = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
-        let status: ants_proto::StatusEvent = serde_json::from_slice(&status.payload).unwrap();
-        assert_eq!(status.update, ants_proto::StatusUpdate::State { state: State::WaitingApproval });
+        for expected in [
+            ants_proto::StatusUpdate::Approval { request_id: request.id },
+            ants_proto::StatusUpdate::State { state: State::WaitingApproval },
+        ] {
+            let status = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
+            let status: ants_proto::StatusEvent = serde_json::from_slice(&status.payload).unwrap();
+            assert_eq!(status.update, expected);
+        }
 
         let decision = request.decide(Verdict::AllowAlways);
         human_js
