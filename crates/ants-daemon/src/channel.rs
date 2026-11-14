@@ -10,14 +10,14 @@
 //! the members the post is relevant to, which wakes them ([`triage_prompt`]). Who is a human is the daemon's
 //! [`crate::humans::Registry`]'s to say.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId, ThreadOrigin, UserId, Uuid,
-    chan_reader, channel_seen_key, subject,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Envelope, Humans, RosterEntry, STREAM, ThreadId,
+    ThreadOrigin, UserId, Uuid, chan_reader, channel_seen_key, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer, kv};
@@ -215,6 +215,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         in_reply_to: None,
         owner: post.owner.clone(),
         creator: post.creator.clone(),
+        origin_thread: None,
         escalation: None,
         approval: None,
         webhook: post.webhook,
@@ -333,6 +334,32 @@ impl Sink for Root<'_> {
     }
 }
 
+/// Finds whether a post on `thread`, stored up to stream sequence `upto`, is by `sender` or wakes it, a member or the
+/// messenger of the thread's channel, whose `entry` it is.
+struct Part<'a> {
+    thread: &'a ThreadId,
+    sender: &'a UserId,
+    entry: &'a ChannelEntry,
+    humans: &'a Humans,
+    upto: u64,
+    found: bool,
+}
+
+impl Sink for Part<'_> {
+    fn take(&mut self, seq: u64, _: SystemTime, post: ChannelPost) -> ControlFlow<()> {
+        if seq > self.upto {
+            return ControlFlow::Break(());
+        }
+        if post.thread_id == *self.thread
+            && (post.from == *self.sender || self.entry.woken(&post, self.humans).contains(self.sender))
+        {
+            self.found = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 /// The prompt for `post`, which @mentions `ant`, after the `context` of its thread. `left` is the turns the thread
 /// keeps after the reply.
 pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) -> String {
@@ -432,6 +459,8 @@ pub struct Threads {
     /// The channel whose top-level post started each thread looked up so far ([`Threads::origin_of`]); None for a
     /// thread no channel post started.
     roots: Mutex<HashMap<ThreadId, Option<ChannelId>>>,
+    /// The senders found taking part in each thread so far ([`Threads::origin_for`]).
+    parts: Mutex<HashSet<(ThreadId, UserId)>>,
 }
 
 impl Threads {
@@ -443,6 +472,7 @@ impl Threads {
             reading: tokio::sync::Mutex::new(()),
             origins: Mutex::default(),
             roots: Mutex::default(),
+            parts: Mutex::default(),
         }
     }
 
@@ -450,27 +480,65 @@ impl Threads {
     /// ([`Threads::origin`]); None when none did, as for a thread a message started. The top-level post is the first
     /// post of any channel whose id is the thread's, among those stored within [`CLOCK_SLACK`] of the time in it.
     pub async fn origin_of(&self, thread: &ThreadId, seq: u64, humans: &Humans) -> Result<Option<ThreadOrigin>> {
-        let Some(start) = thread_start(thread) else { return Ok(None) };
-        let cached = self.roots.lock().expect("roots").get(thread).cloned();
-        let channel = match cached {
-            Some(channel) => channel,
-            None => {
-                let mut root = Root { thread, upto: seq, until: start + 2 * CLOCK_SLACK, channel: None };
-                let from = consumer::DeliverPolicy::ByStartTime { start_time: start.into() };
-                self.scan(subject::ALL_CHANNELS, from, &mut root)
-                    .await
-                    .with_context(|| format!("looking for the top-level post of thread {thread}"))?;
-                let mut roots = self.roots.lock().expect("roots");
-                if roots.len() >= MAX_ORIGINS {
-                    roots.clear();
-                }
-                roots.insert(thread.clone(), root.channel.clone());
-                root.channel
-            }
-        };
-        let Some(channel) = channel else { return Ok(None) };
+        let Some(channel) = self.root(thread, seq).await? else { return Ok(None) };
         let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
         self.origin(&on_thread, seq, humans).await.map(Some)
+    }
+
+    /// The origin of `thread`, at stream sequence `seq`, as [`Threads::origin_of`] reads it, when `sender` takes part
+    /// in it: a member or the messenger of its channel as the channels bucket holds it now, the sender has a post on
+    /// the thread stored before `seq`, or one there wakes it ([`ChannelEntry::woken`]). None otherwise: no ant links
+    /// its thread to a channel thread it has no part in, to take that thread's creator.
+    pub async fn origin_for(
+        &self,
+        thread: &ThreadId,
+        sender: &UserId,
+        seq: u64,
+        humans: &Humans,
+    ) -> Result<Option<ThreadOrigin>> {
+        let Some(channel) = self.root(thread, seq).await? else { return Ok(None) };
+        let channels = self.js.get_key_value(CHANNELS_BUCKET).await.context("opening the channels")?;
+        let Stored::Entry(entry, _) = load(&channels, &channel).await? else { return Ok(None) };
+        if !entry.is_member(sender) && entry.messenger() != *sender {
+            return Ok(None);
+        }
+        let known = self.parts.lock().expect("parts").contains(&(thread.clone(), sender.clone()));
+        if !known {
+            let mut part = Part { thread, sender, entry: &entry, humans, upto: seq, found: false };
+            self.scan(&subject::chan_room(&channel), from_start(thread), &mut part)
+                .await
+                .with_context(|| format!("reading thread {thread} of #{channel} for posts of {sender}"))?;
+            if !part.found {
+                return Ok(None);
+            }
+            let mut parts = self.parts.lock().expect("parts");
+            if parts.len() >= MAX_ORIGINS {
+                parts.clear();
+            }
+            parts.insert((thread.clone(), sender.clone()));
+        }
+        let on_thread = ChannelPost::on_thread(channel, thread.clone(), self.ant.clone(), "");
+        self.origin(&on_thread, seq, humans).await.map(Some)
+    }
+
+    /// The channel whose top-level post, stored before stream sequence `seq`, started `thread`: the first post of any
+    /// channel whose id is the thread's, among those stored within [`CLOCK_SLACK`] of the time in it.
+    async fn root(&self, thread: &ThreadId, seq: u64) -> Result<Option<ChannelId>> {
+        let Some(start) = thread_start(thread) else { return Ok(None) };
+        if let Some(channel) = self.roots.lock().expect("roots").get(thread).cloned() {
+            return Ok(channel);
+        }
+        let mut root = Root { thread, upto: seq, until: start + 2 * CLOCK_SLACK, channel: None };
+        let from = consumer::DeliverPolicy::ByStartTime { start_time: start.into() };
+        self.scan(subject::ALL_CHANNELS, from, &mut root)
+            .await
+            .with_context(|| format!("looking for the top-level post of thread {thread}"))?;
+        let mut roots = self.roots.lock().expect("roots");
+        if roots.len() >= MAX_ORIGINS {
+            roots.clear();
+        }
+        roots.insert(thread.clone(), root.channel.clone());
+        Ok(root.channel)
     }
 
     /// The origin of the thread of `post`, at stream sequence `seq`: who started it, as the posts stored on it up to

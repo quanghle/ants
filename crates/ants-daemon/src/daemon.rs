@@ -598,8 +598,9 @@ impl Inbox<'_> {
     /// Check what the inbox message in `incoming`, at stream sequence `seq`, says of its sender and thread: its sender
     /// wrote it. `webhook` holds only from a webhook ([`Webhooks`]) or a human. A human's owner and creator hold, and a
     /// webhook's owner, the human its config names. From an ant, a thread a channel post started has the owner and
-    /// creator its posts say ([`Threads::origin_of`]); any other has no creator, and the owner the ant names, which
-    /// nothing stored can check.
+    /// creator its posts say ([`Threads::origin_of`]); any other has the owner the ant names, which nothing stored can
+    /// check, and the creator of the channel thread it was spun off, if the sender takes part in that one
+    /// ([`Threads::origin_for`]), else none.
     async fn sender_claims(&self, incoming: &mut Incoming, seq: u64) {
         let envelope = &mut incoming.envelope;
         if incoming.post.is_some() {
@@ -619,22 +620,53 @@ impl Inbox<'_> {
         }
         if envelope.webhook {
             envelope.creator = None;
+            envelope.origin_thread = None;
             return;
         }
         if envelope.owner.is_none() && envelope.creator.is_none() {
+            envelope.origin_thread = None;
             return;
         }
-        match self.threads.origin_of(&envelope.thread_id, seq, &self.humans.humans()).await {
+        let humans = self.humans.humans();
+        match self.threads.origin_of(&envelope.thread_id, seq, &humans).await {
             Ok(Some(origin)) => {
                 envelope.owner = origin.owner;
                 envelope.creator = origin.creator;
+                envelope.origin_thread = None;
             }
-            Ok(None) => envelope.creator = None,
+            Ok(None) => self.spun_off_creator(envelope, seq, &humans).await,
             Err(e) => {
                 tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's origin");
                 envelope.creator = None;
+                envelope.origin_thread = None;
             }
         }
+    }
+
+    /// Name the creator of the thread of `envelope`, an ant's message at stream sequence `seq` on a thread no channel
+    /// post started, as that of the channel thread it links to ([`Envelope::origin_thread`]) when its sender takes
+    /// part in that one; else the thread has none and links nowhere.
+    async fn spun_off_creator(&self, envelope: &mut Envelope, seq: u64, humans: &Humans) {
+        let creator = match envelope.origin_thread.as_ref().filter(|_| envelope.creator.is_some()) {
+            None => None,
+            Some(origin) => match self.threads.origin_for(origin, &envelope.from, seq, humans).await {
+                Ok(origin) => origin.and_then(|origin| origin.creator),
+                Err(e) => {
+                    tracing::warn!(thread = %origin, error = format!("{e:#}"), "reading the origin thread");
+                    None
+                }
+            },
+        };
+        if creator.is_none() && envelope.creator.is_some() {
+            tracing::debug!(
+                thread = %envelope.thread_id,
+                sender = %envelope.from,
+                "dropping the message's creator: it links to no channel thread an ant created that the sender takes \
+                 part in"
+            );
+        }
+        envelope.origin_thread = creator.is_some().then(|| envelope.origin_thread.take()).flatten();
+        envelope.creator = creator;
     }
 
     /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
@@ -2870,6 +2902,51 @@ mod tests {
         };
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert!(timeout(Duration::from_millis(200), to_boss.next()).await.is_err(), "nothing goes to boss");
+    }
+
+    #[tokio::test]
+    async fn a_thread_spun_off_a_channel_thread_keeps_its_creator_only_from_an_ant_taking_part_in_it() {
+        let Some((bus, mut to_human)) = Bus::start().await else { return };
+        let (launch, _, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let [dev_b, dev_c, eve, lead, boss] = ants(["dev-b", "dev-c", "eve", "lead", "boss"]);
+        let [mut to_dev_b, mut to_dev_c, mut to_eve] =
+            inboxes(&bus, &[dev_b.clone(), dev_c.clone(), eve.clone()]).await;
+        let (ops, _) = bus.channel("ops", &["lead", "dev-b", "dev-c"]).await;
+        let root = ChannelPost::new(ops.clone(), lead.clone(), "@dev-b plan the release");
+        bus.post(&root).await;
+        // eve, no member, can still store a post on the thread.
+        bus.post(&ChannelPost::on_thread(ops, root.thread_id.clone(), eve.clone(), "me too")).await;
+        let spin = |from: &UserId, text: &str| {
+            Envelope::on_thread(root.thread_id.clone(), from.clone(), bus.dev.clone(), text)
+                .with_creator(Some(boss.clone()))
+                .spun_off(ThreadId::generate())
+        };
+        let spun = spin(&dev_b, "woken on lead's thread");
+        let mut spent = spin(&dev_b, "stuck");
+        spent.turn_budget = 0;
+        let no_part = spin(&dev_c, "a member that took no part");
+        let no_member = spin(&eve, "no member");
+        let mut seq = 0;
+        for envelope in [&spun, &no_part, &no_member, &spent] {
+            seq = bus::publish_json(&bus.js, envelope.subject(), envelope, None).await.unwrap();
+        }
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            let named = |reply: &Envelope| (reply.in_reply_to, reply.creator.clone(), reply.origin_thread.clone());
+            let reply = next_envelope(&mut to_dev_b).await;
+            assert_eq!(named(&reply), (Some(spun.id), Some(lead.clone()), Some(root.thread_id.clone())));
+            assert_eq!(named(&next_envelope(&mut to_dev_c).await), (Some(no_part.id), None, None));
+            assert_eq!(named(&next_envelope(&mut to_eve).await), (Some(no_member.id), None, None));
+            let escalation = next_envelope(&mut to_human).await;
+            assert_eq!((&escalation.thread_id, &escalation.creator), (&spent.thread_id, &Some(lead.clone())));
+            let created = format!("starts at lead, which created thread {} and has no escalate_to.", spent.thread_id);
+            assert!(escalation.text.ends_with(&created), "{}", escalation.text);
+            bus.until_acked(seq).await;
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
     }
 
     #[tokio::test]
