@@ -503,7 +503,7 @@ fn row(request: &ApprovalRequest, now: DateTime<Utc>) -> String {
 }
 
 /// The whole request, with its tool input and how to answer it.
-fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> String {
+pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Utc>) -> String {
     let mut out = format!(
         "request  {}\nant      {}\nthread   {}\ntool     {}: {}\n",
         request.id, request.ant, request.thread_id, request.tool.kind, request.tool.title
@@ -825,7 +825,7 @@ pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, 
 }
 
 /// What `ants tools approve` prints after approving `request`, for which `suggestion` came.
-fn suggestion_text(request: &ApprovalRequest, suggestion: &Suggestion) -> String {
+pub(crate) fn suggestion_text(request: &ApprovalRequest, suggestion: &Suggestion) -> String {
     let ant = &request.ant;
     format!(
         "{ant} was allowed this {} times: the allow rule {:?} in its allow list would spare asking; `ants tools \

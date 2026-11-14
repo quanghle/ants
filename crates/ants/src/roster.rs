@@ -29,12 +29,12 @@ impl State {
 }
 
 /// Time from `then` to `now`, zero when a clock is ahead.
-fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
+pub(crate) fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
     (now - then).to_std().unwrap_or_default()
 }
 
 /// `duration` in its largest whole unit: `7s`, `3m`, `2h`, `5d`.
-fn short(duration: Duration) -> String {
+pub(crate) fn short(duration: Duration) -> String {
     let secs = duration.as_secs();
     match secs {
         0..60 => format!("{secs}s"),
@@ -54,7 +54,7 @@ fn chain(entry: &RosterEntry) -> String {
 
 /// What the ant is doing: `signed-out` while its harness is, `rate-limited` or `out-of-quota` while a provider limit
 /// holds its messages, else its activity, or `-` when its daemon does not say.
-fn activity(entry: &RosterEntry) -> &'static str {
+pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
     match (&entry.signed_out, &entry.limited, entry.activity) {
         (Some(_), _, _) => "signed-out",
         (None, Some(limited), _) => limited.kind.as_str(),

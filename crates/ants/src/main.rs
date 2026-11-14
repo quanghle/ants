@@ -5,6 +5,7 @@ mod auth;
 mod bridge;
 mod channel;
 mod completions;
+mod dash;
 mod defaults;
 mod doctor;
 mod enroll;
@@ -212,6 +213,14 @@ enum Command {
         /// With an ant, follow only this thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+    },
+    /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the roster, and
+    /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
+    /// credentials.
+    Dash {
+        /// How far back to read threads, such as 90m, 24h or 7d; 0 for everything the stream keeps.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
+        since: Duration,
     },
     /// Stop the prompt ANT is running on THREAD, as a prompt limit does: its daemon cancels the prompt and replies on
     /// the thread with the partial output and an [ants] notice, and the message counts as answered. Messages waiting
@@ -1123,6 +1132,7 @@ async fn run() -> Result<()> {
             thread::show(&nats()?, thread, since, json).await
         }
         Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
+        Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,
         Command::Init => {
             for line in init_hub(&nats()?).await? {
