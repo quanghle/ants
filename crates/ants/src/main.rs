@@ -26,6 +26,7 @@ mod retire;
 mod revoke;
 mod roster;
 mod scheduler;
+mod search;
 mod serve;
 mod service;
 mod setup;
@@ -204,8 +205,9 @@ enum Command {
         remove: bool,
     },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
-    /// and decisions, and dead letters: list the recent ones, find those mentioning a text, or show one's whole
-    /// history. Nothing is consumed or marked read. Needs a human's credentials.
+    /// and decisions, and dead letters: list the recent ones, find those mentioning a text, show one's whole history,
+    /// or search messages by sender, recipient, channel, kind, time and text. Nothing is consumed or marked read.
+    /// Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
@@ -674,6 +676,40 @@ enum ThreadCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Find the messages stored on any thread that match every filter given, the latest --limit of them, printed
+    /// oldest first: time, thread, kind, sender and recipient, message id and a line of text. Times without an offset
+    /// are UTC, as printed; --since is inclusive, --until exclusive. Only the subjects the filters can match are read,
+    /// from --since to --until.
+    Search {
+        /// Only messages whose text contains TEXT, whatever the case; its first matching line is shown.
+        #[arg(long, value_name = "TEXT")]
+        grep: Option<String>,
+        /// Only messages this ant or human sent.
+        #[arg(long, value_name = "SENDER", add = ArgValueCandidates::new(completions::ants))]
+        from: Option<UserId>,
+        /// Only messages to this ant or human: inbox messages, and the decisions and dead letters of this ant.
+        #[arg(long, value_name = "RECIPIENT", add = ArgValueCandidates::new(completions::ants))]
+        to: Option<UserId>,
+        /// Only posts to this channel and the mentions telling of them.
+        #[arg(long, value_name = "CHANNEL", add = ArgValueCandidates::new(completions::channels))]
+        channel: Option<ChannelId>,
+        /// Only messages of these kinds (repeat or separate with commas).
+        #[arg(long = "type", value_name = "TYPE", value_enum, value_delimiter = ',')]
+        kinds: Vec<thread::Kind>,
+        /// From when: a duration back from now (90m, 2h, 3d; 0 for everything the stream keeps), an RFC 3339 time, or
+        /// a date or date and time in UTC (2026-11-14, 2026-11-14 09:30); by default 24h before --until.
+        #[arg(long, value_name = "TIME", value_parser = search::parse_when)]
+        since: Option<search::When>,
+        /// Until when, as --since takes it; by default now.
+        #[arg(long, value_name = "TIME", value_parser = search::parse_when)]
+        until: Option<search::When>,
+        /// At most this many matches, the latest.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// One JSON entry per line, as `ants thread show --json` prints them.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1126,6 +1162,11 @@ async fn run() -> Result<()> {
         }
         Command::Thread(ThreadCommand::Show { thread, since, json }) => {
             thread::show(&nats()?, thread, since, json).await
+        }
+        Command::Thread(ThreadCommand::Search { grep, from, to, channel, kinds, since, until, limit, json }) => {
+            let kinds = kinds.into_iter().collect();
+            let search = search::Search { from, to, channel, kinds, grep, limit, ..Default::default() };
+            search::search(&nats()?, search, since, until, json).await
         }
         Command::Watch { subject, thread } => watch(&nats()?, &subject, thread).await,
         Command::Cancel { ant, thread } => cancel(&nats()?, ant, thread).await,

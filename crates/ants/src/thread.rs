@@ -37,7 +37,7 @@ const LATE: Duration = Duration::from_mins(10);
 const LISTED: usize = 10;
 
 /// What a stored message on a thread is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// An inbox message, between ants or between an ant and a human.
@@ -59,7 +59,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Message => "message",
             Self::Escalation => "escalation",
@@ -132,7 +132,7 @@ impl Entry {
     }
 
     /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`.
-    fn route(&self) -> String {
+    pub(crate) fn route(&self) -> String {
         let from = self.from.as_ref().map_or("(a human)", UserId::as_str);
         match (self.kind, &self.to, &self.channel) {
             (Kind::Post, _, Some(channel)) => format!("{from} -> #{channel}"),
@@ -373,7 +373,7 @@ impl Threads {
     }
 }
 
-fn time(at: DateTime<Utc>) -> String {
+pub(crate) fn time(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
@@ -696,7 +696,7 @@ fn listing<'a>(threads: impl ExactSizeIterator<Item = &'a Entry>) -> String {
 }
 
 /// Connect as the CLI's human: only a human's credentials get stream messages by sequence.
-async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
+pub(crate) async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
     if !nats.me.role.is_human() {
         bail!(
             "the credentials of {} are an ant's, which read no other inbox; `ants thread` reads them all with a \
