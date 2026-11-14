@@ -694,8 +694,8 @@ impl Hub {
 
     /// Why no daemon serves the ant `to` now, by its roster entry, with names from the roster `to` may stand for; None
     /// when one does, `to` is a human or the channel manager, or the roster cannot be read, so a lookup never holds a
-    /// message back.
-    async fn unserved(&self, to: &UserId) -> Option<String> {
+    /// message back. A provider limit counts only while it holds past `wait` from now.
+    async fn unserved(&self, to: &UserId, wait: Duration) -> Option<String> {
         let lookup = self.lookup.get()?;
         if self.humans.is_human(to) || *to == UserId::channel_manager() {
             return None;
@@ -712,7 +712,7 @@ impl Hub {
             }
         };
         let now = chrono::Utc::now();
-        let why = why_unserved(to, entry.as_ref(), now)?;
+        let why = why_unserved(to, entry.as_ref(), now, wait)?;
         let others = match tokio::time::timeout(LOOKUP_TIMEOUT, self.others()).await {
             Ok(Ok(others)) => others,
             _ => return Some(format!("{why}.")),
@@ -1059,7 +1059,7 @@ impl Tools {
     /// Send `text` to `to` as `send_message` does, noting when no daemon serves `to` now: the message waits for one.
     async fn send_to(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<String, String> {
         let envelope = self.hub.outgoing(thread, to, text, on)?;
-        let unserved = self.hub.unserved(&envelope.to).await;
+        let unserved = self.hub.unserved(&envelope.to, Duration::ZERO).await;
         self.hub.send(&envelope).await?;
         let sent =
             format!("Sent to {} on thread {} ({} turns left).", envelope.to, envelope.thread_id, envelope.turn_budget);
@@ -1086,7 +1086,7 @@ impl Tools {
         if envelope.turn_budget == 0 {
             return Err(format!("thread {thread} has no turns left for a reply; ask the human instead"));
         }
-        if let Some(why) = self.hub.unserved(&envelope.to).await {
+        if let Some(why) = self.hub.unserved(&envelope.to, wait).await {
             return Err(format!(
                 "Not sent, as {why} send_message leaves a message waiting in the inbox of {} instead.",
                 envelope.to
@@ -1178,8 +1178,13 @@ fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
-/// [`roster::is_live`]) or a harness signed out.
-fn why_unserved(ant: &UserId, entry: Option<&RosterEntry>, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+/// [`roster::is_live`]), a harness signed out, or a provider limit holding its messages past `wait` from `now`.
+fn why_unserved(
+    ant: &UserId,
+    entry: Option<&RosterEntry>,
+    now: chrono::DateTime<chrono::Utc>,
+    wait: Duration,
+) -> Option<String> {
     let Some(entry) = entry else {
         return Some(format!("{ant} is not in the roster: no daemon serves {ant} now"));
     };
@@ -1191,7 +1196,24 @@ fn why_unserved(ant: &UserId, entry: Option<&RosterEntry>, now: chrono::DateTime
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
         ));
     }
-    let out = entry.signed_out.as_ref()?;
+    let Some(out) = entry.signed_out.as_ref() else {
+        let limited = entry.limited.as_ref()?;
+        let after = chrono::Duration::from_std(wait).unwrap_or(chrono::Duration::MAX);
+        if now.checked_add_signed(after).is_some_and(|by| limited.until <= by) {
+            return None;
+        }
+        let what = match limited.kind {
+            ants_proto::LimitKind::Quota => "is out of quota",
+            ants_proto::LimitKind::RateLimit => "is rate limited",
+            ants_proto::LimitKind::Unknown => "is held back by a provider limit",
+        };
+        return Some(format!(
+            "the harness of {ant} ({} on {}) {what}: messages to {ant} wait unanswered until {}",
+            entry.harness,
+            entry.machine,
+            limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ));
+    };
     Some(format!(
         "the harness of {ant} ({} on {}) is signed out since {}: messages to {ant} wait unanswered until a human signs \
          the harness in",
@@ -1214,7 +1236,7 @@ fn alternatives(
     if let Some(entry) = entry {
         let sharing: Vec<&RosterEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none())
+            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none() && e.limited.is_none())
             .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
             .take(SHOWN_NAMES)
             .collect();
@@ -1942,6 +1964,24 @@ mod tests {
             let entry = roster.iter().find(|e| e.ant == ant).cloned();
             Box::pin(async move { Ok(entry) })
         })
+    }
+
+    #[test]
+    fn a_provider_limit_counts_only_while_it_outlasts_the_wait() {
+        let now = chrono::Utc::now();
+        let mut entry = listed("dev-q", &[]);
+        let until = now + chrono::Duration::minutes(10);
+        entry.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since: now, until });
+        let ant = user("dev-q");
+        let why = why_unserved(&ant, Some(&entry), now, Duration::ZERO).expect("held now");
+        assert!(
+            why.starts_with("the harness of dev-q (copilot on m1) is out of quota: messages to dev-q wait"),
+            "{why}"
+        );
+        assert!(why_unserved(&ant, Some(&entry), now, Duration::from_secs(5 * 60)).is_some(), "past a 5m ask");
+        assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::from_secs(30 * 60)), None, "over within a 30m ask");
+        entry.limited = None;
+        assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::ZERO), None);
     }
 
     #[tokio::test]

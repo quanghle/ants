@@ -560,6 +560,11 @@ pub mod subject {
         format!("ants.status.{ant}.*")
     }
 
+    /// Live progress of every ant on a thread.
+    pub fn status_on(thread: &ThreadId) -> String {
+        format!("ants.status.*.{thread}")
+    }
+
     /// Where a human asks the daemon of `ant` to cancel the prompt running on `thread`
     /// ([`CancelRequest`](super::CancelRequest); core NATS, not stored). Only humans publish here.
     pub fn cancel(ant: &UserId, thread: &ThreadId) -> String {
@@ -761,6 +766,12 @@ pub fn dead_reader(ant: &UserId) -> String {
     format!("deadread-{ant}")
 }
 
+/// JetStream consumer an ant's daemon reads back the messages the ant sent through, one read at a time, like
+/// [`notes_consumer`], to rebuild the context of a thread. Its filter is pinned to [`subject::inbox_from`] of the ant.
+pub fn sent_reader(ant: &UserId) -> String {
+    format!("sentread-{ant}")
+}
+
 /// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
 /// credentials can be confined to its own.
 pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
@@ -880,7 +891,8 @@ impl Permissions {
     ///
     /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
-    /// letters, reads back only its own dead letters (through its own [`dead_reader`]), reads only its own inbox
+    /// letters, reads back only its own dead letters (through its own [`dead_reader`]) and the messages it sent (through
+    /// its own [`sent_reader`]), reads only its own inbox
     /// (consumer and its spares, and live), the notes of every thread (live, and from the stream
     /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
     /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
@@ -1049,6 +1061,7 @@ impl Permissions {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
             let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
             let dead_read = dead_reader(user);
+            let sent_read = sent_reader(user);
             publish.extend([
                 // Get and put of its own sessions.
                 format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
@@ -1067,6 +1080,10 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
+                // Reading back the messages it sent, through its own consumer filtering only those.
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::inbox_from(user)),
+                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
+                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
                 subject::status_of(user),
                 subject::cancelled_of(user),
                 subject::chanadm_from(user),
@@ -1991,6 +2008,8 @@ pub enum EscalationReason {
     Approval,
     /// The agent asked for help with the escalate tool.
     Asked,
+    /// A prompt does not fit the model's context window, even in a fresh session.
+    ContextWindow,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -2005,6 +2024,7 @@ impl EscalationReason {
             Self::DeadLetter => "dead_letter",
             Self::Approval => "approval",
             Self::Asked => "asked",
+            Self::ContextWindow => "context_window",
             Self::Unknown => "unknown",
         }
     }
@@ -3146,6 +3166,8 @@ pub enum State {
     Idle,
     /// An attempt failed; it may be retried.
     Failed,
+    /// The harness is signed out: the thread's messages wait for it to be signed in.
+    SignedOut,
 }
 
 impl State {
@@ -3155,6 +3177,7 @@ impl State {
             State::WaitingApproval => "waiting_approval",
             State::Idle => "idle",
             State::Failed => "failed",
+            State::SignedOut => "signed_out",
         }
     }
 }
@@ -3197,6 +3220,17 @@ pub enum StatusUpdate {
     /// The harness's whole plan, replacing the previous one.
     Plan {
         steps: Vec<PlanStep>,
+    },
+    /// Message `message` waits on the thread behind `ahead` others: the one in flight and those that came before it.
+    /// Sent as it arrives and as the queue moves; `ahead` 0 means its turn came.
+    Queued {
+        message: Uuid,
+        ahead: usize,
+    },
+    /// The tool request `<ant>/<request_id>` waits for a decision, as `ants tools` names it; sent just before the
+    /// [`State::WaitingApproval`] state.
+    Approval {
+        request_id: Uuid,
     },
 }
 
@@ -3586,6 +3620,7 @@ mod tests {
         assert!(STREAM_SUBJECTS.contains(&subject::ALL_NOTES), "thread notes are durable");
         assert_eq!(subject::approvals(&p("dev-a")), "ants.approvals.dev-a");
         assert_eq!(subject::status(&p("dev-a"), &t), "ants.status.dev-a.t1");
+        assert_eq!(subject::status_on(&t), "ants.status.*.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
         assert!(STREAM_SUBJECTS.contains(&subject::DEAD_ALL), "dead letters are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
@@ -3632,7 +3667,11 @@ mod tests {
         );
         let json = serde_json::to_string(&tool).unwrap();
         assert!(json.contains(r#""type":"tool""#) && !json.contains("title"), "{json}");
-        for event in [state, tool] {
+        let queued = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Queued { message: Uuid::nil(), ahead: 2 });
+        let json = serde_json::to_value(&queued).unwrap();
+        assert_eq!((json["type"].as_str(), json["ahead"].as_u64()), (Some("queued"), Some(2)));
+        let approval = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Approval { request_id: Uuid::nil() });
+        for event in [state, tool, queued, approval] {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<StatusEvent>(&json).unwrap(), event);
         }

@@ -27,7 +27,8 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_proto::{
-    ApprovalRequest, DeviceId, Envelope, Following, JsDomain, STREAM, UserId, Uuid, Verdict, notify_consumer, subject,
+    ApprovalRequest, DeviceId, Envelope, EscalationReason, Following, JsDomain, STREAM, UserId, Uuid, Verdict,
+    notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, stream::Stream};
@@ -552,17 +553,20 @@ fn approval_notice(
     Notice { title: format!("{} asks to run a tool", request.ant), text, buttons, urgent: true }
 }
 
-/// The notice of an escalation `envelope` brings, if it brings one.
+/// The notice of an escalation `envelope` brings, if it brings one. The thread to answer on is the escalation's: an
+/// expired tool request's notice comes on a thread of its own.
 fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
     let escalation = envelope.escalation.as_ref()?;
+    let thread = &escalation.thread_id;
     let text = format!(
-        "{}\n\nthread {}; answer with ants ask --thread {} @{} TEXT",
+        "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
         cut(&envelope.text, MAX_TEXT),
-        envelope.thread_id,
-        envelope.thread_id,
         envelope.from,
     );
-    let title = format!("{} escalates: {} on {}", envelope.from, escalation.reason.as_str(), escalation.stuck);
+    let title = match escalation.reason {
+        EscalationReason::Approval => format!("{}'s tool request expired unanswered", escalation.stuck),
+        reason => format!("{} escalates: {} on {}", envelope.from, reason.as_str(), escalation.stuck),
+    };
     Some(Notice { title, text, buttons: Vec::new(), urgent: false })
 }
 
@@ -1214,6 +1218,14 @@ mod tests {
         assert!(notice.text.starts_with("hello\n\nthread ") && notice.text.ends_with("@dev-a TEXT"), "{}", notice.text);
         let (_, _, body) = telegram.request(&notice);
         assert!(body.get("reply_markup").is_none());
+
+        // An expired tool request's notice, on a thread of its own, is answered on the request's thread.
+        let expired = Envelope::new(p("dev-a"), p("alice"), "[ants] Tool request expired".to_owned())
+            .with_escalation(Some(Escalation::of_request(&request)));
+        let notice = escalation_notice(&expired).unwrap();
+        assert_eq!(notice.title, "dev-a's tool request expired unanswered");
+        let answer = format!("thread {0}; answer with ants ask --thread {0} @dev-a TEXT", request.thread_id);
+        assert!(notice.text.ends_with(&answer), "{}", notice.text);
     }
 
     #[test]
