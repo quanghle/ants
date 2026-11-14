@@ -1,0 +1,23 @@
+# ants: `ants bridge serve`, the hub's end of the HTTPS fallback bridge, on the hub machine behind its TLS-terminating
+# reverse proxy, which mounts it on 127.0.0.1:8423 (docs/transport.md, "HTTPS fallback bridge"). Each session connects
+# to the hub's leafnode port, 127.0.0.1:7422.
+# User unit: scripts/install-units.sh --bridge-serve fills in the @...@ placeholders and installs it in
+# ~/.config/systemd/user. Lines marked IF_BRIDGE_TOKEN stay only with --bridge-token FILE; without one, anyone reaching
+# the bridge may open sessions, which NATS authentication then checks.
+# The bearer token is read from its file at each start, so a new token takes effect at the next restart:
+# systemctl --user restart ants-bridge-serve
+
+[Unit]
+Description=ants: bridge serve for the hub
+Wants=ants-nats.service
+After=ants-nats.service
+
+[Service]
+@IF_NO_BRIDGE_TOKEN@ExecStart="@ANTS@" bridge serve
+@IF_BRIDGE_TOKEN@ExecStart="@ANTS@" bridge serve --token-file "@BRIDGE_TOKEN@"
+Environment=NO_COLOR=1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

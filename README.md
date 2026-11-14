@@ -108,7 +108,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants harness check` / `prompt TEXT` | Test ACP handshake or run one prompt without NATS (`--harness NAME`, `--config FILE`; rejects tools). |
 | `ants auth init` / `user NAME` / `enroll NAME` / `channel-manager` / `leaf MACHINE` | Create team keys and `server.conf`, or issue `.creds` (`user`: `--human`, `--webhook --to ANT --channel CH`; `enroll`: `--ttl DUR`, default `1h`, `0` for no expiry). |
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing. |
-| `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests. |
+| `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress (see [Webhooks](#webhooks)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
 
@@ -126,7 +126,7 @@ Every command accepts `--nats`, `--creds` and `--js-domain`. A NATS URL carrying
 | `ANTS_CONFIG` | `--config` (`daemon`, `add`, `harness`) | `~/.ants/config.toml` |
 | `ANTS_ANT` | `--ant` (`ants daemon`) | Serve only the named ant (from config file if `--config` is set, else from CLI flags) |
 | `ANTS_AUTH_DIR` | `--dir` (`auth`, `enroll`, `leaf config`) | `~/.config/ants/auth` |
-| `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions |
+| `ANTS_BRIDGE_TOKEN` | `--token` (`bridge serve`, `bridge connect`) | Optional bearer token gating bridge sessions; `--token-file FILE` reads it from a file instead |
 | `ANTS_MCP_TOKEN` | `--token` (`ants mcp`) | Per-thread session token passed automatically by `ants daemon` |
 | `ANTS_LOG` | All commands | `tracing` stderr filter, default `info,rmcp=warn` |
 | `SSL_CERT_FILE` | TLS / `ants bridge connect` | PEM CA bundle trusted by rustls for private CAs |
@@ -508,9 +508,9 @@ ants leaf outbox macbook --ant dev-a --ant messenger --human alice
 | `wss://host/path` | Standard TLS WebSocket uplink behind a reverse proxy (supports `--proxy` HTTP `CONNECT`). |
 | `tls://host:7422` | Direct TLS connection to the hub leafnode port. |
 | `nats-leaf://127.0.0.1:7422` via `devtunnel connect` | Private Dev Tunnel forwarding the hub leafnode port (`--devtunnel` in `install-units.sh` on workers, `--devtunnel-host` on the hub). |
-| `nats-leaf://127.0.0.1:7422` via `ants bridge connect` | Networks whose proxies block WebSocket; tunnels leaf traffic over plain HTTPS `POST`/long-polled `GET`. |
+| `nats-leaf://127.0.0.1:7422` via `ants bridge connect` | Networks whose proxies block WebSocket; tunnels leaf traffic over plain HTTPS `POST`/long-polled `GET` (`--bridge URL` in `install-units.sh` on workers, `--bridge-serve` on the hub). |
 
-For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. See [docs/transport.md](docs/transport.md#https-fallback-bridge).
+For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127.0.0.1:7422`, optional `ANTS_BRIDGE_TOKEN` or `--token-file FILE`) behind the hub reverse proxy, and `ants bridge connect https://hub.example/bridge [--proxy URL] [--header 'Name: val']` (`127.0.0.1:7422`) on the worker. Run both as services with `scripts/install-units.sh --bridge-serve` on the hub and `--bridge URL` on the worker (see [Services](#services)). See [docs/transport.md](docs/transport.md#https-fallback-bridge).
 
 ## Services
 
@@ -521,10 +521,12 @@ scripts/install-units.sh                                           # nats + daem
 scripts/install-units.sh --devtunnel ants-hub.usw2                 # + devtunnel connect (--devtunnel-token FILE)
 scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds --webhook
 scripts/install-units.sh --no-daemon --devtunnel-host ants-hub    # hub: + devtunnel host (needs devtunnel user login)
+scripts/install-units.sh --bridge https://hub.example/bridge --bridge-token ~/.config/ants/bridge.token   # + ants bridge connect
+scripts/install-units.sh --no-daemon --bridge-serve --bridge-token ~/.config/ants/bridge.token           # hub: + ants bridge serve
 scripts/install-units.sh --out ./rendered-units                    # render only; install nothing
 ```
 
-Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.config/ants/leaf.conf`), `--config FILE` (default `~/.ants/config.toml`), `--no-daemon`, `--channel-manager CREDS`, `--webhook`, `--webhook-config FILE` (default `~/.ants/webhooks.toml`), `--devtunnel TUNNEL`, `--devtunnel-host TUNNEL`, `--devtunnel-bin PATH`, `--devtunnel-token FILE`, `--out DIR`.
+Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.config/ants/leaf.conf`), `--config FILE` (default `~/.ants/config.toml`), `--no-daemon`, `--channel-manager CREDS`, `--webhook`, `--webhook-config FILE` (default `~/.ants/webhooks.toml`), `--devtunnel TUNNEL`, `--devtunnel-host TUNNEL`, `--devtunnel-bin PATH`, `--devtunnel-token FILE`, `--bridge URL`, `--bridge-serve`, `--bridge-token FILE` (either end), `--bridge-proxy URL`, `--bridge-ca FILE` (`SSL_CERT_FILE` for `--bridge`), `--out DIR`. `--devtunnel` and `--bridge` exclude each other: both listen on `127.0.0.1:7422`.
 
 | Service | macOS (launchd / `~/Library/Logs/ants/`) | Linux & WSL (`systemd --user`) | Installed when |
 |---|---|---|---|
@@ -534,9 +536,12 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | Webhook ingress (`ants webhook serve`) | `ants.webhook` (`webhook.log`) | `ants-webhook.service` | `--webhook` |
 | Dev Tunnel (`devtunnel connect`) | `ants.devtunnel` (`devtunnel.log`) | `ants-devtunnel.service` | `--devtunnel TUNNEL` |
 | Dev Tunnel host (`devtunnel host`, hub) | `ants.devtunnel-host` (`devtunnel-host.log`) | `ants-devtunnel-host.service` | `--devtunnel-host TUNNEL` |
+| HTTPS bridge (`ants bridge connect`) | `ants.bridge` (`bridge.log`) | `ants-bridge.service` | `--bridge URL` |
+| HTTPS bridge server (`ants bridge serve`, hub) | `ants.bridge-serve` (`bridge-serve.log`) | `ants-bridge-serve.service` | `--bridge-serve` |
 
 - **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux).
 - **Reload daemon config (`ants add`):** `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
+- **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).
 - **Remove units:** `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`, then delete the unit files.
 - **Persistence:** Linux user units require `loginctl enable-linger $USER` to run without an active login session; WSL requires `[boot] systemd=true` in `/etc/wsl.conf`.

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: `ants bridge serve`, the hub's end of the HTTPS fallback bridge, on the hub machine behind its
+     TLS-terminating reverse proxy, which mounts it on 127.0.0.1:8423 (docs/transport.md, "HTTPS fallback bridge").
+     Each session connects to the hub's leafnode port, 127.0.0.1:7422.
+     scripts/install-units.sh --bridge-serve fills in the @...@ placeholders and installs it as
+     ~/Library/LaunchAgents/ants.bridge-serve.plist. Lines marked IF_BRIDGE_TOKEN stay only with --bridge-token FILE;
+     without one, anyone reaching the bridge may open sessions, which NATS authentication then checks.
+     The bearer token is read from its file at each start, so a new token takes effect at the next restart:
+     launchctl kickstart -k gui/$(id -u)/ants.bridge-serve
+     launchd has no start order: sessions opened before ants.nats listens fail and the leaves retry them. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.bridge-serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@ANTS@</string>
+		<string>bridge</string>
+		<string>serve</string>
+		<string>--token-file</string><!-- @IF_BRIDGE_TOKEN@ -->
+		<string>@BRIDGE_TOKEN@</string><!-- @IF_BRIDGE_TOKEN@ -->
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>NO_COLOR</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/bridge-serve.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/bridge-serve.log</string>
+</dict>
+</plist>

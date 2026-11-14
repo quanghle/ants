@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ants: `ants bridge connect` to the hub's HTTPS fallback bridge, for a leaf whose uplink is
+     nats-leaf://127.0.0.1:7422 (docs/transport.md, "HTTPS fallback bridge").
+     scripts/install-units.sh --bridge URL fills in the @...@ placeholders and installs it as
+     ~/Library/LaunchAgents/ants.bridge.plist. Lines marked IF_BRIDGE_TOKEN stay only with --bridge-token FILE,
+     IF_BRIDGE_PROXY only with --bridge-proxy URL, IF_BRIDGE_CA only with --bridge-ca FILE.
+     The bearer token is read from its file at each start, so a new token takes effect at the next restart:
+     launchctl kickstart -k gui/$(id -u)/ants.bridge
+     launchd has no start order: the leaf node (ants.nats) retries its uplink until the bridge listens. Each leaf
+     connection retries the hub for 60 s; KeepAlive restarts the bridge after a failure, throttled by ThrottleInterval. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ants.bridge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@ANTS@</string>
+		<string>bridge</string>
+		<string>connect</string>
+		<string>@BRIDGE_URL@</string>
+		<string>--token-file</string><!-- @IF_BRIDGE_TOKEN@ -->
+		<string>@BRIDGE_TOKEN@</string><!-- @IF_BRIDGE_TOKEN@ -->
+		<string>--proxy</string><!-- @IF_BRIDGE_PROXY@ -->
+		<string>@BRIDGE_PROXY@</string><!-- @IF_BRIDGE_PROXY@ -->
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>NO_COLOR</key>
+		<string>1</string>
+		<key>SSL_CERT_FILE</key><!-- @IF_BRIDGE_CA@ -->
+		<string>@BRIDGE_CA@</string><!-- @IF_BRIDGE_CA@ -->
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>@LOGS@/bridge.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGS@/bridge.log</string>
+</dict>
+</plist>

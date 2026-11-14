@@ -187,9 +187,28 @@ ANTS_BRIDGE_TOKEN=... ants bridge connect https://hub.example.com/bridge    # --
 ants leaf config macbook --uplink nats-leaf://127.0.0.1:7422
 ```
 
+`--token-file FILE` reads the token from `FILE` at start instead of `--token` or `ANTS_BRIDGE_TOKEN`, keeping it out of the command line and environment.
+
 - **Protocol**: under `<path>`, `POST /open` dials `--upstream` (10 s timeout, max 256 sessions) and returns a 128-bit hex id; `POST /s/<id>?off=N` sends upstream bytes at offset `N` (`204`); `GET /s/<id>?off=N` acks bytes before `N` and long-polls up to 20 s for bytes from `N` (empty `200` on timeout, `410` on EOF); `DELETE /s/<id>` closes the session. One request per direction is in flight, max 128 KiB per body, 1 MiB downstream buffer per session.
 - **Retries and lifetime**: byte offsets make retries idempotent. `ants bridge connect` retries connection and `5xx` errors with backoff up to 4 s for 60 s; `ants bridge serve` expires sessions idle for 60 s, after which the worker drops the local socket and the leaf opens a new session.
 - **Auth, TLS, proxies, headers**: `LEAFNODE` auth (`leaf-<machine>.creds`) runs inside the TCP stream; `--token` (`ANTS_BRIDGE_TOKEN`) adds constant-time `Bearer` checks on HTTP requests. `ants bridge connect` uses `rustls` (`SSL_CERT_FILE`), supports `--proxy http://[user:password@]host:port` (Basic auth), and sends repeatable `--header 'Name: value'`. Prefer `wss://` where WebSocket works.
+
+### `ants bridge` as a service
+
+Write the shared bearer token to a file (`0600`) on both machines, e.g. `openssl rand -hex 32 > ~/.config/ants/bridge.token`, then:
+
+```sh
+# hub
+scripts/install-units.sh --nats-conf ~/.config/ants/hub.conf --no-daemon --bridge-serve --bridge-token ~/.config/ants/bridge.token
+# worker
+scripts/install-units.sh --bridge https://hub.example.com/bridge --bridge-token ~/.config/ants/bridge.token \
+    [--bridge-proxy http://[user:password@]proxy:3128] [--bridge-ca corp-ca.pem]
+```
+
+- **Units**: `--bridge-serve` installs `contrib/launchd/ants.bridge-serve.plist` or `contrib/systemd/ants-bridge-serve.service` (`ants bridge serve --token-file FILE`, default `--listen` and `--upstream`); `--bridge URL` installs `contrib/launchd/ants.bridge.plist` or `contrib/systemd/ants-bridge.service` (`ants bridge connect --token-file FILE [--proxy URL] URL`, `SSL_CERT_FILE` from `--bridge-ca`). Both restart at most every 10 s after a failure (`~/Library/Logs/ants/bridge.log`, `bridge-serve.log`, or `journalctl --user -u ants-bridge -u ants-bridge-serve`). `--bridge` excludes `--devtunnel`: both listen on `127.0.0.1:7422`.
+- **Start order**: systemd starts `ants-nats` after `ants-bridge` on the worker, and `ants-bridge-serve` after `ants-nats` (pulling it in) on the hub. launchd has no start order: the worker's leaf node retries its uplink until `ants.bridge` listens, and on the hub, sessions opened before `ants.nats` listens fail and the leaves retry them.
+- **Token rotation**: the token file is read at each start; replace it on both ends and restart `ants.bridge-serve` / `ants-bridge-serve` and `ants.bridge` / `ants-bridge` (`launchctl kickstart -k gui/$(id -u)/<label>` or `systemctl --user restart <unit>`).
+- **Proxy credentials**: `--bridge-proxy` credentials appear in the installed unit and the process arguments. `--header` values (e.g. `X-Tunnel-Authorization`) and other `--listen` or `--upstream` addresses need an edit of the installed unit.
 
 ## Dev Tunnels
 
