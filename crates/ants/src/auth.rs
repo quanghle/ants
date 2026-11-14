@@ -1939,7 +1939,7 @@ pub(crate) mod tests {
             let msgs: Vec<_> = reader.fetch().max_messages(10).messages().await.unwrap().try_collect().await.unwrap();
             let subjects: Vec<&str> = msgs.iter().map(|m| m.subject.as_str()).collect();
             assert_eq!(subjects, [want.as_str()], "{feed:?}");
-            msgs[0].ack().await.unwrap();
+            msgs[0].double_ack().await.unwrap();
             let again: consumer::PullConsumer = o_js.get_consumer_from_stream(&name, STREAM).await.unwrap();
             assert_eq!(again.cached_info().num_ack_pending, 0, "{feed:?}");
             o_js.delete_consumer_from_stream(&name, STREAM).await.unwrap();
