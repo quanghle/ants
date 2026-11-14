@@ -4,7 +4,8 @@
      scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.daemon.plist.
      launchd has no start order: until ants.nats listens, the daemon waits, retrying the connection. KeepAlive and
      ThrottleInterval cover other failures.
-     SIGTERM lets prompts in flight finish for up to ExitTimeOut seconds; messages cut off are redelivered. -->
+     SIGTERM lets prompts in flight finish for up to ExitTimeOut seconds; messages cut off are redelivered.
+     Serve the ants of an edited config file (ants add) without a restart: launchctl kill SIGHUP gui/$(id -u)/ants.daemon -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

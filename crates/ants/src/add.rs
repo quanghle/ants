@@ -106,8 +106,8 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         Some(_) => {
             println!("credentials of {name} in {}", out.display());
             println!(
-                "serve it: restart `ants daemon`, or its service (macOS: launchctl kickstart -k gui/$(id -u)/ants.daemon, \
-                 Linux: systemctl --user restart ants-daemon)\n\
+                "serve it: reload `ants daemon` with SIGHUP, or its service (macOS: launchctl kill SIGHUP \
+                 gui/$(id -u)/ants.daemon, Linux: systemctl --user reload ants-daemon); the ants it serves carry on\n\
                  behind a leaf node, add {name} to the uplink: `ants auth leaf MACHINE --ant ...` on the machine \
                  holding the account key, then `ants leaf outbox MACHINE --ant ...`"
             );

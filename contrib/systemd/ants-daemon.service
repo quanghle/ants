@@ -1,6 +1,7 @@
 # ants: the ant daemon (antsd), serving the ants of its config file through the local nats-server.
 # User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
 # Until ants-nats listens, the daemon waits, retrying the connection; Restart covers other failures.
+# Serve the ants of an edited config file (ants add) without a restart: systemctl --user reload ants-daemon
 
 [Unit]
 Description=ants: ant daemon
@@ -9,6 +10,7 @@ After=ants-nats.service
 
 [Service]
 ExecStart="@ANTS@" daemon --config "@CONFIG@"
+ExecReload=kill -HUP $MAINPID
 # The harness (copilot) and bd are looked up on this PATH.
 Environment="PATH=@PATH@" NO_COLOR=1
 Restart=on-failure
