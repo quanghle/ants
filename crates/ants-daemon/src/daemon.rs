@@ -380,7 +380,8 @@ async fn stopped(stop: &Stop) {
     }
 }
 
-/// Ctrl-C, or SIGTERM, which launchd and systemd send to stop a service.
+/// Ctrl-C, or SIGTERM, which launchd and systemd send to stop a service; on Windows Ctrl-C, Ctrl-Break, or the console
+/// closing or the system shutting down.
 pub async fn stop_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -391,8 +392,17 @@ pub async fn stop_signal() -> std::io::Result<()> {
             _ = terminate.recv() => Ok(()),
         }
     }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let (mut brk, mut close, mut shutdown) = (ctrl_break()?, ctrl_close()?, ctrl_shutdown()?);
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = brk.recv() => Ok(()),
+            _ = close.recv() => Ok(()),
+            _ = shutdown.recv() => Ok(()),
+        }
+    }
 }
 
 type InHand = (Incoming, jetstream::Message);

@@ -116,7 +116,7 @@ pub fn exit() -> ! {
 mod tests {
     use super::*;
 
-    fn write(path: &Path, content: &str, mode: u32) {
+    fn write(path: &Path, content: &str, #[cfg_attr(not(unix), expect(unused_variables))] mode: u32) {
         std::fs::write(path, content).unwrap();
         #[cfg(unix)]
         {

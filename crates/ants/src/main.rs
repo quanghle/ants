@@ -224,7 +224,7 @@ enum Command {
     Keys(keys::KeysCommand),
     /// Bridge stdio to a daemon's MCP tools, for harnesses without HTTP MCP. The daemon configures this itself.
     Mcp {
-        /// The daemon's MCP socket.
+        /// The daemon's MCP socket (a named pipe on Windows).
         #[arg(long)]
         socket: PathBuf,
         /// The session's token.

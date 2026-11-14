@@ -10,7 +10,7 @@
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
-//! servers, and a Unix socket that `ants mcp` bridges stdio to, for the others. The sessions of each thread get their
+//! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
 //! own bearer token, which tells the tools which thread calls them.
 //!
 //! A reply to `ask_agent` lands in the ant's inbox like any message. It reaches the waiting call through a core NATS
@@ -45,7 +45,7 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt as _, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -54,7 +54,7 @@ use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::notes::NotesStore;
-use crate::{bus, links, roster};
+use crate::{bus, ipc, links, roster};
 
 /// Environment variable carrying the session's token to `ants mcp`.
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
@@ -169,13 +169,13 @@ impl Drop for Mcp {
     fn drop(&mut self) {
         self.tasks.iter().for_each(JoinHandle::abort);
         if let Some(socket) = &self.socket {
-            let _ = std::fs::remove_file(socket);
+            ipc::remove(socket);
         }
     }
 }
 
 impl Mcp {
-    /// Listen on a loopback port and on `<home>/mcp.sock`. What must survive a restart (asks waiting for a reply, late
+    /// Listen on a loopback port and on a local socket ([`ipc::Listener`]). What must survive a restart (asks waiting for a reply, late
     /// replies) lives in `<home>/mcp.json`. `humans` tells the humans the tools reach. Thread notes out of turns are
     /// escalated through `escalator`, without one straight to the thread's owner.
     pub async fn start(
@@ -213,15 +213,13 @@ impl Mcp {
         let mut tasks = vec![tokio::spawn(serve_http(listener, hub.clone()))];
 
         // The stdio fallback is optional: without the socket, harnesses lacking HTTP MCP just get no tools.
-        let path = home.join("mcp.sock");
-        let _ = std::fs::remove_file(&path);
-        let socket = match bind_private(&path) {
-            Ok(listener) => {
+        let socket = match ipc::Listener::bind(home) {
+            Ok((listener, address)) => {
                 tasks.push(tokio::spawn(serve_socket(listener, hub.clone())));
-                Some(path)
+                Some(address)
             }
             Err(e) => {
-                tracing::warn!(socket = %path.display(), error = format!("{e:#}"), "no MCP socket for stdio harnesses");
+                tracing::warn!(error = format!("{e:#}"), "no MCP socket for stdio harnesses");
                 None
             }
         };
@@ -315,11 +313,14 @@ impl Drop for Turn {
 /// Bridge stdin and stdout to the MCP socket of a daemon, as `ants mcp` does for harnesses without HTTP MCP. Ends when
 /// the daemon closes the connection.
 pub async fn bridge_stdio(socket: &Path, token: &str) -> Result<()> {
-    let stream = UnixStream::connect(socket).await.with_context(|| format!("connecting to {}", socket.display()))?;
-    let (mut from_daemon, mut to_daemon) = stream.into_split();
+    let stream = ipc::connect(socket).await.with_context(|| format!("connecting to {}", socket.display()))?;
+    let (mut from_daemon, mut to_daemon) = tokio::io::split(stream);
     to_daemon.write_all(format!("{token}\n").as_bytes()).await?;
     let up = async {
         tokio::io::copy(&mut tokio::io::stdin(), &mut to_daemon).await?;
+        if !ipc::HALF_CLOSE {
+            return Ok(());
+        }
         // The harness closed stdin: let the daemon finish and close its side.
         to_daemon.shutdown().await?;
         std::future::pending::<std::io::Result<()>>().await
@@ -886,19 +887,11 @@ fn bearer<B>(request: &Request<B>) -> Option<&str> {
     request.headers().get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-/// A Unix socket only the daemon's user may connect to.
-fn bind_private(path: &Path) -> Result<UnixListener> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
-}
-
 /// Each connection starts with the session's token on a line of its own, then carries MCP as JSON lines.
-async fn serve_socket(listener: UnixListener, hub: Arc<Hub>) {
+async fn serve_socket(mut listener: ipc::Listener, hub: Arc<Hub>) {
     loop {
         let stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
+            Ok(stream) => stream,
             Err(e) => {
                 tracing::warn!(error = %e, "accepting an MCP socket connection");
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -907,7 +900,7 @@ async fn serve_socket(listener: UnixListener, hub: Arc<Hub>) {
         };
         let hub = hub.clone();
         tokio::spawn(async move {
-            let (read, write) = stream.into_split();
+            let (read, write) = tokio::io::split(stream);
             let mut read = BufReader::new(read);
             let mut line = String::new();
             if (&mut read).take(256).read_line(&mut line).await.is_err() {
@@ -2429,14 +2422,14 @@ mod tests {
         assert_eq!(server.args[..2], ["mcp", "--socket"]);
         let token = &server.env.iter().find(|e| e.name == TOKEN_ENV).unwrap().value;
 
-        let mut stream = UnixStream::connect(&server.args[2]).await.unwrap();
+        let mut stream = ipc::connect(Path::new(&server.args[2])).await.unwrap();
         stream.write_all(format!("{token}\n").as_bytes()).await.unwrap();
         let client = ClientConfig::default().serve(stream).await.unwrap();
         let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "human", "text": "done"})).await;
         assert!(ok, "{text}");
         assert!(sent.recv().await.unwrap().to.is_human());
 
-        let mut stranger = UnixStream::connect(&server.args[2]).await.unwrap();
+        let mut stranger = ipc::connect(Path::new(&server.args[2])).await.unwrap();
         stranger.write_all(b"nope\n").await.unwrap();
         assert!(ClientConfig::default().serve(stranger).await.is_err());
     }

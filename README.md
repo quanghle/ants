@@ -70,6 +70,16 @@ ants --help
 
 From a checkout: `cargo install --locked --path crates/ants`.
 
+### Windows
+
+ants runs on macOS, Linux and Windows. Build on Windows with the MSVC toolchain (Visual Studio Build Tools), or cross-build `--target x86_64-pc-windows-gnu` with mingw-w64 on `PATH` (for its linker and the C compiler of `ring`). On Windows:
+
+- **MCP for stdio harnesses:** the daemon serves the tools for harnesses without HTTP MCP on a named pipe, `\\.\pipe\ants-mcp-<random>`, instead of `<home>/mcp.sock`. Its access list grants access to the daemon's user only, so other local users cannot connect, and it refuses remote clients; each connection still starts with the session's token, as on the socket. See [MCP tools](#mcp-tools).
+- **Harness commands:** a bare command name is looked up on `PATH` as an `.exe`, `.cmd` or `.bat` file, so harnesses installed by npm (`copilot.cmd`) start.
+- **No service units:** `scripts/install-units.sh`, and the service reloads and restarts of `ants add`, `ants renew`, `ants leaf config` and `ants tools approve --rule`, cover launchd and systemd only; they print the commands to run instead. Run `ants daemon` and `nats-server` in a console, or as a Task Scheduler task at logon (`schtasks /Create /SC ONLOGON /TN ants-daemon /TR "C:\Users\NAME\.cargo\bin\ants.exe daemon --config C:\Users\NAME\.ants\config.toml"`), for the account whose Credential Manager holds any stored keys (see [Private keys in the OS credential store](#private-keys-in-the-os-credential-store)). Such a task does not restart on the upgrade exit (status 75): pass `--upgrade-check 0`, or start it again after an upgrade.
+- **Signals:** `ants daemon` stops as on `SIGTERM` on Ctrl-C, Ctrl-Break, the console closing or the system shutting down. There is no `SIGHUP`: restart the daemon for config changes it would reload.
+- **File permissions:** the files ants restricts to their owner elsewhere (mode `0600`: credentials, seeds, secrets) get no mode on Windows: they inherit the access list of their directory. `~` is `%USERPROFILE%`, whose default access list admits the user, SYSTEM and administrators only; keep credentials and the team directory under it.
+
 ### Upgrade
 
 Running `cargo install` again replaces `~/.cargo/bin/ants`; the services move onto the new executable by themselves. `ants daemon`, `ants channel serve`, `ants webhook serve`, `ants bridge serve` and `ants bridge connect` check every 30s whether another file replaced their executable at the path they started from (or the file was rewritten in place). Once the new file is executable, non-empty and unchanged across two checks, the process exits with status 75 for the service manager to start the new one: `ants daemon` first stops its ants as on `SIGTERM` (prompts in flight finish, waiting messages go back for redelivery) and its schedules at once; the others exit at once, as on `SIGTERM`. The units of `scripts/install-units.sh` restart on status 75 (systemd `RestartForceExitStatus=75`; launchd `KeepAlive`, as on any failed exit); systemd units installed before also restart on it, as on a failure. A process started by hand logs the reason and exits: start it again. `--upgrade-check DURATION` (`ANTS_UPGRADE_CHECK`) on those commands sets the period; `0` turns the check off.
@@ -137,7 +147,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing (`outbox`: members from `--ant`/`--human`, or those the uplink credentials of `--leaf-config FILE` carry, changed by `--add-*`/`--remove-*`). |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
-| `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
+| `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon` (a named pipe on Windows). |
 
 `THREAD` in `ask`, `inbox`, `post`, `notes`, `thread show`, `cancel`, `watch`, `spend --thread` and `channel read --thread` is a whole thread ID (a UUID, used without any lookup), a unique start of one, or `last`. A start matches the threads with messages the CLI human sent or received (inbox both ways, own channel and notes posts) stored in the last 7 days; when none of those starts with it, every thread with a message stored in the last 7 days, such as one between ants. For a start of a time-ordered ID (as generated ones are), that second lookup reads only the messages stored while such an ID was made, give or take 5 minutes of clock skew and up to 10 minutes after, so a longer start reads less. An exact ID among the threads matched wins; a start matching several is refused with them listed (ID, latest message time, route and first line), and one matching none with the human's own threads listed. `last` is the thread of the latest message the human sent or received, however old. Both read the stream by message gets (see `ants thread` below) and need human credentials.
 
@@ -451,7 +461,7 @@ ants tools reject dev-a/019a7d2e
 
 ## MCP tools
 
-Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or, without HTTP MCP support, via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`). Tools run on the active thread during a prompt (allowlist: `other:<tool>`):
+Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/mcp` with per-thread bearer token) or, without HTTP MCP support, via `ants mcp --socket <home>/mcp.sock` (`0600`, `ANTS_MCP_TOKEN`; on Windows a named pipe only the daemon's user may open, see [Windows](#windows)). Tools run on the active thread during a prompt (allowlist: `other:<tool>`):
 
 | Tool | Description |
 |---|---|
@@ -822,7 +832,7 @@ For the HTTPS fallback bridge, run `ants bridge serve` (`127.0.0.1:8423` -> `127
 
 ## Services
 
-`scripts/install-units.sh` renders templates from `contrib/launchd/` (macOS `~/Library/LaunchAgents`) or `contrib/systemd/` (Linux/WSL `~/.config/systemd/user`) with resolved binary paths and current `PATH`, then enables and starts them:
+Windows has no units here: see [Windows](#windows). `scripts/install-units.sh` renders templates from `contrib/launchd/` (macOS `~/Library/LaunchAgents`) or `contrib/systemd/` (Linux/WSL `~/.config/systemd/user`) with resolved binary paths and current `PATH`, then enables and starts them:
 
 ```sh
 scripts/install-units.sh                                           # nats + daemon
@@ -919,6 +929,8 @@ cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 ```
 
 CI sets `CARGO_BUILD_WARNINGS=deny`, so any lint warning (rustc or clippy) fails `cargo clippy`, `cargo test` and `cargo build` there. `.cargo/config.toml` sets a 7-day dependency cooldown (`registry.global-min-publish-age`): `cargo update` and `cargo add` resolve only to crate versions published at least 7 days ago, unless `Cargo.lock` already holds them; builds and `cargo install --path` from the committed `Cargo.lock` are unaffected. `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION` takes a newer release, such as a security fix.
+
+CI also lints and builds the Windows target on `windows-latest` and runs the MCP named pipe test there. To lint it from macOS or Linux: `rustup target add x86_64-pc-windows-gnu`, then `CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets --target x86_64-pc-windows-gnu` with mingw-w64 on `PATH`.
 
 Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANTS_REQUIRE_TOOLS=1` is set (as in `.github/workflows/ci.yml`). `crates/ants/tests/e2e.rs` exercises `ants ask --wait` against `ants daemon` using the test binary as a stub ACP harness.
 

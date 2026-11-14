@@ -167,7 +167,16 @@ impl Harness {
     pub(crate) fn process(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgentConfig {
         let context = settings.context.as_ref().and_then(|value| self.context.get(value));
         let args = self.args.iter().chain(context.into_iter().flat_map(|value| &value.args)).cloned();
-        AcpAgentConfig::new(&self.command).args(args).envs(self.env.clone()).envs(env.iter().cloned())
+        AcpAgentConfig::new(self.executable(env)).args(args).envs(self.env.clone()).envs(env.iter().cloned())
+    }
+
+    /// The executable to start: the command, except on Windows a name found on `PATH` ([`Self::locate`]), since
+    /// starting a process by name finds only `.exe` files there, while npm installs harnesses as `.cmd` scripts.
+    fn executable(&self, env: &[(String, String)]) -> PathBuf {
+        if cfg!(windows) && !self.command_is_path() {
+            return self.locate(env).unwrap_or_else(|| self.command.clone());
+        }
+        self.command.clone()
     }
 
     fn agent(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgent {
@@ -184,7 +193,8 @@ impl Harness {
         }
         let path = env.iter().rev().find(|(name, _)| name == "PATH").map(|(_, path)| path.into());
         let path = path.or_else(|| self.env.get("PATH").map(Into::into)).or_else(|| std::env::var_os("PATH"))?;
-        let names: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+        // npm puts a shell script without extension beside the `.cmd` one, which Windows cannot start.
+        let names: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
         std::env::split_paths(&path).find_map(|dir| {
             names.iter().map(|ext| dir.join(format!("{}{ext}", self.command.display()))).find(|p| p.is_file())
         })
