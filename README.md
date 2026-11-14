@@ -103,9 +103,9 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 
 | Command | Description |
 |---|---|
-| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. Warns on stderr, but sends anyway, when no daemon serves the ant now (not in `ants_roster`, stale, or its harness signed out), hinting at a misspelt name when `ants_chains` keeps no chain for it either. |
+| `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT` | Send to `@ant` (`messenger` if omitted) and print the thread ID. `--thread` continues an existing thread. Warns on stderr, but sends anyway, when no daemon serves the ant now (not in `ants_roster`, stale, its harness signed out, or held back by a provider limit), hinting at a misspelt name when `ants_chains` keeps no chain for it either. |
 | `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies and mark read on every device of the human (`--peek` keeps unread; `-f`/`--follow` streams new replies, on every device following, and watches advisories; without `--thread` and `--json`, it also prints pending tool requests with the commands answering them, new ones, and how each ends (answered, by whom if an agent, or expired); without `--thread`, the device counts as reading its escalations, and without `--json` its tool requests too, see [Notifications](#notifications)). |
-| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`), the ants and permissions versions of their daemons, harnesses, capabilities, `escalate_to` chains and workdirs; below the table, a note when live daemons run mixed versions, and one line per signed-out harness with its sign-in command and machine. |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`rate-limited`/`out-of-quota`), the ants and permissions versions of their daemons, harnesses, capabilities, `escalate_to` chains and workdirs; below the table, a note when live daemons run mixed versions, one line per signed-out harness with its sign-in command and machine, and one per harness held back by a provider limit with when its messages are tried again. |
 | `ants spend [ANT] [--thread ID \| --days N] [--json] [--config FILE]` | Report tokens and cost spent (see [Spend report](#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT` | Post to `ops` or `'#ops'` and print the thread ID (`@ant` wakes members; `@human` notifies members; no mention triages). |
@@ -296,6 +296,8 @@ args = ["--stdio", "--log-level", "warn"]
 env = { CUSTOM_ACP_TELEMETRY = "off" }         # layered: daemon env < harness env < ant env < --env
 mode = "default"                               # session fails if harness lacks this mode
 sign_in = "custom-acp login"                   # named when the harness reports it is signed out
+rate_limited = ["slow down"]                   # error phrases of a rate limit, besides the common ones
+quota_exhausted = ["monthly cap reached"]      # error phrases of an exhausted quota, besides the common ones
 
 [harnesses.custom-acp.context]
 default = {}
@@ -328,6 +330,15 @@ A harness is signed out when it answers `session/new`, `session/load` or a promp
 - checks the harness every minute with a handshake (start it, `initialize`, `session/new` in the workdir, stop it); once one succeeds, clears `signed_out` from the roster entry and answers the held messages. The next sign-out after a message got past sign-in tells the human again.
 
 Stopping the daemon while signed out hands the held messages back, each counting one more delivery. `ants harness check` runs the same handshake on demand.
+
+### Provider limits
+
+A harness error reporting a provider limit is classified, after sign-in, as either:
+
+- a **rate limit** or overloaded provider: HTTP `429` or `529` after a word such as `status`, `error` or `code`, or phrases such as `rate limit`, `too many requests`, `overloaded`, `resource_exhausted` or `exhausted your capacity`, plus the definition's `rate_limited` phrases;
+- an **exhausted quota**: phrases such as `insufficient_quota`, `quota exceeded`, `usage limit`, `spending limit` or `credit balance is too low`, plus the definition's `quota_exhausted` phrases (the built-ins add Copilot's premium requests, Claude's session and weekly limits and Antigravity's daily quota). A quota said to be back within 5 minutes counts as a rate limit.
+
+Either way the daemon holds the message in hand exactly as for [sign-in](#sign-in) (no attempt counted, no delivery count growth, no dead letter, no further prompts meanwhile), then tries again after a backoff: 30 s doubling to 10 min for a rate limit, 15 min doubling to 2 h for an exhausted quota. A wait the error names (`retry after 30s`, `try again in 4 days 20 hours`, `resets in 2h27m3s`, `retryDelay`, an epoch after `|`) replaces the doubling, within the same cap. A rate limit passes quietly (logged); an exhausted quota tells the thread's owner, else the default human, once, on the thread, with the harness's words, the machine and when messages are tried again. The roster entry shows the limit (`limited`: `kind` `rate_limit` or `quota`, `since`, `until`) until the wait passes, so `ants roster` and peers' `list_ants` show it and `route` prefers ants without one; the thread's status goes back to `idle`. A message getting past starts the backoff over and lets the next exhausted quota be told again. A limit reported after the prompt streamed work keeps the attempt marker, so the retry carries the cut-off warning, but still spends no attempt.
 
 ### Model, reasoning effort and context
 
@@ -366,7 +377,7 @@ Today's and each day's figures show as `spent/cap` against `max_daily_tokens` an
 
 ## Roster, identity and memory
 
-Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, ants `version` and permissions version `perms`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count, and while the harness is signed out a `signed_out` object with `since` and the `sign_in` command), refreshing every 10s and on activity or sign-in transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
+Each daemon publishes a `RosterEntry` per ant at `<ant>` in `ants_roster` (`machine`, daemon `instance`, `harness`, `workdir`, `capabilities`, `whoami`, `escalate_to`, ants `version` and permissions version `perms`, start/heartbeat timestamps, `idle`/`working` activity, in-flight message count, live harness count, while the harness is signed out a `signed_out` object with `since` and the `sign_in` command, and while a provider limit holds its messages a `limited` object with `kind` (`rate_limit` or `quota`), `since` and `until`), refreshing every 10s and on activity, sign-in or limit transitions, and deleting on clean exit. Entries expire after 30s; `ants roster` marks entries without a heartbeat for 20s as `stale`.
 
 ### Identity, memory and task tracking
 
@@ -424,8 +435,8 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID) and return once stored. |
 | `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait for its reply (`timeout` a duration such as `90s`: default `5m`, max `30m`; refuses humans). |
 | `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (current thread unless `all_threads`). |
-| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command). |
-| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
+| `list_ants(capability?)` | List peer ants from `ants_roster` (`whoami`, capabilities, harness, machine, activity, or a signed-out harness and its sign-in command, or a provider limit and until when). |
+| `route(capability, text, wait?, timeout?)` | Pick a peer with `capability` (signed in > signed out, no provider limit > limited, `live` > `stale`, `idle` > unknown > `working`, fewest messages, name); waits unless `wait: false`. |
 | `post_notes(text)` | Append to the current thread's notes (1 turn; wakes nobody). |
 | `read_notes(thread?)` | Read up to 50 notes posts (oldest first) and turns left on the current or named thread (0 turns). |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
@@ -499,7 +510,7 @@ Unresolved thread conditions — `turn_budget`, `cap`, `notes`, `dead_letter`, `
 
 ## Dead letters
 
-Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`); a harness that is signed out spends none (see [Sign-in](#sign-in)). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
+Inbox and channel messages get 5 prompt attempts (`max_deliver = 6`); a harness that is signed out or held back by a provider limit spends none (see [Sign-in](#sign-in) and [Provider limits](#provider-limits)). When attempt 5 fails — or on delivery 6 if attempt 5 crashed without recording a reply — the daemon writes a `DeadLetter` to `ants.dead.<ant>`, escalates a `dead_letter` notice on the thread, and terminates the consumer delivery. Unparseable or subject-mismatched payloads are dead-lettered immediately without envelopes so they cannot be replayed.
 
 ```sh
 ants dead list          # seq, ant, thread, from, deliveries, time, error, text

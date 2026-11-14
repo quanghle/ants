@@ -35,6 +35,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         version: None,
         perms: None,
         signed_out: None,
+        limited: None,
     }
 }
 

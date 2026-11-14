@@ -370,6 +370,8 @@ pub(crate) mod fake {
         /// While set, opening a session or prompting fails with ACP's `auth_required`, as a harness that is not
         /// signed in does.
         pub signed_out: bool,
+        /// While set, prompts fail with this text, as a harness reporting a provider limit does.
+        pub limited: Option<String>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
@@ -377,7 +379,8 @@ pub(crate) mod fake {
     /// the word `doomed` waits for a permit too, then fails, every time. Words in
     /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
-    /// While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed in.
+    /// While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed in; while
+    /// [`Log::limited`] is, prompts fail with its text.
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));
@@ -442,6 +445,10 @@ pub(crate) mod fake {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
                             log.prompted += 1;
+                            if let Some(limited) = &log.limited {
+                                let error = agent_client_protocol::Error::internal_error().data(limited.clone());
+                                return responder.respond_with_error(error);
+                            }
                             drop(log);
                             let ContentBlock::Text(t) = &prompt.prompt[0] else { unreachable!() };
                             let (text, gate, sender, log, cancels) =
