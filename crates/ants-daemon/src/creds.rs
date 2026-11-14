@@ -219,6 +219,18 @@ impl Finding {
         }
     }
 
+    /// When to renew outdated credentials of a service, which other machines may still run an older ants depending on
+    /// rights the renewal withdraws: empty for a human's and enrollment credentials.
+    pub fn renew_when(&self) -> &'static str {
+        match self.kind {
+            Kind::Human | Kind::Enrollment { .. } => "",
+            _ => {
+                ", once `ants doctor` run as a human finds every daemon, `ants webhook serve` and `ants channel \
+                 serve` at this permissions version (its `versions` check)"
+            }
+        }
+    }
+
     /// What deserves a warning at `now`: an outdated or newer permissions version, and an expiry passed or within
     /// [`EXPIRY_WARNING`], except for enrollment credentials, short-lived by design, which only expire. One line each.
     pub fn warnings(&self, now: u64) -> Vec<String> {
@@ -227,13 +239,15 @@ impl Finding {
         match (self.version_status(), self.version) {
             (VersionStatus::Outdated, None) => warnings.push(format!(
                 "the credentials of {holder} predate permission versions, and this ants gives version \
-                 {PERMISSIONS_VERSION}: requests their role allows now may be refused; {}",
-                self.renew_hint()
+                 {PERMISSIONS_VERSION}: requests their role allows now may be refused; {}{}",
+                self.renew_hint(),
+                self.renew_when()
             )),
             (VersionStatus::Outdated, Some(version)) => warnings.push(format!(
                 "the credentials of {holder} carry permissions version {version}, older than version \
-                 {PERMISSIONS_VERSION} of this ants: requests their role allows now may be refused; {}",
-                self.renew_hint()
+                 {PERMISSIONS_VERSION} of this ants: requests their role allows now may be refused; {}{}",
+                self.renew_hint(),
+                self.renew_when()
             )),
             (VersionStatus::Newer, Some(version)) => warnings.push(format!(
                 "the credentials of {holder} carry permissions version {version}, newer than version \
@@ -403,7 +417,12 @@ mod tests {
         assert_eq!((unstamped.version, unstamped.version_status()), (None, VersionStatus::Outdated));
         let warnings = unstamped.warnings(0);
         assert!(warnings.len() == 1 && warnings[0].contains("`ants auth user dev-a --js-domain hub`"), "{warnings:?}");
-        assert_eq!(finding(&[older]).version_status(), VersionStatus::Outdated);
+        let outdated = finding(std::slice::from_ref(&older));
+        assert_eq!(outdated.version_status(), VersionStatus::Outdated);
+        assert!(outdated.warnings(0)[0].ends_with("(its `versions` check)"), "renew once every component allows it");
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        let human = Finding::from_claims(&claims("alice", &human, &[older], None)).unwrap();
+        assert!(!human.warnings(0)[0].contains("ants doctor"), "a human's renewal withdraws no right a service uses");
         let ahead = finding(&[newer]);
         assert_eq!(ahead.version_status(), VersionStatus::Newer);
         assert!(ahead.warnings(0)[0].contains("upgrade ants"), "{:?}", ahead.warnings(0));

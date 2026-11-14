@@ -23,6 +23,7 @@ mod spend;
 mod thread;
 mod tools;
 mod upgrade;
+mod versions;
 mod webhook;
 
 use std::net::SocketAddr;

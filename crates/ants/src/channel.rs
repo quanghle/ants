@@ -207,15 +207,22 @@ pub async fn update<T>(
 }
 
 /// Run the channel manager until it fails: connect with `creds`, the channel manager's, retrying until the hub
-/// answers, and apply the changes owners ask for ([`ants_daemon::chanadm::serve`]).
+/// answers, and apply the changes owners ask for ([`ants_daemon::chanadm::serve`]). Meanwhile, publish the version of
+/// ants it runs ([`ants_proto::channel_manager_serving_key`]).
 pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&ants_proto::JsDomain>) -> Result<()> {
     let me = UserId::channel_manager();
     let connecting = bus::connect_retrying(url, creds, domain, &me, "ants-channel-manager", std::future::pending());
     let (client, js) = connecting.await?.context("connecting")?;
+    let published = ants_daemon::direct_kv::DirectKv::new(&js, domain, ants_proto::WEBHOOKS_BUCKET).await?;
+    let key = ants_proto::channel_manager_serving_key();
+    let publishing = crate::versions::keep_putting(published, key, crate::versions::serving().await, || {});
     let humans = ants_daemon::humans::Registry::new(UserId::human());
     let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
     let roster = ants_daemon::mcp::jetstream_roster(js.clone());
-    ants_daemon::chanadm::serve(client, js, roster, humans).await
+    tokio::select! {
+        served = ants_daemon::chanadm::serve(client, js, roster, humans) => served,
+        () = publishing => unreachable!("it keeps publishing"),
+    }
 }
 
 /// Remove a channel; fails when there is none. Its posts stay in the stream.
