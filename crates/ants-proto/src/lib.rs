@@ -766,6 +766,12 @@ pub fn dead_reader(ant: &UserId) -> String {
     format!("deadread-{ant}")
 }
 
+/// JetStream consumer an ant's daemon reads back the messages the ant sent through, one read at a time, like
+/// [`notes_consumer`], to rebuild the context of a thread. Its filter is pinned to [`subject::inbox_from`] of the ant.
+pub fn sent_reader(ant: &UserId) -> String {
+    format!("sentread-{ant}")
+}
+
 /// Key of the event of `webhook` whose id hashes to `hash` in [`WEBHOOKS_BUCKET`]. Keys start with the webhook, so its
 /// credentials can be confined to its own.
 pub fn webhook_seen_key(webhook: &UserId, hash: &str) -> String {
@@ -885,7 +891,8 @@ impl Permissions {
     ///
     /// Any ant may write to every inbox, the notes of every thread and every channel, but only as itself (the sender is
     /// the last token of inbox, notes and channel subjects). It speaks only for itself on status, approvals and dead
-    /// letters, reads back only its own dead letters (through its own [`dead_reader`]), reads only its own inbox
+    /// letters, reads back only its own dead letters (through its own [`dead_reader`]) and the messages it sent (through
+    /// its own [`sent_reader`]), reads only its own inbox
     /// (consumer and its spares, and live), the notes of every thread (live, and from the stream
     /// through its own notes consumer and its spares), every channel (live, and from the stream through its own channel
     /// consumer, and its reader and the reader's spares), its own replies and the decisions on its own approval requests (live, and as stored), reads the roster
@@ -1054,6 +1061,7 @@ impl Permissions {
             let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
             let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
             let dead_read = dead_reader(user);
+            let sent_read = sent_reader(user);
             publish.extend([
                 // Get and put of its own sessions.
                 format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
@@ -1072,6 +1080,10 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
+                // Reading back the messages it sent, through its own consumer filtering only those.
+                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::inbox_from(user)),
+                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
+                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
                 subject::status_of(user),
                 subject::cancelled_of(user),
                 subject::chanadm_from(user),
@@ -1996,6 +2008,8 @@ pub enum EscalationReason {
     Approval,
     /// The agent asked for help with the escalate tool.
     Asked,
+    /// A prompt does not fit the model's context window, even in a fresh session.
+    ContextWindow,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -2010,6 +2024,7 @@ impl EscalationReason {
             Self::DeadLetter => "dead_letter",
             Self::Approval => "approval",
             Self::Asked => "asked",
+            Self::ContextWindow => "context_window",
             Self::Unknown => "unknown",
         }
     }

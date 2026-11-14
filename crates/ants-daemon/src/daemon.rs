@@ -29,6 +29,7 @@ use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits,
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
 use crate::notes::{self, NotesStore};
+use crate::overflow::ContextOverflow;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::ratelimit::{self, Backoffs, Limited, Throttle};
@@ -1406,8 +1407,21 @@ impl Inbox<'_> {
             None => text,
         };
         let text = prompt_text(&text, cut_off, late);
-        let prompt =
-            Prompt { text, limits: self.limits, spend: Some(spend_tx), stop: Some(stop), progress: Some(progress_tx) };
+        let history = crate::history::Thread {
+            js: self.js.clone(),
+            ant: self.ant.clone(),
+            thread: thread.clone(),
+            channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
+            before: seq,
+        };
+        let prompt = Prompt {
+            text,
+            limits: self.limits,
+            spend: Some(spend_tx),
+            stop: Some(stop),
+            progress: Some(progress_tx),
+            history: Some(history.history()),
+        };
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
         let prompting = self.metrics.prompting();
@@ -1469,6 +1483,14 @@ impl Inbox<'_> {
                     self.attempts.forget(seq).await;
                 }
                 return Err(e);
+            }
+            // Not even a new session holds the prompt: no further attempt can, so the owner decides.
+            Err(e) if e.is::<ContextOverflow>() => {
+                self.escalate(incoming, &e.to_string(), EscalationReason::ContextWindow, seq, None).await?;
+                bus::double_ack(self.client, msg).await?;
+                self.attempts.forget(seq).await;
+                status::state(self.client, self.ant, thread, State::Failed);
+                return Ok(());
             }
             reply => reply?,
         };
@@ -2283,6 +2305,40 @@ mod tests {
         tokio::join!(bus.serve(&pool, &ctrl_c), check);
         assert_eq!(log.lock().unwrap().answered, [warned("flaky a"), "b".to_owned()]);
         assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_thread_history_tried() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let t1 = ThreadId::generate();
+        bus.send(&t1, "hello").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hello".to_owned()));
+            bus.send(&t1, "overflows").await;
+            let notice = next_envelope(&mut replies).await;
+            let why = "The prompt does not fit the context window of test's model, even in a new session: ";
+            assert!(notice.text.starts_with(why), "{}", notice.text);
+            assert!(notice.text.contains("Prompt is too long"), "{}", notice.text);
+            assert!(
+                notice.text.ends_with("; needs a decision. Last message from human:\noverflows"),
+                "{}",
+                notice.text
+            );
+            assert_eq!(notice.thread_id, t1);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let history = "[ants] The thread's history, read back from ants, oldest first:\n\nhuman to dev-a:\nhello\n\n\
+                       dev-a to human:\ns1: hello\n\n[ants] End of the thread's history.\n\noverflows";
+        let prompts = log.lock().unwrap().prompts.clone();
+        assert_eq!(prompts.len(), 3, "{prompts:?}");
+        assert!(prompts[2].ends_with(history), "{}", prompts[2]);
+        assert_eq!(bus.unacked().await, 0);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
     }
 
     #[tokio::test]
