@@ -19,8 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_daemon::{bus, roster};
 use ants_proto::{
-    ENROLL_INBOX, ENROLL_REPEAT, EnrollLeaf, EnrollReply, EnrollRequest, JsDomain, Machine, Permissions, Role, UserId,
-    subject,
+    Destination, ENROLL_INBOX, ENROLL_REPEAT, EnrollLeaf, EnrollReply, EnrollRequest, JsDomain, Machine, Permissions,
+    Role, UserId, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -337,6 +337,36 @@ impl Approver {
             }
             None => (None, None),
         };
+        let public_key = self.send(&request, jwt, leaf_jwt).await?;
+        Ok(Approved { public_key, leaf })
+    }
+
+    /// Sign the credentials webhook `webhook` asks for (`ants webhook add --enroll`), with the rights
+    /// `ants auth user --webhook` gives for `destinations`, and send them, as [`Approver::approve`] does. Returns the
+    /// public key approved.
+    pub async fn approve_webhook(
+        &self,
+        dir: &Path,
+        webhook: &UserId,
+        destinations: &[Destination],
+        public_key: Option<&str>,
+    ) -> Result<String> {
+        if webhook.is_human() {
+            bail!("{webhook} is the default human, no webhook");
+        }
+        let request = self.one(webhook, public_key).await?;
+        if let Some(leaf) = &request.leaf {
+            bail!("{webhook} asks through the leaf node of {}; a webhook connects to the hub", leaf.machine);
+        }
+        let permissions = Permissions::for_webhook(webhook, destinations).with_js_domain(self.js_domain.as_ref());
+        let jwt = auth::sign_with(dir, webhook, revoke::Kind::Webhook, permissions, &request.public_key)?;
+        self.send(&request, jwt, None).await
+    }
+
+    /// Send the approval of `request`, its user JWT `jwt` and the leaf's renewed uplink JWT `leaf_jwt`, until the
+    /// machine stops asking. Returns the public key approved.
+    async fn send(&self, request: &EnrollRequest, jwt: String, leaf_jwt: Option<String>) -> Result<String> {
+        let ant = &request.ant;
         let public_key = request.public_key.clone();
         let reply = EnrollReply::Approved { ant: ant.clone(), public_key: public_key.clone(), jwt, leaf_jwt };
         // An answer lost on the way leaves the machine asking: answer again while it does.
@@ -344,7 +374,7 @@ impl Approver {
             self.answer(&reply).await?;
             let still = self.pending(Some(ant)).await?;
             if !still.iter().any(|r| r.public_key == request.public_key) {
-                return Ok(Approved { public_key, leaf });
+                return Ok(public_key);
             }
         }
         bail!("{ant} on {} keeps asking; the answer did not get through", request.host)
@@ -500,6 +530,29 @@ mod tests {
         auth::write_creds(&out, &jwt, &user).unwrap();
         let (client, _) = bus::connect(&server.url, Some(&out), None, &dev_a, "test").await.unwrap();
         client.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_webhook_approval_gives_a_webhooks_credentials_for_its_destination() {
+        let Some(server) = Server::start() else { return };
+        let (team, hook) = (server.dir().join("auth"), p("github"));
+        let creds = enrollment(&server, &hook, Duration::from_secs(60));
+        let user = KeyPair::new_user();
+        let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+        let to = Destination::Ant(p("dev-a"));
+
+        let asking = request(&server.url, &creds, &hook, &user, None, REPEAT, pending());
+        let approving = approver.approve_webhook(&team, &hook, std::slice::from_ref(&to), None);
+        let (jwt, key) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+        assert_eq!(key.unwrap(), user.public_key());
+        let out = server.dir().join("github.creds");
+        auth::write_creds(&out, &jwt.unwrap().jwt, &user).unwrap();
+        crate::webhook::check_creds("webhook", &hook, Some(&out), &to).unwrap();
+        let other = Destination::Ant(p("dev-b"));
+        assert!(crate::webhook::check_creds("webhook", &hook, Some(&out), &other).is_err());
+        let issued = revoke::issued(&team).unwrap();
+        let record = issued.iter().find(|i| i.key == user.public_key()).unwrap();
+        assert_eq!(record.kind, revoke::Kind::Webhook);
     }
 
     /// Publish `request` for dev-a with the enrollment credentials at `creds`, as a machine would, signed as given.

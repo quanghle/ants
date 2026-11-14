@@ -13,6 +13,8 @@ pub enum Service {
     Daemon,
     /// `nats-server -c FILE`: the machine's leaf node, or the hub.
     Nats,
+    /// `ants webhook serve --config FILE`.
+    Webhook,
 }
 
 impl Service {
@@ -20,6 +22,7 @@ impl Service {
         match self {
             Service::Daemon => "ants.daemon",
             Service::Nats => "ants.nats",
+            Service::Webhook => "ants.webhook",
         }
     }
 
@@ -27,6 +30,7 @@ impl Service {
         match self {
             Service::Daemon => "ants-daemon",
             Service::Nats => "ants-nats",
+            Service::Webhook => "ants-webhook",
         }
     }
 }

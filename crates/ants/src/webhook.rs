@@ -2,9 +2,11 @@
 //! webhook names.
 //!
 //! Each `[[webhook]]` of the config file ([`Config`]) is its own NATS user, with credentials from
-//! `ants auth user NAME --webhook --to ANT` or `--channel CHANNEL` ([`ants_proto::Permissions::for_webhook`]): it
-//! sends as itself, to its destination only. `POST <path>/<name>` with the event:
-//! - is authenticated before anything else: an HMAC-SHA256 signature of the body, or a bearer token (401);
+//! `ants auth user NAME --webhook --to ANT` or `--channel CHANNEL` ([`ants_proto::Permissions::for_webhook`]), or
+//! with its entry and secret from `ants webhook add` ([`crate::webhook_add`]): it sends as itself, to its destination
+//! only. `POST <path>/<name>` with the event:
+//! - is authenticated before anything else: an HMAC-SHA256 signature of the body, a bearer token, or a token in a
+//!   named header (401);
 //! - is identified by an id from a header, a JSON field or the body's hash; an event already delivered answers
 //!   200 with `"duplicate": true` and delivers nothing ([`WEBHOOKS_BUCKET`], and the stream's `Nats-Msg-Id`);
 //! - becomes the text of a message to the ant, or of a channel post, on a new thread, with the mentions the config
@@ -117,6 +119,7 @@ struct Entry {
     secret_env: Option<String>,
     secret_file: Option<PathBuf>,
     signature_header: Option<String>,
+    token_header: Option<String>,
     id: Option<String>,
     ant: Option<UserId>,
     channel: Option<ChannelId>,
@@ -132,6 +135,7 @@ struct Entry {
 enum AuthKind {
     HmacSha256,
     Bearer,
+    Token,
 }
 
 /// The config file of `ants webhook serve`, checked.
@@ -165,10 +169,12 @@ pub struct Webhook {
 
 #[derive(PartialEq)]
 enum Auth {
-    /// `sha256=<hex>` of the body's HMAC-SHA256, keyed with the secret, in the header.
+    /// The hex of the body's HMAC-SHA256, keyed with the secret, in the header, after `sha256=` or alone.
     Hmac { secret: String, header: HeaderName },
     /// `Authorization: Bearer <token>`.
     Bearer(String),
+    /// The token alone in the header, such as GitLab's `X-Gitlab-Token`.
+    Token { secret: String, header: HeaderName },
 }
 
 #[derive(Debug, PartialEq)]
@@ -206,7 +212,7 @@ impl Config {
 
     /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
     /// directory and read each secret, from `env` or its file.
-    fn parse(text: &str, path: &Path, home: &Path, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
+    pub(crate) fn parse(text: &str, path: &Path, home: &Path, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let shown = path.display();
         let file: File = toml::from_str(text).with_context(|| format!("parsing webhook config {shown}"))?;
         let base = path.parent().unwrap_or(Path::new("."));
@@ -273,6 +279,29 @@ impl Config {
     }
 }
 
+/// What `ants webhook add` reads of a config file's text: where it serves, and the webhooks it lists.
+pub(crate) struct Listing {
+    pub listen: Option<String>,
+    /// Requests go to `<path>/<webhook>`.
+    pub path: String,
+    pub public_url: Option<String>,
+    pub js_domain: Option<JsDomain>,
+    pub webhooks: Vec<UserId>,
+}
+
+impl Listing {
+    pub(crate) fn parse(text: &str) -> Result<Self> {
+        let file: File = toml::from_str(text)?;
+        Ok(Self {
+            listen: file.listen,
+            path: file.path.as_deref().unwrap_or(DEFAULT_PATH).trim_end_matches('/').to_owned(),
+            public_url: file.public_url,
+            js_domain: file.js_domain,
+            webhooks: file.webhooks.into_iter().map(|w| w.name).collect(),
+        })
+    }
+}
+
 impl Webhook {
     fn from_entry(
         entry: Entry,
@@ -291,6 +320,12 @@ impl Webhook {
         if secret.is_empty() {
             bail!("empty secret");
         }
+        if entry.signature_header.is_some() && !matches!(entry.auth, AuthKind::HmacSha256) {
+            bail!("signature_header goes with auth = \"hmac-sha256\" only");
+        }
+        if entry.token_header.is_some() && !matches!(entry.auth, AuthKind::Token) {
+            bail!("token_header goes with auth = \"token\" only");
+        }
         let auth = match entry.auth {
             AuthKind::HmacSha256 => {
                 let header = entry.signature_header.as_deref().unwrap_or(DEFAULT_SIGNATURE_HEADER);
@@ -298,10 +333,13 @@ impl Webhook {
                     .with_context(|| format!("signature_header {header:?}"))?;
                 Auth::Hmac { secret, header }
             }
-            AuthKind::Bearer if entry.signature_header.is_some() => {
-                bail!("signature_header goes with auth = \"hmac-sha256\" only")
-            }
             AuthKind::Bearer => Auth::Bearer(secret),
+            AuthKind::Token => {
+                let header = entry.token_header.as_deref().context("auth = \"token\" needs token_header")?;
+                let header =
+                    HeaderName::from_bytes(header.as_bytes()).with_context(|| format!("token_header {header:?}"))?;
+                Auth::Token { secret, header }
+            }
         };
         let id = match entry.id.as_deref() {
             None | Some("body-sha256") => IdSource::BodySha256,
@@ -440,6 +478,20 @@ struct Event {
     text: String,
 }
 
+#[cfg(test)]
+impl Webhook {
+    /// Whether a request with `headers` and `body` gets through authentication.
+    pub(crate) fn accepts(&self, headers: &HeaderMap, body: &[u8]) -> bool {
+        self.authorized_before_body(headers) && self.authorized(headers, body)
+    }
+
+    /// The hash of the id and the text of the event in an authenticated request.
+    pub(crate) fn event_of(&self, headers: &HeaderMap, body: &[u8]) -> (String, String) {
+        let event = self.event(headers, body).ok().expect("an event");
+        (event.hash, event.text)
+    }
+}
+
 impl Webhook {
     fn authorized_before_body(&self, headers: &HeaderMap) -> bool {
         match &self.auth {
@@ -449,6 +501,10 @@ impl Webhook {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .is_some_and(|given| crate::bridge::same(given.trim().as_bytes(), token.as_bytes())),
+            Auth::Token { secret, header } => headers
+                .get(header)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|given| crate::bridge::same(given.trim().as_bytes(), secret.as_bytes())),
         }
     }
 
@@ -459,11 +515,12 @@ impl Webhook {
                 let signature = headers
                     .get(header)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().strip_prefix("sha256="))
+                    .map(|v| v.trim())
+                    .map(|v| v.strip_prefix("sha256=").unwrap_or(v))
                     .and_then(|hex| HEXLOWER_PERMISSIVE.decode(hex.as_bytes()).ok());
                 signature.is_some_and(|signature| hmac::verify(&key, body, &signature).is_ok())
             }
-            Auth::Bearer(_) => true,
+            Auth::Bearer(_) | Auth::Token { .. } => true,
         }
     }
 

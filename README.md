@@ -124,7 +124,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants init` | Create or update stream `ANTS` and all eleven KV buckets (requires human credentials; other commands with human credentials do the same on connecting). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants, or one ant selected/defined by `--ant` (`ANTS_ANT`); `--metrics` serves health and metrics (see [Monitoring](#monitoring)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Add an ant to `config.toml` and generate its user NKey locally; `--store-key` keeps its seed in the OS credential store (see [Adding an ant](#adding-an-ant)). |
-| `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission). |
+| `ants enroll list` / `approve NAME` / `reject NAME [--reason TEXT]` | List, sign or refuse `ants add --enroll` requests with the account key (`--public-key KEY` disambiguates; approval through a leaf node also renews its uplink credentials and outbox admission); `approve NAME --webhook --to ANT --channel CH` signs a webhook's for `ants webhook add --enroll`. |
 | `ants enroll renewals` / `renew NAME [--public-key KEY]` / `renew --auto` | List the `ants renew` requests heard, renew the credentials `NAME` asks for, or keep renewing every valid, unrevoked request as it arrives until stopped (see [Renewing over NATS](#renewing-over-nats)). |
 | `ants renew [FILE] [--config FILE] [--leaf-config FILE]` | Renew the credentials of `FILE` (default `--creds`) over NATS for a key generated here, wait for `ants enroll renew`, replace the file and reload the daemon or restart the leaf node using it; a leaf uplink's request goes over a human's `--creds`. |
 | `ants keys store` / `unstore` / `remove [FILE...]` | Move the NKey seed of each credentials file (default `--creds`) into the OS credential store once it authenticates at `--nats`, back into the file, or delete the file and its stored seed (see [Private keys in the OS credential store](#private-keys-in-the-os-credential-store)). |
@@ -137,6 +137,7 @@ An empty `~/.ants/config.toml` (or `harness = "claude"`) lets `ants daemon` with
 | `ants leaf config MACHINE --uplink URL ...` / `outbox MACHINE ...` | Write `~/.config/ants/leaf.conf`; configure or `--remove` store-and-forward outbox sourcing (`outbox`: members from `--ant`/`--human`, or those the uplink credentials of `--leaf-config FILE` carry, changed by `--add-*`/`--remove-*`). |
 | `ants bridge serve` / `connect URL` | Tunnel a leaf uplink over plain HTTPS `POST`/`GET` requests (`--token-file FILE` reads the bearer token from a file). |
 | `ants webhook serve [--config FILE] [--listen ADDR]` | Serve HTTP webhook ingress, and push tool requests and escalations to humans' ntfy, Slack or Telegram with approve/reject links (see [Webhooks](#webhooks) and [Notifications](#notifications)). |
+| `ants webhook add NAME (--to ANT \| --channel CH) [--preset github\|gitlab\|grafana] [--config FILE] [--dir DIR] [--out FILE] [--enroll CREDS [--hub URL]]` | Issue a webhook's credentials (or ask for them over NATS), write a new secret file, append its `[[webhook]]` entry, reload the webhook service and print the URL and secret for the sender (see [Adding a webhook](#adding-a-webhook)). |
 | `ants mcp --socket PATH --token TOK` | Internal stdio-to-socket MCP bridge launched by `ants daemon`. |
 
 `THREAD` in `ask`, `inbox`, `post`, `notes`, `thread show`, `cancel`, `watch`, `spend --thread` and `channel read --thread` is a whole thread ID (a UUID, used without any lookup), a unique start of one, or `last`. A start matches the threads with messages the CLI human sent or received (inbox both ways, own channel and notes posts) stored in the last 7 days; when none of those starts with it, every thread with a message stored in the last 7 days, such as one between ants. For a start of a time-ordered ID (as generated ones are), that second lookup reads only the messages stored while such an ID was made, give or take 5 minutes of clock skew and up to 10 minutes after, so a longer start reads less. An exact ID among the threads matched wins; a start matching several is refused with them listed (ID, latest message time, route and first line), and one matching none with the human's own threads listed. `last` is the thread of the latest message the human sent or received, however old. Both read the stream by message gets (see `ants thread` below) and need human credentials.
@@ -553,7 +554,7 @@ js_domain = "hub"                        # overridden by --js-domain / ANTS_JS_D
 [[webhook]]
 name = "github"
 creds = "~/.config/ants/auth/github.creds"    # ants auth user github --webhook --to dev-a
-auth = "hmac-sha256"                          # signature_header defaults to X-Hub-Signature-256 (sha256=<hex>)
+auth = "hmac-sha256"                          # signature_header defaults to X-Hub-Signature-256 ([sha256=]<hex>)
 secret_file = "~/.ants/github.secret"         # mode 0600 (owner-readable only); or secret_env = "VAR"
 id = "header:X-GitHub-Delivery"               # or "json:/pointer"; default "body-sha256"
 ant = "dev-a"
@@ -570,10 +571,30 @@ channel = "ops"
 mention = ["dev-a"]                           # optional; or broadcast = true for all current members
 ```
 
-- **Auth and limits:** `hmac-sha256` and `bearer` check secrets in constant time (`401` on failure). Max body `256 KiB` (`413`), timeout `15s`, max `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store immediately; nothing buffers locally). Bad JSON/ID returns `400`, non-UTF-8 `{body}` `415`, unknown hook `404`, non-`POST` `405`.
+- **Auth and limits:** `hmac-sha256` (the hex of the body's HMAC-SHA256 in `signature_header`, after `sha256=` or alone), `bearer` (`Authorization: Bearer <secret>`) and `token` (the secret alone in `token_header`, such as GitLab's `X-Gitlab-Token`) check secrets in constant time (`401` on failure). Max body `256 KiB` (`413`), timeout `15s`, max `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store immediately; nothing buffers locally). Bad JSON/ID returns `400`, non-UTF-8 `{body}` `415`, unknown hook `404`, non-`POST` `405`.
 - **Deduplication and marker:** stored events return `202` (`{"thread": "...", "duplicate": false}`); repeats within 7 days match `<webhook>.<hash>` in `ants_webhooks` (plus 24 h `Nats-Msg-Id` `webhook.<webhook>.<hash>`) and return `200` (`"duplicate": true`). `ants webhook serve` puts `<webhook>.webhook` in `ants_webhooks` on connecting and hourly, holding the machine, ants version and permissions version it runs (`{"machine": "...", "version": "...", "perms": 2}`; before versions were published, the webhook's name, put daily on delivery).
 - **Templates and routing:** `text` substitutes `{body}`, `{id}`, `{webhook}`, `{header:Name}` and `{json:/pointer}` (`{{` and `}}` escape braces). Treat payloads as untrusted input when setting target `allow` rules. Mentions come strictly from config (`mention` or `broadcast`). Inbox webhook replies go to `owner` if set, else are logged; webhook posts never reset turn budgets.
 - **Reload:** `SIGHUP` reloads the config file without a restart, and so does a change to the file itself (checked every 3 s, acted on once unchanged across two checks). Webhooks and `[[human]]`s newly listed start, those no longer listed stop, and those whose entry or credentials file changed start again (every one of them for another `nats` or `js_domain`, every human for another `public_url` or action secret); the others and the HTTP listener carry on untouched, and so do requests under way. A file that fails to load is logged and the config served stays. `listen` and `metrics` take a restart.
+
+### Adding a webhook
+
+`ants webhook add` does the steps above in one go, on the machine running `ants webhook serve`:
+
+```sh
+ants webhook add github --to dev-a --preset github --js-domain hub
+ants webhook add alerts --channel ops --preset grafana
+```
+
+It issues the webhook's credentials with the account key, as `ants auth user NAME --webhook --to ANT` (or `--channel CH`) does, into `<dir>/<name>.creds` (`--dir`, default `~/.config/ants/auth`; `--out FILE`), for `--js-domain` or else the file's `js_domain`. Away from the account key, `--enroll CREDS [--hub URL]` asks for them over NATS with enrollment credentials from `ants auth enroll NAME`, as `ants add --enroll` does, and waits for `ants enroll approve NAME --webhook --to ANT` (or `--channel CH`) there; a request through a leaf node is refused, as the ingress connects to the hub. It writes a new random secret (64 hex digits) to `<name>.secret` beside the config file, mode `0600`, appends the `[[webhook]]` entry to the config file (created when missing; the text already there, comments included, stays as it is, and a name already listed is refused), reloads the webhook service serving that file when it runs (a running ingress also picks the change up by itself within seconds), and prints the URL to give the sender (`public_url` of the file, else the address the ingress listens on, for the reverse proxy to map), the secret, and where they go. `--preset` sets the entry up for a sender:
+
+| Preset | `auth` | Header | `id` | `text` |
+|---|---|---|---|---|
+| (none) | `bearer` | `Authorization: Bearer <secret>` | `body-sha256` | the default |
+| `github` | `hmac-sha256` | `X-Hub-Signature-256` | `header:X-GitHub-Delivery` | `GitHub {header:X-GitHub-Event} on {json:/repository/full_name}`, then the body |
+| `gitlab` | `token` | `X-Gitlab-Token` | `header:Idempotency-Key` (GitLab 17.4 and later; the same across retries) | `GitLab {header:X-Gitlab-Event} on {json:/project/path_with_namespace}`, then the body |
+| `grafana` | `hmac-sha256` | `X-Grafana-Alerting-Signature` (Grafana's HMAC signature, with no timestamp header) | `body-sha256` | `Grafana: {json:/title}`, then `{json:/message}` |
+
+GitHub needs the content type `application/json`. GitLab's newer signing token (`webhook-signature`) is not supported: give the secret as the secret token.
 
 ### Notifications
 
@@ -843,7 +864,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 
 - **Reload leaf uplink:** `launchctl kill SIGHUP gui/$(id -u)/ants.nats` (macOS) or `systemctl --user reload ants-nats` (Linux); `ants leaf config` does it itself.
 - **Reload daemon config:** the daemon reloads an edited config file by itself within seconds; at once: `launchctl kill SIGHUP gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user reload ants-daemon` (Linux).
-- **Reload webhook config:** the webhook ingress reloads an edited config file by itself within seconds; at once: `launchctl kill SIGHUP gui/$(id -u)/ants.webhook` (macOS) or `systemctl --user reload ants-webhook` (Linux; units installed before need `scripts/install-units.sh --webhook` again for `ExecReload`).
+- **Reload webhook config:** the webhook ingress reloads an edited config file by itself within seconds, and `ants webhook add` reloads its service at once; by hand: `launchctl kill SIGHUP gui/$(id -u)/ants.webhook` (macOS) or `systemctl --user reload ants-webhook` (Linux; units installed before need `scripts/install-units.sh --webhook` again for `ExecReload`).
 - **Managed by `ants add`:** completed credentials reload `ants.daemon` / `ants-daemon` when its unit (`~/Library/LaunchAgents/ants.daemon.plist`, `~/.config/systemd/user/ants-daemon.service`) runs the config file of `ants add` and the service is running; an enrollment that renewed the leaf's uplink credentials then restarts `ants.nats` / `ants-nats` (`launchctl kickstart -k`, `systemctl --user restart`) when its unit runs that `leaf.conf`. `ants renew` reloads the daemon service in the same way when one of its ants uses the renewed file, and restarts `ants.nats` / `ants-nats` when the file is the uplink of the `leaf.conf` its unit runs. `ants leaf config` reloads `ants.nats` / `ants-nats` (`launchctl kill SIGHUP`, `systemctl --user reload`) when its unit runs the `leaf.conf` written and the service is running, or restarts it for changes a reload does not take. A unit of another file, a stopped service or another system gets the commands printed instead.
 - **Start order:** systemd starts `ants-nats` after `ants-devtunnel` or `ants-bridge`, and `ants-devtunnel-host`, `ants-bridge-serve`, the daemon, channel manager and webhook ingress after `ants-nats`. launchd has no start order: the leaf node retries its uplink until the tunnel or bridge listens, and the other services retry their connections.
 - **Restart daemon:** `launchctl kickstart -k gui/$(id -u)/ants.daemon` (macOS) or `systemctl --user restart ants-daemon` (Linux; 120s graceful `SIGTERM` stop).

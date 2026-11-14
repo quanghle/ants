@@ -29,6 +29,7 @@ mod tools;
 mod upgrade;
 mod versions;
 mod webhook;
+mod webhook_add;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -444,6 +445,10 @@ enum WebhookCommand {
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
+    /// List a new webhook in the config file in one step: issue its credentials (or ask for them over NATS with
+    /// --enroll), write a new secret to <name>.secret beside the config file (mode 0600), add its [[webhook]] entry,
+    /// reload the webhook service, and print the URL and secret to give the sender.
+    Add(Box<webhook_add::AddArgs>),
 }
 
 #[derive(Subcommand, Debug)]
@@ -778,12 +783,25 @@ enum EnrollCommand {
         dir: Option<PathBuf>,
     },
     /// Sign the credentials an ant asks for, with the rights `ants auth user` gives, for the hub's --js-domain if
-    /// it has one, and send them to the asking machine.
+    /// it has one, and send them to the asking machine. With --webhook, those of a webhook asking with
+    /// `ants webhook add --enroll`.
+    #[command(group = clap::ArgGroup::new("targets").args(["to", "channels"]).multiple(true))]
     Approve {
+        /// The ant, or with --webhook the webhook.
         ant: UserId,
         /// The asking machine's public key, needed when several ask for the ant.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
+        /// Sign a webhook's credentials, with the rights `ants auth user --webhook` gives: it may only message the
+        /// ants of --to and post to the channels of --channel.
+        #[arg(long, requires = "targets")]
+        webhook: bool,
+        /// With --webhook: an ant the webhook may message (repeatable).
+        #[arg(long, value_name = "ANT", requires = "webhook")]
+        to: Vec<UserId>,
+        /// With --webhook: a channel the webhook may post to (repeatable).
+        #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
+        channels: Vec<ChannelId>,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
@@ -1172,7 +1190,19 @@ async fn main() -> Result<()> {
                 EnrollCommand::List { dir: d } => {
                     enroll::Approver::connect(&cli.nats, &dir(d)?, domain, enroll::LISTEN).await?.list().await
                 }
-                EnrollCommand::Approve { ant, public_key, dir: d } => {
+                EnrollCommand::Approve { ant, public_key, webhook: true, to, channels, dir: d } => {
+                    let dir = dir(d)?;
+                    let approver = enroll::Approver::connect(&cli.nats, &dir, domain, enroll::LISTEN).await?;
+                    let destinations: Vec<Destination> = to
+                        .into_iter()
+                        .map(Destination::Ant)
+                        .chain(channels.into_iter().map(Destination::Channel))
+                        .collect();
+                    let key = approver.approve_webhook(&dir, &ant, &destinations, public_key.as_deref()).await?;
+                    println!("webhook {ant} approved for {key}");
+                    Ok(())
+                }
+                EnrollCommand::Approve { ant, public_key, dir: d, .. } => {
                     let dir = dir(d)?;
                     let approver = enroll::Approver::connect(&cli.nats, &dir, domain, enroll::LISTEN).await?;
                     let approved = approver.approve(&dir, &ant, public_key.as_deref()).await?;
@@ -1348,6 +1378,7 @@ async fn main() -> Result<()> {
             tracing::info!("bridge on http://{addr}, sessions connect to {upstream}");
             upgrade::or_exit(server.run(listener), &upgrade).await
         }
+        Command::Webhook(WebhookCommand::Add(args)) => webhook_add::add(*args, &cli.nats, domain).await,
         Command::Webhook(WebhookCommand::Serve { config, listen, metrics, upgrade }) => {
             let path = match config {
                 Some(path) => path,
