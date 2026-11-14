@@ -846,6 +846,21 @@ fn kv_stream(bucket: &str) -> String {
     format!("KV_{bucket}")
 }
 
+/// What acks the messages `consumer` of `stream` delivers, in both forms of nats-server's ack subjects (ADR-15): v1
+/// `$JS.ACK.<stream>.<consumer>.…` and v2 `$JS.ACK.<domain>.<account hash>.<stream>.<consumer>.…`, the default from
+/// nats-server 2.16 (feature flag `js_ack_fc_v2`). The domain token is the JetStream domain of the server holding the
+/// stream, `_` without one: any is allowed, so credentials issued without a domain still ack on a hub that has one.
+/// So is any account hash: credentials publish only in their own account.
+fn ack_subjects(stream: &str, consumer: &str) -> [String; 2] {
+    [format!("$JS.ACK.{stream}.{consumer}.>"), format!("$JS.ACK.*.*.{stream}.{consumer}.>")]
+}
+
+/// What answers the flow control of the consumers of `stream` in JetStream domain `domain` (`*` for any, as in
+/// [`ack_subjects`]), in both forms: v1 `$JS.FC.<stream>.…` and v2 `$JS.FC.<domain>.<account hash>.<stream>.…`.
+fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
+    [format!("$JS.FC.{stream}.>"), format!("$JS.FC.{domain}.*.{stream}.>")]
+}
+
 /// What a human's credentials need for its inbox ([`READ_BUCKET`]): creating the bucket and reading and writing its own
 /// [`ReadMarker`] only, by key, so no human reads or moves another's; and deleting its own inbox consumer
 /// ([`inbox_consumer`]), which kept a human's read state before the marker, once its state moved into the marker.
@@ -958,7 +973,9 @@ impl Permissions {
             // The filter is part of the subject, so the consumer cannot be pointed at another inbox.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::inbox_of(user)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
-            format!("$JS.ACK.{STREAM}.{consumer}.>"),
+        ]);
+        publish.extend(ack_subjects(STREAM, &consumer));
+        publish.extend([
             // Reading thread notes back through its own consumer, which only ever filters notes subjects.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notes}.{}", subject::ALL_NOTES),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notes}"),
@@ -966,31 +983,41 @@ impl Permissions {
             // Channel posts: its durable consumer, and reading channels back; both only ever filter channel subjects.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan}"),
-            format!("$JS.ACK.{STREAM}.{chan}.>"),
+        ]);
+        publish.extend(ack_subjects(STREAM, &chan));
+        publish.extend([
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{chan_read}.{}", subject::ALL_CHANNELS),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{chan_read}"),
             format!("$JS.API.CONSUMER.DELETE.{STREAM}.{chan_read}"),
             // Reading the roster: single entries, and the ordered consumers behind listing and watching it.
             format!("$JS.API.DIRECT.GET.{roster_stream}.>"),
             format!("$JS.API.CONSUMER.CREATE.{roster_stream}"),
-            format!("$JS.FC.{roster_stream}.>"),
+        ]);
+        publish.extend(flow_control_subjects("*", &roster_stream));
+        publish.extend([
             // Reading the channels the same way.
             format!("$JS.API.STREAM.INFO.{channels}"),
             format!("$JS.API.DIRECT.GET.{channels}.>"),
             format!("$JS.API.CONSUMER.CREATE.{channels}"),
-            format!("$JS.FC.{channels}.>"),
+        ]);
+        publish.extend(flow_control_subjects("*", &channels));
+        publish.extend([
             // And the humans.
             format!("$JS.API.STREAM.INFO.{humans}"),
             format!("$JS.API.DIRECT.GET.{humans}.>"),
             format!("$JS.API.CONSUMER.CREATE.{humans}"),
-            format!("$JS.FC.{humans}.>"),
+        ]);
+        publish.extend(flow_control_subjects("*", &humans));
+        publish.extend([
             // And single escalation chains.
             format!("$JS.API.STREAM.INFO.{chains}"),
             format!("$JS.API.DIRECT.GET.{chains}.>"),
             // And the links passed on to a channel thread, through ordered consumers filtering that thread's.
             format!("$JS.API.STREAM.INFO.{links}"),
             format!("$JS.API.CONSUMER.CREATE.{links}"),
-            format!("$JS.FC.{links}.>"),
+        ]);
+        publish.extend(flow_control_subjects("*", &links));
+        publish.extend([
             // And the owners of single threads.
             format!("$JS.API.DIRECT.GET.{owners}.>"),
             // And the webhooks' markers, not the events they delivered.
@@ -1011,7 +1038,9 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}.>"),
                 format!("$JS.API.CONSUMER.INFO.{STREAM}.{notify}"),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notify}"),
-                format!("$JS.ACK.{STREAM}.{notify}.>"),
+            ]);
+            publish.extend(ack_subjects(STREAM, &notify));
+            publish.extend([
                 format!("$JS.API.STREAM.CREATE.{STREAM}"),
                 // Creating a KV bucket first looks up the account's JetStream limits.
                 "$JS.API.INFO".to_owned(),
@@ -1216,8 +1245,9 @@ impl Permissions {
             format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}"),
             format!("{api}.CONSUMER.CREATE.{OUTBOX_STREAM}.>"),
             format!("{api}.CONSUMER.DELETE.{OUTBOX_STREAM}.>"),
-            format!("$JS.FC.{OUTBOX_STREAM}.>"),
         ]);
+        // The outbox is in the machine's own domain.
+        leaf.subscribe.extend(flow_control_subjects(machine.as_str(), OUTBOX_STREAM));
         for (all, new) in [
             (&mut leaf.publish, [subject::ALL_ENROLL_REQUESTS, subject::ALL_RENEW_REQUESTS]),
             (&mut leaf.subscribe, [subject::ALL_ENROLL_REPLIES, subject::ALL_RENEW_REPLIES]),
@@ -1252,8 +1282,8 @@ impl Permissions {
                 format!("$JS.API.STREAM.INFO.{stream}"),
                 format!("$JS.API.DIRECT.GET.{stream}.>"),
                 format!("$JS.API.CONSUMER.CREATE.{stream}"),
-                format!("$JS.FC.{stream}.>"),
             ]);
+            publish.extend(flow_control_subjects("*", stream));
         }
         publish.push(subject::renew(user.as_str()));
         let subscribe = vec![
@@ -3513,6 +3543,8 @@ mod tests {
             "$JS.hub.API.$KV.ants_roster.dev-a",
             "$JS.hub.API.CONSUMER.MSG.NEXT.ANTS.notes-dev-a",
             "$JS.ACK.ANTS.inbox-dev-a.>",
+            // The v2 form of nats-server 2.16, whatever the domain.
+            "$JS.ACK.*.*.ANTS.inbox-dev-a.>",
             "ants.notes.*.dev-a",
         ] {
             assert!(publish.iter().any(|have| have == s), "{s} missing from {publish:?}");
@@ -3558,7 +3590,9 @@ mod tests {
         let mut extra: Vec<_> = only_a.subscribe.iter().filter(|s| !own.subscribe.contains(s)).collect();
         assert_eq!(extra.pop().map(String::as_str), Some("ants.renew.*.reply"), "hearing the renewals");
         assert_eq!(extra.pop().map(String::as_str), Some("ants.enroll.*.reply"), "hearing the answer");
-        assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || s.starts_with("$JS.FC.ANTS_OUT.")), "{extra:?}");
+        let fc = ["$JS.FC.ANTS_OUT.>", "$JS.FC.m1.*.ANTS_OUT.>"];
+        assert!(fc.iter().all(|s| extra.contains(&&s.to_string())), "both forms in m1's domain: {extra:?}");
+        assert!(extra.iter().all(|s| s.starts_with("$JS.m1.API.") || fc.contains(&s.as_str())), "{extra:?}");
         assert!(extra.iter().all(|s| s.contains(".ANTS_OUT")), "{extra:?}");
         // Never hearing the requests of other machines, nor answering them, without a human (who watches all).
         assert!(!only_a.subscribe.iter().any(|s| s == subject::ALL_ENROLL_REQUESTS || s == ">" || s == "ants.>"));
@@ -4216,6 +4250,7 @@ mod tests {
             "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a.ants.chan.>",
             "$JS.API.CONSUMER.CREATE.ANTS.chanread-dev-a.ants.chan.>",
             "$JS.ACK.ANTS.chan-dev-a.>",
+            "$JS.ACK.*.*.ANTS.chan-dev-a.>",
         ] {
             assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
         }
@@ -4496,6 +4531,7 @@ mod tests {
             "$JS.API.DIRECT.GET.KV_ants_humans.>",
             "$JS.API.CONSUMER.CREATE.KV_ants_humans",
             "$JS.FC.KV_ants_humans.>",
+            "$JS.FC.*.*.KV_ants_humans.>",
         ];
         let named_human = Permissions::for_user(&UserId::human(), Role::Ant);
         for ant in [Permissions::for_user(&p("dev-a"), Role::Ant), named_human] {

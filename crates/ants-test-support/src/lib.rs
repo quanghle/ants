@@ -1,15 +1,22 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools and a throwaway nats-server.
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
-//! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests.
+//! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
+//! every test nats-server uses the JetStream ack and flow control subjects nats-server 2.16 uses by default.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Environment variable that turns a missing tool into a test failure.
 pub const REQUIRE_TOOLS: &str = "ANTS_REQUIRE_TOOLS";
+
+/// Environment variable that, set to `1`, turns on nats-server's feature flag `js_ack_fc_v2` in every test server:
+/// acks and flow control then go to the v2 subjects `$JS.ACK.<domain>.<account hash>.…` and `$JS.FC.<domain>.…`, the
+/// default from nats-server 2.16. Needs nats-server 2.14 or later, which knows the flag.
+pub const JS_ACK_FC_V2: &str = "ANTS_TEST_JS_ACK_FC_V2";
 
 /// Whether `tool` runs. When it does not, the caller skips its test, or this panics under [`REQUIRE_TOOLS`]`=1`.
 pub fn have(tool: &str) -> bool {
@@ -36,6 +43,39 @@ pub fn scratch_dir(name: &str) -> PathBuf {
 /// A TCP port of 127.0.0.1 that was free a moment ago, for a server that must start after its client.
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Whether [`JS_ACK_FC_V2`] asks for v2 ack and flow control subjects; panics when the nats-server on PATH is older than
+/// 2.14, which would refuse the flag.
+fn ack_fc_v2() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        if std::env::var(JS_ACK_FC_V2).as_deref() != Ok("1") {
+            return false;
+        }
+        let out = Command::new("nats-server").arg("--version").output().expect("nats-server --version");
+        let version = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let numbers: Vec<u32> =
+            version.rsplit('v').next().unwrap_or_default().split('.').take(2).map_while(|n| n.parse().ok()).collect();
+        assert!(
+            numbers >= vec![2, 14],
+            "{JS_ACK_FC_V2}=1 needs nats-server 2.14 or later, which knows js_ack_fc_v2; found {version:?}"
+        );
+        true
+    })
+}
+
+/// `config` with feature flag `js_ack_fc_v2` on, in its `feature_flags` block if it has one: a second block would
+/// replace the first.
+fn with_ack_fc_v2(config: &str) -> String {
+    const BLOCK: &str = "feature_flags {";
+    match config.find(BLOCK) {
+        Some(at) => {
+            let at = at + BLOCK.len();
+            format!("{}\n  js_ack_fc_v2: true\n{}", &config[..at], &config[at..])
+        }
+        None => format!("{config}\nfeature_flags {{ js_ack_fc_v2: true }}\n"),
+    }
 }
 
 /// A nats-server with JetStream on a port of its choosing, its files in a scratch directory; stopped and removed on
@@ -84,7 +124,10 @@ impl NatsServer {
         }
         let dir = scratch_dir("nats");
         let path = dir.join("nats.conf");
-        let config = format!("listen: {listen}\nports_file_dir: {dir:?}\n{}", conf(&dir));
+        let mut config = format!("listen: {listen}\nports_file_dir: {dir:?}\n{}", conf(&dir));
+        if ack_fc_v2() {
+            config = with_ack_fc_v2(&config);
+        }
         std::fs::write(&path, config).unwrap();
         let child = Command::new("nats-server")
             .arg("-c")
@@ -117,5 +160,18 @@ impl NatsServer {
     /// The server's process id, to signal it (SIGHUP reloads its configuration).
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ack_flag_joins_the_feature_flags_block_a_config_has() {
+        let config = with_ack_fc_v2("jetstream {}\nfeature_flags { js_api_reply_v2: true }\n");
+        assert_eq!(config.matches("feature_flags").count(), 1, "{config}");
+        assert!(config.contains("js_ack_fc_v2: true") && config.contains("js_api_reply_v2: true"), "{config}");
+        assert!(with_ack_fc_v2("jetstream {}\n").ends_with("feature_flags { js_ack_fc_v2: true }\n"));
     }
 }
