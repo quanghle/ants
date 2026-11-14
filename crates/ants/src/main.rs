@@ -9,6 +9,7 @@ mod humans;
 mod inbox;
 mod leaf;
 mod outbox;
+mod revoke;
 mod roster;
 mod serve;
 mod thread;
@@ -530,6 +531,37 @@ enum AuthCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Revoke credentials before they expire: every key issued to NAME (an ant, human or webhook,
+    /// `leaf-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
+    /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections.
+    Revoke {
+        /// Name the credentials carry; every key issued to it is revoked.
+        #[arg(required_unless_present = "keys")]
+        name: Option<String>,
+        /// Public user NKey to revoke (repeatable), as `ants auth revoked` or the credentials' JWT shows it.
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Only record the revocation and write server.conf; push later with `ants auth push`.
+        #[arg(long)]
+        no_push: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// List the revoked keys: key, name, when revoked and when their credentials expire. Revocations of expired
+    /// credentials are dropped on the next revoke or push.
+    Revoked {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Push the team's account, with its revocations, to the server of --nats (the hub), as `ants auth revoke`
+    /// does.
+    Push {
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -798,6 +830,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Auth(AuthCommand::User { user, human, webhook, to, channels, dir, out, public_key }) => {
+            let kind = match webhook {
+                true => revoke::Kind::Webhook,
+                false => auth::role(&user, human).into(),
+            };
             let permissions = match webhook {
                 true => {
                     if user.is_human() {
@@ -814,11 +850,11 @@ async fn main() -> Result<()> {
             let dir = team_dir(dir)?;
             let Some(key) = public_key else {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
-                auth::issue_with(&dir, &user, permissions, &out)?;
+                auth::issue_with(&dir, &user, kind, permissions, &out)?;
                 println!("{}", out.display());
                 return Ok(());
             };
-            let jwt = auth::sign_with(&dir, &user, permissions, &key)?;
+            let jwt = auth::sign_with(&dir, &user, kind, permissions, &key)?;
             match out {
                 Some(out) => {
                     std::fs::write(&out, format!("{jwt}\n")).with_context(|| format!("writing {}", out.display()))?;
@@ -885,6 +921,26 @@ async fn main() -> Result<()> {
             println!("{}", out.display());
             Ok(())
         }
+        Command::Auth(AuthCommand::Revoke { name, keys, no_push, dir }) => {
+            let dir = team_dir(dir)?;
+            let now = auth::now()?;
+            for r in revoke::revoke(&dir, name.as_deref(), &keys)? {
+                let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
+                println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
+            }
+            println!(
+                "{} carries the revocations: copy it to the hub and every leaf node and reload them (SIGHUP), so \
+                 restarts keep them and leaf nodes refuse the revoked users too",
+                dir.join(auth::SERVER_CONF).display()
+            );
+            if no_push {
+                println!("push them to the hub with: ants auth push --nats URL");
+                return Ok(());
+            }
+            push(&cli.nats, &dir).await
+        }
+        Command::Auth(AuthCommand::Revoked { dir }) => revoke::list(&team_dir(dir)?),
+        Command::Auth(AuthCommand::Push { dir }) => push(&cli.nats, &team_dir(dir)?).await,
         Command::Leaf(LeafCommand::Config {
             machine,
             uplinks,
@@ -992,6 +1048,21 @@ impl<'a> Nats<'a> {
     /// Connect as [`Nats::me`] without registering it.
     async fn connect_only(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         bus::connect(self.url, self.creds, self.domain, &self.me.id, name).await
+    }
+}
+
+/// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure.
+async fn push(url: &str, dir: &Path) -> Result<()> {
+    match revoke::push(url, dir).await {
+        Ok(server) => {
+            println!("account pushed to server {server} ({url}); connections of revoked credentials are closed");
+            Ok(())
+        }
+        Err(e) => Err(e.context(format!(
+            "the account was not pushed to {url}; the revocations stay in {}: push them with `ants auth push \
+             --nats URL` once the hub is in reach, or copy server.conf to the hub and reload it (SIGHUP)",
+            dir.display()
+        ))),
     }
 }
 

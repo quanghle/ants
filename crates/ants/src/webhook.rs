@@ -982,7 +982,14 @@ mod tests {
 
     fn creds(server: &Server, webhook: &UserId, to: Destination) -> PathBuf {
         let out = server.dir().join(format!("{webhook}.creds"));
-        issue_with(&server.dir().join("auth"), webhook, Permissions::for_webhook(webhook, &[to]), &out).unwrap();
+        issue_with(
+            &server.dir().join("auth"),
+            webhook,
+            crate::revoke::Kind::Webhook,
+            Permissions::for_webhook(webhook, &[to]),
+            &out,
+        )
+        .unwrap();
         out
     }
 
