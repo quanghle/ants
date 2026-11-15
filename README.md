@@ -75,6 +75,7 @@ ants thread show <thread>                           # full stored thread history
 ants thread search --from dev-a --grep deploy       # cross-thread message search
 ants thread title <thread> Release 1.2              # shared title (also: pin, unpin, archive, unarchive, mute)
 ants react <message> eyes                           # react to a message (id or unique start of one)
+ants answer <message> 2                             # answer an ant's question with an option (or in own words)
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"
 ants watch [dev-a [<thread>]]                       # live bus traffic or one ant's streamed progress
@@ -94,12 +95,13 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. `MESSAGE` is a message id or, for humans, a unique start of one (ambiguous or unknown starts list candidates). |
+| `ants answer MESSAGE N\|TEXT...` | Answer a question an ant asked the human (MCP `ask_human`) with option `N` or, if the question takes them, own words; prints `thread <id>` and `message <id>`. Human creds only; `MESSAGE` resolves as for `ants react`. |
 | `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT \| --file PATH \| --edit` | Post to `ops` or `'#ops'`; prints `thread <id>` and `message <id>` (`@ant` wakes members, `@human` notifies members, no mention triages). |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels (`--member USER,...`, `--messenger ANT`, `--default-messenger`, `--owner ANT`, `--no-owner`). |
 | `ants channel read CHANNEL [--thread THREAD \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
 | `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--escalated] [--pinned \| --archived] [--since DUR] [--limit N] [--json]` | List active threads within `--since` (default `24h`, `0` all; limit 50), pinned last, archived and `auto-archived` hidden unless `archived+new`. |
-| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions. |
+| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions; questions show their options and the answers given. |
 | `ants thread search [--grep TEXT] [--from USER] [--to USER] [--channel NAME] [--type KIND,...] [--since TIME] [--until TIME] [--limit N] [--json]` | Search stored messages across threads matching all filters (latest `--limit`, default 50, oldest first). |
 | `ants thread title THREAD [TEXT...] [--clear]` | Print, set (1–120 chars, shared across humans) or clear a thread title. |
 | `ants thread pin \| unpin \| archive \| unarchive THREAD` | Pin or archive a thread for the CLI human across devices (mutually exclusive; archiving cancels nothing; unarchiving an `auto-archived` thread keeps it another `auto_archive` period). |
@@ -248,6 +250,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID); warns when unserved or limited. |
 | `ask_ant(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
 | `check_inbox(all_threads?)` | Drain late `ask_ant` replies arriving after timeout (persisted in `<home>/mcp.json`). |
+| `ask_human(question, options, free_text?)` | Ask the thread's owner (else the default human) a question with 2–9 options (question ≤ 500 chars, options ≤ 200; `free_text` default `true` also takes typed answers) and return at once; 0 turns. |
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message (default: active message); 0 turns, wakes nobody. |
 | `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
@@ -266,6 +269,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 
 - **Messenger:** unaddressed `ants ask` and unmentioned human/webhook channel posts route through `messenger`. Unless `messenger = false` or `[[ant]]` defines `messenger`, daemons run a built-in `messenger` (`~/.ants/messenger`, `~/.config/ants/auth/messenger.creds` if present) with automatic standby failover via `ants_roster` (~1 s on exit or 30 s TTL expiry), yielding immediately to an explicit `[[ant]] name = "messenger"`. It suggests a short title (`suggest_thread_title`) for a thread a human's request starts.
 - **Thread notes:** `ants.notes.<thread>.<from>` provides a passive shared board per thread (wakes nobody). An ant's `post_notes` spends 1 turn via CAS from `min(message_budget, last_note_budget)`; exhausting turns escalates `notes` until a human runs `ants notes <thread> TEXT` (8 fresh turns) or escalation climbs a level.
+- **Questions (`ask_human` / `ants answer`):** a question is a message to the human carrying `question` (text, numbered options, `free_text`); `ants inbox` and `ants thread show` print its options and how to answer it, and `thread show` lists the answers stored with it. `ants answer MESSAGE N|TEXT` finds the question among messages to the human, checks the option is one of its numbers (typed words only if `free_text`), and replies on the thread with the option's text (or the words) and `answer` (question id, option or none). An answer prompts the ant with an `[ants]` line naming the question and the option picked, or saying the answer is typed; an answer to no question the ant sent the human is an ordinary message.
 
 ## Threads, search, titles and marks
 

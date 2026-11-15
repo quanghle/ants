@@ -42,5 +42,17 @@ expression: value
     "author": "github"
   },
   "title": "Fix the build",
+  "question": {
+    "text": "Ship the fix?",
+    "options": [
+      "yes",
+      "not yet"
+    ],
+    "free_text": false
+  },
+  "answer": {
+    "question": "019a7d2e-0000-7000-8000-000000000004",
+    "option": 2
+  },
   "sent_at": "2025-01-01T12:00:00Z"
 }

@@ -15,8 +15,8 @@ use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope, EscalationReason, Humans, Mark,
-    NotesPost, ThreadId, ThreadMarks, UserId, Uuid, subject,
+    Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
+    EscalationReason, Humans, Mark, NotesPost, Question, ThreadId, ThreadMarks, UserId, Uuid, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
@@ -116,6 +116,13 @@ pub struct Entry {
     /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
+    /// The question an inbox message that is not forged asks, if valid ([`Envelope::asks`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+    /// The answer an inbox message that is not forged gives a question read before it, if valid
+    /// ([`Envelope::answers`]); an invalid one, or one to a question not read, leaves an ordinary message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
 }
 
 impl Entry {
@@ -136,7 +143,17 @@ impl Entry {
             reactions: Vec::new(),
             reason: None,
             suggested_title: None,
+            question: None,
+            answer: None,
         }
+    }
+
+    /// What this entry answers `question`, an entry asking one, with: set only on a valid answer
+    /// ([`Entry::answer`]).
+    pub fn answers<'q>(&self, question: &'q Entry) -> Option<Answered<'q>> {
+        let answer = self.answer.as_ref()?;
+        (question.id == Some(answer.question)).then_some(())?;
+        question.question.as_ref()?.answered(answer)
     }
 
     /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`.
@@ -158,10 +175,12 @@ impl Entry {
 }
 
 /// Turns stored messages into [`Entry`]s, in stream order. A human's decision does not name its request's thread, so
-/// the threads of the requests read so far are kept to place it.
+/// the threads of the requests read so far are kept to place it, and an answer names its question by id only, so the
+/// questions read so far are kept to check it.
 #[derive(Default)]
 pub struct Parser {
     requests: HashMap<(UserId, Uuid), ThreadId>,
+    questions: HashMap<Uuid, Envelope>,
 }
 
 impl Parser {
@@ -171,6 +190,12 @@ impl Parser {
         if subject::parse_inbox(subject).is_some() {
             let e: Envelope = serde_json::from_slice(payload).ok()?;
             let forged = e.check_subject(subject).is_err();
+            let question = e.asks().filter(|_| !forged).cloned();
+            if question.is_some() {
+                self.questions.insert(e.id, Envelope { text: String::new(), ..e.clone() });
+            }
+            let asked = e.answer.as_ref().and_then(|a| self.questions.get(&a.question));
+            let answer = asked.filter(|q| !forged && e.answers(q).is_some()).and(e.answer.clone());
             let (kind, note, text) = if let Some(d) = &e.approval {
                 let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
                 (Kind::Decision, None, text)
@@ -193,6 +218,8 @@ impl Parser {
                 forged,
                 reason: e.escalation.map(|x| x.reason),
                 suggested_title: e.title.filter(|_| !forged),
+                question,
+                answer,
                 ..entry(kind, e.thread_id)
             });
         }
@@ -514,23 +541,51 @@ fn state(thread: &Summary) -> Option<&'static str> {
 }
 
 /// The entries of a thread as `ants thread show` prints them: time, kind, route, note, id and text, one entry per
-/// line, its text's further lines and the reactions to it indented under it.
+/// line, its text's further lines and the reactions to it indented under it. A question shows its options numbered,
+/// whether a typed answer is taken, and the answers to it among `entries` or how to answer it; an answer, the question
+/// and the option it picks.
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
         let forged = if e.forged { " (forged)" } else { "" };
         let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
-        let mut lines = e.text.lines();
+        let answering = e.answer.as_ref().map_or_default(|a| match a.option {
+            Some(n) => format!(" [answers {} with option {n}]", a.question),
+            None => format!(" [answers {} as typed]", a.question),
+        });
+        let text = match (&e.question, e.id) {
+            (Some(question), Some(id)) => {
+                let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
+                crate::inbox::render_question(id, question, answers)
+            }
+            _ => e.text.clone(),
+        };
+        let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
         let kind = e.kind.as_str();
         let id = e.id.map_or_default(|id| format!(" (message {id})"));
-        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{id}: {first}", time(e.stored_at), e.route());
+        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{answering}{id}: {first}", time(e.stored_at), e.route());
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
         out.push_str(&crate::inbox::render_reactions(&e.reactions, "    "));
     }
     out
+}
+
+/// The answers among `entries` to `question`, an entry asking one, oldest first, each with who answered: an option
+/// picked or a typed answer, the answer's text.
+pub fn answers_to<'a>(question: &'a Entry, entries: &'a [Entry]) -> impl Iterator<Item = (&'a Entry, Answered<'a>)> {
+    entries.iter().filter_map(move |e| Some((e, e.answers(question)?)))
+}
+
+/// How a question's answer is shown beneath it: who answered with which option, or typed what.
+fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
+    let from = by.from.as_ref().map_or("(a human)", UserId::as_str);
+    match answered {
+        Answered::Option(n, option) => format!("answered by {from}: option {n}, {option}"),
+        Answered::Typed => format!("answered by {from}, typed: {}", crate::excerpt(&by.text, 72)),
+    }
 }
 
 /// Where a read of the last `since` starts: everything kept for zero.

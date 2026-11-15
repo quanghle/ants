@@ -2207,7 +2207,27 @@ impl Inbox<'_> {
             }
             None => text,
         };
+        let text = match self.answer_line(envelope, humans).await {
+            Some(line) => format!("{line}\n\n{text}"),
+            None => text,
+        };
         prompt_text(&text, cut_off, late)
+    }
+
+    /// The `[ants]` line telling that `envelope`, a human's message, answers a question the ant asked on the thread
+    /// ([`crate::questions::answer_line`]); none for any other message, which is prompted as an ordinary one.
+    async fn answer_line(&self, envelope: &Envelope, humans: &Humans) -> Option<String> {
+        if envelope.answer.is_none() || !envelope.sender_role(humans).is_human() {
+            return None;
+        }
+        match crate::questions::asked(self.js, self.ant, envelope).await {
+            Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
+            Err(e) => {
+                let thread = &envelope.thread_id;
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading back the question a message answers");
+                None
+            }
+        }
     }
 
     /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
