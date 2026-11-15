@@ -308,18 +308,19 @@ impl Permissions {
             format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
             format!("$KV.{OWNERS_BUCKET}.*.*"),
             "ants.out.owners.*.*".to_owned(),
-            format!("$KV.{HUMANS_BUCKET}.>"),
             format!("$KV.{CHANNELS_BUCKET}.>"),
             format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
             format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
         ];
-        let changes_streams = |s: &str| {
-            ["$JS.API.STREAM.CREATE.", "$JS.API.STREAM.UPDATE.", "$JS.API.STREAM.MSG.DELETE.", "$JS.*.API."]
-                .iter()
-                .any(|prefix| s.starts_with(prefix))
+        let humans = format!("$KV.{HUMANS_BUCKET}.");
+        let withheld = |s: &str| {
+            s.starts_with(&humans)
+                || ["$JS.API.STREAM.CREATE.", "$JS.API.STREAM.UPDATE.", "$JS.API.STREAM.MSG.DELETE.", "$JS.*.API."]
+                    .iter()
+                    .any(|prefix| s.starts_with(prefix))
         };
         as_human.retain(|s| {
-            !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !changes_streams(s)
+            !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s)
         });
         publish.extend(as_human);
         let chunks = format!("$O.{FILES_BUCKET}.C");

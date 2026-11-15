@@ -827,7 +827,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         "ants.cancel.*.*",
         "ants.queue.*",
         "$KV.ants_owners.*.*",
-        "$KV.ants_humans.>",
+        "$KV.ants_humans.*",
         "$KV.ants_channels.>",
         "$JS.API.STREAM.UPDATE.ANTS",
         "$JS.API.STREAM.MSG.DELETE.ANTS",
@@ -842,7 +842,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
         let key = s.strip_prefix("$JS.API.DIRECT.GET.").and_then(|get| get.split_once('.')).map_or(s.as_str(), |g| g.1);
         assert!(s.starts_with("$JS.API.DIRECT.GET.") || !s.contains(".alice"), "writes {s}");
         assert!(!key.starts_with("$KV.ants_reactions.alice"), "reads {s}");
-        for bucket in ["ants_devices", "ants_presence", "ants_notify"] {
+        for bucket in ["ants_devices", "ants_presence", "ants_notify", "ants_humans"] {
             assert!(!s.starts_with(&format!("$KV.{bucket}.")), "puts {s}");
         }
     }
