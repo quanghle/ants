@@ -813,8 +813,8 @@ mod tests {
         assert!(held.iter().all(|(_, acts)| acts.len() == 1 && acts[0].assistant == pa && acts[0].human == alice));
 
         let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
-        consent::confirm(&nats, Some(&tools::qualified(&push)), false).await.unwrap();
-        consent::confirm(&nats, Some(&tools::qualified(&rm)), true).await.unwrap();
+        Box::pin(consent::confirm(&nats, Some(&tools::qualified(&push)), false)).await.unwrap();
+        Box::pin(consent::confirm(&nats, Some(&tools::qualified(&rm)), true)).await.unwrap();
         let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false).await.unwrap_err();
         assert!(err.to_string().contains("ANT/RULE"), "{err}");
         consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false).await.unwrap();
