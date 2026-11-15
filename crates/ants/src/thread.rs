@@ -79,6 +79,17 @@ impl Kind {
             Self::Tool => "tool",
         }
     }
+
+    /// Whether an entry of the kind is a message, channel post or note, which reopens a thread marked done
+    /// ([`ants_proto::ThreadDone::holds`]): no tool request, decision on one or dead letter does.
+    pub fn reopens(self) -> bool {
+        matches!(self, Self::Message | Self::Escalation | Self::Mention | Self::Post | Self::Note)
+    }
+}
+
+/// The sequence of the last of `entries` that reopens a thread marked done ([`Kind::reopens`]); 0 for none.
+pub fn last_reopening(entries: &[Entry]) -> u64 {
+    entries.iter().filter(|e| e.kind.reopens()).map(|e| e.seq).max().unwrap_or(0)
 }
 
 /// One stored message on a thread, as `ants thread show` prints it.
@@ -117,7 +128,8 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
-    /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
+    /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
+    /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_title: Option<String>,
     /// A tool call's details, its title the text and its ant the sender.
@@ -255,6 +267,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Post, post.thread_id)
             });
         }
@@ -268,6 +281,7 @@ impl Parser {
                 note,
                 text: post.text,
                 forged,
+                suggested_title: post.title.filter(|_| !forged),
                 ..entry(Kind::Note, post.thread_id)
             });
         }
@@ -349,9 +363,22 @@ pub struct Summary {
     /// Archived for having been idle (`auto_archive`), not by hand.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_archived: bool,
+    /// Marked done by a human, and no message, post or note stored on it since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<Done>,
     /// The stream sequence of its last message read.
     #[serde(skip)]
     pub last_seq: u64,
+    /// The stream sequence of its last message, post or note read ([`Kind::reopens`]); 0 for none.
+    #[serde(skip)]
+    pub last_reopening: u64,
+}
+
+/// Who marked a thread done, and when ([`ants_proto::ThreadDone`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Done {
+    pub by: UserId,
+    pub at: DateTime<Utc>,
 }
 
 /// What `ants thread list` keeps of the threads read.
@@ -416,10 +443,15 @@ impl Threads {
             archived: false,
             new_activity: false,
             auto_archived: false,
+            done: None,
             last_seq: entry.seq,
+            last_reopening: 0,
         });
         summary.messages += 1;
         summary.last_seq = summary.last_seq.max(entry.seq);
+        if entry.kind.reopens() {
+            summary.last_reopening = summary.last_reopening.max(entry.seq);
+        }
         summary.first_at = summary.first_at.min(entry.stored_at);
         summary.last_at = summary.last_at.max(entry.stored_at);
         summary.users.extend(entry.users().cloned());
@@ -499,10 +531,10 @@ pub(crate) fn time(at: DateTime<Utc>) -> String {
 
 /// The threads as a table: one row per thread under a header, columns padded to line up, and under a thread
 /// matching `--grep` its matching line, under one with an open escalation that escalation. A STATE column (pinned,
-/// archived, archived+new for one with a message stored since, or auto-archived for one idle) and a TITLE column show only when a thread listed
-/// has one.
+/// archived, archived+new for one with a message stored since, or auto-archived for one idle, then done for one
+/// marked done, comma-separated) and a TITLE column show only when a thread listed has one.
 pub fn table(threads: &[Summary]) -> String {
-    let marked = threads.iter().any(|t| t.pinned || t.archived);
+    let marked = threads.iter().any(|t| t.pinned || t.archived || t.done.is_some());
     let titled = threads.iter().any(|t| t.title.is_some());
     let mut header = vec!["THREAD", "OWNER", "USERS", "FIRST", "LAST", "MSGS"];
     header.extend(marked.then_some("STATE"));
@@ -521,7 +553,8 @@ pub fn table(threads: &[Summary]) -> String {
                 t.messages.to_string(),
             ];
             if marked {
-                row.push(state(t).unwrap_or("-").to_owned());
+                let states: Vec<&str> = state(t).into_iter().chain(t.done.as_ref().map(|_| "done")).collect();
+                row.push(if states.is_empty() { "-".to_owned() } else { states.join(",") });
             }
             if titled {
                 row.push(t.title.clone().unwrap_or_else(|| "-".to_owned()));
@@ -605,7 +638,7 @@ pub fn idle_before(auto_archive: Option<Duration>, now: DateTime<Utc>) -> Option
 
 /// Where `ants thread show` reads `thread` from: as `since` says, else the thread's start when its id is
 /// time-ordered, else everything kept.
-fn show_start(thread: &ThreadId, since: Option<Duration>) -> consumer::DeliverPolicy {
+pub(crate) fn show_start(thread: &ThreadId, since: Option<Duration>) -> consumer::DeliverPolicy {
     match (since, ants_daemon::channel::thread_start(thread)) {
         (Some(since), _) => window(since),
         (None, Some(start)) => consumer::DeliverPolicy::ByStartTime { start_time: start.into() },
@@ -915,8 +948,11 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     let (mut threads, omitted) = threads.finish(select, &marks);
     if let Some(meta) = &meta {
         let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
+        let mut dones = meta.dones(threads.iter().map(|t| &t.thread_id)).await?;
         for thread in &mut threads {
             thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
+            let done = dones.remove(&thread.thread_id).filter(|d| d.holds(thread.last_reopening));
+            thread.done = done.map(|d| Done { by: d.by, at: d.at });
         }
         adopt_suggested(meta, &mut threads).await;
     }
@@ -1100,11 +1136,11 @@ pub async fn show(
     let thread = &pick.resolve(&js, &nats.me).await?;
     let entries = history(&js, thread, since, !no_tools).await?;
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
-    let (title, mark) = if json {
-        (None, None)
+    let thread_meta::About { title, mark, done } = if json {
+        thread_meta::About::default()
     } else {
-        let last = entries.iter().rfind(|e| e.kind != Kind::Tool);
-        thread_meta::of_or_none(nats, &js, thread, last, suggested, auto_archive).await
+        let messages: Vec<Entry> = entries.iter().filter(|e| e.kind != Kind::Tool).cloned().collect();
+        thread_meta::of_or_none(nats, &js, thread, &messages, suggested, auto_archive).await
     };
     if json {
         for entry in &entries {
@@ -1122,6 +1158,9 @@ pub async fn show(
             let by_ant = entries.iter().any(|e| e.suggested_title.is_some() && e.from.as_ref() == Some(&title.by));
             let suggested = if by_ant { format!(" (suggested by {})", title.by) } else { String::new() };
             println!("title: {}{suggested}", title.title);
+        }
+        if let Some(done) = done {
+            println!("done by {} {}", done.by, time(done.at));
         }
         match mark {
             Some(Mark::Pinned) => println!("pinned"),

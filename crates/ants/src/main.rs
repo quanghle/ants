@@ -21,6 +21,7 @@ mod humans;
 mod inbox;
 mod keys;
 mod leaf;
+mod live;
 mod manager;
 mod members;
 mod notify;
@@ -81,7 +82,9 @@ async fn run() -> Result<()> {
     let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
     let nats = || conn.nats();
     match cli.command {
-        Command::Ask { thread, replies, input, words } => send::ask(&nats()?, thread, &replies, &input, words).await,
+        Command::Ask { thread, steer, replies, input, words } => {
+            send::ask(&nats()?, thread, steer, &replies, &input, words).await
+        }
         Command::Inbox { peek, thread, limit, follow, json } => {
             let select = inbox::Select { thread: None, limit, peek };
             Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await

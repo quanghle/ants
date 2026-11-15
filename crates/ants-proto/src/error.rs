@@ -29,4 +29,8 @@ pub enum Error {
     /// NATS ([`subject::renewable_name`]).
     #[error("renewal request of {name:?} found at {at}")]
     ForeignRenewal { name: String, at: String },
+    #[error(
+        "invalid device encryption key {0:?}: use the public key of an nkeys xkey, X followed by 55 base32 characters"
+    )]
+    InvalidDeviceKey(String),
 }

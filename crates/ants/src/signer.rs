@@ -9,6 +9,10 @@
 //! machine repeats its request every [`ENROLL_REPEAT`] until an answer comes or it stops waiting
 //! ([`AntRequest::expires_at`]), and the signer answers each repeat of a request it decided the same way.
 //!
+//! The signer answers ants' reactions requests as well ([`reactions::serve`]): an ant's credentials neither read nor
+//! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
+//! ant's own, once it found the ant reads the message.
+//!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
 //! from the manager's machine. How many ants a template has is counted from the keys the team issued
@@ -19,6 +23,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_daemon::config;
+use ants_daemon::reactions;
 use ants_daemon::roster;
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{
@@ -119,7 +124,8 @@ struct Waiting {
 }
 
 /// `ants signer`: answer the ant requests of manager ants ([`AntRequest`]) over the server at `url`, signing with the
-/// account key in the team directory `dir`, until `stop` completes. Each run connects afresh every
+/// account key in the team directory `dir`, and ants' reactions requests ([`reactions::serve`]), until `stop`
+/// completes. Each run connects afresh every
 /// [`Options::reconnect`], with credentials it issues itself, and reads the revocations again; the templates are read
 /// for each request. Calls `report` with what it did with each request.
 pub async fn serve(
@@ -133,8 +139,19 @@ pub async fn serve(
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
     tokio::pin!(stop);
     loop {
-        let approver = Approver::connect(url, dir, js_domain, crate::enroll::LISTEN).await?;
+        let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
         let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
+        let answering = reactions::serve(
+            approver.client.clone(),
+            approver.hub().clone(),
+            js_domain.cloned(),
+            reactions::Answering::ListsAndChanges,
+        );
+        let _answering = AbortOnDrop(tokio::spawn(async move {
+            if let Err(e) = answering.await {
+                tracing::warn!("answering reactions requests until the next reconnect: {e:#}");
+            }
+        }));
         approver.client.flush().await?;
         let until = tokio::time::sleep(options.reconnect);
         let mut ticks = tokio::time::interval(options.tick);
@@ -150,6 +167,14 @@ pub async fn serve(
                 () = &mut stop => return Ok(()),
             }
         }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -850,6 +875,31 @@ mod tests {
         let (added, _) = signing(&server, &config, lead.ask("lead-b", "{}", &KeyPair::new_user())).await;
         let err = format!("{:#}", added.unwrap_err());
         assert!(err.contains("added ants never add ants"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_signer_changes_and_lists_the_reactions_of_ants_to_the_messages_they_read() {
+        use ants_proto::{Envelope, ReactionChange, ReactionsOutcome, ReactionsRequest};
+        let Some(server) = Server::start() else { return };
+        let config = templates(&server, 1);
+        let (human, dev_a) = (UserId::human(), p("dev-a"));
+        let (_, h_js) = server.connect_as(&human, Role::Human).await;
+        bus::ensure_stream(&h_js).await.unwrap();
+        h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+        let to_a = Envelope::new(human, dev_a.clone(), "for dev-a");
+        bus::publish(&h_js, &to_a).await.unwrap();
+        let (a_client, _) = server.connect_as(&dev_a, Role::Ant).await;
+
+        let change = ReactionChange { reaction: "eyes".parse().unwrap(), remove: false };
+        let (outcomes, _) = signing(&server, &config, async {
+            let changed =
+                reactions::request(&a_client, &ReactionsRequest::change(dev_a.clone(), to_a.id, change)).await;
+            (changed.unwrap(), reactions::ask(&a_client, &dev_a, to_a.id).await.unwrap())
+        })
+        .await;
+        assert_eq!(outcomes.0, Some(ReactionsOutcome::Applied { changed: true }));
+        let reacted = ants_proto::Reacted { reaction: "eyes".parse().unwrap(), by: vec![dev_a] };
+        assert_eq!(outcomes.1, Some(ReactionsOutcome::Listed { reactions: vec![reacted] }));
     }
 
     #[tokio::test]

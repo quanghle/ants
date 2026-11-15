@@ -8,5 +8,6 @@ expression: value
   "from": "dev-a",
   "text": "taking the parser",
   "turn_budget": 7,
+  "title": "Rewrite the parser",
   "sent_at": "2025-01-01T12:00:00Z"
 }

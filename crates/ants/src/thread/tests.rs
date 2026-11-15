@@ -125,6 +125,30 @@ fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_messag
 }
 
 #[test]
+fn channel_and_notes_posts_suggest_titles_too_unless_forged() {
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let ops: ChannelId = "ops".parse().unwrap();
+    let top = ChannelPost::new(ops.clone(), alice, "@dev-a the build broke");
+    let thread = top.thread_id.clone();
+    let reply = ChannelPost::on_thread(ops, thread.clone(), dev_a.clone(), "on it");
+    let reply = ChannelPost { title: Some("Fix the build".to_owned()), ..reply };
+    let forged = ChannelPost { from: dev_b.clone(), title: Some("Forged".to_owned()), ..reply.clone() };
+    let note = NotesPost { title: Some("Plan the fix".to_owned()), ..NotesPost::new(thread.clone(), dev_b, "plan") };
+    let messages = [
+        (top.subject(), json(&top)),
+        (reply.subject(), json(&forged)),
+        (reply.subject(), json(&reply)),
+        (note.subject(), json(&note)),
+    ];
+    let read = entries(&messages);
+    let suggested: Vec<_> = read.iter().map(|e| (e.forged, e.suggested_title.as_deref())).collect();
+    assert_eq!(suggested, [(false, None), (true, None), (false, Some("Fix the build")), (false, Some("Plan the fix"))]);
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    assert_eq!(threads.get(&thread).unwrap().suggested, Some((dev_a, "Fix the build".to_owned())));
+}
+
+#[test]
 fn threads_sum_up_their_users_owner_times_and_opening() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let one = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "first line\nmore");
@@ -216,6 +240,32 @@ fn pinned_threads_list_last_and_archived_ones_only_with_a_message_since() {
         (&"Release 1.2".into(), &true.into(), &true.into())
     );
     assert!(serde_json::to_value(&listed[0]).unwrap().get("pinned").is_none());
+}
+
+#[test]
+fn only_messages_posts_and_notes_reopen_a_thread_and_done_ones_list_so() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "build it");
+    let tool = ToolCall { kind: "execute".into(), title: "cargo build".into(), ..Default::default() };
+    let request = ApprovalRequest::new(dev_a, t("t1"), tool, vec![Verdict::AllowOnce], Duration::from_secs(60));
+    let read = entries(&[(ask.subject(), json(&ask)), (request.subject(), json(&request))]);
+    assert_eq!(read.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(last_reopening(&read), 1, "a tool request reopens nothing");
+    assert_eq!(last_reopening(&read[1..]), 0);
+
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    let (mut listed, _) = threads.finish(&Select::default(), &ThreadMarks::default());
+    assert_eq!(listed[0].last_reopening, 1);
+    listed[0].done = Some(Done { by: alice, at: at(0) });
+    let mut pinned = listed[0].clone();
+    pinned.pinned = true;
+    let table = table(&[listed[0].clone(), pinned]);
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(lines[0].contains("MSGS  STATE"), "{table}");
+    assert!(lines[1].contains("  done  ") && lines[2].contains("  pinned,done  "), "{table}");
+    let json = serde_json::to_value(&listed[0]).unwrap();
+    assert_eq!(json["done"]["by"], "alice", "{json}");
 }
 
 #[test]

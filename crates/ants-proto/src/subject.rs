@@ -110,15 +110,24 @@ pub fn reactions(ant: &UserId) -> String {
     format!("ants.reactions.{ant}")
 }
 
+/// Where `ant` asks to add or remove its own reaction to a message ([`ReactionsRequest`](super::ReactionsRequest) with
+/// a change; core NATS, not stored). Only the ant publishes here, and only `ants signer` answers: no ant writes the
+/// reactions bucket itself.
+pub fn react(ant: &UserId) -> String {
+    format!("ants.reactions.{ant}.react")
+}
+
 /// Where the answer to a reactions request of `ant` goes ([`ReactionsReply`](super::ReactionsReply); core NATS): under
 /// the ant's reply inboxes ([`inbox_prefix`](super::inbox_prefix)), which only it reads, so a leaf uplink carries it
-/// down with no subject of its own. Only humans answer.
+/// down with no subject of its own. Only humans and `ants signer` answer.
 pub fn reactions_reply(ant: &UserId) -> String {
     format!("{}.reactions", super::inbox_prefix(ant))
 }
 
 /// Every reactions request, of all ants.
 pub const ALL_REACTIONS_REQUESTS: &str = "ants.reactions.*";
+/// Every request of an ant to change its reactions.
+pub const ALL_REACT_REQUESTS: &str = "ants.reactions.*.react";
 /// Every answer to a reactions request.
 pub const ALL_REACTIONS_REPLIES: &str = "_INBOX.*.reactions";
 

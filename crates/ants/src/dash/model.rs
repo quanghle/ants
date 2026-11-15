@@ -1,16 +1,13 @@
-//! What `ants dash` shows, and how keys change it, apart from the terminal and the connection: the threads read from
-//! the stream, the selected one's history, each thread's live progress, the roster, the pending tool requests and the
-//! one opened, and how fresh it all is. Keys and changes return the [`Action`]s the dashboard then performs.
+//! What `ants dash` shows, and how keys change it, apart from the terminal and the connection: what is read live
+//! ([`State`]), the selected thread and its history, the pending tool request selected or opened, and the latest
+//! notice. Keys and changes return the [`Action`]s the dashboard then performs.
 
-use std::collections::HashMap;
-use std::time::Duration;
-
-use ants_proto::{ApprovalRequest, Mark, RosterEntry, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict};
+use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 
-use crate::progress;
-use crate::thread::{self, Entry, Summary, Threads};
-use crate::tools::{self, State, Update};
+use crate::live::{self, History, State};
+use crate::thread::Entry;
+use crate::tools::{self, Update};
 
 /// The list keys move in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,41 +44,15 @@ pub enum Action {
     Quit,
 }
 
-/// The selected thread's stored messages.
-#[derive(Debug)]
-pub struct History {
-    pub thread: ThreadId,
-    /// While loading, the messages on the thread read from the stream meanwhile, merged in once loaded.
-    pub entries: Vec<Entry>,
-    pub loading: bool,
-    /// How many lines the view is scrolled up from the latest.
-    pub scroll: usize,
-}
-
 /// A tool request opened in full.
 #[derive(Debug)]
 pub struct Detail {
     pub request: ApprovalRequest,
-    pub state: State,
+    pub state: tools::State,
     /// The verdict asked for, waiting for its confirmation.
     pub confirm: Option<Verdict>,
     /// A decision is being stored.
     pub deciding: bool,
-}
-
-/// The ants' live progress on a thread.
-#[derive(Debug)]
-pub struct Progress {
-    pub status: progress::Status,
-    pub at: DateTime<Utc>,
-}
-
-/// The connection to NATS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Link {
-    Connected,
-    /// Lost since then; the client reconnects on its own.
-    Down(DateTime<Utc>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,62 +75,31 @@ const NOTICE_FOR: TimeDelta = TimeDelta::seconds(15);
 const PAGE: usize = 10;
 
 pub struct Model {
-    pub me: UserId,
-    /// How far back the threads are read.
-    pub since: Duration,
-    threads: Threads,
-    /// How the human marked threads when the dashboard started: archived ones are left out of `order`.
-    pub marks: ThreadMarks,
-    /// How long a thread goes without a message before it counts as archived; None for never.
-    pub auto_archive: Option<Duration>,
-    /// The threads, most recently active first, but for the archived ones with no message since and the idle ones.
-    pub order: Vec<ThreadId>,
+    pub live: State,
     pub selected: Option<ThreadId>,
+    /// The selected thread's stored messages.
     pub history: Option<History>,
-    pub progress: HashMap<ThreadId, Progress>,
-    pub roster: Vec<RosterEntry>,
-    pub roster_at: Option<DateTime<Utc>>,
-    /// The pending tool requests, oldest first.
-    pub approvals: Vec<ApprovalRequest>,
+    /// How many lines the history is scrolled up from the latest.
+    pub scroll: usize,
     /// The index of the selected request.
     pub approval: usize,
     pub focus: Pane,
     pub detail: Option<Detail>,
-    pub link: Link,
-    /// The stream sequence read up to, once the threads were read.
-    pub stored_seq: Option<u64>,
-    /// When the stream was last read.
-    pub stored_at: Option<DateTime<Utc>>,
     pub notice: Option<Notice>,
 }
 
 impl Model {
-    pub fn new(me: UserId, since: Duration) -> Self {
+    pub fn new(live: State) -> Self {
         Self {
-            me,
-            since,
-            threads: Threads::new(None),
-            marks: ThreadMarks::default(),
-            auto_archive: None,
-            order: Vec::new(),
+            live,
             selected: None,
             history: None,
-            progress: HashMap::new(),
-            roster: Vec::new(),
-            roster_at: None,
-            approvals: Vec::new(),
+            scroll: 0,
             approval: 0,
             focus: Pane::Threads,
             detail: None,
-            link: Link::Connected,
-            stored_seq: None,
-            stored_at: None,
             notice: None,
         }
-    }
-
-    pub fn summary(&self, thread: &ThreadId) -> Option<&Summary> {
-        self.threads.get(thread)
     }
 
     pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
@@ -171,26 +111,13 @@ impl Model {
         self.notice.as_ref().filter(|n| now - n.at < NOTICE_FOR)
     }
 
-    /// Take the messages read from the stream up to sequence `last`. Selects the most recent thread when none is.
-    pub fn stored(&mut self, entries: Vec<Entry>, last: u64, now: DateTime<Utc>) -> Option<Action> {
-        for entry in &entries {
-            self.threads.add(entry);
-        }
+    /// Take the messages read from the stream. Selects the most recent thread when none is.
+    pub fn stored(&mut self, entries: Vec<Entry>, now: DateTime<Utc>) -> Option<Action> {
+        self.live.stored(&entries, now);
         if let Some(history) = &mut self.history {
-            let after = history.entries.last().map_or(0, |e| e.seq);
-            history.entries.extend(entries.into_iter().filter(|e| e.thread_id == history.thread && e.seq > after));
+            history.stored(entries);
         }
-        self.stored_seq = Some(self.stored_seq.unwrap_or_default().max(last));
-        self.stored_at = Some(now);
-        let idle_before = thread::idle_before(self.auto_archive, now);
-        let shown = |s: &&Summary| {
-            let mark = self.marks.mark_at(&s.thread_id, s.last_seq, s.last_at, idle_before);
-            !matches!(mark, Some(Mark::Archived { new_activity: false } | Mark::Idle))
-        };
-        let mut order: Vec<&Summary> = self.threads.summaries().filter(shown).collect();
-        order.sort_by(|a, b| (b.last_at, &b.thread_id).cmp(&(a.last_at, &a.thread_id)));
-        self.order = order.into_iter().map(|s| s.thread_id.clone()).collect();
-        match (&self.selected, self.order.first()) {
+        match (&self.selected, self.live.order.first()) {
             (None, Some(first)) => Some(self.select(first.clone())),
             _ => None,
         }
@@ -198,21 +125,16 @@ impl Model {
 
     fn select(&mut self, thread: ThreadId) -> Action {
         self.selected = Some(thread.clone());
-        self.history = Some(History { thread: thread.clone(), entries: Vec::new(), loading: true, scroll: 0 });
+        self.history = Some(History::new(thread.clone()));
+        self.scroll = 0;
         Action::LoadHistory(thread)
     }
 
     /// Take the history of `thread` read from the stream, if still wanted.
     pub fn history_loaded(&mut self, thread: &ThreadId, read: anyhow::Result<Vec<Entry>>, now: DateTime<Utc>) {
-        let Some(history) = self.history.as_mut().filter(|h| h.thread == *thread && h.loading) else { return };
-        history.loading = false;
-        match read {
-            Ok(mut entries) => {
-                let after = entries.last().map_or(0, |e| e.seq);
-                entries.extend(std::mem::take(&mut history.entries).into_iter().filter(|e| e.seq > after));
-                history.entries = entries;
-            }
-            Err(e) => self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now),
+        let Some(history) = &mut self.history else { return };
+        if let Err(e) = history.loaded(thread, read) {
+            self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now);
         }
     }
 
@@ -222,52 +144,21 @@ impl Model {
         Some(self.select(thread))
     }
 
-    pub fn status(&mut self, event: &StatusEvent, now: DateTime<Utc>) {
-        let progress = self
-            .progress
-            .entry(event.thread_id.clone())
-            .or_insert_with(|| Progress { status: progress::Status::new(Vec::new()), at: now });
-        progress.status.apply(event);
-        progress.at = now;
-        if progress.status.line(usize::MAX).is_empty() {
-            self.progress.remove(&event.thread_id);
-        }
-    }
-
-    /// What the ants on `thread` are doing, in at most `width` characters, and when that was heard; None when none
-    /// is busy there.
-    pub fn progress_of(&self, thread: &ThreadId, width: usize) -> Option<(String, DateTime<Utc>)> {
-        let progress = self.progress.get(thread)?;
-        Some((progress.status.line(width), progress.at))
-    }
-
-    pub fn roster(&mut self, entries: Vec<RosterEntry>, now: DateTime<Utc>) {
-        self.roster = entries;
-        self.roster_at = Some(now);
-    }
-
     /// Take word from following the tool requests ([`tools::follow`]).
     pub fn approval(&mut self, update: Update) {
-        match update {
-            Update::Pending(request) => {
-                if !self.approvals.iter().any(|r| r.ant == request.ant && r.id == request.id) {
-                    self.approvals.push(request);
-                }
-            }
-            Update::Resolved(request, state) => {
-                self.approvals.retain(|r| !(r.ant == request.ant && r.id == request.id));
-                self.approval = self.approval.min(self.approvals.len().saturating_sub(1));
-                if let Some(detail) = self.detail.as_mut().filter(|d| d.request == request) {
-                    detail.state = state;
-                    detail.confirm = None;
-                }
+        self.live.approval(&update);
+        if let Update::Resolved(request, state) = update {
+            self.approval = self.approval.min(self.live.approvals.len().saturating_sub(1));
+            if let Some(detail) = self.detail.as_mut().filter(|d| d.request == request) {
+                detail.state = state;
+                detail.confirm = None;
             }
         }
     }
 
     /// Following the tool requests starts over: it lists the pending ones again.
     pub fn approvals_reset(&mut self) {
-        self.approvals.clear();
+        self.live.approvals_reset();
         self.approval = 0;
     }
 
@@ -287,18 +178,11 @@ impl Model {
 
     /// Take the connection's state at `now`: once it is back, what was missed meanwhile is read again.
     pub fn link(&mut self, connected: bool, now: DateTime<Utc>) -> Option<Action> {
-        match (connected, self.link) {
-            (false, Link::Connected) => {
-                self.link = Link::Down(now);
-                None
-            }
-            (true, Link::Down(_)) => {
-                self.link = Link::Connected;
-                self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
-                Some(Action::Refresh)
-            }
-            _ => None,
+        if !self.live.link(connected, now) {
+            return None;
         }
+        self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
+        Some(Action::Refresh)
     }
 
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
@@ -323,23 +207,24 @@ impl Model {
             Key::Home => self.step(isize::MIN),
             Key::End => self.step(isize::MAX),
             Key::PageUp => {
-                if let Some(history) = &mut self.history {
-                    history.scroll = history.scroll.saturating_add(PAGE);
+                if self.history.is_some() {
+                    self.scroll = self.scroll.saturating_add(PAGE);
                 }
                 None
             }
             Key::PageDown => {
-                if let Some(history) = &mut self.history {
-                    history.scroll = history.scroll.saturating_sub(PAGE);
+                if self.history.is_some() {
+                    self.scroll = self.scroll.saturating_sub(PAGE);
                 }
                 None
             }
             Key::Enter => match self.focus {
                 Pane::Threads => self.reload_history(),
                 Pane::Approvals => {
-                    if let Some(request) = self.approvals.get(self.approval) {
+                    if let Some(request) = self.live.approvals.get(self.approval) {
                         let request = request.clone();
-                        self.detail = Some(Detail { request, state: State::Pending, confirm: None, deciding: false });
+                        let state = tools::State::Pending;
+                        self.detail = Some(Detail { request, state, confirm: None, deciding: false });
                     }
                     None
                 }
@@ -353,12 +238,13 @@ impl Model {
         let moved = |at: usize, len: usize| at.saturating_add_signed(by).min(len.saturating_sub(1));
         match self.focus {
             Pane::Approvals => {
-                self.approval = moved(self.approval, self.approvals.len());
+                self.approval = moved(self.approval, self.live.approvals.len());
                 None
             }
             Pane::Threads => {
-                let at = self.selected.as_ref().and_then(|s| self.order.iter().position(|t| t == s));
-                let to = self.order.get(at.map_or(0, |at| moved(at, self.order.len())))?.clone();
+                let order = &self.live.order;
+                let at = self.selected.as_ref().and_then(|s| order.iter().position(|t| t == s));
+                let to = order.get(at.map_or(0, |at| moved(at, order.len())))?.clone();
                 (Some(&to) != self.selected.as_ref()).then(|| self.select(to))
             }
         }
@@ -388,48 +274,26 @@ impl Model {
             Key::Char('r') => Verdict::Reject,
             _ => return None,
         };
-        let id = tools::qualified(&detail.request);
-        if detail.state != State::Pending {
-            self.notify(format!("request {id} is answered already"), Level::Error, now);
-        } else if !detail.request.options.contains(&verdict) {
-            self.notify(format!("{} is not offered for request {id}", tools::spelling(verdict)), Level::Error, now);
-        } else {
-            detail.confirm = Some(verdict);
+        match live::refusal(&detail.request, &detail.state, verdict) {
+            Some(refusal) => self.notify(refusal, Level::Error, now),
+            None => detail.confirm = Some(verdict),
         }
         None
     }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use ants_proto::{ApprovalDecision, Envelope, StatusUpdate, ToolCall};
+mod tests {
+    use std::time::Duration;
+
+    use ants_proto::ApprovalDecision;
 
     use super::*;
-    use crate::thread::Parser;
-
-    pub fn at(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
-    }
-
-    pub fn user(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
-
-    /// The entry of a message from `from` to `to` on `thread`, stored at sequence `seq`.
-    pub fn message(seq: u64, thread: &ThreadId, from: &str, to: &str, text: &str) -> Entry {
-        let envelope = Envelope { thread_id: thread.clone(), ..Envelope::new(user(from), user(to), text) };
-        let subject = ants_proto::subject::inbox(&envelope.to, &envelope.from);
-        let payload = serde_json::to_vec(&envelope).unwrap();
-        Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
-    }
-
-    pub fn request(ant: &str, title: &str, options: Vec<Verdict>) -> ApprovalRequest {
-        let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };
-        ApprovalRequest::new(user(ant), ThreadId::generate(), tool, options, Duration::from_mins(5))
-    }
+    use crate::live::Link;
+    use crate::live::tests::{at, message, request, user};
 
     fn model() -> Model {
-        Model::new(user("alice"), Duration::from_hours(24))
+        Model::new(State::new(user("alice"), Duration::from_hours(24)))
     }
 
     #[test]
@@ -437,56 +301,30 @@ pub(crate) mod tests {
         let (old, new) = (ThreadId::generate(), ThreadId::generate());
         let mut m = model();
         let read = vec![message(1, &old, "alice", "dev-a", "old"), message(2, &new, "dev-a", "alice", "new")];
-        assert_eq!(m.stored(read, 2, at(5)), Some(Action::LoadHistory(new.clone())));
-        assert_eq!(m.order, [new.clone(), old.clone()]);
+        assert_eq!(m.stored(read, at(5)), Some(Action::LoadHistory(new.clone())));
+        assert_eq!(m.live.order, [new.clone(), old.clone()]);
         assert_eq!(m.key(Key::Down, at(6)), Some(Action::LoadHistory(old.clone())));
         assert_eq!(m.key(Key::Down, at(6)), None, "the last thread stays selected");
         assert_eq!(m.selected, Some(old.clone()));
         assert_eq!(m.key(Key::Char('k'), at(6)), Some(Action::LoadHistory(new.clone())));
         // Activity on the other thread moves it first; the selection stays on its thread.
-        m.stored(vec![message(3, &old, "dev-a", "alice", "again")], 3, at(7));
-        assert_eq!(m.order, [old, new.clone()]);
+        m.stored(vec![message(3, &old, "dev-a", "alice", "again")], at(7));
+        assert_eq!(m.live.order, [old, new.clone()]);
         assert_eq!(m.selected, Some(new));
         assert_eq!(m.key(Key::Char('q'), at(8)), Some(Action::Quit));
-    }
-
-    #[test]
-    fn archived_and_idle_threads_are_left_out_until_a_message_is_stored_on_them() {
-        let (archived, idle, kept, live) =
-            (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
-        let mut m = model();
-        m.marks.archive(&archived, 1);
-        m.marks.kept.insert(kept.clone(), at(15));
-        m.auto_archive = Some(Duration::from_secs(10));
-        let read = vec![
-            message(1, &archived, "alice", "dev-a", "done"),
-            message(2, &idle, "alice", "dev-a", "quiet"),
-            message(3, &kept, "alice", "dev-a", "kept"),
-            message(20, &live, "alice", "dev-a", "busy"),
-        ];
-        assert_eq!(m.stored(read, 20, at(20)), Some(Action::LoadHistory(live.clone())));
-        assert_eq!(m.order, [live.clone(), kept.clone()], "idle since 10s ago or archived");
-        m.stored(
-            vec![message(21, &idle, "dev-a", "alice", "back"), message(22, &archived, "dev-a", "alice", "news")],
-            22,
-            at(22),
-        );
-        assert_eq!(m.order, [archived.clone(), idle.clone(), live.clone(), kept]);
-        m.stored(Vec::new(), 22, at(26));
-        assert_eq!(m.order, [archived, idle, live], "kept until idle since being kept");
     }
 
     #[test]
     fn messages_read_while_a_history_loads_are_merged_once() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.stored(vec![message(1, &thread, "alice", "dev-a", "hi")], 1, at(1));
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "hi")], at(1));
         // Read meanwhile: one the history read has too, one after it.
         let meanwhile = vec![message(2, &thread, "dev-a", "alice", "two"), message(3, &thread, "dev-a", "alice", "3")];
-        m.stored(meanwhile, 3, at(2));
+        m.stored(meanwhile, at(2));
         let loaded = vec![message(1, &thread, "alice", "dev-a", "hi"), message(2, &thread, "dev-a", "alice", "two")];
         m.history_loaded(&thread, Ok(loaded), at(3));
-        m.stored(vec![message(4, &thread, "dev-a", "alice", "four")], 4, at(4));
+        m.stored(vec![message(4, &thread, "dev-a", "alice", "four")], at(4));
         let history = m.history.as_ref().unwrap();
         assert!(!history.loading);
         assert_eq!(history.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2, 3, 4]);
@@ -501,7 +339,7 @@ pub(crate) mod tests {
         let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
         m.approval(Update::Pending(push.clone()));
         m.approval(Update::Pending(push.clone()));
-        assert_eq!(m.approvals.len(), 1);
+        assert_eq!(m.live.approvals.len(), 1);
         assert_eq!(m.key(Key::Char('a'), at(0)), None, "no decision from the list");
         m.key(Key::Tab, at(0));
         assert_eq!(m.key(Key::Enter, at(0)), None);
@@ -536,9 +374,9 @@ pub(crate) mod tests {
         m.key(Key::Enter, at(0));
         m.key(Key::Char('a'), at(0));
         let decision = ApprovalDecision::new(push.id, push.ant.clone(), Verdict::Reject);
-        let state = State::DecidedByAnt(user("lead"), decision);
+        let state = tools::State::DecidedByAnt(user("lead"), decision);
         m.approval(Update::Resolved(push, state.clone()));
-        assert!(m.approvals.is_empty());
+        assert!(m.live.approvals.is_empty());
         let detail = m.detail.as_ref().unwrap();
         assert_eq!((&detail.state, detail.confirm), (&state, None));
         assert_eq!(m.key(Key::Char('a'), at(1)), None);
@@ -552,19 +390,8 @@ pub(crate) mod tests {
         assert_eq!(m.link(true, at(0)), None);
         assert_eq!(m.link(false, at(1)), None);
         assert_eq!(m.link(false, at(2)), None);
-        assert_eq!(m.link, Link::Down(at(1)));
+        assert_eq!(m.live.link, Link::Down(at(1)));
         assert_eq!(m.link(true, at(3)), Some(Action::Refresh));
-        assert_eq!(m.link, Link::Connected);
-    }
-
-    #[test]
-    fn progress_shows_until_the_ants_go_idle() {
-        let thread = ThreadId::generate();
-        let mut m = model();
-        let event = |update| StatusEvent::new(user("dev-a"), thread.clone(), update);
-        m.status(&event(StatusUpdate::State { state: ants_proto::State::Working }), at(1));
-        assert_eq!(m.progress_of(&thread, 80), Some(("dev-a: working".to_owned(), at(1))));
-        m.status(&event(StatusUpdate::State { state: ants_proto::State::Idle }), at(2));
-        assert_eq!(m.progress_of(&thread, 80), None);
+        assert_eq!(m.live.link, Link::Connected);
     }
 }
