@@ -29,6 +29,7 @@ mod question;
 mod react;
 mod reads;
 mod search;
+mod select;
 mod snooze;
 mod status;
 mod thread;

@@ -14,6 +14,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Data, Key, To};
+use super::select::Selection;
 use crate::thread::{Entry, Kind};
 
 /// What a thread waits on, as its messages and the ants' progress tell.
@@ -303,12 +304,12 @@ impl Filter {
 pub struct Page {
     pub filter: Filter,
     /// The selected thread, kept as threads move.
-    selected: Option<ThreadId>,
+    selected: Selection<ThreadId>,
 }
 
 impl Page {
     pub fn new(filter: Filter) -> Self {
-        Self { filter, selected: None }
+        Self { filter, selected: Selection::default() }
     }
 
     /// The threads listed with their states, the most urgent first, then the most recently active.
@@ -337,7 +338,7 @@ impl Page {
     }
 
     fn at(&self, rows: &[(ThreadId, ThreadState)]) -> usize {
-        self.selected.as_ref().and_then(|s| rows.iter().position(|(t, _)| t == s)).unwrap_or(0)
+        self.selected.at(&threads(rows))
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
@@ -358,7 +359,7 @@ impl Page {
             Key::End => usize::MAX,
             _ => return None,
         };
-        self.selected = rows.get(to.min(rows.len().saturating_sub(1))).map(|(t, _)| t.clone());
+        self.selected.select(&threads(&rows), to);
         None
     }
 
@@ -402,6 +403,10 @@ impl Page {
             frame.render_widget(paragraph, detail);
         }
     }
+}
+
+fn threads(rows: &[(ThreadId, ThreadState)]) -> Vec<ThreadId> {
+    rows.iter().map(|(t, _)| t.clone()).collect()
 }
 
 /// How tall the selected thread's card is, borders included.
