@@ -21,6 +21,7 @@ mod humans;
 mod inbox;
 mod keys;
 mod leaf;
+mod live;
 mod manager;
 mod members;
 mod notify;

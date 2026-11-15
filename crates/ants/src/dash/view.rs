@@ -10,7 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Detail, Level, Link, Model, Pane};
+use super::model::{Detail, Level, Model, Pane};
+use crate::live::Link;
 use crate::{roster, thread, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
@@ -36,8 +37,8 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let rows = |n: usize| u16::try_from(n).unwrap_or(u16::MAX).clamp(1, MOST_ROWS) + 2;
     let [threads, ants, approvals] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(rows(model.roster.len())),
-        Constraint::Length(rows(model.approvals.len())),
+        Constraint::Length(rows(model.live.roster.len())),
+        Constraint::Length(rows(model.live.approvals.len())),
     ])
     .areas(left);
     draw_threads(frame, model, threads, now);
@@ -53,8 +54,8 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
 /// Who the dashboard runs as, the connection, and how fresh the stream and roster read are.
 fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
-    let mut spans = vec![Span::styled(format!(" ants dash · {} · ", model.me), Style::new().bold())];
-    match model.link {
+    let mut spans = vec![Span::styled(format!(" ants dash · {} · ", model.live.me), Style::new().bold())];
+    match model.live.link {
         Link::Connected => spans.push(Span::styled("● connected", Style::new().fg(Color::Green))),
         Link::Down(since) => spans.push(Span::styled(
             format!(
@@ -64,16 +65,16 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
             Style::new().fg(Color::Red).bold(),
         )),
     }
-    let stored = match model.stored_at {
+    let stored = match model.live.stored_at {
         Some(at) => {
-            let stale = model.link != Link::Connected || now - at > STALE;
+            let stale = model.live.link != Link::Connected || now - at > STALE;
             let style = if stale { Style::new().fg(Color::Yellow) } else { dim };
             Span::styled(format!(" · stream read {}", ago(at, now)), style)
         }
         None => Span::styled(" · reading the stream…", dim),
     };
     spans.push(stored);
-    if let Some(at) = model.roster_at {
+    if let Some(at) = model.live.roster_at {
         spans.push(Span::styled(format!(" · roster read {}", ago(at, now)), dim));
     }
     Line::from(spans)
@@ -108,17 +109,17 @@ fn highlight(focused: bool) -> Style {
 }
 
 fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
-    let since = match model.since.as_secs() {
+    let since = match model.live.since.as_secs() {
         0 => "all kept".to_owned(),
         secs => format!("last {}", roster::short(std::time::Duration::from_secs(secs))),
     };
     let focused = model.focus == Pane::Threads && model.detail.is_none();
-    let title = format!(" Threads ({}, {since}) ", model.order.len());
-    let items: Vec<ListItem> = model.order.iter().map(|t| ListItem::new(thread_row(model, t, now))).collect();
-    let selected = model.selected.as_ref().and_then(|s| model.order.iter().position(|t| t == s));
+    let title = format!(" Threads ({}, {since}) ", model.live.order.len());
+    let items: Vec<ListItem> = model.live.order.iter().map(|t| ListItem::new(thread_row(model, t, now))).collect();
+    let selected = model.selected.as_ref().and_then(|s| model.live.order.iter().position(|t| t == s));
     let list = List::new(items).block(block(title, focused)).highlight_style(highlight(focused));
-    if model.order.is_empty() {
-        let text = if model.stored_at.is_some() { "no threads" } else { "reading the stream…" };
+    if model.live.order.is_empty() {
+        let text = if model.live.stored_at.is_some() { "no threads" } else { "reading the stream…" };
         frame.render_widget(Paragraph::new(text).block(block(" Threads ".to_owned(), focused)), area);
         return;
     }
@@ -127,9 +128,9 @@ fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>
 
 /// A thread in the list: whether an ant is busy on it, its id's start, last activity, users and opening line.
 fn thread_row(model: &Model, thread: &ThreadId, _now: DateTime<Utc>) -> Line<'static> {
-    let busy = if model.progress.contains_key(thread) { "▶ " } else { "  " };
+    let busy = if model.live.progress.contains_key(thread) { "▶ " } else { "  " };
     let short: String = thread.as_str().chars().take(8).collect();
-    let Some(summary) = model.summary(thread) else { return Line::raw(format!("{busy}{short}")) };
+    let Some(summary) = model.live.summary(thread) else { return Line::raw(format!("{busy}{short}")) };
     let users: Vec<String> =
         summary.users.iter().map(ToString::to_string).chain(summary.channels.iter().map(|c| format!("#{c}"))).collect();
     Line::from(vec![
@@ -141,11 +142,11 @@ fn thread_row(model: &Model, thread: &ThreadId, _now: DateTime<Utc>) -> Line<'st
 }
 
 fn draw_ants(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
-    let title = format!(" Ants ({}) ", model.roster.len());
-    let lines: Vec<Line> = match model.roster_at {
+    let title = format!(" Ants ({}) ", model.live.roster.len());
+    let lines: Vec<Line> = match model.live.roster_at {
         None => vec![Line::raw("reading the roster…")],
-        Some(_) if model.roster.is_empty() => vec![Line::raw("no ants registered")],
-        Some(_) => model.roster.iter().map(|e| ant_row(e, now)).collect(),
+        Some(_) if model.live.roster.is_empty() => vec![Line::raw("no ants registered")],
+        Some(_) => model.live.roster.iter().map(|e| ant_row(e, now)).collect(),
     };
     frame.render_widget(Paragraph::new(lines).block(block(title, false)), area);
 }
@@ -164,16 +165,16 @@ fn ant_row(entry: &RosterEntry, now: DateTime<Utc>) -> Line<'static> {
 
 fn draw_approvals(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>) {
     let focused = model.focus == Pane::Approvals && model.detail.is_none();
-    let title = format!(" Tool requests ({}) ", model.approvals.len());
+    let title = format!(" Tool requests ({}) ", model.live.approvals.len());
     let mut block = block(title, focused);
-    if !model.approvals.is_empty() {
+    if !model.live.approvals.is_empty() {
         block = block.title_style(Style::new().fg(Color::Yellow).bold());
     }
-    if model.approvals.is_empty() {
+    if model.live.approvals.is_empty() {
         frame.render_widget(Paragraph::new("none pending").block(block), area);
         return;
     }
-    let items: Vec<ListItem> = model.approvals.iter().map(|r| ListItem::new(approval_row(r, now))).collect();
+    let items: Vec<ListItem> = model.live.approvals.iter().map(|r| ListItem::new(approval_row(r, now))).collect();
     let list = List::new(items).block(block).highlight_style(highlight(focused));
     frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(model.approval)));
 }
@@ -190,14 +191,14 @@ fn draw_thread(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>)
         frame.render_widget(Paragraph::new("no thread selected").block(block(" Thread ".to_owned(), false)), area);
         return;
     };
-    let summary = model.summary(thread);
+    let summary = model.live.summary(thread);
     let title = match summary.and_then(|s| s.owner.as_ref()) {
         Some(owner) => format!(" Thread {thread}, owned by {owner} "),
         None => format!(" Thread {thread} "),
     };
     let width = usize::from(area.width.saturating_sub(2));
     let mut lines = Vec::new();
-    match model.progress_of(thread, width.saturating_sub(16)) {
+    match model.live.progress_of(thread, width.saturating_sub(16)) {
         Some((line, at)) => {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
         }
@@ -211,7 +212,7 @@ fn draw_thread(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>)
             }
             let rendered = thread::render(&history.entries);
             lines.extend(rendered.lines().flat_map(|l| wrap(l, width)).map(Line::raw));
-            scroll = history.scroll;
+            scroll = model.scroll;
         }
         _ => {}
     }
@@ -278,8 +279,9 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::dash::model::tests::{at, message, request, user};
     use crate::dash::model::{Action, Key};
+    use crate::live::State;
+    use crate::live::tests::{at, message, request, user};
 
     fn screen(model: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
@@ -300,8 +302,8 @@ mod tests {
     #[test]
     fn the_screen_shows_threads_history_requests_and_staleness() {
         let thread = ThreadId::generate();
-        let mut m = Model::new(user("alice"), Duration::from_hours(24));
-        let start = m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], 1, at(0));
+        let mut m = Model::new(State::new(user("alice"), Duration::from_hours(24)));
+        let start = m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy the site")], at(0));
         assert_eq!(start, Some(Action::LoadHistory(thread.clone())));
         m.history_loaded(&thread, Ok(vec![message(1, &thread, "alice", "dev-a", "deploy the site")]), at(1));
         m.approval(tools::Update::Pending(request("dev-a", "git push", vec![Verdict::AllowOnce])));
