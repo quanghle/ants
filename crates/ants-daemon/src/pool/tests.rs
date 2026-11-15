@@ -292,6 +292,32 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
     assert_eq!(log.locked().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
 }
 
+/// A clone's session is forked in its working directory where the harness advertises session/fork; one stored as
+/// not forked starts over, seeded from the thread's history.
+#[tokio::test]
+async fn a_clone_s_session_is_forked_else_starts_over_from_the_thread_history() {
+    let (launch, log, _) = fake::launch();
+    let session = SessionId::new("s9");
+    assert_eq!(crate::harness::fork(&launch, &session).await.unwrap(), None, "no fork advertised");
+    log.locked().forks = true;
+    let forked = crate::harness::fork(&launch.clone().in_dir(std::path::PathBuf::from("/w")), &session).await.unwrap();
+    assert_eq!(forked, Some(SessionId::new("f1")));
+    assert_eq!(log.locked().forked, [("s9".to_owned(), std::path::PathBuf::from("/w"))]);
+
+    let store = SessionStore::memory();
+    let stored = Stored { session, harness: "test".to_owned(), cloned: true };
+    store.put(&thread(1), stored).await.unwrap();
+    let pool = Pool::new(launch, store.clone(), 4, IDLE);
+    let reply = pool.run(&thread(1), with_history("b")).await.unwrap().text;
+    assert!(reply.starts_with("s1: [ants] This ant is a clone of another"), "{reply}");
+    assert!(reply.ends_with("HISTORY 65536\n\nb"), "{reply}");
+    assert!(log.locked().loaded.is_empty(), "the session cloned from is not loaded");
+    assert_eq!(
+        store.get(&thread(1)).await.unwrap().map(|s| (s.session, s.cloned)),
+        Some((SessionId::new("s1"), false))
+    );
+}
+
 #[tokio::test]
 async fn a_restarted_pool_resumes_a_session_only_in_the_harness_it_ran_in() {
     let (launch, log, _) = fake::launch();
@@ -302,7 +328,8 @@ async fn a_restarted_pool_resumes_a_session_only_in_the_harness_it_ran_in() {
     let pool = restart();
     pool.run_on(&thread(1), with_history("a"), Some(0)).await.unwrap();
     pool.shutdown().await;
-    let ran_in = |harness: &str| Some(Stored { session: SessionId::new("s1"), harness: harness.to_owned() });
+    let ran_in =
+        |harness: &str| Some(Stored { session: SessionId::new("s1"), harness: harness.to_owned(), cloned: false });
     assert_eq!(store.get(&thread(1)).await.unwrap(), ran_in("spare"));
 
     let pool = restart();

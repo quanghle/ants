@@ -696,7 +696,7 @@ impl Threads {
 
     /// The channel whose top-level post, stored before stream sequence `seq`, started `thread`: the first post of any
     /// channel whose id is the thread's, among those stored within [`CLOCK_SLACK`] of the time in it.
-    async fn root(&self, thread: &ThreadId, seq: u64) -> Result<Option<ChannelId>> {
+    pub(crate) async fn root(&self, thread: &ThreadId, seq: u64) -> Result<Option<ChannelId>> {
         let Some(start) = thread_start(thread) else { return Ok(None) };
         if let Some(channel) = self.roots.locked().get(thread).cloned() {
             return Ok(channel);

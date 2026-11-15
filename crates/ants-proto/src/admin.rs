@@ -89,6 +89,13 @@ pub enum AdminOp {
     /// Read the ant's settings as the machine's config file has them, which the outcome's `result` carries
     /// ([`Settings`]).
     ReadSettings,
+    /// Clone the ant, on its machine, as the ant `new`: its home, settings (these overriding them), thread sessions,
+    /// thread history and worktrees, under a key of its own.
+    Clone {
+        new: UserId,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        settings: Map<String, Value>,
+    },
 }
 
 impl AdminOp {
@@ -107,6 +114,7 @@ impl AdminOp {
             Self::Retire => "retire".to_owned(),
             Self::ReadMemories => "read memories".to_owned(),
             Self::ReadSettings => "read settings".to_owned(),
+            Self::Clone { new, .. } => format!("clone as {new}"),
         }
     }
 }

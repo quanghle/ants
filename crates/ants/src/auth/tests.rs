@@ -1185,6 +1185,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
         thread: thread.clone(),
         channel: Some(ops),
         before: u64::MAX,
+        home: None,
     };
     assert_eq!(
         read.history()(ants_daemon::history::DEFAULT_BUDGET).await,

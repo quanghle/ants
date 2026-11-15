@@ -37,6 +37,10 @@ use crate::worktrees::{Branch, Pruned, Worktrees};
 pub struct Stored {
     pub session: SessionId,
     pub harness: String,
+    /// Set by a clone order for a session it could not fork: the clone's first session of the thread starts over,
+    /// seeded from the thread's history ([`Rebuild::Cloned`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cloned: bool,
 }
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
@@ -69,6 +73,17 @@ impl SessionStore {
                 serde_json::from_slice(&value).context("reading the session of the thread").map(Some)
             }
             Self::Memory(map) => Ok(map.locked().get(thread).cloned()),
+        }
+    }
+
+    /// Forget the thread's session, as a failed clone order does with those it stored.
+    pub async fn delete(&self, thread: &ThreadId) -> Result<()> {
+        match self {
+            Self::Kv { kv, ant } => kv.delete(session_key(ant, thread)).await,
+            Self::Memory(map) => {
+                map.locked().remove(thread);
+                Ok(())
+            }
         }
     }
 
@@ -147,6 +162,11 @@ impl Pool {
     /// How the pool starts harnesses.
     pub fn launch(&self) -> &Launch {
         &self.launch
+    }
+
+    /// Where the sessions of threads are kept.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
     }
 
     /// At most `max_live` harnesses (at least one); each stops after `idle_after` without a prompt. Sessions are
@@ -287,7 +307,7 @@ impl Pool {
         if after != before {
             tracing::info!(%thread, session = %after, "the harness moved to a new session");
             let harness = self.launch_on(fallback)?.harness_name().to_owned();
-            if let Err(e) = self.store.put(thread, Stored { session: after, harness }).await {
+            if let Err(e) = self.store.put(thread, Stored { session: after, harness, cloned: false }).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
             }
         }
@@ -453,7 +473,8 @@ impl Pool {
         let harness = launch.harness_name();
         let stored = self.store.get(thread).await?;
         let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
-        let resume = stored.filter(|_| !moved).map(|stored| stored.session);
+        let cloned = stored.as_ref().is_some_and(|stored| stored.cloned);
+        let resume = stored.filter(|_| !moved && !cloned).map(|stored| stored.session);
         let mut launch = launch.for_thread(thread);
         if let Some(worktrees) = self.worktrees.as_ref().filter(|_| self.isolate) {
             match worktrees.checkout(thread).await {
@@ -463,6 +484,8 @@ impl Pool {
         }
         let session = if moved {
             Session::start_over(&launch, Rebuild::Moved).await?
+        } else if cloned {
+            Session::start_over(&launch, Rebuild::Cloned).await?
         } else {
             Session::start(&launch, resume.clone()).await?
         };
@@ -475,7 +498,9 @@ impl Pool {
         }
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.
-        if let Err(e) = self.store.put(thread, Stored { session: session.id(), harness: harness.to_owned() }).await {
+        if let Err(e) =
+            self.store.put(thread, Stored { session: session.id(), harness: harness.to_owned(), cloned: false }).await
+        {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }
         let session = Arc::new(session);
@@ -552,9 +577,10 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::v1::schema::{
-        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, Implementation, InitializeRequest,
-        InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-        PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, ForkSessionRequest,
+        ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
+        LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+        SessionCapabilities, SessionForkCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
         TextContent, ToolCall, Usage, UsageUpdate,
     };
     use agent_client_protocol::{Agent, DynConnectTo};
@@ -599,6 +625,10 @@ pub(crate) mod fake {
         pub takes_images: bool,
         /// The images prompts carried after their text, as media type and base64 data, in order.
         pub images: Vec<(String, String)>,
+        /// While set, harnesses starting advertise session/fork.
+        pub forks: bool,
+        /// The sessions forked, each with the working directory of its fork, in order; fork `n` is session `f<n>`.
+        pub forked: Vec<(String, PathBuf)>,
     }
 
     /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`, or
@@ -631,8 +661,8 @@ pub(crate) mod fake {
         let connect = Arc::new(move || {
             let log = shared.clone();
             log.locked().starts += 1;
-            let (on_init, on_new, on_load, on_prompt, gate) =
-                (log.clone(), log.clone(), log.clone(), log, held.clone());
+            let (on_init, on_new, on_load, on_fork, on_prompt, gate) =
+                (log.clone(), log.clone(), log.clone(), log.clone(), log, held.clone());
             let cancels = Arc::new(Semaphore::new(0));
             let on_cancel = cancels.clone();
             DynConnectTo::new(
@@ -653,13 +683,15 @@ pub(crate) mod fake {
                                 return responder.respond_with_internal_error("broken install");
                             }
                             let prompts = PromptCapabilities::new().image(log.takes_images);
+                            let fork = log.forks.then(SessionForkCapabilities::new);
                             drop(log);
                             responder.respond(
                                 InitializeResponse::new(init.protocol_version)
                                     .agent_capabilities(
                                         AgentCapabilities::new()
                                             .load_session(sessions == Sessions::Loadable)
-                                            .prompt_capabilities(prompts),
+                                            .prompt_capabilities(prompts)
+                                            .session_capabilities(SessionCapabilities::new().fork(fork)),
                                     )
                                     .agent_info(Implementation::new("fake", "1.0")),
                             )
@@ -693,6 +725,14 @@ pub(crate) mod fake {
                             // Replayed history must not leak into the next reply.
                             cx.send_notification(chunk(&load.session_id, "old history"))?;
                             responder.respond(LoadSessionResponse::new())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |fork: ForkSessionRequest, responder, _cx| {
+                            let mut log = on_fork.locked();
+                            log.forked.push((fork.session_id.to_string(), fork.cwd));
+                            responder.respond(ForkSessionResponse::new(format!("f{}", log.forked.len())))
                         },
                         agent_client_protocol::on_receive_request!(),
                     )
