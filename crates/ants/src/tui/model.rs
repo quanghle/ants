@@ -17,7 +17,9 @@ use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, catchup, channel, dm, home, images, nav, people, search, snooze, thread, timeline, tree, work};
+use super::{
+    ant, cards, catchup, channel, dm, home, images, nav, people, search, snooze, thread, timeline, tree, work,
+};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -183,6 +185,7 @@ pub enum Page {
     Dm(dm::Page),
     Search(search::Page),
     Tree(tree::Page),
+    Ant(ant::Page),
 }
 
 impl Page {
@@ -192,9 +195,7 @@ impl Page {
             nav::Item::Home => Self::Home(home::Page::default()),
             nav::Item::Work(state) => Self::Work(work::Page::new(Filter { state: *state, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
-            nav::Item::Ant(user) => {
-                Self::Work(work::Page::new(Filter { user: Some(user.clone()), ..Filter::default() }))
-            }
+            nav::Item::Ant(user) => Self::Ant(ant::Page::new(user.clone())),
             nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
         }
     }
@@ -208,6 +209,7 @@ impl Page {
             Self::Dm(_) => "dm",
             Self::Search(_) => "search",
             Self::Tree(_) => "tree",
+            Self::Ant(_) => "ant",
         }
     }
 }
@@ -585,7 +587,7 @@ impl Model {
                 seqs.iter().for_each(|seq| markers.mark(channel, *seq));
                 Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
             }
-            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) | Page::Tree(_) => None,
+            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) | Page::Tree(_) | Page::Ant(_) => None,
         }
     }
 
@@ -755,6 +757,7 @@ impl Model {
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
             Page::Tree(page) => page.key(key, data, now),
+            Page::Ant(page) => page.key(key, data),
         }?;
         self.go(to, now)
     }
@@ -824,6 +827,24 @@ impl Model {
     pub fn tree_shown(&self) -> Option<(ThreadId, Vec<ThreadId>)> {
         let Page::Tree(page) = self.page() else { return None };
         Some((page.root.clone(), self.data.delegations.threads(&page.root)))
+    }
+
+    /// The ant shown, for its queue to be read.
+    pub fn ant_shown(&self) -> Option<UserId> {
+        let Page::Ant(page) = self.page() else { return None };
+        Some(page.ant.clone())
+    }
+
+    /// Take in what a read of an ant's queue brought.
+    pub fn ant_event(&mut self, event: ant::Event) {
+        let ant::Event::Queue(ant, queue) = event;
+        for page in &mut self.pages {
+            if let Page::Ant(page) = page
+                && page.ant == ant
+            {
+                page.queue = queue.clone();
+            }
+        }
     }
 
     /// Take in what the delegation trees' reads and cancels brought.

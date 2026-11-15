@@ -108,6 +108,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         failing: None,
         fallback: None,
         memory_low: None,
+        model: None,
     }
 }
 

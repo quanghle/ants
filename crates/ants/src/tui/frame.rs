@@ -58,6 +58,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Dm(page) => page.draw(frame, view, data, now, focused),
         Page::Search(page) => page.draw(frame, view, data, now, focused),
         Page::Tree(page) => page.draw(frame, view, data, now, focused),
+        Page::Ant(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
@@ -122,6 +123,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Dm(page)) => page.keys(),
         (Focus::View, Page::Search(_)) => search::Page::KEYS,
         (Focus::View, Page::Tree(page)) => page.keys(),
+        (Focus::View, Page::Ant(page)) => page.keys(),
     };
     Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
@@ -133,7 +135,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp PgDn Home End", "move further"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
-    ("w", "in a channel: its threads in work"),
+    ("w ←→ a", "in a channel or on an ant: its threads in work; on an ant: pane, ask"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),

@@ -1114,6 +1114,24 @@ pub async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
 /// `--archived` since the earliest thread marked so started, or all the stream keeps for `--archived` when idle
 /// threads count as archived), as `select` keeps them, with their titles.
 pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select, json: bool) -> Result<()> {
+    let (threads, omitted) = listed(nats, since, select).await?;
+    if json {
+        for thread in &threads {
+            println!("{}", serde_json::to_string(thread)?);
+        }
+    } else if threads.is_empty() {
+        println!("no threads");
+    } else {
+        println!("{}", table(&threads));
+    }
+    if omitted > 0 {
+        eprintln!("{omitted} less recently active threads left out: raise --limit or narrow --since");
+    }
+    Ok(())
+}
+
+/// The threads [`list`] lists, and how many less recently active ones `select`'s limit left out.
+pub async fn listed(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select) -> Result<(Vec<Summary>, usize)> {
     let auto_archive = crate::defaults::auto_archive()?;
     let select = &Select { idle_before: idle_before(auto_archive, Utc::now()), ..select.clone() };
     let js = connect(nats).await?;
@@ -1157,22 +1175,10 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
         }
         adopt_suggested(meta, &mut threads).await;
     }
-    if json {
-        for thread in &threads {
-            println!("{}", serde_json::to_string(thread)?);
-        }
-    } else if threads.is_empty() {
-        println!("no threads");
-    } else {
-        println!("{}", table(&threads));
-    }
-    if omitted > 0 {
-        eprintln!("{omitted} less recently active threads left out: raise --limit or narrow --since");
-    }
     if let (Some(meta), Some(start)) = (&meta, &start) {
         prune(meta, &marks, start, &present).await;
     }
-    Ok(())
+    Ok((threads, omitted))
 }
 
 /// Forget the marks of the CLI's human and the titles of the threads a read from `start` found no message on though

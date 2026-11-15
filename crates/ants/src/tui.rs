@@ -7,6 +7,7 @@
 //! which draws it and takes its keys.
 
 mod acts;
+mod ant;
 mod approvals;
 mod attach;
 mod cards;
@@ -168,6 +169,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
     let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
+    let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
@@ -181,8 +183,21 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         let mut screen = Screen::open()?;
         let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
-        let chat =
-            Chat { feed, reads, acts, people, searches, trees, cards, summaries, images, exec, model, edit: None };
+        let chat = Chat {
+            feed,
+            reads,
+            acts,
+            people,
+            searches,
+            trees,
+            ants,
+            cards,
+            summaries,
+            images,
+            exec,
+            model,
+            edit: None,
+        };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
         if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
             tracing::debug!("not keeping when ants chat ended: {e:#}");
@@ -234,6 +249,8 @@ struct Chat {
     people: people::Io,
     searches: Searches,
     trees: tree::Io,
+    /// The reads of the shown ant's queue.
+    ants: ant::Io,
     cards: cards::Io,
     summaries: catchup::Io,
     /// The images drawn, with `[cli]` `inline_images` on.
@@ -259,14 +276,7 @@ impl Chat {
                     if self.read_terminal(&mut dirty)?.is_break() {
                         return Ok(());
                     }
-                    let log = progress::last_held_log();
-                    if log != logged {
-                        if let Some(warning) = log.as_deref().and_then(live::warning) {
-                            self.model.notify(warning, Level::Error, Utc::now());
-                            dirty = true;
-                        }
-                        logged = log;
-                    }
+                    dirty |= self.held_log(&mut logged);
                     self.cards.threads(&self.model.data.live.order);
                     if dirty || drawn.elapsed() >= REDRAW {
                         terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
@@ -324,6 +334,11 @@ impl Chat {
                     self.model.tree_event(event, Utc::now());
                     Vec::new()
                 }
+                event = self.ants.next() => {
+                    dirty = true;
+                    self.model.ant_event(event);
+                    Vec::new()
+                }
                 (handle, image) = next_image(self.images.as_mut()) => {
                     dirty = true;
                     self.model.data.images.insert(handle, image);
@@ -347,10 +362,25 @@ impl Chat {
         }
     }
 
-    /// Follow what the views show: the open thread's state, the delegation tree's links and spend, the images.
+    /// Tell of a warning the progress log held since it was `logged`, whether one shows.
+    fn held_log(&mut self, logged: &mut Option<String>) -> bool {
+        let log = progress::last_held_log();
+        if log == *logged {
+            return false;
+        }
+        let warning = log.as_deref().and_then(live::warning);
+        *logged = log;
+        let Some(warning) = warning else { return false };
+        self.model.notify(warning, Level::Error, Utc::now());
+        true
+    }
+
+    /// Follow what the views show: the open thread's state, the delegation tree's links and spend, the ant's queue,
+    /// the images.
     fn watch(&mut self) {
         self.acts.watch(self.model.open().cloned());
         self.trees.watch(self.model.tree_shown());
+        self.ants.watch(self.model.ant_shown());
         if let Some(images) = &mut self.images {
             let wanted = images::wanted(&self.model);
             images.want(&wanted);
@@ -420,6 +450,7 @@ impl Chat {
                 self.acts.refresh();
                 self.people.refresh();
                 self.trees.refresh();
+                self.ants.refresh();
                 self.cards.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);

@@ -237,6 +237,11 @@ fn roster() {
             failing: Some(HarnessFailing { since: at(4), error: "harness exited".to_owned() }),
             fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since: at(5) }),
             memory_low: Some(MemoryLow { since: at(5), available: 805_306_368, max_harnesses: 1 }),
+            model: Some(AntModel {
+                model: Some("gpt-5".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                context: Some("1m".to_owned()),
+            }),
         },
     );
     snap("activity_variants", &[Activity::Idle, Activity::Working, Activity::Unknown]);

@@ -49,5 +49,10 @@ expression: value
     "since": "2025-01-01T12:05:00Z",
     "available": 805306368,
     "max_harnesses": 1
+  },
+  "model": {
+    "model": "gpt-5",
+    "reasoning_effort": "high",
+    "context": "1m"
   }
 }

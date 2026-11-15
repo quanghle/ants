@@ -151,6 +151,21 @@ fn exercise_daemon(custom_tools: bool) {
         assert!(entry.get("whoami").is_none());
     }
 
+    let shown = run(ants(&["ant", "show", "dev-a"]));
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(text.starts_with("dev-a: live") && text.contains("holds:\n  none"), "{text}");
+    assert!(text.contains("no messages waiting") && text.contains(&thread[..8]), "{text}");
+    let shown = run(ants(&["ant", "show", "dev-a", "--json"]));
+    assert!(shown.status.success(), "ants ant show: {}", String::from_utf8_lossy(&shown.stderr));
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["roster"]["ant"], "dev-a", "{shown}");
+    assert_eq!(shown["queue"], serde_json::json!([]), "{shown}");
+    assert_eq!(shown["threads"][0]["thread_id"], thread.as_str(), "{shown}");
+    if custom_tools {
+        let model = serde_json::json!({"model": "stub-model", "reasoning_effort": "high", "context": "long_context"});
+        assert_eq!(shown["roster"]["model"], model, "{shown}");
+    }
+
     // dev-a answered the human's thread: finished work waits on the human.
     let status = run(ants(&["status", "--json"]));
     assert!(status.status.success(), "ants status: {}", String::from_utf8_lossy(&status.stderr));

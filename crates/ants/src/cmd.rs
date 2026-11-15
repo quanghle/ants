@@ -1,5 +1,6 @@
 //! What the commands do, with the arguments of each group of subcommands.
 
+pub(crate) mod ant;
 pub(crate) mod attachment;
 pub(crate) mod auth;
 pub(crate) mod bridge;

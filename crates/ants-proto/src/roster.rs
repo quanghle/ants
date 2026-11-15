@@ -72,6 +72,43 @@ pub struct RosterEntry {
     /// and runs fewer of them. Missing otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_low: Option<MemoryLow>,
+    /// The model, reasoning effort and context the ant's config sets for its harness. Missing when the config sets
+    /// none, so the harness's defaults hold, and from daemons before it was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AntModel>,
+}
+
+/// The model settings of an ant's config, as its roster entry reports them ([`RosterEntry::model`]). A missing
+/// setting keeps the harness's default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AntModel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Provider-native context selection, such as `1m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+impl AntModel {
+    /// The settings, or None when none is set.
+    pub fn of(model: Option<String>, reasoning_effort: Option<String>, context: Option<String>) -> Option<Self> {
+        let settings = Self { model, reasoning_effort, context };
+        (settings != Self::default()).then_some(settings)
+    }
+}
+
+impl fmt::Display for AntModel {
+    /// `<model>`, `effort <effort>` and `context <context>`, the ones set, joined by `, `.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = [
+            self.model.clone(),
+            self.reasoning_effort.as_ref().map(|e| format!("effort {e}")),
+            self.context.as_ref().map(|c| format!("context {c}")),
+        ];
+        write!(f, "{}", parts.into_iter().flatten().collect::<Vec<_>>().join(", "))
+    }
 }
 
 /// A fallback answering an ant's messages, as its roster entry reports it ([`RosterEntry::fallback`]).
@@ -233,6 +270,7 @@ mod tests {
             failing: None,
             fallback: None,
             memory_low: None,
+            model: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""instance":"run-1""#), "{json}");
@@ -241,6 +279,7 @@ mod tests {
         assert!(!json.contains("workdir") && !json.contains("escalate_to"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
+        assert!(!json.contains("model"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -305,6 +344,13 @@ mod tests {
             "{json}"
         );
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), low);
+        assert_eq!(AntModel::of(None, None, None), None);
+        let model = AntModel::of(Some("gpt-5".to_owned()), None, Some("1m".to_owned()));
+        assert_eq!(model.as_ref().map(ToString::to_string).as_deref(), Some("gpt-5, context 1m"));
+        let modelled = RosterEntry { model, ..entry.clone() };
+        let json = serde_json::to_string(&modelled).unwrap();
+        assert!(json.contains(r#""model":{"model":"gpt-5","context":"1m"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), modelled);
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -317,7 +363,7 @@ mod tests {
         assert!(entry.escalate_to.is_empty());
         assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
         assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
-        assert_eq!((entry.fallback, entry.memory_low), (None, None));
+        assert_eq!((entry.fallback, entry.memory_low, entry.model), (None, None, None));
 
         let newer = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
             "activity":"draining","handling":0,"harnesses":3,"version":"9.0.0","perms":9,"queue":4,
