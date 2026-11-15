@@ -1165,6 +1165,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         failing: None,
         fallback: None,
         memory_low: None,
+        model: None,
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
@@ -1965,6 +1966,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         failing: None,
         fallback: None,
         memory_low: None,
+        model: None,
     };
     let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
     b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();

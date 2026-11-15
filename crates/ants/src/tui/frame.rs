@@ -58,6 +58,8 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Dm(page) => page.draw(frame, view, data, now, focused),
         Page::Search(page) => page.draw(frame, view, data, now, focused),
         Page::Tree(page) => page.draw(frame, view, data, now, focused),
+        Page::Ant(page) => page.draw(frame, view, data, now, focused),
+        Page::Credentials(page) => page.draw(frame, view, data, now, focused),
     }
     model.bar.draw(frame, bar, &model.completions());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
@@ -122,6 +124,8 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Dm(page)) => page.keys(),
         (Focus::View, Page::Search(_)) => search::Page::KEYS,
         (Focus::View, Page::Tree(page)) => page.keys(),
+        (Focus::View, Page::Ant(page)) => page.keys(),
+        (Focus::View, Page::Credentials(page)) => page.keys(),
     };
     Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
@@ -133,7 +137,7 @@ const HELP: &[(&str, &str)] = &[
     ("PgUp PgDn Home End", "move further"),
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
-    ("w", "in a channel: its threads in work"),
+    ("w ←→ a", "in a channel or on an ant: its threads in work; on an ant: pane, ask"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
@@ -141,7 +145,7 @@ const HELP: &[(&str, &str)] = &[
     ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
-    ("g r f x d z s", "on home: grant, reply, follow up, cancel, done, snooze, digest"),
+    ("g r f x d z s c", "on home: grant, reply, follow up, cancel, done, snooze, digest, credentials"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
     ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
@@ -207,8 +211,8 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys =
-            "j/k move · Enter open · d done · z snooze · t tree · s digest · Tab nav/view · / search · ? help · q quit";
+        let keys = "j/k move · Enter open · d done · z snooze · t tree · s digest · c creds · Tab nav/view · / \
+                    search · ? help · q quit";
         assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));

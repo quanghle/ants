@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, HarnessAgent, HarnessFailing, HarnessLimit, MemoryLow, PERMISSIONS_VERSION,
+    ANTS_VERSION, Activity, AntModel, HarnessAgent, HarnessFailing, HarnessLimit, MemoryLow, PERMISSIONS_VERSION,
     ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, ServingFallback, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
@@ -203,6 +203,11 @@ pub async fn entry(config: &Config) -> RosterEntry {
         failing: None,
         fallback: None,
         memory_low: None,
+        model: AntModel::of(
+            config.model_settings.model.clone(),
+            config.model_settings.reasoning_effort.clone(),
+            config.model_settings.context.clone(),
+        ),
     }
 }
 
@@ -662,6 +667,7 @@ mod tests {
             failing: None,
             fallback: None,
             memory_low: None,
+            model: None,
         }
     }
 

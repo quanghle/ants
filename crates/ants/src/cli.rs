@@ -10,7 +10,7 @@ use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use futures::StreamExt as _;
 
 use crate::cmd::{
-    attachment::AttachmentCommand, auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand,
+    ant::AntCommand, attachment::AttachmentCommand, auth::AuthCommand, bridge::BridgeCommand, channel::ChannelCommand,
     dead::DeadCommand, enroll::EnrollCommand, harness::HarnessCommand, leaf::LeafCommand, thread::ThreadCommand,
     tools::ToolsCommand, webhook::WebhookCommand,
 };
@@ -103,6 +103,9 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// One ant at a glance, as the ant view of `ants chat` shows it.
+    #[command(subcommand)]
+    Ant(AntCommand),
     /// Report the tokens and cost ants spent, as their daemons keep them: per ant, today and over the last --days UTC
     /// days; for one ANT, each day and each thread since a human's last message on it; with --thread, that thread.
     /// Caps come from the local config file for the ants it lists. Needs human credentials.

@@ -342,7 +342,7 @@ History budget precedence: ant `history_budget` -> selected `context`'s `history
 
 ### Model, reasoning effort and context
 
-`model` is applied before `reasoning_effort` via ACP selectors on new and resumed sessions; unsupported values or mismatched read-backs fail the session and list valid options.
+`model` is applied before `reasoning_effort` via ACP selectors on new and resumed sessions; unsupported values or mismatched read-backs fail the session and list valid options. The ant's `ants_roster` entry publishes the ones set as `model` (`{model, reasoning_effort, context}`, each left out when unset; the whole field when none is), shown by `ants ant show` and the ant view of `ants chat`.
 
 - **Copilot:** `context` accepts `default` or `long_context` (`--context ...`).
 - **Claude:** `context` accepts `default`, or `1m` with an explicit `model` (selects `<model>[1m]`).

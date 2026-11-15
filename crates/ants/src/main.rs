@@ -4,6 +4,7 @@
 
 mod add;
 mod age;
+mod ant;
 mod assistant;
 mod attachments;
 mod auth;
@@ -105,6 +106,7 @@ async fn run() -> Result<()> {
             Box::pin(cmd::inbox::show(&nats()?, select, thread, Listing { follow, json })).await
         }
         Command::Roster { json } => roster::show(&nats()?, json).await,
+        Command::Ant(command) => Box::pin(cmd::ant::run(&nats()?, command)).await,
         Command::Spend { ant, thread, days, json, config } => {
             let path = match config {
                 Some(path) => path,

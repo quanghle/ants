@@ -22,7 +22,7 @@ pub enum Item {
     /// Every thread, or those in a state.
     Work(Option<ThreadState>),
     Channel(ChannelId),
-    /// An ant's threads, until an ant view comes.
+    /// An ant: where and how it runs, what holds it back, its activity, threads, queue and spend.
     Ant(UserId),
     /// Another human: the direct messages with it.
     Person(UserId),

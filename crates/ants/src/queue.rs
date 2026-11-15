@@ -26,21 +26,45 @@ const UNDELIVERED_SHOWN: usize = 100;
 
 /// A message waiting for an ant, as `ants queue` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Waiting {
-    id: Uuid,
-    thread_id: ThreadId,
-    from: UserId,
+pub struct Waiting {
+    pub id: Uuid,
+    pub thread_id: ThreadId,
+    pub from: UserId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<ChannelId>,
-    sent_at: DateTime<Utc>,
-    seq: u64,
-    running: bool,
+    pub channel: Option<ChannelId>,
+    pub sent_at: DateTime<Utc>,
+    pub seq: u64,
+    pub running: bool,
     /// How many messages of its thread go before it.
-    ahead: usize,
+    pub ahead: usize,
     /// Whether the ant's daemon took it from the stream already.
-    delivered: bool,
+    pub delivered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    withdrawn_by: Option<UserId>,
+    pub withdrawn_by: Option<UserId>,
+}
+
+/// The messages waiting for `ant`, as `ants queue` lists them, and how many more wait in the stream unlisted; None
+/// when no daemon serving the ant answered within [`QUEUE_WAIT`]. Asked as `me`, a human.
+pub async fn read(
+    js: &async_nats::jetstream::Context,
+    domain: Option<&ants_proto::JsDomain>,
+    ant: &UserId,
+    me: &UserId,
+) -> Result<Option<(Vec<Waiting>, usize)>> {
+    let Some(answers) = ask(&js.client(), ant, me).await? else { return Ok(None) };
+    let (mut waiting, more) = waiting(js, ant, &answers, UNDELIVERED_SHOWN).await?;
+    let kv = DirectKv::new(js, domain, ATTEMPTS_BUCKET).await?;
+    for message in waiting.iter_mut().filter(|m| !m.running) {
+        if let Some(MessageMark::Withdrawn { by, .. }) = mark(&kv, ant, &message.id).await? {
+            message.withdrawn_by = Some(by);
+        }
+    }
+    Ok(Some((waiting, more)))
+}
+
+/// Why [`read`] found no queue.
+pub fn unanswered(ant: &UserId) -> String {
+    format!("no daemon serving {ant} answered within {}s", QUEUE_WAIT.as_secs())
 }
 
 /// Print the messages waiting for `ant`: a table, or with `json` one per line.
@@ -49,17 +73,8 @@ pub async fn list(nats: &crate::Nats<'_>, ant: UserId, json: bool) -> Result<()>
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; only a human lists an ant's queue");
     }
-    let (client, js) = nats.connect("ants-queue").await?;
-    let Some(answers) = ask(&client, &ant, me).await? else {
-        bail!("no daemon serving {ant} answered within {}s", QUEUE_WAIT.as_secs());
-    };
-    let (mut waiting, more) = waiting(&js, &ant, &answers, UNDELIVERED_SHOWN).await?;
-    let kv = DirectKv::new(&js, nats.domain, ATTEMPTS_BUCKET).await?;
-    for message in waiting.iter_mut().filter(|m| !m.running) {
-        if let Some(MessageMark::Withdrawn { by, .. }) = mark(&kv, &ant, &message.id).await? {
-            message.withdrawn_by = Some(by);
-        }
-    }
+    let (_, js) = nats.connect("ants-queue").await?;
+    let Some((waiting, more)) = read(&js, nats.domain, &ant, me).await? else { bail!(unanswered(&ant)) };
     if json {
         for message in &waiting {
             println!("{}", serde_json::to_string(message)?);
@@ -237,7 +252,7 @@ async fn waiting(
     Ok((waiting, more))
 }
 
-fn table(waiting: &[Waiting], now: DateTime<Utc>) -> String {
+pub fn table(waiting: &[Waiting], now: DateTime<Utc>) -> String {
     let header = ["MESSAGE", "THREAD", "FROM", "AGE", "STATE"].map(str::to_owned);
     let rows: Vec<[String; 5]> = std::iter::once(header)
         .chain(waiting.iter().map(|m| {
@@ -264,7 +279,7 @@ fn table(waiting: &[Waiting], now: DateTime<Utc>) -> String {
 
 /// Where a message stands: running, withdrawn, or waiting behind others of its thread, in the daemon's hands or still
 /// in the stream.
-fn state(m: &Waiting) -> String {
+pub fn state(m: &Waiting) -> String {
     if m.running {
         return "running".to_owned();
     }

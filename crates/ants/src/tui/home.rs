@@ -199,7 +199,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree · s digest";
+    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree · s digest · c creds";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -252,6 +252,7 @@ impl Page {
             Key::Char('z') => return thread().map(To::Snooze),
             Key::Char('t') => return thread().map(To::Tree),
             Key::Char('s') => return Some(To::Digest),
+            Key::Char('c') => return Some(To::Credentials),
             Key::Up | Key::Char('k') => at.saturating_sub(1),
             Key::Down | Key::Char('j') => at + 1,
             Key::Home => 0,
@@ -268,9 +269,12 @@ impl Page {
         let block = frame::block(format!(" Home ({}) ", items.len()), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let [first, area] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-        let rule = Line::styled("─".repeat(usize::from(first.width)), frame::dim());
-        frame.render_widget(Paragraph::new(vec![catchup::since_line(model, now), rule]), first);
+        let mut first = vec![catchup::since_line(model, now)];
+        first.extend(data.credentials.line());
+        let tall = u16::try_from(first.len() + 1).unwrap_or(u16::MAX);
+        let [top, area] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(inner);
+        first.push(Line::styled("─".repeat(usize::from(top.width)), frame::dim()));
+        frame.render_widget(Paragraph::new(first), top);
         if items.is_empty() {
             let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
             frame.render_widget(Paragraph::new(text), area);

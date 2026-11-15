@@ -20,7 +20,7 @@ impl State {
         if roster::is_live(entry, now) { Self::Live } else { Self::Stale }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Live => "live",
             Self::Stale => "stale",
@@ -362,6 +362,7 @@ pub(crate) mod tests {
             failing: None,
             fallback: None,
             memory_low: None,
+            model: None,
         }
     }
 
