@@ -1,5 +1,5 @@
-//! The nav: home, work with a count per state, the human's channels, the ants with their state, and the team's other
-//! humans, online or not. Each entry selects a view.
+//! The nav: home, work with a count per state, the human's channels with their unread posts and @mentions, the ants
+//! with their state, and the team's other humans, online or not. Each entry selects a view.
 
 use ants_proto::{Activity, ChannelId, Humans, RosterEntry, UserId};
 use chrono::{DateTime, Utc};
@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use super::frame;
 use super::model::Data;
 use super::work::ThreadState;
+use crate::channel::reads::Unread;
 use crate::roster;
 use crate::thread::Kind;
 
@@ -72,14 +73,20 @@ pub fn marker(entries: &[&RosterEntry], now: DateTime<Utc>) -> (&'static str, Co
     ("●", Color::Green)
 }
 
-/// The human's unread @mentions in the channel.
-fn mentions(data: &Data, channel: &ChannelId) -> usize {
-    data.live
+/// The channel's unread posts and @mentions of the human among those read, once which are read is known; else, without
+/// the credentials to know, only its unread @mentions as its inbox tells of them.
+fn unread(data: &Data, channel: &ChannelId) -> Unread {
+    if let Some(markers) = &data.channel_reads {
+        return data.feeds.unread(channel, markers.channels.get(channel), data.me());
+    }
+    let mentions = data
+        .live
         .order
         .iter()
         .flat_map(|t| data.unread_on(t))
         .filter(|i| i.kind == Kind::Mention && i.channel.as_ref() == Some(channel))
-        .count()
+        .count();
+    Unread { posts: 0, mentions }
 }
 
 fn line(
@@ -98,10 +105,14 @@ fn line(
             Line::styled(format!("  {}{}", state.label(), count(n)), style)
         }
         Item::Channel(channel) => {
-            let mut spans = vec![Span::raw(format!("#{channel}"))];
-            let n = mentions(data, channel);
-            if n > 0 {
-                spans.push(Span::styled(format!(" @{n}"), Style::new().fg(Color::Magenta).bold()));
+            let unread = unread(data, channel);
+            let style = if unread.posts > 0 { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() };
+            let mut spans = vec![Span::styled(format!("#{channel}"), style)];
+            if unread.posts > 0 {
+                spans.push(Span::raw(format!(" {}", unread.posts)));
+            }
+            if unread.mentions > 0 {
+                spans.push(Span::styled(format!(" @{}", unread.mentions), Style::new().fg(Color::Magenta).bold()));
             }
             Line::from(spans)
         }
@@ -142,11 +153,12 @@ pub fn draw(frame: &mut Frame, area: Rect, data: &Data, selected: &Item, now: Da
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{ChannelEntry, HumanEntry, ThreadId};
+    use ants_proto::{ChannelEntry, ChannelPost, ChannelReadMarkers, HumanEntry, ThreadId};
 
     use super::*;
     use crate::live::tests::{at, message, user};
     use crate::roster::tests::entry;
+    use crate::tui::channel::tests::post;
     use crate::tui::model::tests::model;
     use crate::tui::reads::Read;
 
@@ -184,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_shows_its_unread_mentions() {
+    fn a_channel_shows_its_unread_posts_and_mentions() {
         let thread = ThreadId::generate();
         let mut m = model();
         let ops: ChannelId = "ops".parse().unwrap();
@@ -192,8 +204,17 @@ mod tests {
         mention.kind = Kind::Mention;
         mention.channel = Some(ops.clone());
         m.stored(vec![mention], at(1));
-        assert_eq!(mentions(&m.data, &ops), 1);
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 0, mentions: 1 }, "without channel markers, the inbox's");
         m.data.marker.as_mut().unwrap().mark(1);
-        assert_eq!(mentions(&m.data, &ops), 0);
+        assert_eq!(unread(&m.data, &ops).mentions, 0);
+
+        m.data.channel_reads = Some(ChannelReadMarkers::default());
+        let look = ChannelPost::new(ops.clone(), user("dev-a"), "@alice look");
+        let mine = ChannelPost::new(ops.clone(), user("alice"), "on it");
+        let other = ChannelPost::new("dev".parse().unwrap(), user("dev-a"), "@alice elsewhere");
+        m.stored(vec![post(2, &look), post(3, &mine), post(4, &other)], at(2));
+        assert_eq!(unread(&m.data, &ops), Unread { posts: 1, mentions: 1 }, "the human's own posts are read");
+        m.data.channel_reads.as_mut().unwrap().mark(&ops, 2);
+        assert_eq!(unread(&m.data, &ops), Unread::default());
     }
 }

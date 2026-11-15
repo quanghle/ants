@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 #[cfg(doc)]
 use crate::{
-    ATTEMPTS_BUCKET, ApprovalDecision, ApprovalRequest, ChannelPost, DeadLetter, Envelope, HeldNotices, LINKS_BUCKET,
-    Machine, MessageMark, NOTIFY_BUCKET, NotifyPrefs, OUTBOX_STREAM, OWNERS_BUCKET, Permissions, REACTIONS_BUCKET,
-    RosterEntry, SESSIONS_BUCKET, THREADS_BUCKET,
+    ATTEMPTS_BUCKET, ApprovalDecision, ApprovalRequest, ChannelPost, ChannelReadMarkers, DeadLetter, Envelope,
+    HeldNotices, LINKS_BUCKET, Machine, MessageMark, NOTIFY_BUCKET, NotifyPrefs, OUTBOX_STREAM, OWNERS_BUCKET,
+    Permissions, REACTIONS_BUCKET, READ_BUCKET, ReadMarker, RosterEntry, SESSIONS_BUCKET, THREADS_BUCKET,
 };
 use crate::{PERMISSIONS_VERSION, PermissionsVersion, Reaction, ThreadId, UserId, WEBHOOKS_BUCKET, subject};
 
@@ -165,6 +165,12 @@ pub fn done_key(thread: &ThreadId) -> String {
 /// or human name collides with a title's key.
 pub fn marks_key(human: &UserId) -> String {
     format!("marks.{human}")
+}
+
+/// Key in [`READ_BUCKET`] of the posts `human` read of the channels ([`ChannelReadMarkers`]): its user id with
+/// `.chan` after it, so it collides with no human's inbox [`ReadMarker`], whose key is the bare user id.
+pub fn channel_reads_key(human: &UserId) -> String {
+    format!("{human}.chan")
 }
 
 /// Key in [`NOTIFY_BUCKET`] of the notices held back from `human` ([`HeldNotices`]): starting with `held`, so it

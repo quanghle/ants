@@ -1,0 +1,14 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "channels": {
+    "backend": {
+      "below": 4200,
+      "read": [
+        4207
+      ]
+    }
+  }
+}

@@ -1,10 +1,13 @@
 //! `ants channel`: list, create, read and set channels.
 
+use std::collections::{HashMap, HashSet};
+
 use ants_proto::{ChannelId, UserId};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
+use crate::channel::reads;
 use crate::{Nats, channel, completions, humans, roster, thread, upgrade};
 
 #[derive(Subcommand, Debug)]
@@ -66,10 +69,11 @@ pub(crate) enum ChannelCommand {
         #[arg(required = true, num_args = 1.., value_name = "USER", value_parser = channel::parse_ant, add = ArgValueCandidates::new(completions::ants))]
         users: Vec<UserId>,
     },
-    /// List the channels with the members, the messenger and the owner of each.
+    /// List the channels with the members, the messenger and the owner of each; for a human member of any, also the
+    /// unread posts of each channel it is a member of, with how many @mention it.
     List,
     /// Print the posts of a channel kept in the stream, by thread: the post that started each thread, then the
-    /// replies on the thread, indented.
+    /// replies on the thread, indented. A human's printed posts are marked read on all its devices.
     Read {
         /// The channel: `ops` or `'#ops'`.
         #[arg(value_parser = channel::parse_channel)]
@@ -82,6 +86,9 @@ pub(crate) enum ChannelCommand {
         /// Only the last this many threads.
         #[arg(long, conflicts_with = "thread")]
         limit: Option<usize>,
+        /// Print without marking read.
+        #[arg(long)]
+        peek: bool,
     },
     /// Delete a channel. The posts to the channel stay in the stream.
     Delete {
@@ -167,28 +174,12 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> 
             if entries.is_empty() {
                 println!("no channels");
             } else {
-                println!("{}", channel::table(&entries));
+                let unread = unread(nats, &js, &entries).await;
+                println!("{}", channel::table(&entries, unread.as_ref()));
             }
         }
-        ChannelCommand::Read { channel, thread, limit } => {
-            if channel::get(&kv, &channel).await?.is_none() {
-                tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
-            }
-            let thread = thread::resolve(thread, &js, &nats.me).await?;
-            let mut threads = channel::threads(channel::read(&js, &nats.me, &channel).await?);
-            if let Some(thread) = &thread {
-                threads.retain(|t| t.id == *thread);
-            }
-            if let Some(limit) = limit {
-                threads.drain(..threads.len().saturating_sub(limit));
-            }
-            if threads.is_empty() {
-                match thread {
-                    Some(thread) => println!("no posts on thread {thread} of #{channel}"),
-                    None => println!("no posts in #{channel}"),
-                }
-            }
-            print!("{}", channel::render(&threads));
+        ChannelCommand::Read { channel, thread, limit, peek } => {
+            read(nats, &js, &kv, &channel, thread, limit, peek).await?;
         }
         ChannelCommand::Delete { channel } => {
             channel::delete(&kv, &channel).await?;
@@ -197,6 +188,91 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> 
         ChannelCommand::Serve { .. } => unreachable!("main runs the channel manager"),
     }
     Ok(())
+}
+
+/// `ants channel read`: print the posts of `channel` by thread, marking those printed read unless `peek`.
+async fn read(
+    nats: &Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    kv: &async_nats::jetstream::kv::Store,
+    channel: &ChannelId,
+    thread: Option<thread::Pick>,
+    limit: Option<usize>,
+    peek: bool,
+) -> Result<()> {
+    if channel::get(kv, channel).await?.is_none() {
+        tracing::warn!("no channel #{channel}; showing the posts kept for #{channel} anyway");
+    }
+    let thread = thread::resolve(thread, js, &nats.me).await?;
+    let posts = channel::read_from(js, &nats.me, channel, 0).await?;
+    let mut threads = channel::threads(posts.iter().map(|(_, post)| post.clone()).collect());
+    if let Some(thread) = &thread {
+        threads.retain(|t| t.id == *thread);
+    }
+    if let Some(limit) = limit {
+        threads.drain(..threads.len().saturating_sub(limit));
+    }
+    if threads.is_empty() {
+        match thread {
+            Some(thread) => println!("no posts on thread {thread} of #{channel}"),
+            None => println!("no posts in #{channel}"),
+        }
+    }
+    print!("{}", channel::render(&threads));
+    if !peek && reads::allowed(nats) {
+        mark_read(js, &nats.me.id, channel, &posts, &threads).await;
+    }
+    Ok(())
+}
+
+/// The unread posts of each channel among `entries` the human of `nats` is a member of, if its credentials may read
+/// its channel read markers and it is a member of any; none, with a warning, when reading them fails.
+async fn unread(
+    nats: &Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    entries: &[ants_proto::ChannelEntry],
+) -> Option<HashMap<ChannelId, reads::Unread>> {
+    if !entries.iter().any(|e| e.is_member(&nats.me.id)) || !reads::allowed(nats) {
+        return None;
+    }
+    let me = &nats.me;
+    let counted = async {
+        let (markers, _) = reads::ChannelReads::open(js, &me.id).await?.markers().await?;
+        let mut unread = HashMap::new();
+        for entry in entries.iter().filter(|e| e.is_member(&me.id)) {
+            unread.insert(entry.channel.clone(), reads::unread(js, me, &markers, &entry.channel).await?);
+        }
+        anyhow::Ok(unread)
+    };
+    counted.await.inspect_err(|e| tracing::warn!("not counting the unread posts: {e:#}")).ok()
+}
+
+/// Mark the posts of `threads`, printed from `posts` of `channel`, every post of it kept, read for `human`; warns when
+/// that fails.
+async fn mark_read(
+    js: &async_nats::jetstream::Context,
+    human: &UserId,
+    channel: &ChannelId,
+    posts: &[(u64, ants_proto::ChannelPost)],
+    threads: &[channel::Thread],
+) {
+    let printed: HashSet<&ants_proto::ThreadId> = threads.iter().map(|t| &t.id).collect();
+    let marks: Vec<u64> = posts.iter().filter(|(_, p)| printed.contains(&p.thread_id)).map(|(seq, _)| *seq).collect();
+    let marked = async {
+        reads::ChannelReads::open(js, human)
+            .await?
+            .change(|markers| {
+                for seq in &marks {
+                    markers.mark(channel, *seq);
+                }
+                // Every post kept was read, so what the marker covers has no gap.
+                markers.compact(channel, posts.iter().map(|(seq, _)| *seq));
+            })
+            .await
+    };
+    if let Err(e) = marked.await {
+        tracing::warn!("not marking the posts of #{channel} read: {e:#}");
+    }
 }
 
 /// Warn about members, messengers and owners no daemon serves now ([`roster::unserved`]), rather than refuse them:

@@ -125,7 +125,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     };
     nats.prepare(&js).await;
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
-    let reads = Reads::new(js.clone(), me.clone());
+    let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
@@ -225,7 +225,7 @@ impl Chat {
                     Vec::new()
                 }
             };
-            for action in actions {
+            for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
@@ -260,6 +260,7 @@ impl Chat {
                 self.reads.mark_read(thread);
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
