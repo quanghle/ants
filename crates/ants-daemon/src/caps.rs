@@ -77,6 +77,9 @@ struct ThreadSpend {
     reminder: Option<Reminder>,
     #[serde(default, skip_serializing_if = "Warned::none")]
     warned: Warned,
+    /// The tool rules the thread is narrowed to ([`ants_proto::Envelope::allow`]), until a human's message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    narrowed: Option<Vec<String>>,
 }
 
 /// What the ant spent in a UTC day, stored as [`Spent`] is, with the warnings given.
@@ -381,12 +384,27 @@ impl Ledger {
         self.update(thread, |spent| (forget_spend(spent), ())).await
     }
 
-    /// A message from a human: the thread starts over from nothing spent, and its escalation is over, with its
-    /// reminder. Returns whether it had either.
+    /// A message from a human: the thread starts over from nothing spent, its escalation is over, with its reminder,
+    /// and its tool rules are no longer narrowed. Returns whether it had an escalation or a reminder.
     pub async fn reset(&self, thread: &ThreadId) -> Result<bool> {
         self.update(thread, |spent| {
             let escalated = spent.escalation.take().is_some() | spent.reminder.take().is_some();
-            (forget_spend(spent) || escalated, escalated)
+            let narrowed = spent.narrowed.take().is_some();
+            (forget_spend(spent) || escalated || narrowed, escalated)
+        })
+        .await
+    }
+
+    /// The tool rules the thread is narrowed to: those it was narrowed to first, until a human's message
+    /// ([`Ledger::reset`]), else `carried`, which a message on it carries and which it is narrowed to from then on.
+    pub async fn narrowed(&self, thread: &ThreadId, carried: Option<Vec<String>>) -> Result<Option<Vec<String>>> {
+        self.update(thread, |spent| match (&spent.narrowed, carried) {
+            (Some(rules), _) => (false, Some(rules.clone())),
+            (None, Some(rules)) => {
+                spent.narrowed = Some(rules.clone());
+                (true, Some(rules))
+            }
+            (None, None) => (false, None),
         })
         .await
     }
@@ -786,6 +804,23 @@ mod tests {
         assert!(reached.starts_with("Daily token cap of dev-a reached (260 of 250"), "{reached}");
         ledger.fresh_allowance(&t1).await.unwrap();
         assert!(ledger.reached_on(&t1, DAY).await.unwrap().is_some(), "the daily cap holds until the day ends");
+    }
+
+    #[tokio::test]
+    async fn a_thread_stays_narrowed_across_a_restart_until_a_human_messages() {
+        let store = Store::Memory(Arc::default());
+        let ledger = Ledger::with_store(store.clone(), ant(), Caps::default());
+        let (read, all) = (Some(vec!["read".to_owned()]), Some(vec!["*".to_owned()]));
+        assert_eq!(ledger.narrowed(&thread(1), None).await.unwrap(), None);
+        assert_eq!(ledger.narrowed(&thread(1), read.clone()).await.unwrap(), read);
+
+        let ledger = Ledger::with_store(store, ant(), Caps::default());
+        assert_eq!(ledger.narrowed(&thread(1), None).await.unwrap(), read, "kept without a message's rules");
+        assert_eq!(ledger.narrowed(&thread(1), all.clone()).await.unwrap(), read, "the first rules hold");
+        assert_eq!(ledger.narrowed(&thread(2), None).await.unwrap(), None);
+        assert!(!ledger.reset(&thread(1)).await.unwrap(), "no escalation ended");
+        assert_eq!(ledger.narrowed(&thread(1), None).await.unwrap(), None);
+        assert_eq!(ledger.narrowed(&thread(1), all.clone()).await.unwrap(), all);
     }
 
     #[tokio::test]

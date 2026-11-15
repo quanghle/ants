@@ -139,6 +139,7 @@ async fn fire(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>, late: bool) ->
         destination: &schedule.destination,
         mentions: &schedule.mentions,
         owner: schedule.owner.as_ref(),
+        allow: schedule.allow.as_deref(),
         key: webhook_seen_key(&schedule.name, &at),
         message_id: format!("schedule.{}.{at}", schedule.name),
         text,
@@ -175,6 +176,7 @@ mod tests {
             owner: None,
             text: "check the nightly build".to_owned(),
             catch_up: false,
+            allow: None,
         }
     }
 
@@ -248,6 +250,7 @@ mod tests {
         let creds = creds(&server, &nightly, to.clone());
         let mut schedule = schedule("nightly", Some(creds.clone()), to);
         schedule.owner = Some(p("alice"));
+        schedule.allow = Some(vec!["read:*".to_owned()]);
         let connect = || Bus::connect(&nightly, Some(&creds), &server.url, None, "test");
         let (a, b) = (connect().await.unwrap(), connect().await.unwrap());
         let due = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
@@ -271,6 +274,7 @@ mod tests {
         assert_ne!(message.thread_id, later.thread_id);
         assert_eq!((message.text.as_str(), message.webhook), ("check the nightly build", true));
         assert_eq!(message.owner.as_ref(), Some(&p("alice")));
+        assert_eq!(message.allow, schedule.allow, "its threads are narrowed to its rules");
         let recorded = Owners::new(js.clone()).recorded(&message.thread_id, &message.to).await.unwrap();
         assert_eq!(recorded, Some(p("alice")));
         let marker =
@@ -292,7 +296,7 @@ mod tests {
         assert!(!fire(&bus, &schedule, due, false).await.unwrap().duplicate);
         let posts: Vec<ChannelPost> = stored(&js, &subject::chan(&ops, &standup)).await;
         let [post] = &posts[..] else { panic!("one post: {posts:?}") };
-        assert!(post.webhook && post.owner.is_none());
+        assert!(post.webhook && post.owner.is_none() && post.allow.is_none(), "receiving daemons narrow it");
         assert_eq!(post.mentions, [p("dev-a"), p("dev-b")]);
     }
 }

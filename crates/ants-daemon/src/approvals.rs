@@ -135,10 +135,14 @@ impl NatsApprover {
         let answering = self.answering.lock().expect("answering").get(&request.thread_id).cloned();
         let notice = expired_notice(&self.ant, request, self.timeout, answering.as_ref(), &self.humans);
         let id = format!("approval-expired-{}-{}", self.ant, request.id);
+        let allow = answering.and_then(|e| e.allow);
         let members: Vec<_> = asked
             .iter()
             .filter(|member| **member != notice.to)
-            .map(|member| (expired_member_notice(&self.ant, request, self.timeout, member), format!("{id}-{member}")))
+            .map(|member| {
+                let told = expired_member_notice(&self.ant, request, self.timeout, member).with_allow(allow.clone());
+                (told, format!("{id}-{member}"))
+            })
             .collect();
         for (told, id) in std::iter::once((notice, id)).chain(members) {
             match bus::store(&self.js, told.subject(), &told, &id).await {
@@ -180,8 +184,9 @@ impl NatsApprover {
         }
     }
 
-    /// Send `request` to every ant of the chain, as an approval escalation showing the tool call. Returns whom it
-    /// went to: none when the chain is empty or allows no hop.
+    /// Send `request` to every ant of the chain, as an approval escalation showing the tool call, with the tool rules
+    /// of the message the ant answers on the thread. Returns whom it went to: none when the chain is empty or allows
+    /// no hop.
     async fn ask_chain(&self, request: &ApprovalRequest) -> Result<Vec<UserId>> {
         let Hop::Chain { escalation, to } =
             Escalation::of_request(request).up(&self.chain.escalate_to, self.chain.max_hops)
@@ -189,10 +194,12 @@ impl NatsApprover {
             return Ok(Vec::new());
         };
         let text = chain_text(request, &to);
+        let answering = self.answering.lock().expect("answering").get(&request.thread_id).map(|e| e.allow.clone());
         for member in &to {
             let envelope =
                 Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), member.clone(), text.clone())
-                    .with_escalation(Some(escalation.clone()));
+                    .with_escalation(Some(escalation.clone()))
+                    .with_allow(answering.clone().flatten());
             let id = format!("approval-{}-{}-{member}", self.ant, request.id);
             bus::store(&self.js, envelope.subject(), &envelope, &id).await?;
             crate::status::escalated(&self.client, &envelope);

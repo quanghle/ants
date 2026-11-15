@@ -589,6 +589,11 @@ impl Launch {
         }
     }
 
+    /// What answers the permission requests of the harness's sessions; its clones share narrowed threads.
+    pub(crate) fn policy(&self) -> &PermissionPolicy {
+        &self.policy
+    }
+
     #[cfg(test)]
     pub(crate) fn with_transport(connect: Connector, cwd: PathBuf, policy: PermissionPolicy) -> Self {
         let harness = Harness {

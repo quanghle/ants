@@ -10,6 +10,7 @@
 //! owner = "alice"                   # optional human owner of the threads it starts
 //! text = "Audit the dependencies and report what changed."
 //! catch_up = true                   # optional: once a daemon runs again, send the latest firing it missed
+//! allow = ["read:*", "execute:cargo audit*"]  # optional: the tool rules its threads are narrowed to
 //!
 //! [[schedule]]
 //! name = "pulse"
@@ -60,6 +61,7 @@ pub struct Entry {
     text: String,
     #[serde(default)]
     catch_up: bool,
+    allow: Option<Vec<String>>,
 }
 
 /// Whom a channel post mentions.
@@ -89,6 +91,8 @@ pub struct Schedule {
     pub text: String,
     /// Send the latest firing missed while no daemon could, late, rather than skip it.
     pub catch_up: bool,
+    /// The tool rules the threads it starts are narrowed to; None for [`ants_proto::WEBHOOK_ALLOW`].
+    pub allow: Option<Vec<String>>,
 }
 
 impl Schedule {
@@ -134,6 +138,9 @@ impl Schedule {
         if let Some(url) = &entry.nats {
             crate::bus::check_url(url)?;
         }
+        if let Some(allow) = &entry.allow {
+            crate::permission::Allowlist::parse(allow)?;
+        }
         Ok(Self {
             name: entry.name,
             creds: entry.creds.as_deref().map(resolve),
@@ -145,6 +152,7 @@ impl Schedule {
             owner: entry.owner,
             text: entry.text,
             catch_up: entry.catch_up,
+            allow: entry.allow,
         })
     }
 }

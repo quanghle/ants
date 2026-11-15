@@ -19,10 +19,11 @@
 //!   `mcp__<server>__<tool>` and Codex `mcp.<server>.<tool>`; the pattern may match that or just the tool. Codex
 //!   reports MCP tool calls as `execute`; they count as `other`.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use agent_client_protocol::v1::schema::{
     PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
@@ -159,17 +160,62 @@ pub trait Approver: Send + Sync {
     fn decide(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> BoxFuture<'static, Verdict>;
 }
 
+/// Threads being answered under narrowed tool rules ([`PermissionPolicy::narrow`]), with how many answers narrow each.
+type Narrowed = Arc<Mutex<HashMap<ThreadId, (Allowlist, usize)>>>;
+
 /// What to answer when a harness asks permission to use a tool. The default rejects every request.
 #[derive(Clone, Default)]
 pub struct PermissionPolicy {
     allow: Allowlist,
     /// Who decides requests outside the allowlist. None rejects them.
     approver: Option<Arc<dyn Approver>>,
+    /// Shared by the policy's clones.
+    narrowed: Narrowed,
+}
+
+/// Keeps a thread's tool rules narrowed while held ([`PermissionPolicy::narrow`]).
+#[must_use]
+pub struct Narrowing {
+    narrowed: Narrowed,
+    thread: Option<ThreadId>,
+}
+
+impl Drop for Narrowing {
+    fn drop(&mut self) {
+        let Some(thread) = self.thread.take() else { return };
+        let mut narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, held)) = narrowed.get_mut(&thread) {
+            *held -= 1;
+            if *held == 0 {
+                narrowed.remove(&thread);
+            }
+        }
+    }
 }
 
 impl PermissionPolicy {
     pub fn new(allow: Allowlist, approver: Option<Arc<dyn Approver>>) -> Self {
-        Self { allow, approver }
+        Self { allow, approver, narrowed: Narrowed::default() }
+    }
+
+    /// Narrow the tool rules on `thread` to `rules`, if any, while the returned guard is held: a request is then
+    /// allowed unasked only when both the allowlist and `rules` allow it. Rules that do not parse allow nothing.
+    pub fn narrow(&self, thread: &ThreadId, rules: Option<&[String]>) -> Narrowing {
+        let Some(rules) = rules else { return Narrowing { narrowed: self.narrowed.clone(), thread: None } };
+        let rules = Allowlist::parse(rules).unwrap_or_else(|e| {
+            tracing::warn!(%thread, error = %e, "the thread's tool rules do not parse, narrowing it to none");
+            Allowlist::default()
+        });
+        let mut narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = narrowed.get(thread).map_or(0, |(_, held)| *held);
+        narrowed.insert(thread.clone(), (rules, held + 1));
+        Narrowing { narrowed: self.narrowed.clone(), thread: Some(thread.clone()) }
+    }
+
+    /// Whether `tool` on `thread` falls outside the thread's narrowed tool rules.
+    fn narrowed_out(&self, tool: &Tool<'_>, thread: Option<&ThreadId>, workdir: &Path) -> bool {
+        let narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        thread.and_then(|t| narrowed.get(t)).is_some_and(|(rules, _)| !rules.allows(tool, workdir))
     }
 
     /// Reject every request, asking no one.
@@ -191,10 +237,14 @@ impl PermissionPolicy {
     ) -> RequestPermissionResponse {
         let fields = &request.tool_call.fields;
         let tool = Tool { kind: kind_name(fields), fields };
-        let verdict = if self.allow.allows(&tool, workdir) {
+        let allowed = self.allow.allows(&tool, workdir);
+        let verdict = if allowed && !self.narrowed_out(&tool, thread, workdir) {
             tracing::info!(kind = %tool.kind, title = ?fields.title, "tool allowed by the allowlist");
             Verdict::AllowOnce
         } else {
+            if allowed {
+                tracing::info!(kind = %tool.kind, title = ?fields.title, "tool outside the thread's narrowed rules");
+            }
             match (&self.approver, thread) {
                 (Some(approver), Some(thread)) => {
                     let verdict = approver.decide(thread.clone(), summary(&tool), offered(request)).await;
@@ -551,5 +601,30 @@ mod tests {
         assert_eq!(chosen(&PermissionPolicy::reject_all().answer(&push, Some(&thread), workdir).await), Some("no"));
         assert_eq!(chosen(&policy.answer(&push, None, workdir).await), Some("no"), "no thread, no one to ask");
         assert_eq!(chosen(&PermissionPolicy::allow_all().answer(&push, None, workdir).await), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn a_narrowed_thread_asks_for_what_its_rules_leave_out() {
+        let (thread, other): (ThreadId, ThreadId) = ("t1".parse().unwrap(), "t2".parse().unwrap());
+        let workdir = Path::new(WORKDIR);
+        let fake = Arc::new(Fake(Verdict::Reject, Mutex::default()));
+        let policy = PermissionPolicy::new(Allowlist::all(), Some(fake.clone()));
+        let (read, push) = (request(ToolKind::Read, "View", json!({ "path": "a" }), &[]), shell("git push"));
+
+        let narrowed = policy.narrow(&thread, Some(&["read:*".to_owned()]));
+        let again = policy.clone().narrow(&thread, Some(&["read:*".to_owned()]));
+        assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("yes"));
+        assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"));
+        assert_eq!(fake.1.lock().unwrap().len(), 1, "the approver decides what the narrowing leaves out");
+        assert_eq!(chosen(&policy.answer(&push, Some(&other), workdir).await), Some("yes"), "only the thread");
+        drop(narrowed);
+        assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"), "still held");
+        drop(again);
+        assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("yes"));
+
+        let _bad = policy.narrow(&thread, Some(&["nonsense".to_owned()]));
+        assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("no"), "unparsed allows none");
+        let _none = policy.narrow(&other, None);
+        assert_eq!(chosen(&policy.answer(&push, Some(&other), workdir).await), Some("yes"));
     }
 }

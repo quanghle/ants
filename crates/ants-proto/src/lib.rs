@@ -121,6 +121,23 @@ pub const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(10);
 pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 /// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
+/// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
+/// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
+/// whose messages carry the narrowing on.
+pub const WEBHOOK_ALLOW: [&str; 12] = [
+    "read:*",
+    "search",
+    "think",
+    "other:list_ants",
+    "other:check_inbox",
+    "other:read_notes",
+    "other:post_notes",
+    "other:send_message",
+    "other:ask_agent",
+    "other:route",
+    "other:escalate",
+    "other:react",
+];
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
 pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;
 
@@ -717,8 +734,8 @@ pub fn session_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{thread}")
 }
 
-/// Key of what a thread has spent since the human's last message on it, and of its escalation, in [`SESSIONS_BUCKET`]
-/// beside its session.
+/// Key of what a thread has spent since the human's last message on it, of its escalation and of the tool rules it is
+/// narrowed to ([`Envelope::allow`]), in [`SESSIONS_BUCKET`] beside its session.
 pub fn thread_spend_key(ant: &UserId, thread: &ThreadId) -> String {
     format!("{ant}.{thread}.spend")
 }
@@ -2302,6 +2319,14 @@ pub struct Envelope {
     /// sends an answer to the owner it names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// The tool rules the thread is narrowed to, as a webhook or schedule that started it, or the message it follows on
+    /// from, says: the recipient's daemon allows a tool call unasked only when these and the ant's own `allow` both
+    /// allow it, so they never widen what an ant may do and are taken from any sender. A daemon fills in
+    /// [`WEBHOOK_ALLOW`] for a webhook's message without them and drops them from a human's. Replies and the messages
+    /// an agent sends on or from the thread keep them, so the narrowing follows a thread's spin-offs, until a human
+    /// messages the ant on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
     /// The channel post that @mentioned `to`, a human member of the channel, when the message tells it so
     /// ([`ChannelPost::mention_notice`]): `from` is the post's author, or the channel's messenger relaying a webhook's
     /// post ([`ChannelPost::relayed_notice`]), the thread and text are the post's.
@@ -2344,6 +2369,7 @@ impl Envelope {
             escalation: None,
             approval: None,
             webhook: false,
+            allow: None,
             mention: None,
             sent_at: Utc::now(),
         }
@@ -2362,6 +2388,11 @@ impl Envelope {
     /// The role of the sender, given the `humans`: an ant's for a webhook's message, else as `humans` says.
     pub fn sender_role(&self, humans: &Humans) -> Role {
         if self.webhook { Role::Ant } else { humans.role(&self.from) }
+    }
+
+    /// The envelope narrowed to the tool rules `allow` ([`Envelope::allow`]).
+    pub fn with_allow(self, allow: Option<Vec<String>>) -> Self {
+        Self { allow, ..self }
     }
 
     /// The envelope with `creator` as the ant that started its thread with a channel post.
@@ -2404,11 +2435,13 @@ impl Envelope {
             .then(|| request.decide(decision.verdict))
     }
 
-    /// A message on this envelope's thread, with a fresh budget and the same owner, creator and origin thread.
+    /// A message on this envelope's thread, with a fresh budget and the same owner, creator, origin thread and tool
+    /// rules.
     pub fn follow_up(&self, from: UserId, to: UserId, text: impl Into<String>) -> Self {
         let follow_up = Self::on_thread(self.thread_id.clone(), from, to, text)
             .with_owner(self.owner.clone())
-            .with_creator(self.creator.clone());
+            .with_creator(self.creator.clone())
+            .with_allow(self.allow.clone());
         Self { origin_thread: self.origin_thread.clone(), ..follow_up }
     }
 
@@ -2431,9 +2464,9 @@ impl Envelope {
         self.creator.is_some() || self.owner.is_some()
     }
 
-    /// Reply to the sender, whose role is `to`, keeping the thread's owner, creator and origin thread. Replies to a human are free;
-    /// agent-to-agent replies spend one turn, and fail when none are left, so the caller escalates to a human instead
-    /// of looping.
+    /// Reply to the sender, whose role is `to`, keeping the thread's owner, creator, origin thread and tool rules.
+    /// Replies to a human are free; agent-to-agent replies spend one turn, and fail when none are left, so the caller
+    /// escalates to a human instead of looping.
     pub fn reply(&self, from: UserId, text: impl Into<String>, to: Role) -> Result<Self, Error> {
         let turn_budget = if to.is_human() {
             self.turn_budget
@@ -2454,6 +2487,7 @@ impl Envelope {
             escalation: None,
             approval: None,
             webhook: false,
+            allow: self.allow.clone(),
             mention: None,
             sent_at: Utc::now(),
         })
@@ -3031,6 +3065,11 @@ pub struct ChannelPost {
     /// marker is in [`WEBHOOKS_BUCKET`] ([`webhook_marker_key`]) or a human, so no ant names a thread's owner with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
+    /// The tool rules the thread is narrowed to, as [`Envelope::allow`]: a webhook's post without them stands for
+    /// [`WEBHOOK_ALLOW`], an agent's reply keeps those of the post it answers ([`ChannelPost::reply`]) and a human's has
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -3059,6 +3098,7 @@ impl ChannelPost {
             owner: None,
             creator: None,
             webhook: false,
+            allow: None,
             sent_at: Utc::now(),
         }
     }
@@ -3071,6 +3111,11 @@ impl ChannelPost {
     /// The post with `creator` as the ant that started its thread.
     pub fn with_creator(self, creator: Option<UserId>) -> Self {
         Self { creator, ..self }
+    }
+
+    /// The post narrowed to the tool rules `allow` ([`ChannelPost::allow`]).
+    pub fn with_allow(self, allow: Option<Vec<String>>) -> Self {
+        Self { allow, ..self }
     }
 
     /// The ant that created the post's thread, none of the `humans`, no webhook and not the channel manager: of a
@@ -3127,8 +3172,8 @@ impl ChannelPost {
 
     /// A reply on the same channel and thread, after the posts stored on it `later` than this one, keeping the
     /// thread's owner ([`ChannelPost::thread_owner`]) and creator ([`ChannelPost::thread_creator`]); a human's reply on
-    /// a thread with no known owner takes it. A
-    /// human's reply has a fresh budget; an agent's spends one of the [`ChannelPost::turns_left`].
+    /// a thread with no known owner takes it. A human's reply has a fresh budget and no tool rules; an agent's spends
+    /// one of the [`ChannelPost::turns_left`] and keeps this post's tool rules.
     pub fn reply(
         &self,
         from: UserId,
@@ -3140,7 +3185,11 @@ impl ChannelPost {
         reply.in_reply_to = Some(self.id);
         reply.owner = self.thread_owner(humans).or_else(|| reply.thread_owner(humans));
         reply.creator = self.thread_creator(humans);
-        if humans.contains(&reply.from) { Ok(reply) } else { reply.spend(self.turns_left(later, humans)) }
+        if humans.contains(&reply.from) {
+            return Ok(reply);
+        }
+        reply.allow.clone_from(&self.allow);
+        reply.spend(self.turns_left(later, humans))
     }
 
     /// Whether the post is a top-level one, which started its thread.
@@ -4565,6 +4614,25 @@ mod tests {
         assert_eq!(uncreated.clone().spun_off(a.clone()).origin_thread, None, "no creator or owner to keep");
         let owned = uncreated.with_owner(Some(p("alice"))).spun_off(a);
         assert_eq!(owned.origin_thread, Some(channel_thread), "the owner's thread");
+    }
+
+    #[test]
+    fn the_tool_rules_follow_a_thread_and_its_spin_offs_but_not_a_human_s_reply() {
+        let rules = Some(vec!["read:*".to_owned()]);
+        let fired = Envelope::new(p("nightly"), p("dev-a"), "go").from_webhook().with_allow(rules.clone());
+        let ask = fired.reply(p("dev-a"), "help", Role::Ant).unwrap().spun_off(ThreadId::generate());
+        assert_eq!(ask.allow, rules);
+        assert_eq!(ask.reply(p("dev-b"), "done", Role::Ant).unwrap().allow, rules);
+        assert_eq!(ask.follow_up(p("dev-a"), p("dev-c"), "x").allow, rules);
+        assert_eq!(Envelope::on_thread(ask.thread_id, p("dev-a"), p("dev-c"), "x").allow, None);
+        let json = serde_json::to_string(&Envelope::new(p("dev-a"), p("dev-b"), "x")).unwrap();
+        assert!(!json.contains("allow"), "{json}");
+
+        let humans = Humans::default();
+        let post = ChannelPost::new("ops".parse().unwrap(), p("github"), "push").with_allow(rules.clone());
+        let answer = post.reply(p("dev-a"), "on it", &[], &humans).unwrap();
+        assert_eq!(answer.allow, rules);
+        assert_eq!(answer.reply(UserId::human(), "thanks", &[], &humans).unwrap().allow, None);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use ants_proto::{
     CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
     Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid,
-    subject,
+    WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -1475,6 +1475,7 @@ impl Inbox<'_> {
     /// gives the thread a fresh allowance, and the escalation leader's answer gives the thread a fresh budget and
     /// allowance once per level ([`Escalator::arrived`]). The leader's reply that does so on a thread the ant got
     /// stuck on in a channel is answered in that channel, with the fresh budget: the thread's turns come from its posts.
+    /// The message takes the tool rules its thread is narrowed to ([`Inbox::narrow`]).
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
@@ -1483,12 +1484,32 @@ impl Inbox<'_> {
             return Ok(false);
         }
         let renewed = self.escalator.arrived(&mut incoming.envelope, human).await?;
+        self.narrow(incoming, human).await?;
         // Not a message from ask_agent or send_message: an ask_agent call waits for the answer in the leader's inbox.
         if renewed && incoming.post.is_none() && incoming.envelope.in_reply_to.is_some() {
             let pending = self.escalator.ledger().pending(&incoming.envelope.thread_id).await?;
             incoming.resume = pending.and_then(|p| p.channel);
         }
         Ok(true)
+    }
+
+    /// Set the tool rules of the message, and of its post, to those its thread is narrowed to: a human's message lifts
+    /// the narrowing ([`Ledger::reset`]) and has none, a thread keeps the first rules a message brought it, and a
+    /// webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own.
+    async fn narrow(&self, incoming: &mut Incoming, human: bool) -> Result<()> {
+        let envelope = &mut incoming.envelope;
+        let carried = envelope.allow.take();
+        if !human {
+            let carried = match carried {
+                None if envelope.webhook => Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()),
+                carried => carried,
+            };
+            envelope.allow = self.ledger.narrowed(&envelope.thread_id, carried).await?;
+        }
+        if let Some(posted) = &mut incoming.post {
+            posted.post.allow.clone_from(&envelope.allow);
+        }
+        Ok(())
     }
 
     /// Ack the message at stream sequence `seq`, which needs no reply.
@@ -1554,6 +1575,7 @@ impl Inbox<'_> {
         tracing::info!(%thread, from = %envelope.from, cut_off, "prompting");
         status::state(self.client, self.ant, thread, State::Working);
 
+        let _narrowed = self.pool.launch().policy().narrow(thread, envelope.allow.as_deref());
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
@@ -4349,6 +4371,7 @@ mod tests {
             let reply = next_envelope(&mut to_human).await;
             assert_eq!((&reply.from, &reply.to, reply.in_reply_to), (&bus.dev, &human, Some(owned.id)));
             assert_eq!(reply.turn_budget, owned.turn_budget, "an answer to a human is free");
+            assert_eq!(reply.allow, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()), "the thread is narrowed");
             bus.until_acked(seq).await;
             ctrl_c.add_permits(1);
         };
@@ -4360,6 +4383,8 @@ mod tests {
         let quiet = Duration::from_millis(200);
         assert!(timeout(quiet, to_human.next()).await.is_err(), "the unowned answer goes nowhere");
         assert!(timeout(quiet, to_hook.next()).await.is_err(), "nothing goes to the webhook's inbox");
+        let kept = bus.ledger.narrowed(&unowned.thread_id, None).await.unwrap();
+        assert_eq!(kept, Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()), "until a human messages the ant on it");
     }
 
     #[tokio::test]
