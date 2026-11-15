@@ -1084,10 +1084,17 @@ fn away_of<'a>(from: &UserId, escalation: &'a Escalation) -> Option<&'a Away> {
 /// The message relaying to `human`'s stand-in the notice `notice`, held back from `human` by `why`, if it is to be
 /// relayed: a pending tool request that waits for `human`, or an escalation an ant sent it, but not the notice of an
 /// expired request nor one relayed already, and not what a muted thread holds back. The stand-in is the one the ant
-/// named on it, else `human`'s own; it must be a human (`is_human`), as an ant would take the relay for a human's
-/// message, and not `human`. The relay goes on the escalation's or request's thread, from `human` to the stand-in,
-/// carrying the escalation (a request's as [`Escalation::of_request`] makes it) marked [`Escalation::away`].
-fn relayed(human: &Human, notice: &Notice, why: &str, is_human: impl Fn(&UserId) -> bool) -> Option<Envelope> {
+/// named on it, else `human`'s own; it must be a human (`is_human`), as another ant would take the relay for a
+/// human's message, and not `human`. When `human` set no stand-in of its own, `assistant`, the ant its grant designates,
+/// stands in rather than the ant's. The relay goes on the escalation's or request's thread, from `human` to the
+/// stand-in, carrying the escalation (a request's as [`Escalation::of_request`] makes it) marked [`Escalation::away`].
+fn relayed(
+    human: &Human,
+    notice: &Notice,
+    why: &str,
+    assistant: Option<&UserId>,
+    is_human: impl Fn(&UserId) -> bool,
+) -> Option<Envelope> {
     if why == "muted thread" {
         return None;
     }
@@ -1104,12 +1111,23 @@ fn relayed(human: &Human, notice: &Notice, why: &str, is_human: impl Fn(&UserId)
     };
     let owner = &human.name;
     let valid = |user: &&UserId| *user != owner && is_human(user);
-    let stand_in = named.filter(valid).or(human.stand_in.as_ref().filter(valid))?;
-    let text = format!(
-        "[ants] Relayed to {stand_in}, {owner}'s stand-in, while {owner} is away ({why}); an answer acts for \
-         {owner}, who is told of it.\n\n{}\n\n{}",
-        notice.title, notice.text
-    );
+    let own = human.stand_in.as_ref().filter(valid);
+    let assistant = assistant.filter(|ant| *ant != owner && !is_human(ant));
+    let (stand_in, text) = match (own, assistant) {
+        (None, Some(assistant)) => (
+            assistant,
+            format!("[ants] Relayed to {assistant}, the assistant of {owner}, while {owner} is away ({why})."),
+        ),
+        _ => {
+            let stand_in = named.filter(valid).or(own)?;
+            let text = format!(
+                "[ants] Relayed to {stand_in}, {owner}'s stand-in, while {owner} is away ({why}); an answer acts for \
+                 {owner}, who is told of it."
+            );
+            (stand_in, text)
+        }
+    };
+    let text = format!("{text}\n\n{}\n\n{}", notice.title, notice.text);
     let escalation = Escalation { away: Some(Away { human: owner.clone(), ant: ant.clone() }), ..escalation };
     let thread = escalation.thread_id.clone();
     Some(Envelope::on_thread(thread, owner.clone(), stand_in.clone(), text).with_escalation(Some(escalation)))
@@ -1445,7 +1463,7 @@ pub async fn run(
     let held = bucket.ok().filter(|_| human.config.digest);
     let prefs = DirectKv::new(&js, js_domain.as_ref(), NOTIFY_BUCKET).await?;
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
-    let humans = Registry::new(name.clone());
+    let humans = Registry::new(name.clone()).verifying_grants(ants_daemon::humans::account(creds));
     let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
     let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, humans, _watching, held });
     let bus = human.bus.get().expect("just set");
@@ -1579,7 +1597,8 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
 /// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed`]) when `human` is away: no device of
 /// its sinks follows what the notice is about. The relay is stored once, whichever process of `human` relays it.
 async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u64) {
-    let Some(relay) = relayed(human, notice, why, |user| bus.humans.is_human(user)) else { return };
+    let assistant = bus.humans.assistant(&human.name);
+    let Some(relay) = relayed(human, notice, why, assistant.as_ref(), |user| bus.humans.is_human(user)) else { return };
     let what = if matches!(notice.about, About::Approval { .. }) { Following::Approvals } else { Following::Inbox };
     let reading = bus.present.following(&human.name, human.devices(), what).await;
     if !reading.is_empty() {
