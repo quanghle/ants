@@ -13,7 +13,7 @@ use super::command::{Bar, Tone};
 use super::exec::Job;
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, thread, timeline, tree, work};
+use super::{cards, channel, dm, home, images, nav, people, search, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 
@@ -118,6 +118,8 @@ pub struct Data {
     pub delegations: tree::Delegations,
     /// The threads' done states, TL;DRs and spend.
     pub cards: cards::Cards,
+    /// The image attachments drawn in the thread view.
+    pub images: images::Images,
 }
 
 impl Data {
@@ -238,6 +240,7 @@ impl Model {
             people: people::People::default(),
             delegations: tree::Delegations::default(),
             cards: cards::Cards::default(),
+            images: images::Images::default(),
         };
         let nav = nav::Item::Home;
         Self {

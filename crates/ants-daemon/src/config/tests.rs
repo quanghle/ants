@@ -657,6 +657,9 @@ fn the_cli_section_overrides_the_top_level_server() {
     assert_eq!(relative.auto_archive, None, "never by default");
     assert_eq!(cli("[cli]\nauto_archive = \"14d\"").unwrap().auto_archive, Some(Duration::from_hours(14 * 24)));
     assert_eq!(cli("[cli]\nauto_archive = \"0\"").unwrap().auto_archive, None);
+    assert!(!relative.inline_images, "off by default");
+    assert!(cli("[cli]\ninline_images = true").unwrap().inline_images);
+    assert!(parse_all("[cli]\ninline_images = true").is_ok(), "the daemon accepts it");
 
     assert_eq!(relative.summaries, SummaryConfig::default(), "on demand, by the messenger");
     let ahead = cli("[cli]\nsummaries = \"ahead\"\nsummary_daily_tokens = 50000\nsummary_ant = \"scribe\"").unwrap();

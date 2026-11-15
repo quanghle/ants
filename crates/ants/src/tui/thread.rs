@@ -6,10 +6,11 @@
 //! those stored on their timelines ([`timeline::Calls::stored`]), each placed before the first message stored after
 //! it started. Messages between a human and an ant, and posts, are the top level; a message from one ant to another
 //! nests a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver
-//! nests the sender already (a reply). Messages, posts and notes render as markdown. Opened from a search, the view
-//! selects the message found and holds it at its top until moved.
+//! nests the sender already (a reply). Messages, posts and notes render as markdown, their attachments listed under
+//! them, images drawn under their lines when on ([`images`]). Opened from a search, the view selects the message found
+//! and holds it at its top until moved.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -26,7 +27,7 @@ use super::exec::Job;
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::timeline::Call;
-use super::{attach, markdown, work};
+use super::{attach, images, markdown, work};
 use crate::attachments::Listed;
 use crate::live::History;
 use crate::thread::{Entry, Kind};
@@ -205,7 +206,8 @@ impl Page {
             lines.push(Line::styled("reading the thread…", frame::dim()));
         }
         let marked = self.attached().map(|e| (e.seq, self.mark.at(e.seq, e.attachments.len())));
-        let shown = Shown { data, now, busy: data.live.progress.contains_key(thread), width, marked };
+        let busy = data.live.progress.contains_key(thread);
+        let shown = Shown { data, now, busy, width, marked, placed: RefCell::default() };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let rows = rows(&self.history.entries, calls, |u| data.is_human(u));
         let held = self.held();
@@ -243,10 +245,11 @@ impl Page {
             }
         };
         self.top.set(top);
-        let paragraph = Paragraph::new(lines)
-            .block(frame::block(title, focused))
-            .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
+        let block = frame::block(title, focused);
+        let inner = block.inner(area);
+        let paragraph = Paragraph::new(lines).block(block).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
+        images::draw(frame, &data.images, &shown.placed.borrow(), top, inner);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));
             frame.render_widget(Paragraph::new(lines).block(frame::block(String::new(), false)), panel);
@@ -411,6 +414,8 @@ struct Shown<'a> {
     width: usize,
     /// The message whose attachments `o` opens, by its sequence, and the one marked among them.
     marked: Option<(u64, usize)>,
+    /// Where the images drawn go among the lines.
+    placed: RefCell<Vec<images::Placed>>,
 }
 
 impl Shown<'_> {
@@ -436,7 +441,7 @@ impl Shown<'_> {
                 }
                 lines.push(first);
                 lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
-                lines.extend(attach::lines(&e.attachments, self.marked_of(e), &under));
+                self.attachments(lines, e, &under);
             }
         }
     }
@@ -478,10 +483,20 @@ impl Shown<'_> {
         }
         lines.push(Line::from(head));
         lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
-        lines.extend(attach::lines(&e.attachments, self.marked_of(e), "  "));
+        self.attachments(lines, e, "  ");
         let reactions = crate::inbox::render_reactions(&e.reactions, "  ");
         for line in reactions.lines() {
             push(lines, line, "  ", frame::dim(), self.width);
+        }
+    }
+
+    /// The lines of `e`'s attachments, begun with `indent`, each image's drawn under its line.
+    fn attachments(&self, lines: &mut Vec<Line<'static>>, e: &Entry, indent: &str) {
+        let shown = attach::lines(&e.attachments, self.marked_of(e), indent);
+        let mut placed = self.placed.borrow_mut();
+        for (line, listed) in shown.into_iter().zip(&e.attachments) {
+            lines.push(line);
+            images::place(lines, &mut placed, &self.data.images, listed, indent.chars().count(), self.width);
         }
     }
 
@@ -866,5 +881,40 @@ mod tests {
         page.key(Key::Home, &m.data, at(3));
         page.key(Key::Down, &m.data, at(3));
         assert_eq!(page.key(Key::Char('o'), &m.data, at(3)), None, "the selected message has no files");
+    }
+
+    #[test]
+    fn an_image_encoded_draws_under_its_line_and_the_others_keep_theirs() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut sent = message(1, &thread, "dev-a", "alice", "the screenshot");
+        let png = crate::tui::images::tests::png(40, 40);
+        let shot = ants_daemon::files::reference("shot.png", "image/png", &png).unwrap();
+        let log = ants_daemon::files::reference("build.log", "text/plain", b"ok").unwrap();
+        let envelope =
+            ants_proto::Envelope::new(crate::live::tests::user("dev-a"), crate::live::tests::user("alice"), "x");
+        sent.attachments = crate::attachments::listed(&[shot, log], |id| envelope.attachment_handle(id));
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(vec![sent.clone()])).unwrap();
+        let before = screen(&page, &m.data, 80, at(3));
+
+        m.data.images = images::Images::new(true);
+        assert_eq!(images::wanted(&m), Vec::new(), "only for the open thread");
+        let image = crate::tui::images::tests::halfblocks(&png);
+        m.data.images.insert(sent.attachments[0].handle.clone(), Some(image));
+        let shown = screen(&page, &m.data, 80, at(3));
+        let rows: Vec<&str> = shown.lines().collect();
+        let line = rows.iter().position(|r| r.contains("shot.png")).unwrap();
+        assert!(rows[line + 3].contains("build.log"), "two rows for the image:\n{shown}");
+        assert_eq!(before.lines().filter(|r| r.contains("📎")).count(), 2);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| page.draw(f, f.area(), &m.data, at(3), true)).unwrap();
+        let red = ratatui::style::Color::Rgb(200, 40, 40);
+        let drawn: Vec<(u16, u16)> = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .filter(|&(x, y)| terminal.backend().buffer()[(x, y)].bg == red)
+            .collect();
+        let y = u16::try_from(line).unwrap() + 1;
+        assert_eq!(drawn, [(3, y), (4, y), (5, y), (6, y), (3, y + 1), (4, y + 1), (5, y + 1), (6, y + 1)]);
     }
 }
