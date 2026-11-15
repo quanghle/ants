@@ -479,13 +479,16 @@ pub fn reactions_config() -> stream::Config {
 /// handle ([`ants_proto::AttachmentHandle::chunk_subject`]), each stored once as its writer expects none before it,
 /// and dropped with the stream's messages. It denies deletes and purges, which would remove others' attachments as
 /// well, and serves direct gets, as ants read by subject without consumers. No object store metadata is kept: its
-/// subjects, named after base64 names, could not be confined to their writers.
+/// subjects, named after base64 names, could not be confined to their writers. Like the `ANTS` stream, it drops a copy
+/// of a chunk a leaf's outbox kept ([`crate::files::put`]) as a duplicate of the chunk stored directly within a day,
+/// rather than refuse it, which would stall the source it came from.
 pub fn files_config() -> stream::Config {
     stream::Config {
         name: FILES_STREAM.to_owned(),
         description: Some("Attachments of messages, each chunk under its sender's subject".into()),
         subjects: vec![format!("$O.{FILES_BUCKET}.C.>")],
         max_age: RETENTION,
+        duplicate_window: DUPLICATE_WINDOW,
         max_message_size: (ATTACHMENT_CHUNK + ATTACHMENT_HEADROOM) as i32,
         storage: stream::StorageType::File,
         num_replicas: 1,

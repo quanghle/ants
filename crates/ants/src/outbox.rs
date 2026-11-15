@@ -13,7 +13,12 @@
 //! sourcing from the intake, per ant, only the keys the ant may write itself ([`Machine::admitted_links`]); so do the
 //! owners its humans record for the threads they message ants on ([`OWNERS_BUCKET`]), the owners bucket sourcing them
 //! from the intake only when a human runs on the machine ([`Machine::admitted_owners`]). The owners bucket keeps every
-//! record it sources, a thread's first staying its owner: a record it refused would stall its source.
+//! record it sources, a thread's first staying its owner: a record it refused would stall its source. The chunks of
+//! the attachments of messages kept in the outbox, kept there ahead of them, reach the attachments' store
+//! ([`FILES_STREAM`]) likewise, the store sourcing from the intake, per ant, only the chunks under its own handles, and
+//! when humans run on the machine, the chunks of every sender for the first of them by name
+//! ([`Machine::admitted_files`]). Each chunk keeps its `Nats-Msg-Id`, so the store drops a buffered copy of a chunk it
+//! took directly within its duplicate window, as the hub's stream does, rather than refuse it and stall its source.
 //!
 //! A machine's credentials thus never decide what the hub's stream stores: only a human, who sets up both hops here,
 //! does. Each message keeps its `Nats-Msg-Id`, so the hub's stream drops a buffered copy of a message it already took
@@ -24,7 +29,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET, Role, STREAM, UserId, subject,
+    FILES_STREAM, INTAKE_STREAM, LINKS_BUCKET, Machine, OUTBOX_STREAM, OUTBOX_SUBJECTS, OWNERS_BUCKET, Role, STREAM,
+    UserId, subject,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::ErrorCode;
@@ -54,8 +60,9 @@ pub async fn connect(url: &str, creds: Option<&Path>, human: &UserId, machine: &
 /// Set up store and forward for `machine`, on which `members` run, ants and humans each in its role
 /// ([`crate::auth::members`]): create or update the machine's outbox on its leaf node (which must be connected),
 /// through `leaf` from [`connect`], and have the hub's stream take from it what those members may send, the links
-/// bucket the links its ants pass on, and the owners bucket the owners its humans record, once `ants init` created
-/// them. Admissions of members no longer listed are dropped; those already in place are kept as they are.
+/// bucket the links its ants pass on, the owners bucket the owners its humans record, and the attachments' store the
+/// chunks of the attachments they send, once `ants init` created them. Admissions of members no longer listed are
+/// dropped; those already in place are kept as they are.
 pub async fn admit(
     leaf: &async_nats::Client,
     hub: &Context,
@@ -87,6 +94,11 @@ pub async fn admit(
         admit_into(&mut config, machine, owner_admissions(machine, members, start));
         hub.update_stream(&config).await.context("admitting the machine's outbox into the owners bucket")?;
     }
+    if let Some(mut config) = stream_config(hub, FILES_STREAM).await? {
+        let wanted = file_admissions(machine, members, start).into_iter().map(|(_, source)| source).collect();
+        admit_into(&mut config, machine, wanted);
+        hub.update_stream(&config).await.context("admitting the machine's outbox into the attachments' store")?;
+    }
 
     let mut intake = intake_config(hub).await?;
     let sources = intake.sources.get_or_insert_default();
@@ -97,8 +109,8 @@ pub async fn admit(
     Ok(())
 }
 
-/// Admit `ant`, new to `machine`, into the hub's stream from the machine's outbox, and into the links bucket once
-/// `ants init` created it, as [`admit`] would with the ant listed too, leaving the other admissions as they are; for
+/// Admit `ant`, new to `machine`, into the hub's stream from the machine's outbox, and into the links bucket and the
+/// attachments' store once `ants init` created them, as [`admit`] would with the ant listed too, leaving the other admissions as they are; for
 /// `ants enroll approve`, which connects through `hub` with [`Permissions::for_enroll_approver`]. Returns false,
 /// changing nothing, when the hub's intake does not source the machine's outbox (`ants leaf outbox` never ran for it).
 ///
@@ -129,6 +141,17 @@ pub async fn admit_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result
         && add_source(config.sources.get_or_insert_default(), link_source(machine, ant, start))
     {
         hub.update_stream(&config).await.context("admitting the ant into the links bucket")?;
+    }
+    if let Some(mut config) = stream_config(hub, FILES_STREAM).await? {
+        // A human's admission may take the chunks of every sender already, which the ant's may not overlap.
+        let every_sender = machine.admitted_files(&UserId::human(), Role::Human).0;
+        let sources = config.sources.get_or_insert_default();
+        let taken = sources
+            .iter()
+            .any(|s| from_machine(s, machine) && s.subject_transforms.iter().any(|t| t.source == every_sender));
+        if !taken && add_source(sources, file_source(machine, ant, Role::Ant, start)) {
+            hub.update_stream(&config).await.context("admitting the ant into the attachments' store")?;
+        }
     }
     Ok(true)
 }
@@ -180,26 +203,36 @@ pub enum Hearing {
 #[derive(Debug, PartialEq)]
 pub struct Sourcing {
     pub hearing: Hearing,
-    /// The members the hub's stream takes nothing from the outbox for.
+    /// The members the hub's stream, or the attachments' store, takes nothing from the outbox for.
     pub unadmitted: Vec<UserId>,
 }
 
 /// Whether the hub's intake sources the outbox of `machine` and has heard from it, and which of `members`, ants and
-/// humans each in its role, the hub's stream takes nothing from it for, as [`admit`] would set it up. Reads the intake's
-/// and the stream's info, which only a human's credentials get; changes nothing.
+/// humans each in its role, the hub's stream, or the attachments' store once `ants init` created it, takes nothing from
+/// it for, as [`admit`] would set them up. Reads the intake's, the stream's and the store's info, which only a human's
+/// credentials get; changes nothing.
 pub async fn sourcing(hub: &Context, machine: &Machine, members: &[(UserId, Role)]) -> Result<Sourcing> {
     let info: serde_json::Value =
         hub.request(format!("STREAM.INFO.{INTAKE_STREAM}"), &()).await.context("looking up the hub's intake")?;
     let hearing = hearing(&info, machine);
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let sources = ants.info().await?.config.sources.clone().unwrap_or_default();
-    let unadmitted = admitted_members(machine, members, 0)
-        .into_iter()
-        .filter(|(_, wanted)| {
-            !sources.iter().any(|s| s.name == wanted.name && s.subject_transforms == wanted.subject_transforms)
-        })
-        .map(|(user, _)| user)
-        .collect();
+    let files = stream_config(hub, FILES_STREAM).await?;
+    let file_sources = files.as_ref().and_then(|config| config.sources.clone()).unwrap_or_default();
+    let missing = |sources: &[Source], (user, wanted): (UserId, Source)| {
+        let there = sources.iter().any(|s| s.name == wanted.name && s.subject_transforms == wanted.subject_transforms);
+        (!there).then_some(user)
+    };
+    let mut unadmitted: Vec<UserId> =
+        admitted_members(machine, members, 0).into_iter().filter_map(|m| missing(&sources, m)).collect();
+    if files.is_some() {
+        for user in file_admissions(machine, members, 0).into_iter().filter_map(|m| missing(&file_sources, m)) {
+            if !unadmitted.contains(&user) {
+                unadmitted.push(user);
+            }
+        }
+        unadmitted.sort();
+    }
     Ok(Sourcing { hearing, unadmitted })
 }
 
@@ -237,6 +270,10 @@ pub async fn remove(hub: &Context, machine: &Machine) -> Result<()> {
                 .with_context(|| format!("dropping the machine from the {bucket} bucket"))?;
         }
     }
+    if let Some(mut config) = stream_config(hub, FILES_STREAM).await? {
+        admit_into(&mut config, machine, Vec::new());
+        hub.update_stream(&config).await.context("dropping the machine from the attachments' store")?;
+    }
     let mut intake = intake_config(hub).await?;
     if let Some(sources) = intake.sources.as_mut() {
         sources.retain(|s| !outbox_of(s, machine));
@@ -259,10 +296,15 @@ fn admit_into(config: &mut stream::Config, machine: &Machine, wanted: Vec<Source
 
 /// The configuration of the stream of `bucket`, or `None` while `ants init` has not created it.
 async fn bucket_config(hub: &Context, bucket: &str) -> Result<Option<stream::Config>> {
-    match hub.get_stream(format!("KV_{bucket}")).await {
+    stream_config(hub, &format!("KV_{bucket}")).await
+}
+
+/// The configuration of stream `name`, or `None` while `ants init` has not created it.
+async fn stream_config(hub: &Context, name: &str) -> Result<Option<stream::Config>> {
+    match hub.get_stream(name).await {
         Ok(mut stream) => Ok(Some(stream.info().await?.config.clone())),
         Err(e) if not_found(&e) => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("looking up the {bucket} bucket")),
+        Err(e) => Err(e).with_context(|| format!("looking up stream {name}")),
     }
 }
 
@@ -376,6 +418,29 @@ fn owner_admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -
         subject_transforms: vec![SubjectTransform { source, destination }],
         ..Default::default()
     }]
+}
+
+/// The attachments' store's sources for `machine`, each with its member: when humans run on it, one taking the chunks
+/// of every sender for the first of them by name, as a human writes under any sender and the filters of one stream's
+/// sources may not overlap; else one per ant, taking the chunks under its own handles.
+fn file_admissions(machine: &Machine, members: &[(UserId, Role)], start: u64) -> Vec<(UserId, Source)> {
+    let mut members: Vec<&(UserId, Role)> = members.iter().collect();
+    members.sort_by(|(a, _), (b, _)| a.cmp(b));
+    members.dedup_by(|(a, _), (b, _)| a == b);
+    if let Some(human) = members.iter().find(|(_, role)| role.is_human()) {
+        members = vec![*human];
+    }
+    members.into_iter().map(|(user, role)| (user.clone(), file_source(machine, user, *role, start))).collect()
+}
+
+fn file_source(machine: &Machine, user: &UserId, role: Role, start: u64) -> Source {
+    let (source, destination) = machine.admitted_files(user, role);
+    Source {
+        name: INTAKE_STREAM.to_owned(),
+        start_sequence: Some(start),
+        subject_transforms: vec![SubjectTransform { source, destination }],
+        ..Default::default()
+    }
 }
 
 fn from_machine(source: &Source, machine: &Machine) -> bool {

@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, JsDomain, LINKS_BUCKET, ROSTER_BUCKET, Role,
-    SESSIONS_BUCKET, STREAM, UserId, inbox_prefix, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, Envelope, FILES_STREAM, JsDomain, LINKS_BUCKET, ROSTER_BUCKET,
+    Role, SESSIONS_BUCKET, STREAM, UserId, inbox_prefix, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::consumer::{self, PullConsumer, pull};
@@ -589,16 +589,18 @@ pub async fn uncaptured(js: &jetstream::Context) -> bool {
 /// How long [`uncaptured`] waits for JetStream: a leaf node whose uplink is down answers at once with no responders.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// What to do when no stream captures `subject` while the hub is in reach ([`uncaptured`]).
+/// What to do when no stream captures `subject` while the hub is in reach ([`uncaptured`]): the stream missing is the
+/// attachments' store for a chunk of an attachment, else the `ANTS` stream.
 fn uncaptured_hint(subject: &str) -> String {
+    let stream = if subject.starts_with("$O.") { FILES_STREAM } else { STREAM };
     format!(
-        "the hub's JetStream answers, but no stream captures {subject}: its {STREAM} stream is missing; run `ants init` \
+        "the hub's JetStream answers, but no stream captures {subject}: its {stream} stream is missing; run `ants init` \
          with a human's credentials to create it"
     )
 }
 
 /// `e`, the error of a publish to `subject`, with [`uncaptured_hint`] when `uncaptured`.
-fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
+pub(crate) fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
     let e = anyhow::Error::new(e);
     if uncaptured { e.context(uncaptured_hint(subject)) } else { e }
 }
@@ -621,7 +623,7 @@ fn subject_kind(subject: &str) -> &str {
 
 /// Warn that the hub's stream does not capture `subject` ([`uncaptured_hint`]), once per process for each kind of
 /// subject ([`subject_kind`]), then only at debug level. True when it warned.
-fn warn_uncaptured(subject: &str, done: &str) -> bool {
+pub(crate) fn warn_uncaptured(subject: &str, done: &str) -> bool {
     let first = WARNED_UNCAPTURED.locked().insert(subject_kind(subject).to_owned());
     if first {
         tracing::warn!(%subject, "{}; {done}", uncaptured_hint(subject));
@@ -663,7 +665,7 @@ async fn publish_to_hub(
 }
 
 /// Whether publishing failed because no stream answered (the leaf node's uplink is down) or none answered in time.
-fn out_of_reach(e: &jetstream::context::PublishError) -> bool {
+pub(crate) fn out_of_reach(e: &jetstream::context::PublishError) -> bool {
     matches!(e.kind(), PublishErrorKind::StreamNotFound | PublishErrorKind::TimedOut)
 }
 

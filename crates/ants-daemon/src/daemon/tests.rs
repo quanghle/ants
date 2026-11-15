@@ -2607,7 +2607,9 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     let handle = |id| to.attachment_handle(id);
     let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
     let log_file = attach(&bus, handle, "build.log", "text/plain", b"error: E0308").await;
-    let gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    // Made long ago, so the prompt does not wait for its chunks to come from a leaf's outbox.
+    let mut gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    gone.id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_700_000_000, 0));
     message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
     bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
 
