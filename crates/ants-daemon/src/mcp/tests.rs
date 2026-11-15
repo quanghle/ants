@@ -1398,6 +1398,39 @@ async fn attach_to_reply_names_the_files_the_turns_answer_carries() {
 }
 
 #[tokio::test]
+async fn attach_redacts_secrets_in_text_files_only() {
+    let home = home("attach-redact");
+    let (mcp, mut sent) = start(&home).await;
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.clone());
+    mcp.with_redactor(Arc::new(crate::redact::Redactor::default()));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let token = format!("ghp_{}", "a1B2".repeat(9));
+    std::fs::write(work.join(".env"), format!("GITHUB_TOKEN={token}\nLOG=info\n")).unwrap();
+    let mut binary = vec![0xff, 0xfe];
+    binary.extend_from_slice(token.as_bytes());
+    std::fs::write(work.join("blob.bin"), &binary).unwrap();
+    std::fs::write(work.join("plain.txt"), "nothing secret").unwrap();
+    let current = from_human();
+    let _turn = mcp.begin(&current);
+    let client = client_in(&mcp, &current.thread_id, &work).await;
+
+    let args = serde_json::json!({"to": "dev-b", "text": "see", "attach": [".env", "blob.bin", "plain.txt"]});
+    let (ok, text) = call(&client, "send_message", args).await;
+    assert!(ok, "{text}");
+    let out = sent.try_recv().unwrap();
+    let held: Vec<_> = out.attachments.iter().map(|a| stored.locked()[&out.attachment_handle(a.id)].clone()).collect();
+    let env = b"GITHUB_TOKEN=[redacted]\nLOG=info\n";
+    assert_eq!(held[0].1, env);
+    let expected = crate::files::reference(".env", "application/octet-stream", env).unwrap();
+    let reference = |a: &Attachment| (a.size, a.sha256.clone());
+    assert_eq!(reference(&held[0].0), reference(&expected), "the reference is of the bytes stored");
+    assert_eq!(held[1].1, binary, "not text: left alone");
+    assert_eq!(held[2].1, b"nothing secret");
+}
+
+#[tokio::test]
 async fn read_attachment_returns_images_and_text_and_saves_other_files() {
     let home = home("read-attachment");
     let (mcp, _sent) = start(&home).await;

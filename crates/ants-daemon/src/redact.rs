@@ -1,4 +1,5 @@
-//! Redacting secrets from what leaves the daemon: replies, streamed status, tool requests and messages the ant sends.
+//! Redacting secrets from what leaves the daemon: replies, streamed status, tool requests, messages the ant sends and
+//! the text files it attaches.
 //!
 //! A [`Redactor`] replaces each secret it finds with [`MARK`]:
 //!

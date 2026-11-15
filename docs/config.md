@@ -420,12 +420,12 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 
 ### Redaction
 
-Before publishing tool requests (redacted before the 2000-byte input cut), status streams (buffered to whitespace / PEM boundaries so secrets never split across frames), replies, escalations, thread notes, MCP messages/posts, and failing-harness errors, the daemon replaces secrets with `[redacted]`:
+Before publishing tool requests (redacted before the 2000-byte input cut), status streams (buffered to whitespace / PEM boundaries so secrets never split across frames), replies, escalations, thread notes, MCP messages/posts, files MCP tools attach (`attach`, `attach_to_reply`) whose bytes are UTF-8 text whatever their type (a `.env`, a config dump; the reference records the redacted size and SHA-256, and other files are stored as they are), and failing-harness errors, the daemon replaces secrets with `[redacted]`:
 
 - **Environment values** (≥ 8 chars, not starting with `/`, `~`, `.` or a drive letter): values from the ant's `env`, harness `env`, and daemon env whose variable name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `AUTH` or `CREDENTIALS`, plus token-like values (alphanumeric, no spaces/slashes/file extensions) in ant/harness `env`.
 - **Patterns:** PEM private keys, `Bearer`/`Basic` headers, GitHub/GitLab/Slack/OpenAI/Anthropic/AWS/Google/Stripe/npm/Hugging Face/Telegram tokens, Slack/Discord webhook URLs, NKey seeds, JWTs, URL passwords (`scheme://user:pass@host`), and secret-named assignments containing a digit (`API_KEY=...`, `"password": "..."`, `--token ...`).
 
-Top-level `redact = false` disables daemon redaction. `ants webhook serve` always redacts outbound notifications (patterns + secret-named process env vars). Local logs are not redacted.
+Top-level `redact = false` disables daemon redaction. Files a human attaches with the CLI are never redacted. `ants webhook serve` always redacts outbound notifications (patterns + secret-named process env vars). Local logs are not redacted.
 
 ## Schedules
 

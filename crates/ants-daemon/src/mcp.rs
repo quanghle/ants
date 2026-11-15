@@ -64,6 +64,7 @@ use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::notes::NotesStore;
+use crate::redact::Redactor;
 use crate::sync::MutexExt as _;
 use crate::{bus, ipc, links, reactions, roster};
 
@@ -304,6 +305,7 @@ impl Mcp {
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
             files: OnceLock::new(),
+            redactor: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -355,6 +357,11 @@ impl Mcp {
     /// `read_attachment` are refused.
     pub fn with_files(&self, files: FileAccess, workdir: PathBuf) {
         let _ = self.hub.files.set((files, workdir));
+    }
+
+    /// Redact with `redactor` the files the tools attach whose bytes are UTF-8 text, before they are stored.
+    pub fn with_redactor(&self, redactor: Arc<Redactor>) {
+        let _ = self.hub.redactor.set(redactor);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -537,6 +544,8 @@ struct Hub {
     reaction_asker: OnceLock<ReactionAsker>,
     /// The attachments' store and the ant's workdir.
     files: OnceLock<(FileAccess, PathBuf)>,
+    /// What redacts the text files the tools attach; none redacts nothing.
+    redactor: OnceLock<Arc<Redactor>>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -578,7 +587,9 @@ impl Hub {
             return Ok(Vec::new());
         }
         let (_, dir) = self.files(thread)?;
-        attach::load(&dir, paths).await
+        let off = Redactor::off();
+        let redactor = self.redactor.get().map_or(&off, |r| r.as_ref());
+        attach::load(&dir, paths, redactor).await
     }
 
     /// Store `loaded` under the handles `handle_of` gives, returning the references for the message to carry.
@@ -1354,7 +1365,8 @@ struct SendMessage {
     /// Thread to send on: omitted for the current one, `new` for a fresh one, or a thread id.
     #[serde(default)]
     thread: Option<String>,
-    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
     #[serde(default)]
     attach: Vec<String>,
 }
@@ -1368,7 +1380,8 @@ struct AskAnt {
     /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
     timeout: Option<String>,
-    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
     #[serde(default)]
     attach: Vec<String>,
 }
@@ -1427,7 +1440,8 @@ struct DecideApproval {
 struct PostNotes {
     /// The post.
     text: String,
-    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
     #[serde(default)]
     attach: Vec<String>,
 }
@@ -1438,7 +1452,8 @@ struct PostChannel {
     channel: String,
     /// The post; an @mention in it wakes that member of the channel, or notifies it if a human.
     text: String,
-    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
     #[serde(default)]
     attach: Vec<String>,
 }
@@ -1475,15 +1490,16 @@ struct Route {
     /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
     timeout: Option<String>,
-    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
     #[serde(default)]
     attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AttachToReply {
-    /// Files the final answer carries: paths in the working directory, at most 8 files of up to 8 MiB each; empty
-    /// for none.
+    /// Files the final answer carries: paths in the working directory, at most 8 files of up to 8 MiB each, secrets in
+    /// text files redacted; empty for none.
     #[serde(default)]
     attach: Vec<String>,
 }
@@ -1890,8 +1906,8 @@ impl Tools {
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
         message. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
         message still goes and waits, and the result warns so, naming ants from the roster to message instead. \
-        `attach` lists files in the working directory to attach (at most 8 of up to 8 MiB each); one that cannot \
-        be attached fails the call with nothing sent.")]
+        `attach` lists files in the working directory to attach (at most 8 of up to 8 MiB each), secrets in text \
+        files replaced with [redacted]; one that cannot be attached fails the call with nothing sent.")]
     async fn send_message(
         &self,
         Parameters(args): Parameters<SendMessage>,
@@ -2238,8 +2254,9 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          asks the thread's owner a question with numbered options and returns at once; the answer arrives later as a \
          message, prefixed with an [ants] line naming the question and the option picked. send_message, \
          ask_ant, route, post_channel and post_notes attach files from the working directory (attach), and \
-         attach_to_reply attaches them to the turn's final answer; read_attachment reads a file attached to a message by the handle listed with it. Memory and task \
-         tools follow the ant's configured instructions."
+         attach_to_reply attaches them to the turn's final answer, secrets in text files replaced with [redacted]; \
+         read_attachment reads a file attached to a message by the handle listed with it. Memory and task tools \
+         follow the ant's configured instructions."
     );
     if manager {
         text.push_str(

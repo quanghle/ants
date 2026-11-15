@@ -1,7 +1,9 @@
 //! Files the ant attaches to what it sends with its MCP tools (`attach`), and the attachments it reads
 //! (`read_attachment`). Paths stay inside the directory the thread's session works in: the ant's workdir, or the
-//! thread's worktree.
+//! thread's worktree. A file whose bytes are UTF-8 text has its secrets redacted before it is stored, as the text of
+//! a message is.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,6 +13,8 @@ use ants_proto::{
 use anyhow::Result;
 use futures::future::BoxFuture;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+use crate::redact::Redactor;
 
 /// Most bytes of a text attachment `read_attachment` returns as text; a longer one is saved as a file.
 pub(super) const MAX_TEXT: usize = ATTACHMENT_CHUNK;
@@ -53,8 +57,9 @@ pub(super) struct Loaded {
 
 /// Read the files at `paths` to attach them, each relative to `dir` unless absolute: at most [`MAX_ATTACHMENTS`],
 /// each a regular file of at most [`MAX_ATTACHMENT_SIZE`] whose real path, symlinks and `..` resolved, is inside `dir`.
-/// Each is named by the base name of its path, with a media type guessed from its extension.
-pub(super) async fn load(dir: &Path, paths: &[String]) -> Result<Vec<Loaded>, String> {
+/// Each is named by the base name of its path, with a media type guessed from its extension. `redactor` redacts the
+/// secrets of those whose bytes are UTF-8 text, whatever their type: other bytes are left alone.
+pub(super) async fn load(dir: &Path, paths: &[String], redactor: &Redactor) -> Result<Vec<Loaded>, String> {
     if paths.len() > MAX_ATTACHMENTS {
         return Err(format!("attach takes at most {MAX_ATTACHMENTS} files, not {}", paths.len()));
     }
@@ -63,13 +68,14 @@ pub(super) async fn load(dir: &Path, paths: &[String]) -> Result<Vec<Loaded>, St
         .map_err(|e| format!("cannot resolve the working directory {}: {e}", dir.display()))?;
     let mut loaded = Vec::with_capacity(paths.len());
     for path in paths {
-        let file = load_one(&root, path.trim()).await.map_err(|why| format!("cannot attach {path:?}: {why}"))?;
+        let file =
+            load_one(&root, path.trim(), redactor).await.map_err(|why| format!("cannot attach {path:?}: {why}"))?;
         loaded.push(file);
     }
     Ok(loaded)
 }
 
-async fn load_one(root: &Path, path: &str) -> Result<Loaded, String> {
+async fn load_one(root: &Path, path: &str, redactor: &Redactor) -> Result<Loaded, String> {
     if path.is_empty() {
         return Err("the path is empty".to_owned());
     }
@@ -90,6 +96,14 @@ async fn load_one(root: &Path, path: &str) -> Result<Loaded, String> {
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     // At most one byte over, so a file growing meanwhile is caught without reading all of it.
     (&mut file).take(MAX_ATTACHMENT_SIZE + 1).read_to_end(&mut bytes).await.map_err(|e| e.to_string())?;
+    let redacted = std::str::from_utf8(&bytes).ok().and_then(|text| match redactor.redact(text) {
+        Cow::Owned(redacted) => Some(redacted),
+        Cow::Borrowed(_) => None,
+    });
+    if let Some(redacted) = redacted {
+        tracing::warn!(path, "redacted secrets in an attached file");
+        bytes = redacted.into_bytes();
+    }
     if bytes.len() as u64 > MAX_ATTACHMENT_SIZE {
         return Err(too_big(bytes.len() as u64));
     }
