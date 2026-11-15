@@ -103,12 +103,63 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
     }
     assert!("hub.x".parse::<JsDomain>().is_err());
 
-    // A human's leaf outbox rights name any domain already, so the hub's form takes no more room.
+    // A human's leaf outbox rights name any domain already, so the hub's form takes no more room; the families a
+    // human holds whole take one wildcard each, the plain forms staying as they are.
     let human = Permissions::for_user(&p("alice"), Role::Human);
-    let in_domain = human.with_js_domain(Some(&domain)).publish;
+    let in_domain = human.clone().with_js_domain(Some(&domain)).publish;
+    assert_eq!(in_domain[..human.publish.len()], human.publish);
     assert!(in_domain.iter().any(|s| s == "$JS.*.API.STREAM.INFO.ANTS_OUT"));
-    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_IN"));
-    assert!(!in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_OUT"));
+    for family in ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"] {
+        assert!(in_domain.iter().any(|s| *s == format!("$JS.hub.API.{family}")), "{family}");
+    }
+    for s in ["$JS.hub.API.STREAM.INFO.ANTS_IN", "$JS.hub.API.STREAM.INFO.ANTS_OUT", "$JS.hub.API.CONSUMER.CREATE.ANTS"]
+    {
+        assert!(!in_domain.iter().any(|have| have == s), "{s}");
+    }
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.MSG.GET.ANTS"), "other families stay listed");
+    // An ant lacks some of each family, and an assistant some stream lookups: theirs stay listed.
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant).with_js_domain(Some(&domain)).publish;
+    assert!(!ant.iter().any(|s| s.starts_with("$JS.hub.API.STREAM.") && s.ends_with(".*")));
+    assert!(!ant.iter().any(|s| s == "$JS.hub.API.CONSUMER.CREATE.*"));
+    let assistant = Permissions::for_assistant(&p("pa"), &p("alice")).with_js_domain(Some(&domain)).publish;
+    assert!(assistant.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS"));
+    assert!(!assistant.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.*"));
+}
+
+/// A family's domain wildcard grants nothing through a leaf node, whose uplink checks the domain form unmapped: no
+/// credentials hold a right of the family a human's lack.
+#[test]
+fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
+    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    let most = Permissions::for_user(&human, Role::Human).publish;
+    let families = ["STREAM.INFO.*", "STREAM.CREATE.*", "STREAM.UPDATE.*", "CONSUMER.CREATE.*"];
+    for (kind, rights) in [
+        ("ant", Permissions::for_user(&a, Role::Ant)),
+        ("assistant", Permissions::for_assistant(&pa, &human)),
+        ("leaf", Permissions::for_leaf(&m1, [(&a, Role::Ant), (&human, Role::Human)])),
+        ("host", Permissions::for_host(&m1)),
+        ("channel manager", Permissions::for_channel_manager()),
+        ("enrollment", Permissions::for_enrollment(&a)),
+        ("webhook", Permissions::for_webhook(&p("hook"), &[])),
+        ("observer", Permissions::for_observer(&p("watch"))),
+        ("enroll approver", Permissions::for_enroll_approver()),
+        ("reactions responder", Permissions::for_reactions_responder()),
+        ("device revoker", Permissions::for_device_revoker()),
+        ("bootstrap", Permissions::for_bootstrap()),
+        ("registrar", Permissions::for_registrar()),
+    ] {
+        for s in &rights.publish {
+            let plain = s.strip_prefix("$JS.API.").map(str::to_owned).or_else(|| {
+                let rest = s.strip_prefix("$JS.")?;
+                Some(rest.split_once(".API.")?.1.to_owned())
+            });
+            let Some(plain) = plain else { continue };
+            if families.iter().any(|family| covers(family, &plain)) {
+                assert!(most.contains(&format!("$JS.API.{plain}")), "{kind} holds {s}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -885,7 +936,7 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     let has = |s: &str| assistant.publish.iter().any(|have| have == s);
     let ant = Permissions::for_user(&p("pa"), Role::Ant);
     for s in &ant.publish {
-        assert!(has(s), "ant right {s} missing");
+        assert!(assistant.publish.iter().any(|have| covers(have, s)), "ant right {s} missing");
     }
     for s in &ant.subscribe {
         assert!(assistant.subscribe.contains(s), "ant subscription {s} missing");

@@ -2600,8 +2600,36 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     timeout(WAIT, task).await.unwrap().unwrap().expect("the host stops once its daemon drops it");
 }
 
-/// A human's credentials, the longest a client connects with, fit in its `CONNECT` line with room for the rest of it
-/// (signature, name and options, some 400 bytes): nats-server closes a connection whose line is longer than
+/// On a hub with a JetStream domain, the domain wildcards of a human's credentials (`$JS.hub.API.STREAM.CREATE.*`)
+/// reach no further than its plain rights: the hub checks the subject it maps them to as well.
+#[tokio::test]
+async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
+    let Some(hub) = Server::start_with("domain: hub", "") else { return };
+    let (domain, human) = ("hub".parse::<JsDomain>().unwrap(), UserId::human());
+    let creds = hub.creds_in(&human, Some(&domain));
+    let (client, mut js) = bus::connect(&hub.url, Some(&creds), Some(&domain), &human, "test").await.unwrap();
+    js.set_timeout(Duration::from_secs(1));
+    bus::ensure_stream(&js).await.unwrap();
+    let ask = |subject: &str, body: &str| {
+        let request = client.request(subject.to_owned(), body.to_owned().into());
+        async move { timeout(Duration::from_secs(1), request).await.ok().and_then(Result::ok) }
+    };
+    assert!(ask("$JS.hub.API.STREAM.INFO.ANTS", "").await.is_some(), "a right of the family answers");
+    let config = r#"{"name":"FOO","subjects":["foo.>"]}"#;
+    for (subject, body) in [
+        ("$JS.hub.API.STREAM.CREATE.FOO", config),
+        ("$JS.hub.API.STREAM.UPDATE.KV_ants_identities", ""),
+        ("$JS.hub.API.STREAM.INFO.KV_ants_identities", ""),
+        ("$JS.hub.API.CONSUMER.CREATE.KV_ants_sessions", r#"{"stream_name":"KV_ants_sessions","config":{}}"#),
+    ] {
+        assert!(ask(subject, body).await.is_none(), "{subject} answered");
+    }
+    let streams: Vec<_> = js.streams().try_collect().await.unwrap();
+    assert!(streams.iter().all(|info| info.config.name != "FOO"));
+}
+
+/// A human's credentials fit in its `CONNECT` line with room for the rest of it (signature, name and options, some 400
+/// bytes) and for rights yet to come, 3 KiB in all: nats-server closes a connection whose line is longer than
 /// `max_control_line`.
 #[test]
 fn a_humans_credentials_fit_max_control_line() {
@@ -2613,7 +2641,7 @@ fn a_humans_credentials_fit_max_control_line() {
         let out = dir.join("alice.creds");
         issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
         let (jwt, _) = read_creds(&out).unwrap();
-        assert!(jwt.len() + 400 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
