@@ -163,6 +163,8 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         sealing: sealing.clone(),
         account: nats.account.clone(),
         keyring: feed.keyring(),
+        url: nats.url.to_owned(),
+        creds: nats.creds.map(std::path::PathBuf::from),
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));

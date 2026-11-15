@@ -653,6 +653,24 @@ pub fn sign_added(
     Ok(jwt)
 }
 
+/// Sign the user JWT of `ant`, added on its machine by the admin order `order`, for `public_key`, with the permissions
+/// of an ant, and record the key with the order ([`Issued::order`]).
+pub fn sign_ordered(
+    dir: &Path,
+    ant: &UserId,
+    js_domain: Option<&JsDomain>,
+    public_key: &str,
+    order: ants_proto::Uuid,
+) -> Result<String> {
+    check_user_key(public_key)?;
+    check_not_reserved(ant)?;
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let permissions = Permissions::for_user(ant, Role::Ant).with_js_domain(js_domain);
+    let jwt = user_jwt(&account, public_key, ant.as_str(), permissions, json!({}), None)?;
+    revoke::record(dir, &Issued { order: Some(order), ..Issued::new(public_key, ant.as_str(), Kind::Ant, None)? })?;
+    Ok(jwt)
+}
+
 /// `permissions` of credentials of `kind` for the hub's JetStream domain `domain`, if it has one: a leaf node's uplink
 /// allows the domain form only ([`Permissions::with_uplink_js_domain`]), any other credentials both.
 fn in_domain(permissions: Permissions, kind: &CredsKind, domain: Option<&JsDomain>) -> Permissions {

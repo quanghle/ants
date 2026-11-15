@@ -6,7 +6,8 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`add`] adds an ant to it,
+//! its credentials signed by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,10 +28,15 @@ use tokio::sync::Notify;
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
+mod add;
+mod ask;
+mod retire;
 mod set;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
+/// How often an order in hand for long tells the stream so ([`in_progress`]).
+const PROGRESS: Duration = Duration::from_secs(20);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -55,6 +61,11 @@ pub struct Orders {
     pub accounts: Vec<String>,
     /// The config file the daemon serves whole, which orders edit; none refuses those.
     pub config: Option<ConfigFile>,
+    /// The host credentials, which ask `ants signer` to sign an added ant's key or revoke a retired one's, and beside
+    /// which an added ant's credentials go; none refuses those orders.
+    pub creds: Option<PathBuf>,
+    /// The hub's JetStream domain, where a retirement reads the roster.
+    pub js_domain: Option<JsDomain>,
 }
 
 /// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
@@ -150,7 +161,8 @@ async fn handle(
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let mut outcome = decide(devices, orders, &msg.subject, &order, stored_at).await?;
+                        let deciding = decide(js, devices, orders, &msg.subject, &order, stored_at);
+                        let mut outcome = in_progress(msg, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
@@ -170,6 +182,23 @@ async fn handle(
         }
     }
     bus::double_ack(&js.client(), msg).await
+}
+
+/// `work` on the order in `msg`, telling the stream every [`PROGRESS`] that it is in hand, so that an order taking
+/// longer than [`ACK_WAIT`] (an ant to stop, the signer to answer) is not delivered again meanwhile.
+async fn in_progress<T>(msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
+    tokio::pin!(work);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
+    loop {
+        tokio::select! {
+            done = &mut work => return done,
+            _ = ticks.tick() => {
+                if let Err(e) = msg.ack_with(AckKind::Progress).await {
+                    tracing::debug!(error = %e, "telling the stream the order is in hand");
+                }
+            }
+        }
+    }
 }
 
 /// What a message of the machine's consumer holds.
@@ -220,6 +249,7 @@ fn read(subject: &str, payload: &[u8], msg_id: Option<&str>, machine: &Machine) 
 /// administration and an admin of the team signed it with credentials not revoked, as [`devices`] records them;
 /// else what carrying it out ([`apply`]) gave.
 async fn decide(
+    js: &jetstream::Context,
     devices: &DirectKv,
     orders: &Orders,
     subject: &str,
@@ -243,19 +273,19 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(orders, order).await),
+        Ok(_) => Ok(apply(js, orders, order).await),
     }
 }
 
 /// Carry out `order`, which an admin signed, with the module of its op, which refuses it when it cannot.
-async fn apply(orders: &Orders, order: &AdminOrder) -> AdminOutcome {
+async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder) -> AdminOutcome {
     match &order.op {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
         AdminOp::Pause => refused(order, NOT_SUPPORTED),
         AdminOp::Resume => refused(order, NOT_SUPPORTED),
         AdminOp::Restart { .. } => refused(order, NOT_SUPPORTED),
-        AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
-        AdminOp::Retire => refused(order, NOT_SUPPORTED),
+        AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
+        AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),
     }
 }

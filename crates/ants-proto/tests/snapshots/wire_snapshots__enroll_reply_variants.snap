@@ -15,5 +15,13 @@ expression: value
     "ant": "dev-a",
     "public_key": "UABC",
     "reason": "unknown machine"
+  },
+  {
+    "outcome": "retired",
+    "ant": "dev-a",
+    "public_key": "UABC",
+    "revoked": [
+      "UABC"
+    ]
   }
 ]

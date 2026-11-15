@@ -766,7 +766,10 @@ impl Permissions {
     /// and acking them, after recording the outcome of each beside the machine's record ([`admin_outcome_key`]), which it
     /// reads back by direct gets, and looking up the revocation records of the credentials that signed them
     /// ([`subject::revoked_devices`]). It hears its own replies under [`host_inbox_prefix`], apart from every user's.
-    /// Nothing else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
+    /// Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request carrying the
+    /// order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the answers
+    /// ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped. Nothing
+    /// else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
         let record = subject::machine_record(machine);
         let consumer = admin_consumer(machine);
@@ -780,9 +783,12 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{ROSTER_BUCKET}.*", kv_stream(ROSTER_BUCKET)),
+            subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
         publish.extend(ack_subjects(STREAM, &consumer));
-        Self { publish, subscribe: vec![format!("{}.>", host_inbox_prefix(machine))] }
+        let subscribe = vec![format!("{}.>", host_inbox_prefix(machine)), subject::ALL_ENROLL_REPLIES.to_owned()];
+        Self { publish, subscribe }
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management

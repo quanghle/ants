@@ -36,6 +36,9 @@ pub struct Ctx {
     pub account: Option<String>,
     /// What opens the attachments of sealed messages, if anything.
     pub keyring: Option<Arc<Keyring>>,
+    /// The server and credentials of the chat, which sign admin orders.
+    pub url: String,
+    pub creds: Option<std::path::PathBuf>,
 }
 
 impl Ctx {
@@ -120,6 +123,10 @@ pub enum Job {
     Attached {
         job: Box<Job>,
         files: Rc<[File]>,
+    },
+    /// Retire `ant` by admin order, as `ants ant retire` does.
+    Retire {
+        ant: UserId,
     },
 }
 
@@ -265,6 +272,12 @@ impl Job {
             Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, ctx.keyring.as_deref(), &listed).await?)),
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
+            }
+            Self::Retire { ant } => {
+                let nats = crate::Nats::new(&ctx.url, ctx.creds.as_deref(), ctx.domain.as_ref())?;
+                let wait = crate::orders::retire::WAIT;
+                let said = crate::orders::retire::retire(&nats, &ctx.js, &ant, None, wait).await?;
+                Ok(Done::line(said.replace('\n', " ")))
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }
@@ -434,7 +447,18 @@ mod tests {
         }
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None };
+        let ctx = Ctx {
+            client,
+            js,
+            me,
+            domain: None,
+            meta,
+            sealing,
+            account: None,
+            keyring: None,
+            url: String::new(),
+            creds: None,
+        };
         let source = server.dir().join("menu.txt");
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
@@ -511,7 +535,18 @@ mod tests {
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let meta = Err("unused".into());
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None };
+        let ctx = Ctx {
+            client,
+            js: js.clone(),
+            me,
+            domain: None,
+            meta,
+            sealing,
+            account: None,
+            keyring: None,
+            url: String::new(),
+            creds: None,
+        };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(

@@ -2,6 +2,9 @@
 //! for its outcome, which the daemon of the ant's machine records ([`AdminOutcome`]); and listing the orders to an ant
 //! with where each stands (`ants ant orders`).
 
+pub mod add;
+pub mod retire;
+
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -36,7 +39,6 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
 /// Send `op` about `ant` to the daemon of `machine`, else of the machine that last recorded serving it, signed with
 /// the admin credentials of `nats`, once the hub's stream has stored it; then wait up to `wait` for its outcome. None
 /// when the order is still pending then, as it stays until the machine's daemon takes it.
-#[cfg_attr(not(test), expect(dead_code, reason = "the admin commands of ants-5ggma.6 send orders"))]
 pub async fn send(
     nats: &Nats<'_>,
     js: &jetstream::Context,
@@ -74,6 +76,19 @@ pub async fn send(
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// What a command says of `order` still pending when it stopped waiting.
+fn pending_note(order: &AdminOrder) -> String {
+    format!(
+        "order {} sent; the daemon of {} has not decided it yet: `ants ant orders {}` shows its outcome",
+        order.id, order.machine, order.ant
+    )
+}
+
+/// Why the daemon refused an order, as its outcome says.
+fn reason(outcome: &AdminOutcome) -> &str {
+    outcome.reason.as_deref().unwrap_or("no reason given")
 }
 
 /// Publish `order` to the hub's stream, as message id its id, and wait until the stream stored it.
@@ -253,15 +268,15 @@ mod tests {
     use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::revoke::Kind;
 
-    const WAIT: Duration = Duration::from_secs(5);
+    pub(super) const WAIT: Duration = Duration::from_secs(5);
 
-    fn p(s: &str) -> UserId {
+    pub(super) fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 
     /// The host connection of m1 serving dev-a, as a daemon whose config sets `[admin] remote` to `remote` runs it,
     /// serving the file `config`, once it recorded its ants; dropping the sender stops it.
-    async fn host_of_m1(
+    pub(super) async fn host_of_m1(
         server: &Server,
         js: &jetstream::Context,
         remote: bool,

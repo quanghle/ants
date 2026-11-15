@@ -103,8 +103,14 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
     let accounts = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
-    let orders =
-        admin::Orders { machine: machine.clone(), remote: host.remote_admin, accounts, config: host.config.clone() };
+    let orders = admin::Orders {
+        machine: machine.clone(),
+        remote: host.remote_admin,
+        accounts,
+        config: host.config.clone(),
+        creds: host.creds.clone(),
+        js_domain: host.js_domain.clone(),
+    };
     tokio::select! {
         recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),

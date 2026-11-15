@@ -76,9 +76,8 @@ pub struct Page {
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str =
-        "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · Esc back";
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · X retire · Esc back";
+    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · X retire · Esc back";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
@@ -124,6 +123,7 @@ impl Page {
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
             _ => {}
         }
         if self.pane == Pane::Threads {
