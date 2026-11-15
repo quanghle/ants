@@ -23,7 +23,7 @@ use crate::bridge::{self, Probe};
 use crate::humans::{Me, Rights};
 use crate::service::{Action, Service, Services, State, Unit};
 use crate::webhook::{self, SecretSource};
-use crate::{auth, leaf, notify, outbox, revoke, versions};
+use crate::{auth, backup, leaf, notify, outbox, revoke, versions};
 
 /// How long a network check may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,8 +108,8 @@ pub struct Setup {
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the team, each ant's credentials, harness and workdir, the hub's
-/// account resolver, the leaf node and outbox, the installed services, the webhooks' config file and notification
-/// sinks, and the Dev Tunnel and HTTPS bridge services installed.
+/// account resolver, the team keys' backup, the leaf node and outbox, the installed services, the webhooks' config
+/// file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -132,6 +132,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(ants_checked);
     checks.extend(check_shared_workdirs(ants, &setup.config));
     checks.push(resolver);
+    checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), now).await);
     let (services, transports) = {
@@ -717,6 +718,47 @@ async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
 
 fn copy_server_conf(conf: &Path, then: &str) -> String {
     format!("copy {} next to the hub's nats-server configuration and {then}", conf.display())
+}
+
+/// Whether a backup of `ants auth backup` holds the team keys of `team` and every key issued and revoked since
+/// ([`backup::state`]); none without team keys.
+fn check_backup(team: &Path) -> Option<Check> {
+    if !auth::holds_team(team) {
+        return None;
+    }
+    let check = "team keys backup";
+    let dir = match auth::default_dir() {
+        Ok(default) if default == team => String::new(),
+        _ => format!(" --dir {}", team.display()),
+    };
+    let fix = vec![format!("ants auth backup FILE{dir}, then keep FILE off this machine")];
+    let last = |record: &backup::Record| format!("{} ({})", creds::time(record.at), record.file.display());
+    Some(match backup::state(team) {
+        Err(e) => Check::warn(check, format!("{e:#}"), fix),
+        Ok(backup::State::None) => Check::warn(
+            check,
+            format!(
+                "no backup of the team keys in {}: without them no credentials can be issued, renewed or revoked \
+                 again",
+                team.display()
+            ),
+            fix,
+        ),
+        Ok(backup::State::Current(record)) => Check::ok(check, format!("backed up {}", last(&record))),
+        Ok(backup::State::Behind { record, issued, revoked }) => {
+            let mut since = Vec::new();
+            match issued {
+                0 => {}
+                1 => since.push("1 issued.jsonl entry (a key issued, renewed or relabelled)".to_owned()),
+                2.. => since.push(format!("{issued} issued.jsonl entries (keys issued, renewed or relabelled)")),
+                _ => since.push("issued.jsonl changes".to_owned()),
+            }
+            if revoked {
+                since.push("revocations".to_owned());
+            }
+            Check::warn(check, format!("the last backup, {}, predates {}", last(&record), since.join(" and ")), fix)
+        }
+    })
 }
 
 /// Each ant's credentials, and, unless told not to, whether its harness is installed and signed in: one handshake per
@@ -1860,6 +1902,25 @@ mod tests {
             let none = Setup { team: hub.dir().join("no-team"), ..other };
             assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
         }
+    }
+
+    #[test]
+    fn the_backup_check_warns_until_a_backup_holds_every_key_issued() {
+        let root = ants_test_support::scratch_dir("doctor-backup");
+        let team = root.join("auth");
+        assert_eq!(check_backup(&team), None, "no team keys here");
+        auth::init(&team).unwrap();
+        let check = check_backup(&team).unwrap();
+        assert_eq!(check.status, Status::Warn, "{check}");
+        assert!(check.detail.contains("no backup") && check.fix[0].contains("ants auth backup FILE"), "{check}");
+        backup::backup(&team, &root.join("team.age"), "passphrase", 10).unwrap();
+        assert_eq!(check_backup(&team).unwrap().status, Status::Ok);
+        let key = nkeys::KeyPair::new_user().public_key();
+        revoke::record(&team, &revoke::Issued::new(&key, "dev-a", revoke::Kind::Ant, None).unwrap()).unwrap();
+        let check = check_backup(&team).unwrap();
+        assert_eq!(check.status, Status::Warn, "{check}");
+        assert!(check.detail.contains("predates 1 issued.jsonl entry"), "{check}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
