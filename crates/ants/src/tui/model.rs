@@ -8,7 +8,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{channel, dm, home, nav, people, search, thread, work};
+use super::{cards, channel, dm, home, nav, people, search, thread, work};
 use crate::live::{self, State};
 use crate::thread::Entry;
 
@@ -90,6 +90,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
+    /// The threads' done states, TL;DRs and spend.
+    pub cards: cards::Cards,
 }
 
 impl Data {
@@ -200,6 +202,7 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             people: people::People::default(),
+            cards: cards::Cards::default(),
         };
         let nav = nav::Item::Home;
         Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None, prompt: None }
@@ -301,6 +304,13 @@ impl Model {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
             Read::Reactions(reactions) => data.reactions = reactions,
+        }
+    }
+
+    /// Take what was read of the threads besides their messages.
+    pub fn cards(&mut self, read: cards::Read, now: DateTime<Utc>) {
+        if let Some(failed) = self.data.cards.take(read) {
+            self.notify(failed, Level::Error, now);
         }
     }
 

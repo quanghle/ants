@@ -6,6 +6,7 @@
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
 
+mod cards;
 mod channel;
 mod dm;
 mod frame;
@@ -129,12 +130,15 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
+    let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Chat { feed, reads, people, searches, model: Model::new(state, server) }.run(&mut screen.terminal))
-            .await
+        Box::pin(
+            Chat { feed, reads, people, searches, cards, model: Model::new(state, server) }.run(&mut screen.terminal),
+        )
+        .await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -172,6 +176,7 @@ struct Chat {
     reads: Reads,
     people: people::Io,
     searches: Searches,
+    cards: cards::Io,
     model: Model,
 }
 
@@ -199,6 +204,7 @@ impl Chat {
                         }
                         logged = log;
                     }
+                    self.cards.threads(&self.model.data.live.order);
                     if dirty || drawn.elapsed() >= REDRAW {
                         terminal.draw(|f| frame::draw(f, &self.model, Utc::now())).context("drawing")?;
                         (dirty, drawn) = (false, Instant::now());
@@ -222,6 +228,11 @@ impl Chat {
                 found = self.searches.next() => {
                     dirty = true;
                     self.model.found(found);
+                    Vec::new()
+                }
+                read = self.cards.next() => {
+                    dirty = true;
+                    self.model.cards(read, Utc::now());
                     Vec::new()
                 }
             };
@@ -268,6 +279,7 @@ impl Chat {
                 self.feed.refresh();
                 self.reads.refresh();
                 self.people.refresh();
+                self.cards.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread);
                 }

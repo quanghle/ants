@@ -152,6 +152,9 @@ pub struct Entry {
     /// A tool call's details, its title the text and its ant the sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCall>,
+    /// The turns left on the thread that an inbox message, channel post or notes post carries.
+    #[serde(skip)]
+    pub turns: Option<u32>,
 }
 
 /// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
@@ -195,6 +198,7 @@ impl Entry {
             question: None,
             answer: None,
             tool: None,
+            turns: None,
         }
     }
 
@@ -289,6 +293,7 @@ impl Parser {
         let channel = e.mention.map(|m| m.channel);
         Some(Entry {
             id: Some(e.id),
+            turns: Some(e.turn_budget),
             from: Some(e.from),
             to: Some(e.to),
             channel,
@@ -328,6 +333,7 @@ impl Parser {
                 text: post.text,
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
+                turns: Some(post.turn_budget),
                 ..entry(Kind::Post, post.thread_id)
             });
         }
@@ -343,6 +349,7 @@ impl Parser {
                 text: post.text,
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
+                turns: Some(post.turn_budget),
                 ..entry(Kind::Note, post.thread_id)
             });
         }
