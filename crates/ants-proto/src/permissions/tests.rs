@@ -532,11 +532,13 @@ fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
 }
 
 #[test]
-fn humans_set_every_title_but_only_their_own_pins_and_archives_and_ants_neither() {
+fn humans_set_every_title_and_done_state_but_only_their_own_pins_and_archives_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_threads.title.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*",
+        "$KV.ants_threads.done.*",
+        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
         "$KV.ants_threads.marks.alice",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.marks.alice",
         "$JS.API.STREAM.CREATE.KV_ants_threads",
@@ -631,6 +633,53 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
     assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
     assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
     assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
+}
+
+#[test]
+fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_they_read() {
+    let files = |perms: &Permissions| -> Vec<String> {
+        perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_files")).cloned().collect()
+    };
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let get = "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C";
+    assert_eq!(
+        files(&ant),
+        [
+            "$O.ants_files.C.dev-a.>".to_owned(),
+            format!("{get}.*.inbox.dev-a.>"),
+            format!("{get}.dev-a.inbox.>"),
+            format!("{get}.*.notes.>"),
+            format!("{get}.*.chan.>"),
+        ],
+        "no stream info or consumer, which would show the attachments between others"
+    );
+    let outbox: Vec<&String> = ant.publish.iter().filter(|s| s.starts_with("ants.out.files.")).collect();
+    assert_eq!(outbox, ["ants.out.files.dev-a.>"]);
+
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$O.ants_files.C.>",
+        "ants.out.files.>",
+        "$JS.API.STREAM.INFO.OBJ_ants_files",
+        "$JS.API.STREAM.CREATE.OBJ_ants_files",
+        "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.>",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let domain: JsDomain = "hub".parse().unwrap();
+    let ant_in_domain = ant.clone().with_js_domain(Some(&domain));
+    assert!(
+        ant_in_domain.publish.iter().any(|s| s == "$JS.hub.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.*.notes.>")
+    );
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&p("dev-a"), Role::Ant)]);
+    assert!(leaf.publish.iter().any(|s| s == "$O.ants_files.C.dev-a.>"), "an ant on a leaf stores through the uplink");
+    assert!(!leaf.publish.iter().any(|s| s.starts_with("ants.out.files.")), "the outbox forms stay on the leaf");
+    let observer = Permissions::for_observer(&p("watcher"));
+    let hook = Permissions::for_webhook(&p("gh"), &[Destination::Ant(p("dev-a"))]);
+    for none in [&observer, &hook, &Permissions::for_channel_manager(), &Permissions::for_enrollment(&p("dev-a"))] {
+        assert!(files(none).is_empty() && !none.publish.iter().any(|s| s.contains("out.files")), "{none:?}");
+    }
 }
 
 #[test]

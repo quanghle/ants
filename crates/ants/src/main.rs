@@ -108,6 +108,7 @@ async fn run() -> Result<()> {
         Command::Channel(command) => cmd::channel::run(&nats()?, command).await,
         Command::Notes { thread, text } => send::thread_notes(&nats()?, thread, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
+        Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
@@ -272,7 +273,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         devices::publish_or_warn(&js, own).await;
     }
     lines.push(format!(
-        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -288,7 +289,8 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET,
         ants_proto::NOTIFY_BUCKET,
-        ants_proto::DEVICES_BUCKET
+        ants_proto::DEVICES_BUCKET,
+        ants_proto::FILES_BUCKET
     ));
     Ok(lines)
 }

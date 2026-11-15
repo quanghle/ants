@@ -2453,6 +2453,39 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
 }
 
 #[tokio::test]
+async fn a_human_s_answer_to_the_ant_s_question_is_prompted_with_an_ants_line() {
+    let Some((bus, mut replies)) = Bus::start().await else { return };
+    let (launch, _log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let thread = ThreadId::generate();
+    let options = ["yes".to_owned(), "not yet".to_owned()];
+    let question = ants_proto::Question::new("Ship it?", &options, false).unwrap();
+    let asked = Envelope::asking(thread.clone(), bus.dev.clone(), UserId::human(), question);
+    bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
+    timeout(WAIT, replies.next()).await.expect("the question").unwrap();
+    let picked = Envelope::answering(&asked, UserId::human(), ants_proto::Choice::Option(2)).unwrap();
+    bus::publish_json(&bus.js, picked.subject(), &picked, None).await.unwrap();
+    // No such option: an ordinary message.
+    let mut wrong = picked.clone();
+    wrong.id = Uuid::now_v7();
+    wrong.answer.as_mut().unwrap().option = Some(3);
+    bus::publish_json(&bus.js, wrong.subject(), &wrong, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let line = format!(
+            "[ants] human answers the question asked with ask_human as message {} (\"Ship it?\") with option 2, \
+             \"not yet\"; the message is that option's text.",
+            asked.id
+        );
+        assert_eq!(next_reply(&mut replies).await, (thread.clone(), format!("{line}\n\nnot yet")));
+        assert_eq!(next_reply(&mut replies).await, (thread.clone(), "not yet".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
 async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     let Some((bus, _)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();

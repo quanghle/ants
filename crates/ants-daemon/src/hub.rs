@@ -1,4 +1,4 @@
-//! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream and the KV buckets. [`check`] finds those
+//! The JetStream objects `ants init` sets up on the hub, the `ANTS` stream, the KV buckets and the attachments' store. [`check`] finds those
 //! missing and [`apply`] creates one with this version's configuration; an object already there is left as it is.
 //!
 //! An object whose stream info the credentials do not get, as the presence bucket for every human's, cannot be
@@ -8,10 +8,10 @@ use std::fmt;
 use std::time::Duration;
 
 use ants_proto::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, DEVICES_BUCKET, HUMANS_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET,
-    OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL,
-    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
-    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
+    ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, DEVICES_BUCKET,
+    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, LINKS_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET, PRESENCE_BUCKET,
+    PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET, STORED_INBOX_DESTINATION,
+    STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -39,11 +39,13 @@ pub enum Object {
     Presence,
     Notify,
     Devices,
+    /// The attachments' store ([`FILES_BUCKET`]).
+    Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -60,12 +62,13 @@ impl Object {
         Self::Presence,
         Self::Notify,
         Self::Devices,
+        Self::Files,
     ];
 
-    /// The bucket's name; None for the stream.
+    /// The KV bucket's name; None for the stream and the attachments' store.
     pub fn bucket(self) -> Option<&'static str> {
         Some(match self {
-            Self::Stream => return None,
+            Self::Stream | Self::Files => return None,
             Self::Roster => ROSTER_BUCKET,
             Self::Sessions => SESSIONS_BUCKET,
             Self::Attempts => ATTEMPTS_BUCKET,
@@ -84,11 +87,12 @@ impl Object {
         })
     }
 
-    /// The name of its JetStream stream: `ANTS`, or `KV_<bucket>`.
+    /// The name of its JetStream stream: `ANTS`, `KV_<bucket>`, or `OBJ_ants_files`.
     pub fn stream_name(self) -> String {
-        match self.bucket() {
-            Some(bucket) => format!("KV_{bucket}"),
-            None => STREAM.to_owned(),
+        match (self, self.bucket()) {
+            (Self::Files, _) => FILES_STREAM.to_owned(),
+            (_, Some(bucket)) => format!("KV_{bucket}"),
+            (_, None) => STREAM.to_owned(),
         }
     }
 
@@ -102,6 +106,7 @@ impl Object {
             Self::Stream => Spec::Stream(Box::new(stream_config())),
             Self::Owners => Spec::Stream(Box::new(owners_config())),
             Self::Reactions => Spec::Stream(Box::new(reactions_config())),
+            Self::Files => Spec::Stream(Box::new(files_config())),
             Self::Roster => Spec::Bucket(Box::new(roster_config(ROSTER_TTL))),
             Self::Sessions | Self::Attempts | Self::Links => {
                 Spec::Bucket(Box::new(kept_config(self.bucket().unwrap_or_default())))
@@ -155,9 +160,10 @@ impl Object {
 
 impl fmt::Display for Object {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.bucket() {
-            Some(bucket) => write!(f, "bucket {bucket}"),
-            None => write!(f, "stream {STREAM}"),
+        match (self, self.bucket()) {
+            (Self::Files, _) => write!(f, "store {FILES_BUCKET}"),
+            (_, Some(bucket)) => write!(f, "bucket {bucket}"),
+            (_, None) => write!(f, "stream {STREAM}"),
         }
     }
 }
@@ -446,6 +452,27 @@ pub fn reactions_config() -> stream::Config {
     }
 }
 
+/// The stream of the attachments' store ([`FILES_BUCKET`]): the chunks of each attachment, on the subjects of its
+/// handle ([`ants_proto::AttachmentHandle::chunk_subject`]), each stored once as its writer expects none before it,
+/// and dropped with the stream's messages. It denies deletes and purges, which would remove others' attachments as
+/// well, and serves direct gets, as ants read by subject without consumers. No object store metadata is kept: its
+/// subjects, named after base64 names, could not be confined to their writers.
+pub fn files_config() -> stream::Config {
+    stream::Config {
+        name: FILES_STREAM.to_owned(),
+        description: Some("Attachments of messages, each chunk under its sender's subject".into()),
+        subjects: vec![format!("$O.{FILES_BUCKET}.C.>")],
+        max_age: RETENTION,
+        max_message_size: (ATTACHMENT_CHUNK + ATTACHMENT_HEADROOM) as i32,
+        storage: stream::StorageType::File,
+        num_replicas: 1,
+        allow_direct: true,
+        deny_delete: true,
+        deny_purge: true,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ants_proto::{UserId, subject};
@@ -480,14 +507,17 @@ mod tests {
             denied.to_string(),
             format!("bucket ants_read is missing, and the credentials may not create it ({read_create})")
         );
-        let left = [Object::Read, Object::Presence, Object::Notify, Object::Devices];
+        let left = [Object::Read, Object::Presence, Object::Notify, Object::Devices, Object::Files];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
         // As a human's credentials, which get no stream info of the presence bucket but may create it.
         let human = |s: &str| s != Object::Presence.info_subject();
-        assert_eq!(problems(&init(&js, human).await.unwrap()), [Object::Read, Object::Notify, Object::Devices]);
+        assert_eq!(
+            problems(&init(&js, human).await.unwrap()),
+            [Object::Read, Object::Notify, Object::Devices, Object::Files]
+        );
         assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there");
-        for object in Object::ALL.into_iter().filter(|o| *o != Object::Stream && *o != Object::Owners) {
+        for object in Object::ALL.into_iter().filter(|o| o.bucket().is_some() && *o != Object::Owners) {
             let kv = js.get_key_value(object.bucket().unwrap()).await.unwrap();
             let max = kv.stream.cached_info().config.max_consumers;
             assert_eq!(max == MAX_CONSUMERS, object.watched(), "{object} created with room for {max} consumers");

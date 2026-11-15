@@ -42,6 +42,27 @@ expression: value
     "author": "github"
   },
   "title": "Fix the build",
+  "question": {
+    "text": "Ship the fix?",
+    "options": [
+      "yes",
+      "not yet"
+    ],
+    "free_text": false
+  },
+  "answer": {
+    "question": "019a7d2e-0000-7000-8000-000000000004",
+    "option": 2
+  },
   "steer": true,
+  "attachments": [
+    {
+      "id": "019a7d2e-0000-7000-8000-000000000014",
+      "name": "build log.txt",
+      "mime": "text/plain",
+      "size": 1234,
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    }
+  ],
   "sent_at": "2025-01-01T12:00:00Z"
 }

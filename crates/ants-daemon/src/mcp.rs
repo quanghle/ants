@@ -12,6 +12,8 @@
 //! lists the reactions to a message the ant reads (see [`crate::reactions`]).
 //! `suggest_thread_title` has the turn's reply on the thread suggest a title for it ([`Envelope::title`],
 //! [`ants_proto::ChannelPost::title`], [`ants_proto::NotesPost::title`]).
+//! `ask_human` asks the thread's owner, else the default human, a question with options ([`Envelope::question`]) and
+//! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -30,8 +32,9 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
     ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
-    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, ROSTER_BUCKET, Reaction, ReactionChange,
-    ReactionsOutcome, ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
+    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, Question, ROSTER_BUCKET, Reaction,
+    ReactionChange, ReactionsOutcome, ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid,
+    Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -796,6 +799,30 @@ impl Hub {
         ))
     }
 
+    /// Ask the owner of the thread `thread` is handling a message on, else the default human, `args`'s question on
+    /// the thread, without waiting: the answer comes later as a message. Spends no turn.
+    async fn ask_human(&self, thread: &ThreadId, args: AskHuman) -> Result<String, String> {
+        let question =
+            Question::new(&args.question, &args.options, args.free_text.unwrap_or(true)).map_err(|e| e.to_string())?;
+        let human = {
+            let sessions = self.sessions.locked();
+            let current = sessions.current.get(thread);
+            current
+                .map(|current| self.humans.owner_of(current))
+                .ok_or("no message is being handled on this thread; questions go out only while one is".to_owned())?
+        };
+        let rendered = question.render();
+        let mut envelope = self.outgoing(thread, human.as_str(), rendered, None)?;
+        envelope.question = Some(question);
+        envelope.escalation = None;
+        self.send(&envelope).await?;
+        Ok(format!(
+            "Asked {human} on thread {} as message {}. The answer comes later as a message from {human} naming the \
+             question and the option picked, or saying the answer is typed.",
+            envelope.thread_id, envelope.id
+        ))
+    }
+
     async fn send(&self, envelope: &Envelope) -> Result<(), String> {
         (self.outbox)(envelope.clone()).await.map_err(|e| format!("not sent: {e:#}"))
     }
@@ -1211,6 +1238,17 @@ struct ListReactions {
     /// The id of the message whose reactions to list; omitted for the message being handled on this thread.
     #[serde(default)]
     message_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AskHuman {
+    /// The question: 1-500 characters.
+    question: String,
+    /// 2-9 options to pick from by number, each one line of 1-200 characters.
+    options: Vec<String>,
+    /// Whether the human may type an answer instead of picking an option (default true).
+    #[serde(default)]
+    free_text: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1658,6 +1696,19 @@ impl Tools {
         Ok(text(self.send_to(&thread, &args.to, args.text, args.thread.as_deref()).await))
     }
 
+    #[tool(description = "Ask the thread's owner, else the default human, a question with 2-9 options to pick from \
+        by number, and return the question's message id at once without waiting. `free_text` (default true) lets the \
+        human type an answer instead. The answer arrives later as a new message on this thread, naming the question \
+        and the option picked or saying the answer is typed. Spends no turn.")]
+    async fn ask_human(
+        &self,
+        Parameters(args): Parameters<AskHuman>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.ask_human(&thread, args).await))
+    }
+
     #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
         check_inbox. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
@@ -1942,7 +1993,9 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
          humans see beneath it: it wakes nobody, so it acknowledges without a reply. list_reactions shows the \
          reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \
-         title for the thread, which the reply carries and which becomes its title unless it ever had one. Memory and task \
+         title for the thread, which the reply carries and which becomes its title unless it ever had one. ask_human \
+         asks the thread's owner a question with numbered options and returns at once; the answer arrives later as a \
+         message, prefixed with an [ants] line naming the question and the option picked. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {
