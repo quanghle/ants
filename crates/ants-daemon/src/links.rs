@@ -69,8 +69,27 @@ pub async fn passing_on(js: &jetstream::Context, envelope: &Envelope) {
     }
 }
 
+/// A link to a thread passed on, as the links bucket keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passed {
+    pub from: UserId,
+    pub to: UserId,
+    /// The thread of the message that passed it on, when read: the linked thread, or one spun off it.
+    pub on: Option<ThreadId>,
+}
+
 /// Who passed the link to `thread` on to whom, as the links bucket keeps it: none while there is no bucket.
 pub async fn passed_on(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<(UserId, UserId)>> {
+    Ok(read(js, thread, true).await?.into_iter().map(|p| (p.from, p.to)).collect())
+}
+
+/// [`passed_on`], with the thread of each message that passed the link on.
+pub async fn passed(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec<Passed>> {
+    read(js, thread, false).await
+}
+
+/// The links to `thread` passed on; with `headers_only`, without the threads they were passed on.
+async fn read(js: &jetstream::Context, thread: &ThreadId, headers_only: bool) -> Result<Vec<Passed>> {
     let kv = match js.get_key_value(LINKS_BUCKET).await {
         Ok(kv) => kv,
         Err(e) => {
@@ -83,7 +102,7 @@ pub async fn passed_on(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec
         .create_consumer(consumer::push::OrderedConfig {
             deliver_subject: js.client().new_inbox(),
             filter_subject: format!("{}{}", kv.prefix, links_to(thread)),
-            headers_only: true,
+            headers_only,
             deliver_policy: consumer::DeliverPolicy::LastPerSubject,
             replay_policy: consumer::ReplayPolicy::Instant,
             ..Default::default()
@@ -103,8 +122,11 @@ pub async fn passed_on(js: &jetstream::Context, thread: &ThreadId) -> Result<Vec
         if removed {
             continue;
         }
-        if let Some(link) = msg.subject.strip_prefix(kv.prefix.as_str()).and_then(|key| parse_link_key(key, thread)) {
-            links.push(link);
+        if let Some((from, to)) =
+            msg.subject.strip_prefix(kv.prefix.as_str()).and_then(|key| parse_link_key(key, thread))
+        {
+            let on = std::str::from_utf8(&msg.payload).ok().and_then(|on| on.parse().ok());
+            links.push(Passed { from, to, on });
         }
     }
     Ok(links)

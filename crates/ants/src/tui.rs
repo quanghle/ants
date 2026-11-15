@@ -19,6 +19,7 @@ mod reads;
 mod search;
 mod thread;
 mod timeline;
+mod tree;
 mod work;
 
 use std::io::{IsTerminal as _, Write as _};
@@ -134,12 +135,14 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
     let searches = Searches::new(js.clone());
+    let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
         Box::pin(
-            Chat { feed, reads, acts, people, searches, model: Model::new(state, server) }.run(&mut screen.terminal),
+            Chat { feed, reads, acts, people, searches, trees, model: Model::new(state, server) }
+                .run(&mut screen.terminal),
         )
         .await
     };
@@ -180,6 +183,7 @@ struct Chat {
     acts: Acts,
     people: people::Io,
     searches: Searches,
+    trees: tree::Io,
     model: Model,
 }
 
@@ -237,6 +241,11 @@ impl Chat {
                     self.model.found(found);
                     Vec::new()
                 }
+                event = self.trees.next() => {
+                    dirty = true;
+                    self.model.tree_event(event, Utc::now());
+                    Vec::new()
+                }
             };
             for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
@@ -244,6 +253,7 @@ impl Chat {
                 }
             }
             self.acts.watch(self.model.open().cloned());
+            self.trees.watch(self.model.tree_shown());
         }
     }
 
@@ -288,11 +298,17 @@ impl Chat {
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
+            Action::CancelSubtree(prompts) => {
+                let text = format!("asking {} ants to cancel their prompts…", prompts.len());
+                self.model.notify(text, Level::Info, Utc::now());
+                self.trees.cancel(prompts);
+            }
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
                 self.acts.refresh();
                 self.people.refresh();
+                self.trees.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread, true);
                 }

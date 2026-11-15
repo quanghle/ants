@@ -9,7 +9,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use super::acts::{Acted, Change};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{channel, dm, home, nav, people, search, thread, timeline, work};
+use super::{channel, dm, home, nav, people, search, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 
@@ -53,6 +53,8 @@ pub enum Action {
     Refresh,
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
+    /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
+    CancelSubtree(Vec<(UserId, ThreadId)>),
     Quit,
 }
 
@@ -97,6 +99,8 @@ pub struct Data {
     pub calls: timeline::Threads,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
+    /// Who messaged whom on each thread, for the delegation trees.
+    pub delegations: tree::Delegations,
 }
 
 impl Data {
@@ -144,6 +148,7 @@ pub enum Page {
     Thread(thread::Page),
     Dm(dm::Page),
     Search(search::Page),
+    Tree(tree::Page),
 }
 
 impl Page {
@@ -168,6 +173,7 @@ impl Page {
             Self::Thread(_) => "thread",
             Self::Dm(_) => "dm",
             Self::Search(_) => "search",
+            Self::Tree(_) => "tree",
         }
     }
 }
@@ -179,6 +185,8 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
+    /// A thread's delegation tree.
+    Tree(ThreadId),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -210,6 +218,7 @@ impl Model {
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
             people: people::People::default(),
+            delegations: tree::Delegations::default(),
         };
         let nav = nav::Item::Home;
         Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None, prompt: None }
@@ -247,6 +256,9 @@ impl Model {
             live::Event::Roster(Err(e)) => self.notify(format!("reading the roster: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => {
                 let read = read.map(|entries| self.tools(entries));
+                for entry in read.iter().flatten() {
+                    self.data.delegations.add(entry);
+                }
                 let page = self.pages.iter_mut().rev().find_map(|page| match page {
                     Page::Thread(page) if page.history.thread == thread => Some(page),
                     _ => None,
@@ -273,6 +285,7 @@ impl Model {
             data.facts.add(entry, &me);
             data.people.dms.add(entry, &me);
             posted |= data.feeds.add(entry);
+            data.delegations.add(entry);
         }
         let mut actions = Vec::new();
         for page in &mut self.pages {
@@ -402,7 +415,7 @@ impl Model {
                 seqs.iter().for_each(|seq| markers.mark(channel, *seq));
                 Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
             }
-            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) => None,
+            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) | Page::Tree(_) => None,
         }
     }
 
@@ -554,6 +567,7 @@ impl Model {
             Page::Thread(page) => page.key(key, data, now),
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
+            Page::Tree(page) => page.key(key, data, now),
         }?;
         match to {
             To::Thread(thread) => {
@@ -568,7 +582,47 @@ impl Model {
                 self.pages.push(Page::Work(work::Page::new(filter)));
                 None
             }
+            To::Tree(thread) => {
+                self.tree(thread);
+                None
+            }
             To::Do(action) => Some(action),
+        }
+    }
+
+    /// Show the delegation tree of `thread` over the view.
+    pub fn tree(&mut self, thread: ThreadId) {
+        self.pages.push(Page::Tree(tree::Page::new(thread)));
+        self.focus = Focus::View;
+    }
+
+    /// The root of the delegation tree shown, and the threads known of it, for its links and spend to be read.
+    pub fn tree_shown(&self) -> Option<(ThreadId, Vec<ThreadId>)> {
+        let Page::Tree(page) = self.page() else { return None };
+        Some((page.root.clone(), self.data.delegations.threads(&page.root)))
+    }
+
+    /// Take in what the delegation trees' reads and cancels brought.
+    pub fn tree_event(&mut self, event: tree::Event, now: DateTime<Utc>) {
+        match event {
+            tree::Event::Read(root, links, spend) => {
+                for page in &mut self.pages {
+                    if let Page::Tree(page) = page
+                        && page.root == root
+                    {
+                        if let Some(links) = &links {
+                            page.links.clone_from(links);
+                        }
+                        if spend.is_some() {
+                            page.spend.clone_from(&spend);
+                        }
+                    }
+                }
+            }
+            tree::Event::Cancelled(outcomes) => {
+                let (text, level) = tree::notice(&outcomes);
+                self.notify(text, level, now);
+            }
         }
     }
 }

@@ -51,6 +51,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Thread(page) => page.draw(frame, right, data, now, focused),
         Page::Dm(page) => page.draw(frame, right, data, now, focused),
         Page::Search(page) => page.draw(frame, right, data, now, focused),
+        Page::Tree(page) => page.draw(frame, right, data, now, focused),
     }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
@@ -94,6 +95,7 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Thread(_)) => thread::Page::KEYS,
         (Focus::View, Page::Dm(page)) => page.keys(),
         (Focus::View, Page::Search(_)) => search::Page::KEYS,
+        (Focus::View, Page::Tree(page)) => page.keys(),
     };
     Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
@@ -108,6 +110,8 @@ const HELP: &[(&str, &str)] = &[
     ("w", "in a channel: its threads in work"),
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("t", "in a thread: its delegation tree"),
+    ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "search messages, as in: deploy from:dev-a"),
     ("R", "read everything again"),
