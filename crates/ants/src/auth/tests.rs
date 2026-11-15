@@ -1091,8 +1091,8 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (_, d_js) = server.connect(&dev_a).await;
     let missing = Meta::open(&a_js, None, &alice).await.unwrap().title(&thread).await.unwrap_err();
     assert_eq!(missing.to_string(), MISSING, "no bucket before `ants init`");
-    assert!(d_js.create_key_value(ants_daemon::hub::threads_config()).await.is_err(), "only a human creates it");
-    a_js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+    assert!(d_js.create_stream(ants_daemon::hub::threads_config()).await.is_err(), "only a human creates it");
+    a_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
     let (alice_meta, bob_meta) =
         (Meta::open(&a_js, None, &alice).await.unwrap(), Meta::open(&b_js, None, &bob).await.unwrap());
 
@@ -1134,7 +1134,7 @@ async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, a_js) = server.connect_as(&alice, Role::Human).await;
     let (_, d_js) = server.connect(&dev_a).await;
-    a_js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+    a_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
     let meta = Meta::open(&a_js, None, &alice).await.unwrap();
     let (fresh, titled, cleared) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
 

@@ -79,9 +79,9 @@ pub struct Envelope {
     pub mention: Option<Mention>,
     /// The title the sending ant suggests for the thread, as its MCP tool suggest_thread_title took it: a trimmed line
     /// of 1 to [`MAX_TITLE`] characters ([`ThreadTitle::new`]). A human's CLI reading it on a thread whose
-    /// [`title_key`] never had an entry in [`THREADS_BUCKET`] stores it there by the sender, so a title a human set or
-    /// cleared always wins. The subject pins the sender, so only an ant that messaged on the thread suggests its
-    /// title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    /// [`title_key`] has no entry in [`THREADS_BUCKET`], not even the delete marker a cleared title leaves until its
+    /// thread is gone, stores it there by the sender, so a title a human set or cleared wins. The subject pins the
+    /// sender, so only an ant that messaged on the thread suggests its title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub sent_at: DateTime<Utc>,
