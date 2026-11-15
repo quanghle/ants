@@ -38,6 +38,7 @@ mod reactions;
 mod roles;
 mod roster;
 mod sealed;
+mod shared;
 mod status;
 pub mod subject;
 mod threads;
@@ -73,6 +74,7 @@ pub use reactions::*;
 pub use roles::*;
 pub use roster::*;
 pub use sealed::*;
+pub use shared::*;
 pub use status::*;
 pub use threads::*;
 pub use timeline::*;
@@ -220,7 +222,8 @@ pub const THREADS_BUCKET: &str = "ants_threads";
 /// KV create, so the first creator wins, and the daemon serving the ant counts its completed prompts in it by
 /// compare-and-set. Each ant writes only its own key; humans read all and set an ant's avatar and colour; the
 /// short-lived credentials of `ants auth revoke` delete the record of an ant revoked whole
-/// ([`Permissions::for_device_revoker`]). Entries never expire.
+/// ([`Permissions::for_device_revoker`]). Beside it, under `<ant>.settings`, the ant's [`SharedSettings`], which only
+/// host credentials write ([`Permissions::for_host`]). Entries never expire.
 pub const IDENTITIES_BUCKET: &str = "ants_identities";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;

@@ -50,6 +50,7 @@ fn roster() -> Roster {
             memory_low: None,
             model: None,
             paused: None,
+            drift: Vec::new(),
         };
         Box::pin(async move { Ok(vec![entry("lead", "boss"), entry("boss", "dev-a")]) })
     })

@@ -12,16 +12,19 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
     let default_path = ants_daemon::config::default_path()?;
     let config = std::path::absolute(serve::config_file(args, &default_path)?)?;
     let dropins = ants_daemon::config::dropin_dir(&config);
-    let triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
+    let mut triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
     let edited = ConfigFile::new(config, triggers.edits());
+    triggers.watch_shared(edited.shared.subscribe());
     let served = || {
         let listed = serve::ants(args, &default_path)?;
+        edited.shared.listed(&listed.ants);
         let mut configs = serve::configs(
             listed.ants,
             &listed.harnesses,
             conn.nats,
             conn.creds.map(Path::to_path_buf),
             conn.js_domain.cloned(),
+            Some(&edited.shared),
         )?;
         for config in &configs {
             config.pause.credit(edited.pausers.take(&config.ant));

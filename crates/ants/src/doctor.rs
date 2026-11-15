@@ -380,6 +380,7 @@ async fn reach(setup: &Setup, identity: Option<&Identity>, leaf: Option<&Leaf>) 
     checks.push(check_versions(&js, identity).await);
     checks.push(check_harness_versions(&js).await);
     checks.extend(check_avatars(&js, identity).await);
+    checks.push(check_drift(&js, identity).await);
     (checks, Some(Connected { js, rights: identity.rights.clone() }))
 }
 
@@ -757,6 +758,39 @@ async fn check_avatars(js: &jetstream::Context, identity: &Identity) -> [Check; 
             [Check::skip(check, why), Check::skip(moved_check, why)]
         }
     }
+}
+
+/// The ants whose machines' configs set some of their shared settings otherwise, as the machines' records tell.
+async fn check_drift(js: &jetstream::Context, identity: &Identity) -> Check {
+    let check = "shared settings";
+    if !identity.me.role.is_human() {
+        return Check::skip(check, "checked with a human's credentials, which list the machines");
+    }
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, crate::machines::list(js)).await {
+        Ok(Ok(records)) => drift(&records),
+        Ok(Err(e)) => Check::skip(check, format!("no machine records read: {e:#}")),
+        Err(_) => Check::skip(check, "no machine records read within 10s"),
+    }
+}
+
+fn drift(records: &[ants_proto::MachineRecord]) -> Check {
+    let check = "shared settings";
+    let lines: Vec<String> = records
+        .iter()
+        .flat_map(|r| r.drift.iter().map(move |(ant, fields)| format!("{ant}: {} on {}", fields.join(", "), r.machine)))
+        .collect();
+    if lines.is_empty() {
+        return Check::ok(check, format!("no drift on {} machines", records.len()));
+    }
+    Check::warn(
+        check,
+        format!("machines' configs set ants' shared settings otherwise, which they ignore: {}", lines.join("; ")),
+        vec![
+            "`ants ant show ANT` lists the shared settings that serve; remove the fields from the machine's \
+             config.toml, or set them on every machine with `ants ant set ANT FIELD=VALUE`"
+                .to_owned(),
+        ],
+    )
 }
 
 /// The ants `ants ant export --move` marked moved to another bus, which no daemon here serves.

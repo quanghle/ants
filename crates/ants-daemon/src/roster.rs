@@ -220,6 +220,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         fallback: None,
         memory_low: None,
         paused: config.pause.get(),
+        drift: config.drift.clone(),
         model: AntModel::of(
             config.model_settings.model.clone(),
             config.model_settings.reasoning_effort.clone(),
@@ -688,6 +689,7 @@ mod tests {
             memory_low: None,
             model: None,
             paused: None,
+            drift: Vec::new(),
         }
     }
 

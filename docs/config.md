@@ -110,12 +110,21 @@ allow = ["read:*", "execute:cargo test*"]
 - `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger) with CLI ant flags overriding `FILE`; templated ants refuse ant flags. No schedules run when `--ant` is set.
 - Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file override `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`ants daemon` reloads on `SIGHUP`, at once after an admin's `set`, `pause` or `resume` order edited `config.toml` ([auth.md](auth.md#admin-orders)), or automatically when `config.toml` or `harnesses.d/*.toml` changes on disk (polled every 3 s by mtime, size and inode; applied once unchanged across two checks, ~6 s after write):
+`ants daemon` reloads on `SIGHUP`, at once after an admin's `set`, `pause` or `resume` order edited `config.toml` ([auth.md](auth.md#admin-orders)) or the shared settings of one of its ants changed ([Shared settings](#shared-settings)), or automatically when `config.toml` or `harnesses.d/*.toml` changes on disk (polled every 3 s by mtime, size and inode; applied once unchanged across two checks, ~6 s after write):
 
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order (`ants ant set`) edits the ant's `[[ant]]` table, or the `[harnesses]` table, in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
+
+## Shared settings
+
+An ant's role settings and core memories are the ant's, the same on whichever machine serves it: `whoami`, `memory`, `capabilities`, `model`, `reasoning_effort`, `context`, `fallback`, `allow` and `escalate_to`. They live in one record on the bus, `<ant>.settings` in `ants_identities`, which admins change with `set` orders (`ants ant set ANT model=o3`, [auth.md](auth.md#admin-orders)). Everything else stays the machine's own, in its `config.toml`: `workdir`, `env`, `harness` and the `[harnesses]` tables, `tasks` (the task database), `creds`, `nats`, caps and limits, worktrees, `paused`.
+
+- Seeding: a daemon serving the whole file with host credentials reads the shared settings of its ants at start (waiting up to 5 s for them before starting the ants) and every 10 s. An ant with no record yet gets one created from the fields its `[[ant]]` table sets, by create-only write, so the first machine to serve it wins and the others read that record.
+- Serving: once an ant has a record, its daemon serves the record's values for these fields, a field the record leaves out taking its default, and ignores its table's; a change of the record reloads the daemon, restarting the ant as any change of its settings does. Shared settings the machine cannot serve (such as a `fallback` naming a harness it lacks) are logged, and the table's are served instead. A standby daemon taking the ant over serves the same record, so the ant answers alike on every machine; `ants ant memories` reads `whoami` and `memory` from it.
+- Drift: a field the table sets otherwise than the record is drift. The daemon lists it in the ant's roster entry (`drift`) and its machine's record in `ants_machines` (`drift`, by ant); `ants roster` notes each drifted ant, and `ants doctor` (**shared settings**) lists each field by ant and machine. `ants ant show` lists the shared settings and marks the table's lines they override `(ignored: shared)`. To mend drift, remove the fields from the table, or set them with `ants ant set`, which also writes a field the serving machine's table sets.
+- Without host credentials, without the `ants_identities` bucket, or with `ants daemon --ant`, a daemon shares nothing and serves its table's settings, and `set` orders change them in `config.toml`.
 
 ## Pausing an ant
 
@@ -412,7 +421,9 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
 
 - `bus`: the public key of the account of the bus exported from.
 - `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
-- `settings`: of its `[[ant]]`, `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`.
+- `settings`: `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`, taken from the ant's
+  [shared settings](#shared-settings) where the bus holds them, as its daemon serves them, else from its `[[ant]]`
+  (`harness`, the machine's, always from its `[[ant]]`).
 - `files`: each file of its home (`home`, default `~/.ants/<name>`) as `{path, kind, data}`, `data` in base64, at
   most 64 MiB in all. `kind` is `harness` for the files of its harness's [memory files](#memory-files) globs, taken
   relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
@@ -445,7 +456,9 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
    harness here (`--harness`, else the exported one, else the file's top-level `harness`).
 4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
    add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
-   them later.
+   them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus
+   holds shared settings of the name already, those serve instead, and the import warns which imported fields they
+   set otherwise.
 
 A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
 name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.

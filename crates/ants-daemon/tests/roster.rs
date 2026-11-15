@@ -42,6 +42,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         memory_low: None,
         model: None,
         paused: None,
+        drift: Vec::new(),
     }
 }
 
