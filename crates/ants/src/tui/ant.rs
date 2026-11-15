@@ -1,7 +1,7 @@
 //! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
 //! its roster entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
-//! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, or the messages waiting for
-//! it, which [`Io`] asks its daemon for every while (as `ants queue` does).
+//! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it,
+//! which [`Io`] asks its daemon for every while (as `ants queue` does), or its memories ([`super::memories`]).
 
 use std::time::Duration;
 
@@ -17,8 +17,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
+use super::exec::Job;
 use super::frame::{self, ago};
-use super::model::{Data, Key, To};
+use super::memories;
+use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::work::{self, Filter};
 use crate::live::maybe;
@@ -34,15 +36,18 @@ pub enum Pane {
     Threads,
     /// The messages waiting for the ant.
     Queue,
+    /// The ant's core and harness memories, read-only.
+    Memories,
 }
 
 impl Pane {
-    pub const ALL: [Self; 2] = [Self::Threads, Self::Queue];
+    pub const ALL: [Self; 3] = [Self::Threads, Self::Queue, Self::Memories];
 
     fn label(self) -> &'static str {
         match self {
             Self::Threads => "threads",
             Self::Queue => "queue",
+            Self::Memories => "memories",
         }
     }
 
@@ -73,21 +78,31 @@ pub struct Page {
     /// The selected message of the queue, kept as messages come and go.
     message: Selection<Uuid>,
     pub queue: Queue,
+    pub memories: memories::Page,
+    /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
+    armed: bool,
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · X retire · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · X retire · Esc back";
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask \
+                                    · w work · r restart · p (un)pause · X retire · Esc back";
+    pub const QUEUE_KEYS: &str =
+        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p (un)pause · X retire · Esc back";
+    pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, cancelling the \
+                                  prompts · any other key keeps them";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
-        Self { ant, pane: Pane::Threads, threads, message: Selection::default(), queue: Queue::Asking }
+        let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
+        Self { ant, pane: Pane::Threads, threads, message, queue, memories, armed: false }
     }
 
     pub fn keys(&self) -> &'static str {
         match self.pane {
+            _ if self.armed => Self::ARMED_KEYS,
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
+            Pane::Memories => memories::Page::KEYS,
         }
     }
 
@@ -107,27 +122,47 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.thread(data),
             Pane::Queue => self.waiting().get(self.message.at(&self.messages())).map(|m| m.thread_id.clone()),
+            Pane::Memories => None,
         }
     }
 
     pub fn key(&mut self, key: Key, data: &Data) -> Option<To> {
+        let armed = std::mem::take(&mut self.armed);
         match key {
-            Key::Left => {
-                self.pane = self.pane.moved(-1);
+            Key::Char('r') => {
+                self.armed = true;
                 return None;
             }
-            Key::Right => {
-                self.pane = self.pane.moved(1);
+            Key::Char(c @ ('y' | '!')) if armed => {
+                let job = Job::Restart { ant: self.ant.clone(), now: c == '!' };
+                return Some(To::Do(Action::Run(job, String::new())));
+            }
+            Key::Left | Key::Right => {
+                self.pane = self.pane.moved(if key == Key::Left { -1 } else { 1 });
+                if self.pane == Pane::Memories {
+                    self.memories.shown();
+                }
                 return None;
             }
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
             Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
+            Key::Char('p') => {
+                let paused = data.live.roster.iter().any(|e| e.ant == self.ant && e.paused.is_some());
+                let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
+                let job = Job::Pause { ant, paused: !paused };
+                return Some(To::Do(Action::Run(job, format!("{verb} {}", self.ant))));
+            }
             _ => {}
         }
-        if self.pane == Pane::Threads {
-            return self.threads.key(key, data);
+        match self.pane {
+            Pane::Threads => return self.threads.key(key, data),
+            Pane::Memories => {
+                self.memories.key(key);
+                return None;
+            }
+            Pane::Queue => {}
         }
         let messages = self.messages();
         let at = self.message.at(&messages);
@@ -162,7 +197,7 @@ impl Page {
         let block = frame::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
-        let counts = [threads.to_string(), self.queued()];
+        let counts = [threads.to_string(), self.queued(), self.memories.count()];
         let mut spans = vec![Span::raw(" ")];
         for (pane, count) in Pane::ALL.iter().zip(counts) {
             let style = if *pane == self.pane { frame::highlight(focused) } else { frame::dim() };
@@ -174,6 +209,7 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
+            Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
         }
     }
 
@@ -366,7 +402,7 @@ impl Io {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{AntModel, SignInNeeded, StatusEvent, StatusUpdate};
+    use ants_proto::{AntModel, CoreMemories, Memories, MemoryFile, SignInNeeded, StatusEvent, StatusUpdate};
 
     use super::*;
     use crate::live::tests::{at, message, user};
@@ -441,6 +477,39 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.key(Key::Char('a'), at(3));
         assert!(m.bar.focused && m.bar.text() == "@dev-a ", "a opens the bar on the ant");
+        m.key(Key::Esc, at(3));
+        m.focus = crate::tui::model::Focus::View;
+        assert_eq!(m.key(Key::Char('r'), at(3)), None);
+        assert!(screen(&m, at(3)).contains(Page::ARMED_KEYS), "r asks first");
+        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Run(restart(false), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('!'), at(3)), Some(Action::Run(restart(true), String::new())));
+        m.key(Key::Char('r'), at(3));
+        assert_eq!(m.key(Key::Char('n'), at(3)), None);
+        assert_eq!(m.key(Key::Char('y'), at(3)), None, "any other key keeps the harnesses");
+    }
+
+    fn restart(now: bool) -> Job {
+        Job::Restart { ant: user("dev-a"), now }
+    }
+
+    #[test]
+    fn p_pauses_the_ant_or_resumes_it_when_paused() {
+        let mut m = model();
+        let mut dev = entry("dev-a", 60, 2, at(2));
+        m.data.live.roster(vec![dev.clone()], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        m.focus = crate::tui::model::Focus::View;
+        let pause = |paused| Some(Action::Run(Job::Pause { ant: user("dev-a"), paused }, String::new()));
+        let sent = |action: Option<Action>| match action {
+            Some(Action::Run(job, _)) => Some(Action::Run(job, String::new())),
+            other => other,
+        };
+        assert_eq!(sent(m.key(Key::Char('p'), at(3))), pause(true));
+        dev.paused = Some(ants_proto::Paused { since: at(3), by: None });
+        m.data.live.roster(vec![dev], at(3));
+        assert_eq!(sent(m.key(Key::Char('p'), at(4))), pause(false));
+        assert!(screen(&m, at(4)).contains("paused"), "{}", screen(&m, at(4)));
     }
 
     #[test]
@@ -464,5 +533,41 @@ mod tests {
         assert!(shown.contains(Page::QUEUE_KEYS), "{shown}");
         m.key(Key::Down, at(3));
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
+    }
+
+    #[test]
+    fn the_memories_pane_reads_them_once_shown_and_again_on_u() {
+        let mut m = model();
+        m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        assert_eq!(m.memories_wanted(), None, "not before the pane shows");
+        m.key(Key::Left, at(3));
+        assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its memories…"));
+        assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));
+        let memories = Memories {
+            core: CoreMemories { whoami: Some("A tester.".to_owned()), ..CoreMemories::default() },
+            harness: Some("codex".to_owned()),
+            workdir: Some("/w".to_owned()),
+            files: vec![MemoryFile {
+                path: "/w/AGENTS.md".to_owned(),
+                size: 9,
+                text: "Run it.\n".to_owned(),
+                truncated: false,
+            }],
+            ..Memories::default()
+        };
+        m.memories_event(memories::Event(user("dev-a"), 1, Ok(memories)));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("memories (1)") && shown.contains("memories of dev-a · read-only"), "{shown}");
+        assert!(shown.contains("A tester.") && shown.contains("── AGENTS.md (9 B)"), "{shown}");
+        assert!(shown.contains(memories::Page::KEYS), "{shown}");
+
+        m.focus = crate::tui::model::Focus::View;
+        m.key(Key::Char('u'), at(3));
+        assert_eq!(m.memories_wanted(), Some((user("dev-a"), 2)));
+        m.memories_event(memories::Event(user("dev-a"), 1, Err("late".to_owned())));
+        assert!(screen(&m, at(3)).contains("asking the daemon"), "an earlier asking's answer is dropped");
+        m.memories_event(memories::Event(user("dev-a"), 2, Err("no admin role".to_owned())));
+        assert!(screen(&m, at(3)).contains("reading the memories: no admin role"));
     }
 }

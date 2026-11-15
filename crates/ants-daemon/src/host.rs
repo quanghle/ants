@@ -33,6 +33,8 @@ pub struct Host {
     pub remote_admin: bool,
     /// The config file the daemon serves whole, which admin orders edit; none refuses those.
     pub config: Option<admin::ConfigFile>,
+    /// The ants the process serves, which restart their harnesses on an admin order.
+    pub restarts: admin::restart::Restarts,
 }
 
 static OFF_TOLD: AtomicBool = AtomicBool::new(false);
@@ -57,7 +59,15 @@ impl Host {
             }
             return None;
         }
-        Some(Self { machine, nats, creds, js_domain, remote_admin: true, config: None })
+        Some(Self {
+            machine,
+            nats,
+            creds,
+            js_domain,
+            remote_admin: true,
+            config: None,
+            restarts: admin::restart::Restarts::default(),
+        })
     }
 }
 
@@ -110,6 +120,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         config: host.config.clone(),
         creds: host.creds.clone(),
         js_domain: host.js_domain.clone(),
+        restarts: host.restarts.clone(),
     };
     tokio::select! {
         recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,

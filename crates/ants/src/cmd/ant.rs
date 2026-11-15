@@ -9,7 +9,7 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::serve::AntOptions;
-use crate::{ant, completions, orders};
+use crate::{ant, completions, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -58,12 +58,68 @@ pub(crate) enum AntCommand {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
         /// The machine running the ant (default: the one that last recorded serving it).
-        #[arg(long = "on", value_name = "MACHINE")]
-        on: Option<Machine>,
+        #[arg(long)]
+        machine: Option<Machine>,
         /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
         #[arg(long, value_name = "DURATION", default_value = "8m", value_parser = ants_proto::duration::parse)]
         wait: Duration,
     },
+    /// Show ANT's memories, which an admin order asks the daemon of its machine to read while online: its core
+    /// memories (whoami, memory, tasks), which a set order edits, and its harness's memory files (the `memory_files`
+    /// globs of its harness) and bd memories (with BD_DB in its environment), read-only and size-capped. Needs a
+    /// human device's admin credentials.
+    Memories {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// One JSON object: core, harness, workdir, files, bd and skipped.
+        #[arg(long)]
+        json: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+    },
+    /// Order ANT's daemon to restart its harnesses: idle ones stop at once, working ones once their current prompt
+    /// ends, and each thread's next prompt resumes its session in a new harness. Waits up to 10 s for the outcome, else
+    /// the order stays pending until the daemon takes it (`ants ant orders`). Needs a human device's admin
+    /// credentials.
+    Restart {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// Cancel the prompts running too, as `ants cancel` does, and stop their harnesses at once.
+        #[arg(long)]
+        now: bool,
+        /// The machine whose daemon serves ANT (default: the machine that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+        /// The outcome as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause ANT: an admin order has the daemon of its machine set `paused = true` in its config, after which it
+    /// takes no new prompt and the messages to it wait queued, prompts already running going on to their end. Needs
+    /// admin credentials, as every order does.
+    Pause {
+        #[command(flatten)]
+        order: Order,
+    },
+    /// Resume ANT paused by `ants ant pause` or its config: it takes the messages queued for it in turn.
+    Resume {
+        #[command(flatten)]
+        order: Order,
+    },
+}
+
+/// Where an order goes, and how long to wait for its outcome.
+#[derive(clap::Args, Debug)]
+pub(crate) struct Order {
+    #[arg(add = ArgValueCandidates::new(completions::ants))]
+    ant: UserId,
+    /// The machine whose daemon serves ANT (default: the one that last recorded serving it).
+    #[arg(long)]
+    machine: Option<Machine>,
+    /// How long to wait for the daemon to apply or refuse the order; a pending order stays until it does.
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "10s")]
+    wait: Duration,
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -78,6 +134,12 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
         AntCommand::Add { name, on, options, wait } => orders::add::run(nats, &name, on, &options, wait).await,
-        AntCommand::Retire { ant, on, wait } => orders::retire::run(nats, &ant, on, wait).await,
+        AntCommand::Retire { ant, machine, wait } => orders::retire::run(nats, &ant, machine, wait).await,
+        AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
+        AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,
+        AntCommand::Pause { order: Order { ant, machine, wait } } => pause::run(nats, &ant, machine, true, wait).await,
+        AntCommand::Resume { order: Order { ant, machine, wait } } => {
+            pause::run(nats, &ant, machine, false, wait).await
+        }
     }
 }

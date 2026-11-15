@@ -30,6 +30,7 @@ struct Bus {
     /// dev-a's escalation chain.
     chain: Chain,
     workload: roster::Workload,
+    pause: crate::pause::Pause,
     mcp: Option<Mcp>,
     channels: jetstream::kv::Store,
     threads: Threads,
@@ -37,6 +38,7 @@ struct Bus {
     humans: Registry,
     redactor: Redactor,
     publisher: Option<crate::publish::Publisher>,
+    restarts: Restarts,
 }
 
 impl Bus {
@@ -80,6 +82,7 @@ impl Bus {
             ledger,
             chain: Chain::default(),
             workload,
+            pause: crate::pause::Pause::new(false),
             mcp: None,
             channels,
             threads,
@@ -87,6 +90,7 @@ impl Bus {
             humans: Registry::default(),
             redactor: Redactor::default(),
             publisher: None,
+            restarts: Restarts::default(),
         };
         (bus, replies)
     }
@@ -129,6 +133,7 @@ impl Bus {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         };
         roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
@@ -169,9 +174,12 @@ impl Bus {
     }
 
     async fn serve_timed(&self, pool: &Pool, ctrl_c: &Arc<Semaphore>, progress_every: Duration, ack_wait: Duration) {
-        let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
-        let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
-        let messages = futures::stream::select(messages, posts);
+        let open = async || {
+            let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
+            let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
+            anyhow::Ok(futures::stream::select(messages, posts))
+        };
+        let messages = Box::pin(pause::pausable(self.pause.subscribe(), None, open));
         let channels = Channels::watch(self.channels.clone()).await.unwrap();
         let escalator = self.escalator();
         let notes = crate::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
@@ -181,6 +189,7 @@ impl Bus {
             ant: &self.dev,
             pool,
             cancels: Cancels::default(),
+            restarts: &self.restarts,
             attempts: &self.attempts,
             answered: &self.answered,
             buried: &self.buried,
@@ -189,6 +198,7 @@ impl Bus {
             publisher: self.publisher.as_ref(),
             redactor: &self.redactor,
             workload: &self.workload,
+            pause: &self.pause,
             metrics: crate::metrics::ant(&self.dev),
             limits: self.limits,
             ledger: &self.ledger,
@@ -221,6 +231,7 @@ impl Bus {
             () = inbox.serve(messages, channels, IDLE, stop) => {}
             () = escalator.deadlines() => {}
             () = inbox.hear_cancels() => {}
+            () = inbox.hear_restarts() => {}
         }
     }
 
@@ -349,6 +360,60 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
         until("the inbox to go idle", || bus.workload.activity() == ants_proto::Activity::Idle).await;
         assert_eq!(bus.workload.harnesses(), 2, "a harness per thread stays live");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resumed() {
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    bus.pause = crate::pause::Pause::new(true);
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let resume = || bus.pause.replace(&crate::pause::Pause::new(false));
+    let pause = || bus.pause.replace(&crate::pause::Pause::new(true));
+    let check = async {
+        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().prompted, 0, "paused from the start");
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let consumer = bus.stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await;
+        assert!(consumer.is_err(), "nothing pulled while paused");
+
+        resume();
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "a".to_owned()));
+        assert_eq!(bus.workload.paused(), None);
+        bus.send(&t1, "hold b").await;
+        until("b to start", || log.locked().prompted == 2).await;
+        bus.send(&t1, "c").await;
+        timeout(WAIT, async {
+            while bus.consumer().await.num_ack_pending < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("c never came in hand");
+        pause();
+        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold b".to_owned()), "a running prompt finishes");
+        bus.send(&t2, "d").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().prompted, 2, "neither the message in hand nor a new one starts");
+        let consumer = bus.consumer().await;
+        assert_eq!((consumer.num_pending, consumer.num_ack_pending), (1, 1), "d queued, c in hand: {consumer:?}");
+
+        resume();
+        let mut rest = [next_reply(&mut replies).await, next_reply(&mut replies).await];
+        rest.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(rest, [(t1.clone(), "c".to_owned()), (t2.clone(), "d".to_owned())]);
+        assert_eq!(log.locked().starts, 2, "a harness per thread, none restarted");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -1210,6 +1275,82 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(log.locked().cancelled, 1);
     assert_eq!(log.locked().prompted, 2, "not retried");
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// Have the daemon restart dev-a's harnesses for alice once it serves the inbox.
+async fn restart(bus: &Bus, now: bool) -> Restarted {
+    let (dev, alice) = (bus.dev.clone(), "alice".parse::<UserId>().unwrap());
+    let _served = bus.restarts.serve(&dev);
+    timeout(WAIT, async {
+        while !bus.restarts.is_listening(&dev) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        bus.restarts.restart(&dev, alice, now).await.expect("dev-a is served")
+    })
+    .await
+    .expect("the daemon heard no restart")
+}
+
+#[tokio::test]
+async fn a_restart_stops_idle_harnesses_and_working_ones_after_their_prompt() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "one").await;
+    bus.send(&t2, "hold two").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut replies = vec![next_reply(&mut to_human).await];
+        until("the held prompt to run", || log.locked().prompted == 2).await;
+        until("the first message to be handled", || bus.workload.handling() == 1).await;
+        assert_eq!(restart(&bus, false).await, Restarted { stopped: 1, after_prompt: 1, cancelled: 0 });
+        gate.add_permits(1);
+        replies.push(next_reply(&mut to_human).await);
+        replies.sort();
+        let mut want = vec![(t1.clone(), "one".to_owned()), (t2.clone(), "hold two".to_owned())];
+        want.sort();
+        assert_eq!(replies, want, "the working prompt ends");
+        bus.send(&t2, "again").await;
+        assert_eq!(next_reply(&mut to_human).await, (t2.clone(), "again".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.starts, log.cancelled), (3, 0), "a new harness, no prompt cancelled");
+        assert_eq!(log.loaded, ["s2"], "it resumes the session");
+    }
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_restart_now_cancels_the_running_prompt_and_the_sender_gets_what_it_wrote() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "stall").await;
+    bus.send(&t1, "after").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        assert_eq!(restart(&bus, true).await, Restarted { stopped: 0, after_prompt: 1, cancelled: 1 });
+        let reply = next_envelope(&mut to_human).await;
+        let notice = "[ants] The prompt was cancelled by alice to restart dev-a's harnesses (ants ant restart --now).";
+        assert_eq!(reply.text, format!("partial\n\n{notice}"));
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "after".to_owned()), "the thread goes on");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.starts, log.cancelled, log.prompted), (2, 1, 2), "not retried, on a new harness");
+        assert_eq!(log.loaded, ["s1"], "it resumes the session");
+    }
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -3300,6 +3441,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         fallback: None,
         memory_low: None,
         model: None,
+        paused: None,
     };
     roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

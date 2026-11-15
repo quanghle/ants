@@ -17,10 +17,11 @@ use futures::{FutureExt as _, StreamExt as _};
 use super::attach;
 use crate::attachments::{self, File, Listed};
 use crate::cmd::{cancel, send};
+use crate::orders;
 use crate::sealed::{Keyring, Sealing};
 use crate::thread::{self, Entry, Kind};
 use crate::thread_meta::{self, Marking, Meta};
-use crate::{humans, quiet};
+use crate::{humans, pause, quiet};
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -36,9 +37,8 @@ pub struct Ctx {
     pub account: Option<String>,
     /// What opens the attachments of sealed messages, if anything.
     pub keyring: Option<Arc<Keyring>>,
-    /// The server and credentials of the chat, which sign admin orders.
-    pub url: String,
-    pub creds: Option<std::path::PathBuf>,
+    /// The human's admin credentials, which sign admin orders, or why there are none.
+    pub admin: Result<orders::Admin, String>,
 }
 
 impl Ctx {
@@ -119,6 +119,17 @@ pub enum Job {
     Open(Box<Listed>),
     /// Save the attachment as `ants attachment get` does, to the path given, else under its name here.
     Save(Box<Listed>, Option<std::path::PathBuf>),
+    /// Order the daemon of `ant` to restart its harnesses, cancelling their prompts if `now`, as `ants ant restart`
+    /// does.
+    Restart {
+        ant: UserId,
+        now: bool,
+    },
+    /// Pause `ant`, or resume it, as `ants ant pause|resume` does.
+    Pause {
+        ant: UserId,
+        paused: bool,
+    },
     /// Send as `job`, an [`Job::Ask`], [`Job::Post`], [`Job::Reply`] or [`Job::Grant`], does, with `files` attached.
     Attached {
         job: Box<Job>,
@@ -218,6 +229,11 @@ impl Job {
                 let ant = stuck(&entries).ok_or_else(|| anyhow!("no ant is stuck on thread {thread}"))?;
                 ask(ctx, ant.into(), Some(thread), text, false, &files).await
             }
+            Self::Restart { ant, now } => {
+                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+                let (order, outcome) = crate::restart::send(admin, &ctx.js, None, &ant, now).await?;
+                Ok(Done::line(crate::restart::told(&order, outcome)?))
+            }
             Self::Cancel { thread, ants } => {
                 let mut lines = Vec::new();
                 let mut failed = None;
@@ -273,15 +289,21 @@ impl Job {
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
-            Self::Retire { ant } => {
-                let nats = crate::Nats::new(&ctx.url, ctx.creds.as_deref(), ctx.domain.as_ref())?;
-                let wait = crate::orders::retire::WAIT;
-                let said = crate::orders::retire::retire(&nats, &ctx.js, &ant, None, wait).await?;
-                Ok(Done::line(said.replace('\n', " ")))
+            Self::Retire { ant } => retire(ctx, &ant).await,
+            Self::Pause { ant, paused } => {
+                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+                Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }
     }
+}
+
+/// Retire `ant` by admin order, as `ants ant retire` does.
+async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
+    let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+    let said = crate::orders::retire::retire(admin, &ctx.js, ant, None, crate::orders::retire::WAIT).await?;
+    Ok(Done::line(said.replace('\n', " ")))
 }
 
 /// The warning for a message kept in the leaf node's outbox.
@@ -447,18 +469,8 @@ mod tests {
         }
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
-        let ctx = Ctx {
-            client,
-            js,
-            me,
-            domain: None,
-            meta,
-            sealing,
-            account: None,
-            keyring: None,
-            url: String::new(),
-            creds: None,
-        };
+        let admin = Err("unused".into());
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
         let source = server.dir().join("menu.txt");
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
@@ -535,18 +547,8 @@ mod tests {
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let meta = Err("unused".into());
-        let ctx = Ctx {
-            client,
-            js: js.clone(),
-            me,
-            domain: None,
-            meta,
-            sealing,
-            account: None,
-            keyring: None,
-            url: String::new(),
-            creds: None,
-        };
+        let admin = Err("unused".into());
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(

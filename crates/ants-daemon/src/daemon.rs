@@ -21,6 +21,7 @@ use async_nats::jetstream::{self, AckKind};
 use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
+use crate::admin::restart::{Restarted, Restarts};
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::behalf::Records;
@@ -46,7 +47,7 @@ use crate::status::{self, Status};
 use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
-use crate::{bus, roster, unserved};
+use crate::{bus, pause, roster, unserved};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
 /// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
@@ -142,13 +143,16 @@ pub struct Config {
     pub redact: bool,
     /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
     pub publish: crate::publish::Publish,
+    /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
+    /// restarts no harness ([`crate::pause::Pause::replace`]).
+    pub pause: crate::pause::Pause,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
 /// that defers to others ([`Config::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
-    run_until(config, &Stop::default()).await
+    run_until(config, &Stop::default(), &Restarts::default()).await
 }
 
 /// A request to stop serving one ant, as the first Ctrl-C does: it takes no more messages, hands back those waiting
@@ -163,14 +167,16 @@ impl Stop {
     }
 }
 
-/// [`run`], also stopping on `stop`'s request.
-pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
+/// [`run`], also stopping on `stop`'s request, and restarting the ant's harnesses on the admin orders `restarts`
+/// passes on.
+pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
+    let _served = restarts.serve(&config.ant);
     if let Some(detail) = config.harness.unenforced(&config.allow, !config.escalation.escalate_to.is_empty()) {
         tracing::warn!(ant = %config.ant, fix = config.harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
-    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
+    while Box::pin(serve(&config, stop, restarts)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
     Ok(())
@@ -223,7 +229,8 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context)
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
-async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
+#[allow(clippy::too_many_lines)]
+async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = connect(config, stop).await? else {
         tracing::info!("stopped before connecting");
@@ -231,6 +238,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     };
     let metrics = crate::metrics::ant(&config.ant);
     let workload = std::sync::Arc::new(roster::Workload::default());
+    workload.set_paused(config.pause.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
     let mut entry = roster::entry(config).await;
     let mut claimed = None;
@@ -286,6 +294,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         ant: &config.ant,
         pool: &pool,
         cancels: Cancels::default(),
+        restarts,
         attempts: &attempts,
         answered: &answered,
         buried: &buried,
@@ -294,6 +303,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         publisher: publisher.as_ref(),
         redactor: &redactor,
         workload: &workload,
+        pause: &config.pause,
         metrics,
         limits: config.limits,
         ledger: &ledger,
@@ -556,23 +566,51 @@ async fn publisher(
 }
 
 /// The messages to the ant, from its inbox and the posts to its channels, and the channels; the inbox alone when the
-/// channels fail.
+/// channels fail. While the ant is paused ([`Config::pause`]) the consumers are not pulled from ([`pause::pausable`]).
 async fn inbox_messages(
     js: &jetstream::Context,
     stream: &jetstream::stream::Stream<()>,
     config: &Config,
-) -> Result<(impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin, Channels)> {
+) -> Result<(impl Stream<Item = Result<jetstream::Message, anyhow::Error>> + Unpin, Channels)> {
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
-    let messages = bus::inbox_consumer(stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let (channels, posts) = match channels(js, stream, &config.ant, in_hand).await {
-        Ok((channels, posts)) => (channels, Some(posts)),
+    let channels = match async { Channels::watch(bus::ensure_channels(js).await?).await }.await {
+        Ok(channels) => Some(channels),
         Err(e) => {
             tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
-            (Channels::default(), None)
+            None
         }
     };
-    let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
-    Ok((messages, channels))
+    let posts = channels.is_some();
+    let paused = config.pause.subscribe();
+    let current = match *paused.borrow() {
+        Some(_) => None,
+        None => Some(open_messages(stream, &config.ant, in_hand, posts).await?),
+    };
+    let (stream, ant) = (stream.clone(), config.ant.clone());
+    let messages = pause::pausable(paused, current, async move || open_messages(&stream, &ant, in_hand, posts).await);
+    Ok((Box::pin(messages), channels.unwrap_or_default()))
+}
+
+/// The ant's inbox consumer, with its channel consumer if `posts`, as one stream.
+async fn open_messages(
+    stream: &jetstream::stream::Stream<()>,
+    ant: &UserId,
+    in_hand: i64,
+    posts: bool,
+) -> Result<impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin + use<>> {
+    let messages = bus::inbox_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let posts = if posts {
+        match bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await {
+            Ok(posts) => Some(posts),
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "serving the inbox without channel posts");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(futures::stream::select(messages, futures::stream::iter(posts).flatten()))
 }
 
 /// Put the ant on the roster, holding its entry from the revision claimed, if any.
@@ -649,23 +687,12 @@ where
             tell_kept_branches(inbox.js, inbox.threads, inbox.humans, &config.ant, kept).await;
         }) => {}
         () = inbox.hear_cancels() => {}
+        () = inbox.hear_restarts() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
     Ok(registration.is_lost() && !stopping.get())
-}
-
-/// The channels, and the posts to them through the ant's channel consumer.
-async fn channels<I>(
-    js: &jetstream::Context,
-    stream: &jetstream::stream::Stream<I>,
-    ant: &UserId,
-    in_hand: i64,
-) -> Result<(Channels, jetstream::consumer::pull::Stream)> {
-    let channels = Channels::watch(bus::ensure_channels(js).await?).await?;
-    let posts = bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    Ok((channels, posts))
 }
 
 /// Ctrl-C, SIGTERM or a request on `stop`, whichever comes first.
@@ -821,18 +848,32 @@ struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<Canc
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cancel {
     by: UserId,
-    /// Whether it came with a steer message ([`Envelope::steer`]), which the thread takes next.
-    steer: bool,
+    why: Why,
+}
+
+/// What a prompt is cancelled for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// `ants cancel`.
+    Cancel,
+    /// A steer message ([`Envelope::steer`]), which the thread takes next.
+    Steer,
+    /// An admin's order to restart the ant's harnesses now ([`crate::admin::restart`]).
+    Restart,
 }
 
 impl Cancel {
     /// The `[ants]` line ending the cancelled prompt's reply.
     fn notice(&self, ant: &UserId) -> String {
         let by = &self.by;
-        if self.steer {
-            format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer).")
-        } else {
-            format!("[ants] The prompt was cancelled by {by} (ants cancel).")
+        match self.why {
+            Why::Cancel => format!("[ants] The prompt was cancelled by {by} (ants cancel)."),
+            Why::Steer => format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer)."),
+            Why::Restart => {
+                format!(
+                    "[ants] The prompt was cancelled by {by} to restart {ant}'s harnesses (ants ant restart --now)."
+                )
+            }
         }
     }
 }
@@ -871,6 +912,8 @@ struct Inbox<'a> {
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
+    /// Where admin orders to restart the ant's harnesses arrive.
+    restarts: &'a Restarts,
     attempts: &'a Attempts,
     answered: &'a Answered,
     /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
@@ -884,6 +927,8 @@ struct Inbox<'a> {
     redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
+    /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
+    pause: &'a crate::pause::Pause,
     /// The ant's counters, for monitoring.
     metrics: std::sync::Arc<crate::metrics::Ant>,
     limits: PromptLimits,
@@ -953,6 +998,7 @@ impl Inbox<'_> {
             }
         };
         let mut answering = FuturesUnordered::new();
+        let mut paused = self.pause.subscribe();
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
@@ -975,6 +1021,7 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
+                Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {
@@ -1002,10 +1049,13 @@ impl Inbox<'_> {
             }
             // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
             // wait in hand, unless a fallback answers them: the consumer's limit on them stops deliveries. A rate limit
-            // is waited out.
+            // is waited out. While the ant is paused they wait in hand too, and the consumers are not pulled from.
             let now = tokio::time::Instant::now();
-            let held = self.throttle.is_held() && !self.throttle.is_quota_held()
+            let pause = paused.borrow_and_update().clone();
+            let held = pause.is_some()
+                || self.throttle.is_held() && !self.throttle.is_quota_held()
                 || self.outage().is_some() && self.fallback(now).is_none();
+            self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {
@@ -1085,7 +1135,7 @@ impl Inbox<'_> {
         if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {
             return Some(Steered::Ahead);
         }
-        let cancel = Cancel { by: envelope.from.clone(), steer: true };
+        let cancel = Cancel { by: envelope.from.clone(), why: Why::Steer };
         self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
     }
 
@@ -1145,7 +1195,8 @@ impl Inbox<'_> {
                 tracing::warn!(error = %e, "ignoring a forged cancel request");
                 continue;
             }
-            let cancelled = self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), steer: false });
+            let cancelled =
+                self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
             if !cancelled {
                 tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
             }
@@ -1156,6 +1207,33 @@ impl Inbox<'_> {
             }
         }
         std::future::pending::<()>().await;
+    }
+
+    /// Restart the ant's harnesses on each admin order to ([`crate::admin::restart`]) for as long as the daemon serves:
+    /// the idle ones stop at once, the working ones once their prompt ends, cancelled first on an order to restart now.
+    async fn hear_restarts(&self) {
+        let mut listening = self.restarts.listen(self.ant);
+        loop {
+            let request = listening.next().await;
+            let restarting = self.pool.restart();
+            let cancel = Cancel { by: request.by.clone(), why: Why::Restart };
+            let cancelled = if request.now {
+                restarting.working.iter().filter(|thread| self.cancels.cancel(thread, cancel.clone())).count()
+            } else {
+                0
+            };
+            let restarted =
+                Restarted { stopped: restarting.stopped, after_prompt: restarting.working.len(), cancelled };
+            tracing::info!(
+                by = %request.by,
+                now = request.now,
+                stopped = restarted.stopped,
+                after_prompt = restarted.after_prompt,
+                cancelled,
+                "restarting the harnesses"
+            );
+            let _ = request.done.send(restarted);
+        }
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
@@ -2481,7 +2559,7 @@ impl Inbox<'_> {
                     }
                 }
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
-                    tracing::info!(%thread, by = %by.by, steer = by.steer, "cancelling the prompt");
+                    tracing::info!(%thread, by = %by.by, why = ?by.why, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
                         let _ = stop.send(format!("Cancelled by {}", by.by));
                         cut_by_cancel = true;

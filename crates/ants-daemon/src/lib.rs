@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod notes;
 pub mod overflow;
 pub mod owners;
+pub mod pause;
 pub mod permission;
 pub mod pool;
 pub mod pressure;

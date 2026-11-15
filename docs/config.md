@@ -74,6 +74,7 @@ max_escalation_hops = 3                    # default
 escalate_after = "30m"                     # default; "0" waits indefinitely
 escalation_reminder = "4h"                 # default; human reminder delay; "0" disables
 stand_in = "bob"                           # optional human relayed this ant's requests and escalations while their human is away
+paused = true                              # optional; takes no new prompt, messages wait queued (see Pausing an ant)
 
 [[ant_template]]
 name = "worker"
@@ -107,12 +108,18 @@ allow = ["read:*", "execute:cargo test*"]
 - `ants daemon --config FILE --ant dev-a`: serves only `dev-a` from `FILE` (`--ant messenger` selects the built-in messenger) with CLI ant flags overriding `FILE`; templated ants refuse ant flags. No schedules run when `--ant` is set.
 - Per-ant, per-schedule and top-level `nats`, `js_domain` and `creds` in the file override `--nats`, `--js-domain` and `--creds`, which fill in omitted values (`--creds` applies only when serving a single ant, never to schedules).
 
-`ants daemon` reloads on `SIGHUP`, at once after an admin's `set` order edited `config.toml` ([auth.md](auth.md#admin-orders)), or automatically when `config.toml` or `harnesses.d/*.toml` changes on disk (polled every 3 s by mtime, size and inode; applied once unchanged across two checks, ~6 s after write):
+`ants daemon` reloads on `SIGHUP`, at once after an admin's `set`, `pause` or `resume` order edited `config.toml` ([auth.md](auth.md#admin-orders)), or automatically when `config.toml` or `harnesses.d/*.toml` changes on disk (polled every 3 s by mtime, size and inode; applied once unchanged across two checks, ~6 s after write):
 
-- Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members).
+- Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members, nor does `paused` alone: see [Pausing an ant](#pausing-an-ant)).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` or `[admin]` table or host credentials file reconnects the host. With `[admin] remote = false`, the host refuses every admin order to the machine's ants, recording `this machine's config sets [admin] remote = false` as its outcome; otherwise an admin's `set` order edits the ant's `[[ant]]` table in place, comments kept, refused naming the field when the field no longer holds the value the order expects, or with the loader's error when the file would not load, and changing nothing then. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
+
+## Pausing an ant
+
+`paused = true` on an `[[ant]]` pauses it: its daemon stops pulling from the ant's inbox and channel consumers, so the messages to it wait queued in the stream, neither drained nor returned and spending no delivery attempts, and the ant takes no new prompt; prompts already running go on to their end, and messages already in hand stay in hand, unprompted, until it resumes. Its roster entry says `paused` (`{since, by}`: when, and the admin whose order paused it, left out when the file did), which `ants roster`, `ants ant show`, the ant view of `ants chat` (`‖` in the nav), the `list_ants` MCP tool and the warnings at send time show; `route` picks a paused ant last, and a sender whose messages wait 15 min for a paused ant is told so, as for an ant no daemon serves. Removing the key, or `paused = false`, resumes it, and it takes the messages queued for it in turn. A reload that changes `paused` alone pauses or resumes the running ant in place, restarting no harness. Templated ants may set it too.
+
+`ants ant pause ANT [--machine M] [--wait DUR]` and `ants ant resume ANT` send the admin order (`pause`, `resume`) that has the daemon of the ant's machine set `paused = true`, or remove it, and reload at once ([auth.md](auth.md#admin-orders)); `p` in the ant view of `ants chat` sends the one that flips it.
 
 ## Worktrees
 
@@ -161,7 +168,7 @@ Allowed per-ant overrides within template bounds:
 
 - `workdir` (in `workdirs`), `harness` (in `harnesses`), `context` (in `contexts`), `allow_sets` (keys of `allow_sets`, appended to `allow`).
 - `model` (required when `models` is non-empty, forbidden when empty) and `reasoning_effort` (`low` < `medium` < `high` < `xhigh` < `max`, at most the model's ceiling).
-- `whoami`, `memory`, `tasks`, `capabilities`.
+- `whoami`, `memory`, `tasks`, `capabilities`, `paused`.
 - `max_thread_tokens`, `max_thread_cost`, `max_daily_tokens`, `max_daily_cost`, `max_harnesses`, `prompt_timeout`, `max_tool_calls` — each at most the template ceiling (unset caps have no ceiling; `0` for `prompt_timeout` or `max_tool_calls` is allowed only when the template's is `0`).
 
 Removing a manager from `managers` blocks new additions while keeping existing workers.
@@ -290,12 +297,28 @@ rate_limited = ["slow down"]                   # extra rate-limit error substrin
 quota_exhausted = ["monthly cap reached"]      # extra quota-exhausted error substrings
 window = 200000                                # optional context window (tokens); sizes history seed
 history_budget = 65536                         # optional history seed budget (bytes)
+memory_files = ["AGENTS.md", "~/.custom/*.md"] # memory files an admin's read shows (see Memory files)
 
 [harnesses.custom-acp.context]
 default = {}
 large = { args = ["--context-window", "1m"], window = 1000000 }
 huge = { model_suffix = "-1m", history_budget = 262144 }
 ```
+
+### Memory files
+
+`memory_files` lists globs of the files a harness takes as memory, which an admin's `read_memories` order shows read-only (`ants ant memories ANT`, the memories pane of the ant view in `ants chat`; [auth.md](auth.md#admin-orders)). A glob is relative to the ant's workdir, `~/` names the home directory of the daemon's user and an absolute path is taken as is; `*` and `?` match within a path component, `**` any number of directories, and `..` is refused. The built-ins default to:
+
+| Harness | `memory_files` |
+|---|---|
+| `copilot` | `AGENTS.md`, `.github/copilot-instructions.md`, `.github/instructions/**/*.instructions.md`, `CLAUDE.md`, `GEMINI.md`, `~/.copilot/copilot-instructions.md` |
+| `claude` | `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md` |
+| `codex` | `AGENTS.md`, `AGENTS.override.md`, `~/.codex/AGENTS.md`, `~/.codex/AGENTS.override.md` |
+| `antigravity` | `GEMINI.md`, `AGENTS.md`, `.agent/rules/*.md`, `~/.gemini/GEMINI.md` |
+
+A `[harnesses.NAME]` redefining a harness without `memory_files` keeps the globs of the one it replaces; `memory_files = []` shows none. A read follows a symbolic link only when its target, resolved, still matches one of the globs and lies under the ant's workdir, the ant's home (`home`, default `~/.ants/<name>`) or the home directory of the daemon's user; `**` follows no linked directory. Anything else is left out, named with the reason. With `BD_DB` in the ant's environment (the ant's `env`, else its harness's, else the daemon's), the read also lists the bd memories of that database (`bd memories --json`, run in the workdir, at most 10 s).
+
+A read is capped so its outcome fits the `ants_machines` bucket: 32 KiB per file or memory (cut short beyond), 192 KiB of JSON for all of them, and 64 files; what is left out is listed with why. The ant's core memories (`whoami`, `memory`, `tasks` of its `[[ant]]`) come from the config file and are edited with a `set` order.
 
 ### Choosing a harness in `ants setup`
 

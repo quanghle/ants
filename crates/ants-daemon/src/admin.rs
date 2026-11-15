@@ -6,8 +6,10 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`add`] adds an ant to it,
-//! its credentials signed by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`pause`] pauses or resumes
+//! the ant there; [`restart`] has the daemon serving the ant restart its harnesses; [`memories`] reads the ant's
+//! memories, only while online; [`add`] adds an ant to the config, its credentials signed by `ants signer` on the
+//! order, and [`retire`] removes one, its credentials revoked so.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +32,9 @@ use crate::direct_kv::{DirectKv, Lookup};
 
 mod add;
 mod ask;
+mod memories;
+mod pause;
+pub mod restart;
 mod retire;
 mod set;
 
@@ -44,8 +49,6 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Why every order is refused while the config sets `[admin] remote = false` (requirement: a machine may opt out).
 pub const REMOTE_OFF: &str = "this machine's config sets [admin] remote = false";
-/// Why an order is refused that the daemon cannot carry out yet.
-pub const NOT_SUPPORTED: &str = "not supported yet";
 
 /// Why an order to edit the config is refused by a daemon serving no config file.
 pub const NO_CONFIG: &str = "the daemon serves no config file to edit";
@@ -66,6 +69,8 @@ pub struct Orders {
     pub creds: Option<PathBuf>,
     /// The hub's JetStream domain, where a retirement reads the roster.
     pub js_domain: Option<JsDomain>,
+    /// The ants the process serves, which restart their harnesses on an order.
+    pub restarts: restart::Restarts,
 }
 
 /// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
@@ -75,6 +80,14 @@ pub struct ConfigFile {
     pub path: PathBuf,
     /// Notified once per edit written.
     pub edited: Arc<Notify>,
+    /// The admins whose orders paused ants, for the reloaded config to credit ([`crate::pause::Pause::credit`]).
+    pub pausers: crate::pause::Pausers,
+}
+
+impl ConfigFile {
+    pub fn new(path: PathBuf, edited: Arc<Notify>) -> Self {
+        Self { path, edited, pausers: crate::pause::Pausers::default() }
+    }
 }
 
 impl PartialEq for ConfigFile {
@@ -273,20 +286,21 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(js, orders, order).await),
+        Ok(_) => Ok(apply(js, orders, order, stored_at).await),
     }
 }
 
-/// Carry out `order`, which an admin signed, with the module of its op, which refuses it when it cannot.
-async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder) -> AdminOutcome {
+/// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
+/// refuses it when it cannot.
+async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
     match &order.op {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
-        AdminOp::Pause => refused(order, NOT_SUPPORTED),
-        AdminOp::Resume => refused(order, NOT_SUPPORTED),
-        AdminOp::Restart { .. } => refused(order, NOT_SUPPORTED),
+        AdminOp::Pause => pause::apply(orders, order, true),
+        AdminOp::Resume => pause::apply(orders, order, false),
+        AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
         AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
         AdminOp::Retire => retire::apply(js, orders, order).await,
-        AdminOp::ReadMemories => refused(order, NOT_SUPPORTED),
+        AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
     }
 }
 

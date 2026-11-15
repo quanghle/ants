@@ -8,6 +8,7 @@ use ants_proto::{AdminOp, Machine, OrderState, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream;
 
+use super::Admin;
 use crate::Nats;
 use crate::retire::stop_note;
 
@@ -18,20 +19,20 @@ pub const WAIT: Duration = Duration::from_mins(8);
 /// `ants ant retire`: send the order and wait up to `wait` for its outcome.
 pub async fn run(nats: &Nats<'_>, ant: &UserId, machine: Option<Machine>, wait: Duration) -> Result<()> {
     let (_, js) = nats.connect("ants-ant-retire").await?;
-    println!("{}", retire(nats, &js, ant, machine, wait).await?);
+    println!("{}", retire(&Admin::of(nats)?, &js, ant, machine, wait).await?);
     Ok(())
 }
 
-/// Send the retire order for `ant` to `machine`, else to the machine that last recorded serving it, and wait up to
+/// Send the retire order for `ant`, signed by `admin`, to `machine`, else to the machine that last recorded serving it, and wait up to
 /// `wait` for its outcome: what it did, a line each, or that it is still pending. Fails when the daemon refused it.
 pub async fn retire(
-    nats: &Nats<'_>,
+    admin: &Admin,
     js: &jetstream::Context,
     ant: &UserId,
     machine: Option<Machine>,
     wait: Duration,
 ) -> Result<String> {
-    let (order, outcome) = super::send(nats, js, machine, ant, AdminOp::Retire, wait).await?;
+    let (order, outcome) = admin.send(js, machine, ant, AdminOp::Retire, wait).await?;
     let Some(outcome) = outcome else { return Ok(super::pending_note(&order)) };
     if outcome.state != OrderState::Applied {
         bail!("the daemon of {} refused to retire {ant}: {}", order.machine, super::reason(&outcome));

@@ -125,7 +125,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `approval` | `request_id` | A tool request waits for a decision |
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
 | `asked` | `to`, `message` (id), `question`: `{text, options, free_text}` | A question was asked of a human (below) |
-| `decided` | `request_id`, `verdict`, `by`, `decider`? | A tool request was settled (below) |
+| `decided` | `request_id`, `verdict`, `by`, `decider`?, `via`? | A tool request was settled (below) |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
 
@@ -177,7 +177,9 @@ a decision of an ant of its chain sent to its inbox (which observers cannot read
 `verdict` is what the ant goes on with (`allow_once`, `allow_always`, `reject`), a verdict the harness did not offer
 counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
 `expiry` (rejected unanswered). A human's decision names its human in `decider` when its `ApprovalDecision` names one
-(`by`, as the deciding client claims it); the `ApprovalDecision` feed holds it.
+(`by`, as the deciding client claims it); the `ApprovalDecision` feed holds it. A decision an assistant made for its
+human and the human confirmed or pre-allowed ([auth.md](auth.md#confirming-an-assistants-acts)) is `by: human` with
+the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stored for it.
 
 ### `Timeline` on `ants.timeline.<thread>.<ant>`
 

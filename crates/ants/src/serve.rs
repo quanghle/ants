@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::admin::ConfigFile;
+use ants_daemon::admin::restart::Restarts;
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
@@ -411,11 +412,17 @@ pub async fn run(
     let metrics = served.metrics;
     let _metrics = crate::serve_metrics(metrics, Arc::new(ants_daemon::metrics::Daemon)).await?;
     let mut running = HashMap::new();
+    // The ants served, which the host connection's admin orders restart.
+    let restarts = Restarts::default();
+    let serve = |ant| serve(ant, restarts.clone());
+    let restarting = |wanted: Option<(Host, Vec<UserId>)>| {
+        wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), ..host }, ants))
+    };
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
     let mut host = HostRun::default();
-    host.reconcile(served.host);
+    host.reconcile(restarting(served.host));
     let shutdown = async {
         if let Err(e) = ants_daemon::daemon::stop_signal().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
@@ -463,7 +470,7 @@ pub async fn run(
                     }
                     tasks.extend(reconcile(&mut running, served.configs).into_iter().map(serve));
                     schedules.reconcile(served.schedules, run_schedule);
-                    host.reconcile(served.host);
+                    host.reconcile(restarting(served.host));
                 }
                 Err(e) => tracing::error!(
                     on = trigger.describe(),
@@ -481,11 +488,11 @@ pub async fn run(
     }
 }
 
-/// Serve one ant until it stops, reporting which.
-fn serve((config, stop): (Config, Stop)) -> impl Future<Output = (UserId, Result<()>)> {
+/// Serve one ant until it stops, reporting which, restarting its harnesses on the admin orders `restarts` passes on.
+fn serve((config, stop): (Config, Stop), restarts: Restarts) -> impl Future<Output = (UserId, Result<()>)> {
     let ant = config.ant.clone();
     let span = tracing::info_span!("ant", name = %ant);
-    async move { (ant, ants_daemon::run_until(config, &stop).await) }.instrument(span)
+    async move { (ant, ants_daemon::run_until(config, &stop, &restarts).await) }.instrument(span)
 }
 
 /// Run `schedule` in a task of its own until aborted.
@@ -659,6 +666,7 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             start.push(Running::insert(running, config));
             continue;
         };
+        config.pause.carry(&r.config.pause);
         if r.stopping {
             r.next = Some(config);
         } else if r.config != config {
@@ -669,9 +677,12 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
-        } else if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
-            // Members are left out of the comparison: the running ant takes the new ones as it is.
-            serving.members.replace(&listed.members);
+        } else {
+            // Pool members and the pause are left out of the comparison: the running ant takes them as it is.
+            if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
+                serving.members.replace(&listed.members);
+            }
+            r.config.pause.replace(&config.pause);
         }
     }
     start
@@ -834,6 +845,34 @@ mod tests {
         assert!(reconcile(&mut running, vec![config(&["lead-a", "lead-b"])]).is_empty());
         assert!(!running[&member("lead-a")].stopping, "only its pool's members changed");
         assert_eq!(served.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
+    }
+
+    #[test]
+    fn a_reload_pauses_and_resumes_a_running_ant_without_a_restart() {
+        let ant_named = |paused: bool, model: Option<&str>| {
+            let p = Ant { paused, model: model.map(str::to_owned), ..ant("dev-a") };
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+        };
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let mut running = HashMap::new();
+        let (served, _) = reconcile(&mut running, vec![ant_named(false, None)]).remove(0);
+        let paused = ant_named(true, None);
+        paused.pause.credit(Some("alice".parse().unwrap()));
+        assert!(reconcile(&mut running, vec![paused]).is_empty());
+        assert!(!running[&dev_a].stopping, "only paused changed");
+        let pause = served.pause.get().expect("the running ant is paused");
+        assert_eq!(pause.by.as_ref().map(UserId::as_str), Some("alice"));
+        assert!(reconcile(&mut running, vec![ant_named(true, None)]).is_empty());
+        assert_eq!(served.pause.get(), Some(pause.clone()), "a pause on keeps its start and admin");
+
+        assert!(reconcile(&mut running, vec![ant_named(true, Some("smart"))]).is_empty());
+        let next = running[&dev_a].next.as_ref().expect("restarted for its model");
+        assert_eq!(next.pause.get(), Some(pause), "carried over the restart");
+        running.get_mut(&dev_a).unwrap().stopping = false;
+        running.get_mut(&dev_a).unwrap().next = None;
+        assert!(reconcile(&mut running, vec![ant_named(false, None)]).is_empty());
+        assert!(!running[&dev_a].stopping, "only paused changed");
+        assert_eq!(served.pause.get(), None, "resumed");
     }
 
     #[test]

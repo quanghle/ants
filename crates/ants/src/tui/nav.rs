@@ -64,6 +64,9 @@ pub fn marker(entries: &[&RosterEntry], now: DateTime<Utc>) -> (&'static str, Co
     if entry.signed_out.is_some() || entry.failing.is_some() {
         return ("✕", Color::Red);
     }
+    if entry.paused.is_some() {
+        return ("‖", Color::Yellow);
+    }
     if entry.limited.is_some() || entry.fallback.is_some() {
         return ("◌", Color::Yellow);
     }
@@ -193,6 +196,9 @@ mod tests {
         let mut out = entry("dev-a", 60, 5, now);
         out.signed_out = Some(ants_proto::SignInNeeded { since: now, sign_in: None });
         assert_eq!(marker(&[&out], now).0, "✕");
+        let mut paused = entry("dev-a", 60, 5, now);
+        paused.paused = Some(ants_proto::Paused { since: now, by: None });
+        assert_eq!(marker(&[&paused], now).0, "‖");
     }
 
     #[test]

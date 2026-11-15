@@ -623,6 +623,30 @@ pub(crate) enum AssistantCommand {
         #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,
     },
+    /// List the decisions the human's assistant made for the human on pending tool requests, held until the human
+    /// confirms them; or answer the one on ACT (`ANT/ID`, as `ants tools` writes a request): confirm it, so it takes
+    /// effect as the human's, or drop it with `--deny`. Signed by the human's device.
+    Confirm {
+        #[arg(value_name = "ACT")]
+        act: Option<String>,
+        /// Drop the decision instead.
+        #[arg(long, requires = "act")]
+        deny: bool,
+    },
+    /// Show the human's pre-allow rules, or add RULES: a decision of the assistant on a tool request a rule covers takes
+    /// effect unconfirmed, unless it allows always. A rule is `ANT/RULE` or `*/RULE` for every ant, RULE an allow rule
+    /// (`execute:cargo test*`, `read:/work/*`; paths absolute). Signed by the human's device, for the assistant now
+    /// designated.
+    Allow {
+        #[arg(value_name = "RULE")]
+        rules: Vec<String>,
+        /// Remove RULES instead.
+        #[arg(long, requires = "rules")]
+        remove: bool,
+        /// Remove every rule.
+        #[arg(long, conflicts_with_all = ["rules", "remove"])]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

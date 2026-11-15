@@ -25,6 +25,14 @@
 //! written `<ant>/<id>`, and a bare id (or start of one) matching requests of several ants is refused with
 //! the qualified ids to choose from.
 //!
+//! A human's assistant decides for its human with such an envelope too, claiming to act for the human
+//! (`on_behalf_of`): the requester holds the decision until the human consents to it, by confirming it (`ants assistant
+//! confirm`) or by a pre-allow rule covering the call (`ants assistant allow`), as the daemon's `approvals` module
+//! tells. A request with such a decision the human consented to before it expired is decided too, by the assistant for
+//! the human ([`State::DecidedByAnt`] with the decision's `on_behalf_of` set); one still waiting for consent stays
+//! pending, with its held decisions ([`held`]). The human's records are read as stored: only the human's credentials
+//! write them, and the requester's daemon verifies them before it applies anything.
+//!
 //! `ants tools list --follow` and `ants inbox --follow` follow the requests alike ([`follow`]); the inbox also shows
 //! how each ends.
 
@@ -34,8 +42,9 @@ use std::path::Path;
 
 use ants_daemon::{bus, chains, config, permission};
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CHAINS_BUCKET, Envelope, Following, ROSTER_BUCKET, RosterEntry, STREAM, UserId,
-    Uuid, Verdict, subject,
+    Act, ActAnswer, ApprovalDecision, ApprovalRequest, AssistantGrant, CHAINS_BUCKET, Confirmations, Envelope,
+    Following, HUMANS_BUCKET, PreAllow, ROSTER_BUCKET, RosterEntry, STREAM, UserId, Uuid, Verdict, assistant_grant_key,
+    confirmations_key, pre_allow_key, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -78,7 +87,8 @@ pub enum State {
     Pending,
     /// A human's decision.
     Decided(ApprovalDecision),
-    /// The decision of an ant of the requester's escalate_to, the one named.
+    /// The decision of an ant of the requester's escalate_to, the one named; or of a human's assistant, named, for
+    /// the human its `on_behalf_of` names, who consented to it.
     DecidedByAnt(UserId, ApprovalDecision),
     /// No decision in time; the ant rejected it.
     Expired,
@@ -145,19 +155,42 @@ impl AntDecision {
     }
 }
 
-/// The first decision on each request of `ant` that an ant of `chain` sent to its inbox, by request id, from
-/// stream sequence `from` up to `until` (excluded), as far as the stream holds messages.
+/// A decision an assistant sent to the requester's inbox for its human, which the requester holds until the human
+/// consents to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldAct {
+    pub human: UserId,
+    pub assistant: UserId,
+    pub verdict: Verdict,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl HeldAct {
+    /// The act as the human answers it.
+    pub fn act(&self, request: &ApprovalRequest) -> Act {
+        Act::Decision { ant: request.ant.clone(), request_id: request.id, verdict: self.verdict }
+    }
+}
+
+/// The decisions in an ant's inbox on its requests, by request id.
+#[derive(Debug, Default)]
+struct InboxDecisions {
+    /// The first of an ant of its escalate_to on each.
+    chain: HashMap<Uuid, AntDecision>,
+    /// The latest of each assistant for its human on each, sent before the request expired.
+    held: HashMap<Uuid, Vec<HeldAct>>,
+}
+
+/// The decisions on the requests of `ant` sent to its inbox by an ant of `chain` or by an assistant for its human,
+/// from stream sequence `from` up to `until` (excluded), as far as the stream holds messages.
 async fn ant_decisions(
     stream: &Stream,
     ant: &UserId,
     chain: &[UserId],
     from: u64,
     until: Option<u64>,
-) -> Result<HashMap<Uuid, AntDecision>> {
-    let mut found = HashMap::new();
-    if chain.is_empty() {
-        return Ok(found);
-    }
+) -> Result<InboxDecisions> {
+    let mut found = InboxDecisions::default();
     let inbox = subject::inbox_of(ant);
     let mut next = from;
     while until.is_none_or(|until| next < until) {
@@ -173,9 +206,17 @@ async fn ant_decisions(
         let Ok(envelope) = serde_json::from_slice::<Envelope>(&msg.payload) else { continue };
         let Some(decision) = &envelope.approval else { continue };
         // The subject pins the sender; the ant takes decisions on its own requests from its own chain only.
-        let ours = &envelope.to == ant && &decision.ant == ant;
-        if ours && envelope.check_subject(&msg.subject).is_ok() && envelope.is_from_chain(chain) {
-            found.entry(decision.request_id).or_insert_with(|| AntDecision {
+        let ours = &envelope.to == ant && &decision.ant == ant && envelope.check_subject(&msg.subject).is_ok();
+        if !ours {
+            continue;
+        }
+        if let Some(human) = &envelope.on_behalf_of {
+            let held = found.held.entry(decision.request_id).or_default();
+            held.retain(|h| !(h.human == *human && h.assistant == envelope.from));
+            let (human, assistant) = (human.clone(), envelope.from.clone());
+            held.push(HeldAct { human, assistant, verdict: decision.verdict, sent_at: envelope.sent_at });
+        } else if envelope.is_from_chain(chain) {
+            found.chain.entry(decision.request_id).or_insert_with(|| AntDecision {
                 by: envelope.from.clone(),
                 decision: (**decision).clone(),
                 sent_at: envelope.sent_at,
@@ -183,6 +224,84 @@ async fn ant_decisions(
         }
     }
     Ok(found)
+}
+
+/// What a human stored of its assistant and its consent to the assistant's acts, unverified.
+#[derive(Debug, Default)]
+struct Consent {
+    assistant: Option<UserId>,
+    confirmations: Option<Confirmations>,
+    pre_allow: Option<PreAllow>,
+}
+
+impl Consent {
+    /// What `human` stored in the humans bucket `kv`; nothing for what is missing or malformed.
+    async fn read(kv: Option<&jetstream::kv::Store>, human: &UserId) -> Result<Self> {
+        let Some(kv) = kv else { return Ok(Self::default()) };
+        let grant: Option<AssistantGrant> = record(kv, &assistant_grant_key(human)).await?;
+        Ok(Self {
+            assistant: grant.and_then(|g| g.assistant),
+            confirmations: record(kv, &confirmations_key(human)).await?,
+            pre_allow: record(kv, &pre_allow_key(human)).await?,
+        })
+    }
+
+    /// Whether the human consents to `held` on `request`, by an answer or a pre-allow rule standing before the request
+    /// expired; None while it has not answered and no rule covers it.
+    fn answer(&self, request: &ApprovalRequest, held: &HeldAct) -> Option<ActAnswer> {
+        if held.sent_at >= request.expires_at || self.assistant.as_ref() != Some(&held.assistant) {
+            return Some(ActAnswer::Deny);
+        }
+        let confirmed = self.confirmations.as_ref().filter(|c| c.issued_at < request.expires_at);
+        if let Some(answer) = confirmed.and_then(|c| c.answer(&held.assistant, &held.act(request))) {
+            return Some(answer);
+        }
+        let rules = self.pre_allow.as_ref().filter(|r| r.assistant == held.assistant);
+        let covered =
+            rules.is_some_and(|r| r.rules_for(&request.ant).any(|rule| permission::covers(rule, &request.tool)));
+        (covered && held.verdict != Verdict::AllowAlways).then_some(ActAnswer::Confirm)
+    }
+}
+
+/// The record under `key` in the humans bucket `kv`; none when missing or malformed.
+pub(crate) async fn record<T: serde::de::DeserializeOwned>(kv: &jetstream::kv::Store, key: &str) -> Result<Option<T>> {
+    let value = kv.get(key).await.with_context(|| format!("reading {key} in {HUMANS_BUCKET}"))?;
+    Ok(value.and_then(|v| serde_json::from_slice(&v).ok()))
+}
+
+/// Of `held`, the decisions on `request` assistants made for their humans, the one its human consented to, as a
+/// decision by the assistant for the human; and those still waiting for consent.
+async fn consented(
+    js: &jetstream::Context,
+    request: &ApprovalRequest,
+    held: &[HeldAct],
+) -> Result<(Option<(UserId, ApprovalDecision)>, Vec<HeldAct>)> {
+    if held.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let kv = js.get_key_value(HUMANS_BUCKET).await.ok();
+    let mut waiting = Vec::new();
+    for act in held {
+        match Consent::read(kv.as_ref(), &act.human).await?.answer(request, act) {
+            Some(ActAnswer::Confirm) => {
+                let decision =
+                    request.decide(act.verdict).by(Some(act.human.clone())).on_behalf(Some(act.human.clone()));
+                let decision = ApprovalDecision { decided_at: act.sent_at, ..decision };
+                return Ok((Some((act.assistant.clone(), decision)), Vec::new()));
+            }
+            Some(ActAnswer::Deny) => {}
+            None => waiting.push(act.clone()),
+        }
+    }
+    Ok((None, waiting))
+}
+
+/// Who made `decision`, which `by` sent: `by`, or `by for <human>` when an assistant made it for its human.
+pub(crate) fn deciders(by: &UserId, decision: &ApprovalDecision) -> String {
+    match &decision.on_behalf_of {
+        Some(human) => format!("{by} for {human}"),
+        None => by.to_string(),
+    }
 }
 
 /// The decision that counts on `request`, the first stored, if any.
@@ -228,32 +347,60 @@ async fn state_at(
     request: &ApprovalRequest,
     now: DateTime<Utc>,
 ) -> Result<(State, u64)> {
+    let (state, last, _) = standing(js, stream, seq, request, now).await?;
+    Ok((state, last))
+}
+
+/// [`state_at`], and the decisions assistants made on a pending request for their humans that wait for consent.
+async fn standing(
+    js: &jetstream::Context,
+    stream: &Stream,
+    seq: u64,
+    request: &ApprovalRequest,
+    now: DateTime<Utc>,
+) -> Result<(State, u64, Vec<HeldAct>)> {
     let (decision, last) = decisions(stream, request).await?;
     // A chain ant's decision counts only before a human's: the ant takes the first.
     let until = decision.is_some().then_some(last);
     let chain = chain_of(js, &request.ant).await?;
-    let by_chain = ant_decisions(stream, &request.ant, &chain, seq + 1, until).await?;
-    let state = match (by_chain.get(&request.id).and_then(|d| d.on(request)), decision) {
-        (Some((by, decision)), _) => State::DecidedByAnt(by, decision),
-        (None, Some(decision)) => State::Decided(decision),
-        (None, None) if request.is_expired(now) => State::Expired,
-        (None, None) => State::Pending,
+    let found = ant_decisions(stream, &request.ant, &chain, seq + 1, until).await?;
+    if let Some((by, decision)) = found.chain.get(&request.id).and_then(|d| d.on(request)) {
+        return Ok((State::DecidedByAnt(by, decision), last, Vec::new()));
+    }
+    if let Some(decision) = decision {
+        return Ok((State::Decided(decision), last, Vec::new()));
+    }
+    let held = found.held.get(&request.id).map_or(&[][..], Vec::as_slice);
+    let (state, held) = match consented(js, request, held).await? {
+        (Some((by, decision)), _) => (State::DecidedByAnt(by, decision), Vec::new()),
+        (None, _) if request.is_expired(now) => (State::Expired, Vec::new()),
+        (None, held) => (State::Pending, held),
     };
-    Ok((state, last))
+    Ok((state, last, held))
 }
 
-/// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human or an ant
-/// of the ant's escalate_to.
+/// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human, an ant
+/// of the ant's escalate_to or an assistant for its human who consented.
 pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
-    Ok(pending_at(js, stream, now).await?.into_iter().map(|(_, request)| request).collect())
+    Ok(pending_at(js, stream, now).await?.into_iter().map(|(_, request, _)| request).collect())
 }
 
-/// [`pending`], each with its stream sequence.
+/// The pending requests at `now` with decisions assistants made for their humans, which wait for the humans' consent.
+pub async fn held(
+    js: &jetstream::Context,
+    stream: &Stream,
+    now: DateTime<Utc>,
+) -> Result<Vec<(ApprovalRequest, Vec<HeldAct>)>> {
+    let pending = pending_at(js, stream, now).await?;
+    Ok(pending.into_iter().filter(|(.., held)| !held.is_empty()).map(|(_, request, held)| (request, held)).collect())
+}
+
+/// [`pending`], each with its stream sequence and the decisions held on it.
 async fn pending_at(
     js: &jetstream::Context,
     stream: &Stream,
     now: DateTime<Utc>,
-) -> Result<Vec<(u64, ApprovalRequest)>> {
+) -> Result<Vec<(u64, ApprovalRequest, Vec<HeldAct>)>> {
     let mut undecided = Vec::new();
     for (seq, request) in requests(stream).await? {
         // Expired ones need no decision lookup.
@@ -262,7 +409,7 @@ async fn pending_at(
         }
     }
     // One read of each ant's inbox, from its oldest undecided request on.
-    let mut decided: HashMap<UserId, HashMap<Uuid, AntDecision>> = HashMap::new();
+    let mut decided: HashMap<UserId, InboxDecisions> = HashMap::new();
     for (seq, request) in &undecided {
         if decided.contains_key(&request.ant) {
             continue;
@@ -271,10 +418,18 @@ async fn pending_at(
         let found = ant_decisions(stream, &request.ant, &chain, seq + 1, None).await?;
         decided.insert(request.ant.clone(), found);
     }
-    Ok(undecided
-        .into_iter()
-        .filter(|(_, r)| decided.get(&r.ant).and_then(|d| d.get(&r.id)).and_then(|d| d.on(r)).is_none())
-        .collect())
+    let mut pending = Vec::new();
+    for (seq, request) in undecided {
+        let found = decided.get(&request.ant);
+        if found.and_then(|d| d.chain.get(&request.id)).and_then(|d| d.on(&request)).is_some() {
+            continue;
+        }
+        let held = found.and_then(|d| d.held.get(&request.id)).map_or(&[][..], Vec::as_slice);
+        if let (None, held) = consented(js, &request, held).await? {
+            pending.push((seq, request, held));
+        }
+    }
+    Ok(pending)
 }
 
 /// How a request is written on the command line: `<ant>/<id>`. Ant names and ids never contain `/`.
@@ -393,6 +548,7 @@ async fn check(
         (State::Pending, last) => last,
         (State::Decided(d), _) => return Err(answered(request, &d)),
         (State::DecidedByAnt(by, d), _) => {
+            let by = deciders(&by, &d);
             bail!("request {} was already answered by {by}: {}", qualified(request), spelling(d.verdict))
         }
         (State::Expired, _) => {
@@ -521,7 +677,8 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
             write!(out, "answered {} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
         }
         State::DecidedByAnt(by, d) => {
-            write!(out, "answered {} by {by} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
+            let (by, at) = (deciders(by, d), d.decided_at.format("%Y-%m-%d %H:%M:%S"));
+            write!(out, "answered {} by {by} at {at}", spelling(d.verdict))
         }
         State::Expired => write!(out, "expired  at {}, rejected", request.expires_at.format("%Y-%m-%d %H:%M:%S")),
     };
@@ -533,6 +690,9 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
 pub enum Update {
     /// A request waiting for a decision: pending when following started, or new since.
     Pending(ApprovalRequest),
+    /// The decisions assistants made on a request reported pending for their humans, which wait for the humans'
+    /// consent: all of them, in place of those reported before.
+    Held(ApprovalRequest, Vec<HeldAct>),
     /// How a request reported pending ended: decided, or expired.
     Resolved(ApprovalRequest, State),
 }
@@ -543,16 +703,39 @@ struct Open {
     seq: Option<u64>,
     request: ApprovalRequest,
     /// When to look again at a request that was still pending right after word of a decision on it came, as that
-    /// word may come before the stream stores the decision.
+    /// word may come before the stream stores the decision, or that holds decisions waiting for consent.
     recheck: Option<DateTime<Utc>>,
+    /// The decisions held on it last reported.
+    held: Vec<HeldAct>,
 }
 
 /// How long after word of a decision a request still pending is looked at again.
 const RECHECK: TimeDelta = TimeDelta::seconds(1);
 
+/// The request `msg` published live, unless unreadable, for another ant or expired.
+fn live_request(msg: &async_nats::Message) -> Option<ApprovalRequest> {
+    match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
+        Ok(request) => match request.check_subject(&msg.subject) {
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping a request for another ant");
+                None
+            }
+            Ok(()) => (!request.is_expired(Utc::now())).then_some(request),
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "skipping unreadable tool request");
+            None
+        }
+    }
+}
+
+/// How often a request holding decisions waiting for consent is looked at again: the human's consent is not heard.
+const HELD_RECHECK: TimeDelta = TimeDelta::seconds(5);
+
 /// Report the pending requests, then each new one and how each reported one ends, until the connection closes. Word
 /// of a decision comes on the decision subjects (a human's) and in the inbox of each ant with a request reported (an
-/// ant's of its escalate_to); a request is looked at again when one names it, and when it expires.
+/// ant's of its escalate_to, or an assistant's for its human); a request is looked at again when one names it, when it
+/// expires, and every [`HELD_RECHECK`] while it holds decisions waiting for consent.
 pub async fn follow(
     client: &async_nats::Client,
     js: &jetstream::Context,
@@ -568,10 +751,13 @@ pub async fn follow(
     let mut heard = std::collections::HashSet::new();
     let mut reported = std::collections::HashSet::new();
     let mut open: Vec<Open> = Vec::new();
-    let mut fresh: Vec<_> =
-        Box::pin(pending_at(js, &stream, Utc::now())).await?.into_iter().map(|(seq, r)| (Some(seq), r)).collect();
+    let mut fresh: Vec<_> = Box::pin(pending_at(js, &stream, Utc::now()))
+        .await?
+        .into_iter()
+        .map(|(seq, r, held)| (Some(seq), r, held))
+        .collect();
     loop {
-        for (seq, request) in fresh.drain(..) {
+        for (seq, request, held) in fresh.drain(..) {
             if !reported.insert((request.ant.clone(), request.id)) {
                 continue;
             }
@@ -580,7 +766,11 @@ pub async fn follow(
                 inboxes.push(client.subscribe(inbox).await.context("following decisions of chain ants")?);
             }
             report(&Update::Pending(request.clone()))?;
-            open.push(Open { seq, request, recheck: None });
+            let recheck = (!held.is_empty()).then(|| Utc::now() + HELD_RECHECK);
+            if !held.is_empty() {
+                report(&Update::Held(request.clone(), held.clone()))?;
+            }
+            open.push(Open { seq, request, recheck, held });
         }
         let wake = open.iter().map(|o| o.recheck.unwrap_or(o.request.expires_at)).min();
         let wake = async {
@@ -593,14 +783,7 @@ pub async fn follow(
         tokio::select! {
             msg = asked.next() => {
                 let Some(msg) = msg else { return Ok(()) };
-                match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
-                    Ok(request) => match request.check_subject(&msg.subject) {
-                        Err(e) => tracing::warn!(error = %e, "skipping a request for another ant"),
-                        Ok(()) if !request.is_expired(Utc::now()) => fresh.push((None, request)),
-                        Ok(()) => {}
-                    },
-                    Err(e) => tracing::warn!(error = %e, "skipping unreadable tool request"),
-                }
+                fresh.extend(live_request(&msg).map(|request| (None, request, Vec::new())));
             }
             msg = decided.next() => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -629,18 +812,24 @@ pub async fn follow(
             }
             o.recheck = None;
             match Box::pin(resolution(js, &stream, stored, o, now)).await {
-                Ok(State::Pending) if o.request.is_expired(now) => {
+                Ok((State::Pending, _)) if o.request.is_expired(now) => {
                     // Only a request no longer in the stream: an expired one is pending no more.
                     tracing::debug!(request = %qualified(&o.request), "no longer following an expired request");
                     open.remove(i);
                 }
-                Ok(State::Pending) => {
+                Ok((State::Pending, held)) => {
+                    if held != o.held {
+                        report(&Update::Held(o.request.clone(), held.clone()))?;
+                        o.held = held;
+                    }
                     if is_named {
                         o.recheck = Some(now + RECHECK);
+                    } else if !o.held.is_empty() {
+                        o.recheck = Some(now + HELD_RECHECK);
                     }
                     i += 1;
                 }
-                Ok(state) => report(&Update::Resolved(open.remove(i).request, state))?,
+                Ok((state, _)) => report(&Update::Resolved(open.remove(i).request, state))?,
                 Err(e) if o.request.is_expired(now) => {
                     tracing::warn!(request = %qualified(&o.request), "not telling how the request ended: {e:#}");
                     open.remove(i);
@@ -654,22 +843,26 @@ pub async fn follow(
     }
 }
 
-/// Where `open` stands at `now`; a request heard live is looked up among those stored after sequence `stored`.
+/// Where `open` stands at `now`, with the decisions held on it while pending; a request heard live is looked up among
+/// those stored after sequence `stored`.
 async fn resolution(
     js: &jetstream::Context,
     stream: &Stream,
     stored: u64,
     open: &mut Open,
     now: DateTime<Utc>,
-) -> Result<State> {
+) -> Result<(State, Vec<HeldAct>)> {
     let seq = match open.seq {
         Some(seq) => seq,
         None => {
-            let Some(seq) = seq_of(stream, &open.request, stored + 1).await? else { return Ok(State::Pending) };
+            let Some(seq) = seq_of(stream, &open.request, stored + 1).await? else {
+                return Ok((State::Pending, Vec::new()));
+            };
             *open.seq.insert(seq)
         }
     };
-    state(js, stream, seq, &open.request, now).await
+    let (state, _, held) = standing(js, stream, seq, &open.request, now).await?;
+    Ok((state, held))
 }
 
 /// The stream sequence of `request`, looked for from sequence `from` on, if stored.
@@ -707,11 +900,25 @@ pub fn render(update: &Update, now: DateTime<Utc>) -> String {
             let _ = writeln!(out, "  expires in {}; answer with {}", left(r.expires_at, now), commands(r));
             out
         }
+        Update::Held(r, held) => held.iter().fold(String::new(), |mut out, h| {
+            let (assistant, human, verdict) = (&h.assistant, &h.human, spelling(h.verdict));
+            let _ = writeln!(
+                out,
+                "{}  {assistant} chose {verdict} on request {} for {human}, held until {human} confirms it: ants \
+                 assistant confirm {}",
+                local(h.sent_at),
+                qualified(r),
+                qualified(r)
+            );
+            out
+        }),
         Update::Resolved(r, state) => {
             let (at, how) = match state {
                 State::Pending => (now, "is pending".to_owned()),
                 State::Decided(d) => (d.decided_at, format!("was answered: {}", spelling(d.verdict))),
-                State::DecidedByAnt(by, d) => (d.decided_at, format!("was answered by {by}: {}", spelling(d.verdict))),
+                State::DecidedByAnt(by, d) => {
+                    (d.decided_at, format!("was answered by {}: {}", deciders(by, d), spelling(d.verdict)))
+                }
                 State::Expired => (r.expires_at, format!("expired unanswered: {} rejected it", r.ant)),
             };
             format!("{}  request {} of {} {how}\n", local(at), qualified(r), r.ant)
@@ -741,7 +948,7 @@ pub async fn list(nats: &crate::Nats<'_>, listing: crate::Listing) -> Result<()>
     }
     let follow = Box::pin(self::follow(&client, &js, |update| match update {
         Update::Pending(request) => print(request),
-        Update::Resolved(..) => Ok(()),
+        Update::Held(..) | Update::Resolved(..) => Ok(()),
     }));
     // Ctrl-C ends the following cleanly, so the device's presence goes at once.
     let follow = async {

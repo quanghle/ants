@@ -1166,6 +1166,7 @@ async fn ants_write_their_own_roster_entry_and_everyone_reads_the_roster() {
         fallback: None,
         memory_low: None,
         model: None,
+        paused: None,
     };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::ROSTER_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
@@ -1967,6 +1968,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
         fallback: None,
         memory_low: None,
         model: None,
+        paused: None,
     };
     let b_roster = bus::ensure_roster(&b_js, ants_proto::ROSTER_TTL).await.unwrap();
     b_roster.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
@@ -2559,6 +2561,7 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
         js_domain: None,
         remote_admin: true,
         config: None,
+        restarts: ants_daemon::admin::restart::Restarts::default(),
     };
     let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone(), UserId::messenger()]);
     let task = tokio::spawn(ants_daemon::host::run(host, watched));

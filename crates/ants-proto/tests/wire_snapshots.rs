@@ -245,6 +245,7 @@ fn roster() {
                 reasoning_effort: Some("high".to_owned()),
                 context: Some("1m".to_owned()),
             }),
+            paused: Some(Paused { since: at(6), by: Some(user("alice")) }),
         },
     );
     snap("activity_variants", &[Activity::Idle, Activity::Working, Activity::Unknown]);
@@ -791,6 +792,7 @@ fn status() {
                 verdict: Verdict::AllowOnce,
                 by: DecidedBy::Chain,
                 decider: Some(user("lead")),
+                via: None,
             },
         ),
     ];

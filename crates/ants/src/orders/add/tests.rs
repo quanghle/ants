@@ -76,7 +76,7 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
         format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
     std::fs::write(&path, &text).unwrap();
     let mut triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
-    let config = ConfigFile { path: path.clone(), edited: triggers.edits() };
+    let config = ConfigFile { path: path.clone(), edited: triggers.edits(), pausers: Default::default() };
     let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
     let m1: ants_proto::Machine = "m1".parse().unwrap();
 
