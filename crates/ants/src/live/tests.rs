@@ -1,0 +1,146 @@
+use std::time::Duration;
+
+use ants_daemon::bus;
+use ants_proto::{Envelope, StatusUpdate, ToolCall};
+use chrono::DateTime;
+
+use super::*;
+use crate::auth::tests::Server;
+
+pub fn at(secs: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
+}
+
+pub fn user(name: &str) -> UserId {
+    name.parse().unwrap()
+}
+
+/// The entry of a message from `from` to `to` on `thread`, stored at sequence `seq`.
+pub fn message(seq: u64, thread: &ThreadId, from: &str, to: &str, text: &str) -> Entry {
+    let envelope = Envelope { thread_id: thread.clone(), ..Envelope::new(user(from), user(to), text) };
+    let subject = subject::inbox(&envelope.to, &envelope.from);
+    let payload = serde_json::to_vec(&envelope).unwrap();
+    Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
+}
+
+pub fn request(ant: &str, title: &str, options: Vec<Verdict>) -> ApprovalRequest {
+    let tool = ToolCall { kind: "execute".into(), title: title.into(), ..Default::default() };
+    ApprovalRequest::new(user(ant), ThreadId::generate(), tool, options, Duration::from_mins(5))
+}
+
+#[test]
+fn a_verdict_answers_only_a_pending_request_offering_it() {
+    let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
+    let id = tools::qualified(&push);
+    assert_eq!(refusal(&push, &tools::State::Pending, Verdict::AllowOnce), None);
+    assert_eq!(refusal(&push, &tools::State::Pending, Verdict::Reject), None, "a reject is always offered");
+    assert_eq!(
+        refusal(&push, &tools::State::Pending, Verdict::AllowAlways),
+        Some(format!("allow-always is not offered for request {id}"))
+    );
+    assert_eq!(
+        refusal(&push, &tools::State::Expired, Verdict::AllowOnce),
+        Some(format!("request {id} is answered already"))
+    );
+}
+
+/// The next event of `feed` that `pick` takes, the others skipped.
+async fn until<T>(feed: &mut Feed, mut pick: impl FnMut(Event) -> Option<T>) -> T {
+    let wait = async {
+        loop {
+            if let Some(picked) = pick(feed.next().await) {
+                return picked;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait).await.expect("the feed told nothing wanted")
+}
+
+/// Sends `text` from dev-a to the human on `thread`.
+async fn tell(js: &jetstream::Context, thread: &ThreadId, text: &str) {
+    let envelope = Envelope { thread_id: thread.clone(), ..Envelope::new(user("dev-a"), UserId::human(), text) };
+    bus::publish_json(js, subject::inbox(&envelope.to, &envelope.from), &envelope, None).await.unwrap();
+}
+
+/// The texts of the messages on `thread` among `entries`.
+fn texts<'a>(entries: &'a [Entry], thread: &ThreadId) -> Vec<&'a str> {
+    entries.iter().filter(|e| e.thread_id == *thread).map(|e| e.text.as_str()).collect()
+}
+
+#[tokio::test]
+async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
+    let Some(server) = Server::start() else { return };
+    let (client, js) = server.connect(&UserId::human()).await;
+    bus::ensure_stream(&js).await.unwrap();
+    let (ant, ant_js) = server.connect(&user("dev-a")).await;
+    let thread = ThreadId::generate();
+    tell(&ant_js, &thread, "first").await;
+    let push = request("dev-a", "git push", vec![Verdict::AllowOnce]);
+    bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
+
+    let mut feed = Feed::new(client, js, Duration::from_hours(1)).await.unwrap();
+    assert!(feed.connected());
+    assert!(matches!(feed.next().await, Event::Following), "the tool requests are followed first");
+    // The stream read and the pending requests come in either order.
+    let (mut stored, mut pending) = (None, None);
+    until(&mut feed, |e| {
+        match e {
+            Event::Stored(read) => stored = stored.take().or(Some(read.unwrap())),
+            Event::Approval(update) => pending = Some(update),
+            _ => {}
+        }
+        (stored.is_some() && pending.is_some()).then_some(())
+    })
+    .await;
+    assert_eq!(texts(&stored.unwrap(), &thread), ["first"]);
+    assert_eq!(pending, Some(Update::Pending(push.clone())));
+
+    // What is heard after is read from where the last read ended, and progress is told as heard.
+    tell(&ant_js, &thread, "second").await;
+    let stored = until(&mut feed, |e| match e {
+        Event::Stored(read) => Some(read.unwrap()).filter(|entries| !entries.is_empty()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(texts(&stored, &thread), ["second"]);
+    let working =
+        StatusEvent::new(user("dev-a"), thread.clone(), StatusUpdate::State { state: ants_proto::State::Working });
+    let payload = serde_json::to_vec(&working).unwrap();
+    ant.publish(subject::status(&working.ant, &thread), payload.into()).await.unwrap();
+    ant.flush().await.unwrap();
+    let heard = until(&mut feed, |e| match e {
+        Event::Status(event) => Some(event),
+        _ => None,
+    })
+    .await;
+    assert_eq!(heard, working);
+
+    feed.load_history(thread.clone());
+    let (loaded, read) = until(&mut feed, |e| match e {
+        Event::History(thread, read) => Some((thread, read.unwrap())),
+        _ => None,
+    })
+    .await;
+    assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second"]));
+
+    feed.decide(push.clone(), Verdict::AllowOnce, UserId::human());
+    let (mut decided, mut resolved) = (None, None);
+    until(&mut feed, |e| {
+        match e {
+            Event::Decided(outcome) => decided = Some(outcome.unwrap()),
+            Event::Approval(Update::Resolved(request, state)) => resolved = Some((request, state)),
+            _ => {}
+        }
+        (decided.is_some() && resolved.is_some()).then_some(())
+    })
+    .await;
+    let decided = decided.unwrap();
+    assert!(decided.starts_with(&format!("answered request {}: allow-once", tools::qualified(&push))), "{decided}");
+    let (request, state) = resolved.unwrap();
+    assert_eq!(request, push);
+    assert!(matches!(state, tools::State::Decided(d) if d.verdict == Verdict::AllowOnce));
+
+    // A refresh follows the tool requests again, telling the pending ones anew.
+    feed.refresh();
+    assert!(matches!(feed.next().await, Event::Following));
+}
