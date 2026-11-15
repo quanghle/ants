@@ -3,7 +3,9 @@
 //! publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices marking at once lose
 //! nothing.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
@@ -11,6 +13,7 @@ use ants_proto::{
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
+use chrono::Utc;
 use futures::StreamExt as _;
 
 use crate::thread::{self, Entry, Pick};
@@ -46,18 +49,23 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
     Meta::open(js, nats.domain, me).await
 }
 
-/// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it; none on any error,
-/// warned of.
+/// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it, idle for
+/// `auto_archive` included; none on any error, warned of.
 pub async fn of_or_none(
     nats: &crate::Nats<'_>,
     js: &jetstream::Context,
     thread: &ThreadId,
     last: Option<&Entry>,
+    auto_archive: Option<Duration>,
 ) -> (Option<ThreadTitle>, Option<Mark>) {
     let read = async {
         let meta = open(nats, js).await?;
         let title = meta.title(thread).await?;
-        let mark = meta.marks().await?.mark(thread, last.map_or(0, |e| e.seq));
+        let marks = meta.marks().await?;
+        let mark = match last {
+            Some(e) => marks.mark_at(thread, e.seq, e.stored_at, thread::idle_before(auto_archive, Utc::now())),
+            None => marks.mark(thread, 0),
+        };
         anyhow::Ok((title, mark))
     };
     read.await.unwrap_or_else(|e| {
@@ -103,8 +111,12 @@ pub enum Marking {
 }
 
 /// `ants thread pin|unpin|archive|unarchive THREAD`: mark the thread `pick` picks so, for every device of the CLI's
-/// human.
+/// human. Unarchiving a thread archived for having been idle keeps it ([`ThreadMarks::keep`]).
 pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Result<()> {
+    let auto_archive = match marking {
+        Marking::Unarchive => crate::defaults::auto_archive()?,
+        _ => None,
+    };
     let js = thread::connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let meta = open(nats, &js).await?;
@@ -112,14 +124,30 @@ pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Resul
         Marking::Archive => last_sequence(&js).await?,
         _ => 0,
     };
+    let last_at = match auto_archive {
+        Some(_) => thread::last_activity(&js, thread).await?,
+        None => None,
+    };
+    let idle_before = thread::idle_before(auto_archive, Utc::now());
+    let kept = Cell::new(false);
     let changed = meta
         .change_marks(|marks| match marking {
             Marking::Pin => marks.pin(thread),
             Marking::Unpin => marks.unpin(thread),
             Marking::Archive => marks.archive(thread, after),
-            Marking::Unarchive => marks.unarchive(thread),
+            Marking::Unarchive => {
+                let unarchived = marks.unarchive(thread);
+                let idle = last_at.zip(idle_before).is_some_and(|(at, before)| marks.idle(thread, at, before));
+                kept.set(idle && marks.keep(thread));
+                unarchived || kept.get()
+            }
         })
         .await?;
+    if changed && kept.get() {
+        let idle = ants_proto::duration::format(auto_archive.unwrap_or_default());
+        println!("thread {thread} unarchived; archived again automatically after {idle} without a message");
+        return Ok(());
+    }
     let line = match (marking, changed) {
         (Marking::Pin, true) => "pinned",
         (Marking::Pin, false) => "already pinned",
@@ -283,5 +311,14 @@ mod tests {
         assert!(meta.change_marks(|m| m.pin(thread)).await.unwrap());
         let pinned = listed(&Select { pinned: true, ..Default::default() }).await;
         assert!(pinned[0].pinned && !pinned[0].archived, "pinning unarchives");
+
+        assert!(meta.change_marks(|m| m.unpin(thread)).await.unwrap());
+        let last_at = thread::last_activity(&js, thread).await.unwrap().unwrap();
+        let idle = Select { idle_before: Some(last_at), ..Default::default() };
+        assert!(listed(&idle).await.is_empty(), "idle since its last message");
+        assert!(listed(&Select { archived: true, ..idle.clone() }).await[0].auto_archived);
+        assert!(meta.change_marks(|m| m.keep(thread)).await.unwrap());
+        assert!(!listed(&idle).await[0].archived, "kept");
+        assert_eq!(thread::last_activity(&js, &ThreadId::generate()).await.unwrap(), None);
     }
 }

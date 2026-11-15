@@ -16,6 +16,7 @@ redact = true                              # redact secrets from daemon publicat
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
 nats = "nats://127.0.0.1:4222"             # default: top-level nats
 js_domain = "hub"                          # default: top-level js_domain
+auto_archive = "14d"                       # hide threads idle this long from thread list and dash (default "0": never; README.md, Auto-archive)
 
 [storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)

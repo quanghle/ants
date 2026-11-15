@@ -289,6 +289,9 @@ pub struct Summary {
     /// Archived, and a message was stored on it since.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub new_activity: bool,
+    /// Archived for having been idle (`auto_archive`), not by hand.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_archived: bool,
     /// The stream sequence of its last message read.
     #[serde(skip)]
     pub last_seq: u64,
@@ -311,6 +314,9 @@ pub struct Select {
     pub pinned: bool,
     /// Only the threads the CLI's human archived; otherwise only those with a message stored since are kept of them.
     pub archived: bool,
+    /// Threads with no message stored after this, neither pinned, archived nor kept since, count as archived
+    /// ([`ThreadMarks::idle`]).
+    pub idle_before: Option<DateTime<Utc>>,
 }
 
 /// The threads of the entries handed to [`Threads::add`].
@@ -351,6 +357,7 @@ impl Threads {
             pinned: false,
             archived: false,
             new_activity: false,
+            auto_archived: false,
             last_seq: entry.seq,
         });
         summary.messages += 1;
@@ -394,15 +401,17 @@ impl Threads {
 
     /// The threads `select` keeps, as the CLI's human marked them (`marks`), least recently active first and its
     /// pinned ones after the others, and how many more it left out for its limit. Archived threads are left out,
-    /// unless a message was stored on one since it was archived, or `select` asks for archived threads.
+    /// unless a message was stored on one since it was archived, or `select` asks for archived threads; so are threads
+    /// idle since `select`'s `idle_before`, which count as archived.
     pub fn finish(self, select: &Select, marks: &ThreadMarks) -> (Vec<Summary>, usize) {
         let mut threads: Vec<Summary> = self
             .by_id
             .into_values()
             .map(|mut t| {
-                match marks.mark(&t.thread_id, t.last_seq) {
+                match marks.mark_at(&t.thread_id, t.last_seq, t.last_at, select.idle_before) {
                     Some(Mark::Pinned) => t.pinned = true,
                     Some(Mark::Archived { new_activity }) => (t.archived, t.new_activity) = (true, new_activity),
+                    Some(Mark::Idle) => (t.archived, t.auto_archived) = (true, true),
                     None => {}
                 }
                 t
@@ -427,7 +436,7 @@ pub(crate) fn time(at: DateTime<Utc>) -> String {
 
 /// The threads as a table: one row per thread under a header, columns padded to line up, and under a thread
 /// matching `--grep` its matching line, under one with an open escalation that escalation. A STATE column (pinned,
-/// archived, or archived+new for one with a message stored since) and a TITLE column show only when a thread listed
+/// archived, archived+new for one with a message stored since, or auto-archived for one idle) and a TITLE column show only when a thread listed
 /// has one.
 pub fn table(threads: &[Summary]) -> String {
     let marked = threads.iter().any(|t| t.pinned || t.archived);
@@ -481,6 +490,7 @@ pub fn table(threads: &[Summary]) -> String {
 fn state(thread: &Summary) -> Option<&'static str> {
     match (thread.pinned, thread.archived, thread.new_activity) {
         (true, ..) => Some("pinned"),
+        (_, true, _) if thread.auto_archived => Some("auto-archived"),
         (_, true, true) => Some("archived+new"),
         (_, true, false) => Some("archived"),
         _ => None,
@@ -513,6 +523,12 @@ pub fn window(since: Duration) -> consumer::DeliverPolicy {
         Some(start) if !since.is_zero() => consumer::DeliverPolicy::ByStartTime { start_time: start.into() },
         _ => consumer::DeliverPolicy::All,
     }
+}
+
+/// The time threads last active then or before count as archived, `auto_archive` before `now`; None when
+/// `auto_archive` is.
+pub fn idle_before(auto_archive: Option<Duration>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    now.checked_sub_signed(chrono::TimeDelta::from_std(auto_archive?).ok()?)
 }
 
 /// Where `ants thread show` reads `thread` from: as `since` says, else the thread's start when its id is
@@ -780,8 +796,11 @@ pub async fn connect(nats: &crate::Nats<'_>) -> Result<jetstream::Context> {
 }
 
 /// `ants thread list`: the threads with messages stored within `since` (by default [`SINCE`], or for `--pinned` and
-/// `--archived` since the earliest thread marked so started), as `select` keeps them, with their titles.
+/// `--archived` since the earliest thread marked so started, or all the stream keeps for `--archived` when idle
+/// threads count as archived), as `select` keeps them, with their titles.
 pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Select, json: bool) -> Result<()> {
+    let auto_archive = crate::defaults::auto_archive()?;
+    let select = &Select { idle_before: idle_before(auto_archive, Utc::now()), ..select.clone() };
     let js = connect(nats).await?;
     let meta = match thread_meta::open(nats, &js).await {
         Ok(meta) => Some(meta),
@@ -798,6 +817,7 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     let start = match since {
         Some(since) => Some(window(since)),
         None if select.pinned => marked_start(marks.pinned.keys()),
+        None if select.archived && auto_archive.is_some() => Some(consumer::DeliverPolicy::All),
         None if select.archived => marked_start(marks.archived.keys()),
         None => Some(window(SINCE)),
     };
@@ -863,13 +883,30 @@ pub async fn history(js: &jetstream::Context, thread: &ThreadId, since: Option<D
     Ok(entries)
 }
 
+/// When the last message stored on `thread` was, reading from the thread's start when its id is time-ordered, else
+/// from all the stream keeps; None when none is left.
+pub async fn last_activity(js: &jetstream::Context, thread: &ThreadId) -> Result<Option<DateTime<Utc>>> {
+    let mut last = None;
+    scan(js, show_start(thread, None), |entry| {
+        if entry.thread_id == *thread {
+            last = Some(entry.stored_at);
+        }
+    })
+    .await?;
+    Ok(last)
+}
+
 /// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
 pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
+    let auto_archive = crate::defaults::auto_archive()?;
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let entries = history(&js, thread, since).await?;
-    let (title, mark) =
-        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last()).await };
+    let (title, mark) = if json {
+        (None, None)
+    } else {
+        thread_meta::of_or_none(nats, &js, thread, entries.last(), auto_archive).await
+    };
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
@@ -889,6 +926,10 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
             Some(Mark::Pinned) => println!("pinned"),
             Some(Mark::Archived { new_activity: true }) => println!("archived, with messages since"),
             Some(Mark::Archived { new_activity: false }) => println!("archived"),
+            Some(Mark::Idle) => {
+                let idle = ants_proto::duration::format(auto_archive.unwrap_or_default());
+                println!("auto-archived: no message for {idle} (`ants thread unarchive` keeps it)");
+            }
             None => {}
         }
         print!("{}", render(&entries));

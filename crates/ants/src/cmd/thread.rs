@@ -14,7 +14,9 @@ pub(crate) enum ThreadCommand {
     /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
     /// last time, messages, pinned or archived and title when any is, and the first line of the first message; the
     /// most recently active last, and the pinned after the others. Archived threads are left out, but for those with
-    /// a message stored since they were archived (`archived+new`).
+    /// a message stored since they were archived (`archived+new`). With `auto_archive` set in the config file's
+    /// `[cli]`, such as "14d", a thread neither pinned nor archived with no message stored for that long is left out
+    /// as `auto-archived` too, until a message is stored on it.
     List {
         /// Only threads this ant (or human) sent or received a message on.
         #[arg(long, value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
@@ -33,7 +35,8 @@ pub(crate) enum ThreadCommand {
         /// Only the threads pinned (`ants thread pin`), by default read from the earliest one's start.
         #[arg(long, conflicts_with = "archived")]
         pinned: bool,
-        /// Only the threads archived (`ants thread archive`), by default read from the earliest one's start.
+        /// Only the threads archived (`ants thread archive`), by default read from the earliest one's start, or with
+        /// `auto_archive` set from all the stream keeps, auto-archived threads included.
         #[arg(long)]
         archived: bool,
         /// How far back to read, such as 90m, 24h or 7d; 0 for everything the stream keeps. Each message in it is
@@ -125,7 +128,7 @@ pub(crate) enum ThreadCommand {
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
-    /// Unarchive a thread.
+    /// Unarchive a thread. One auto-archived for having been idle is kept until idle that long again.
     Unarchive {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
@@ -152,7 +155,8 @@ pub(crate) enum ThreadCommand {
 pub(crate) async fn run(nats: &Nats<'_>, command: ThreadCommand) -> Result<()> {
     match command {
         ThreadCommand::List { ant, owner, grep, escalated, pinned, archived, since, limit, json } => {
-            let select = thread::Select { ant, owner, grep, limit: Some(limit), escalated, pinned, archived };
+            let select =
+                thread::Select { ant, owner, grep, limit: Some(limit), escalated, pinned, archived, idle_before: None };
             thread::list(nats, since, &select, json).await
         }
         ThreadCommand::Title { thread, text, clear } => thread_meta::title(nats, thread, &text, clear).await,

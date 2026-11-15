@@ -211,6 +211,7 @@ fn kv_entries() {
         &ThreadMarks {
             pinned: BTreeMap::from([(thread(), at(0))]),
             archived: BTreeMap::from([(other_thread(), Archived { at: at(1), after: 4211 })]),
+            kept: BTreeMap::from([(thread(), at(2))]),
         },
     );
     snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted: BTreeMap::from([(thread(), at(45))]) });
