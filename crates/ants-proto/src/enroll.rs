@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::inbox_prefix;
-use crate::{DeviceKey, Error, Machine, UserId, subject};
+use crate::{AdminOrder, DeviceKey, Error, Machine, UserId, subject};
 
 /// Reply prefix of the connections of `ants enroll`: its first token starts with `_`, which no user id does, so no
 /// user's own reply inboxes ([`inbox_prefix`]) cover it.
@@ -27,7 +27,12 @@ pub const ENROLL_REPEAT: Duration = Duration::from_secs(5);
 /// The request carries the user JWT of the enrollment credentials it is sent with and their key's `signature` of
 /// [`EnrollRequest::signed`], so the approver takes only requests of a holder of the ant's enrollment credentials,
 /// whatever connection carried them (a leaf node's uplink may carry anyone's).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A machine's daemon carrying out an admin order to add or retire an ant on it ([`crate::AdminOp::Add`],
+/// [`crate::AdminOp::Retire`]) sends the request with the `order`, the user JWT of its host credentials as
+/// `enrollment` and their key's signature: `ants signer` takes it on the admin's word, with no human asked again,
+/// signing the new ant's key or revoking the retired ant's (`public_key`) and answering [`EnrollReply::Retired`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollRequest {
     pub ant: UserId,
     /// The user's public NKey, `U...`.
@@ -35,13 +40,17 @@ pub struct EnrollRequest {
     /// Host name of the asking machine, as it reports it.
     pub host: String,
     pub sent_at: DateTime<Utc>,
-    /// The user JWT of the enrollment credentials of `ant`.
+    /// The user JWT of the enrollment credentials of `ant`, or with an `order`, of the asking machine's host
+    /// credentials.
     pub enrollment: String,
     /// Signature of [`EnrollRequest::signed`] by the enrollment credentials' key, base64url without padding.
     pub signature: String,
     /// The leaf node the asking machine reaches the hub through, whose uplink the approval extends to the ant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf: Option<EnrollLeaf>,
+    /// The admin order the machine's daemon carries out by asking, which an admin signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Box<AdminOrder>>,
 }
 
 /// The leaf node of an asking machine ([`EnrollRequest::leaf`]): its machine name, the user JWT of its uplink
@@ -64,15 +73,30 @@ impl EnrollRequest {
             enrollment: String::new(),
             signature: String::new(),
             leaf: None,
+            order: None,
         }
     }
 
-    /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line.
+    /// What the enrollment key and the leaf's uplink key sign: every field but the signatures, one per line, and the
+    /// id of the order last when there is one (the order is signed by its admin), so requests without one sign what
+    /// they did before orders existed.
     pub fn signed(&self) -> Vec<u8> {
         let sent_at = self.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let (machine, leaf) = self.leaf.as_ref().map_or(("", ""), |l| (l.machine.as_str(), l.jwt.as_str()));
-        let fields =
-            ["ants-enroll", self.ant.as_str(), &self.public_key, &sent_at, &self.enrollment, machine, leaf, &self.host];
+        let order = self.order.as_ref().map(|o| o.id.to_string());
+        let mut fields = vec![
+            "ants-enroll",
+            self.ant.as_str(),
+            &self.public_key,
+            &sent_at,
+            &self.enrollment,
+            machine,
+            leaf,
+            &self.host,
+        ];
+        if let Some(order) = &order {
+            fields.push(order);
+        }
         fields.join("\n").into_bytes()
     }
 
@@ -110,12 +134,22 @@ pub enum EnrollReply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// The answer to a request carrying an order to retire `ant` ([`crate::AdminOp::Retire`]): the keys of the ant
+    /// revoked, `public_key` and those issued before it, none when none was live, and why pushing the account to the
+    /// hub failed, if it did.
+    Retired {
+        ant: UserId,
+        public_key: String,
+        revoked: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push_error: Option<String>,
+    },
 }
 
 impl EnrollReply {
     pub fn ant(&self) -> &UserId {
         match self {
-            Self::Approved { ant, .. } | Self::Rejected { ant, .. } => ant,
+            Self::Approved { ant, .. } | Self::Rejected { ant, .. } | Self::Retired { ant, .. } => ant,
         }
     }
 
@@ -126,7 +160,7 @@ impl EnrollReply {
     /// Whether the answer is meant for the request of `public_key`.
     pub fn answers(&self, public_key: &str) -> bool {
         match self {
-            Self::Approved { public_key: key, .. } => key == public_key,
+            Self::Approved { public_key: key, .. } | Self::Retired { public_key: key, .. } => key == public_key,
             Self::Rejected { public_key: key, .. } => key.as_deref().is_none_or(|key| key == public_key),
         }
     }
@@ -252,6 +286,24 @@ mod tests {
         assert!(all.answers("UKEY") && all.answers("UOTHER"));
         let one = EnrollReply::Rejected { ant: p("dev-a"), public_key: Some("UOTHER".into()), reason: None };
         assert!(!one.answers("UKEY"));
+        let retired =
+            EnrollReply::Retired { ant: p("dev-a"), public_key: "UKEY".into(), revoked: vec![], push_error: None };
+        assert_eq!(serde_json::to_value(&retired).unwrap()["outcome"], "retired");
+        assert!(retired.answers("UKEY") && !retired.answers("UOTHER"));
+    }
+
+    #[test]
+    fn a_request_carrying_an_order_signs_its_id_last() {
+        let mut request = EnrollRequest::new(p("dev-a"), "UKEY", "m1");
+        let bare = request.signed();
+        let order = AdminOrder::new(p("alice"), "m1".parse().unwrap(), p("dev-a"), crate::AdminOp::Retire, "j");
+        request.order = Some(Box::new(order.clone()));
+        let signed = request.signed();
+        assert_eq!(signed, [bare, format!("\n{}", order.id).into_bytes()].concat());
+        let back: EnrollRequest = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(back.signed(), signed, "the same bytes after the wire");
+        request.order = Some(Box::new(AdminOrder::new(p("alice"), order.machine, p("dev-a"), order.op, "j")));
+        assert_ne!(request.signed(), signed, "another order");
     }
 
     #[test]

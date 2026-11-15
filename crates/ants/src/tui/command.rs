@@ -49,6 +49,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("attach", "PATH", "attach a file to the next message"),
     ("detach", "", "drop the files attached"),
     ("save", "[PATH]", "save the marked attachment"),
+    ("retire", "ANT", "retire the ant by admin order, its home kept"),
     ("quit", "", "leave ants chat"),
 ];
 
@@ -110,6 +111,8 @@ pub enum Slash {
     Detach,
     /// Save the marked attachment of the selected message, to the path if given.
     Save(Option<String>),
+    /// Retire the ant by admin order.
+    Retire(UserId),
     Quit,
 }
 
@@ -209,6 +212,10 @@ fn slash(text: &str) -> Result<Slash, String> {
         "attach" => text().map(Slash::Attach),
         "detach" => bare(Slash::Detach),
         "save" => Ok(Slash::Save(optional())),
+        "retire" => {
+            let ant = text()?;
+            ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
+        }
         "quit" => bare(Slash::Quit),
         _ if COMMANDS.iter().any(|(n, ..)| *n == name) => Err(usage()),
         _ => Err(format!("no command /{name}")),
@@ -601,6 +608,7 @@ impl Model {
                 let listed = self.attachment().ok_or("no attachment on the selected message")?;
                 run(Job::Save(Box::new(listed), to.map(|to| attach::expand(&to))))
             }
+            Slash::Retire(ant) => run(Job::Retire { ant }),
             Slash::Attach(_) | Slash::Detach => Ok(None),
             Slash::Quit => Ok(Some(Action::Quit)),
         }
@@ -814,6 +822,7 @@ mod tests {
         assert_eq!(ok("/react eyes"), Slash::React("eyes".parse().unwrap()));
         assert_eq!(ok("/goto #ops"), Slash::Goto(Goto::Channel("ops".parse().unwrap())));
         assert_eq!(ok("/goto @bob"), Slash::Goto(Goto::User(user("bob"))));
+        assert_eq!(ok("/retire @dev-a"), Slash::Retire(user("dev-a")));
         assert_eq!(ok("/goto 019A"), Slash::Goto(Goto::Thread("019a".into())));
         assert_eq!(ok("/archive"), Slash::Mark(Marking::Archive));
         assert_eq!(ok("/snooze"), Slash::Snooze(TimeDelta::hours(1)));

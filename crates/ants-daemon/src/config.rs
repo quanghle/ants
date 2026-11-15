@@ -129,7 +129,7 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".ants").join("config.toml"))
 }
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     std::env::home_dir().context("no home directory")
 }
 
@@ -980,7 +980,7 @@ fn read_dropin(path: &Path) -> Result<BTreeMap<String, Harness>> {
     Ok(file.harnesses)
 }
 
-fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     match path.strip_prefix("~") {
         Ok(rest) => home.join(rest),
         Err(_) => base.join(path),

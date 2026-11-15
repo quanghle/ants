@@ -42,7 +42,7 @@ pub enum Holder {
 }
 
 /// A request heard.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Asked {
     /// An ant's machine asks for its first credentials (`ants add --enroll`).
     Enroll(EnrollRequest),
@@ -522,6 +522,7 @@ mod tests {
             enrollment: String::new(),
             signature: String::new(),
             leaf: None,
+            order: None,
         })
     }
 
