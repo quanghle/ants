@@ -1546,6 +1546,11 @@ struct MemoryHuman {
     titles: StdMutex<Vec<ThreadTitle>>,
     done: StdMutex<Vec<ants_proto::ThreadDone>>,
     reactions: StdMutex<Vec<Reacted>>,
+    owners: StdMutex<Vec<(ThreadId, UserId, UserId, UserId)>>,
+    /// The messages the ants' daemons hold, and the requests they answered.
+    held: StdMutex<Vec<ants_proto::QueuedMessage>>,
+    cancels: StdMutex<Vec<ants_proto::CancelRequest>>,
+    queues: StdMutex<Vec<ants_proto::QueueRequest>>,
 }
 
 impl MemoryHuman {
@@ -1616,6 +1621,34 @@ impl HumanStore for MemoryHuman {
             reactions.push((by, message, reaction, Some(human)));
         }
         Box::pin(async { Ok(true) })
+    }
+
+    fn record_owner(
+        &self,
+        thread: ThreadId,
+        to: UserId,
+        human: UserId,
+        assistant: UserId,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.owners.locked().push((thread, to, human, assistant));
+        Box::pin(async { Ok(()) })
+    }
+
+    /// A prompt runs on the thread of a held message marked running; a withdrawal takes a held message not running.
+    fn cancel(&self, request: ants_proto::CancelRequest) -> BoxFuture<'_, Result<Vec<ants_proto::CancelReply>>> {
+        let held = self.held.locked();
+        let answer = match request.withdraw {
+            Some(id) => request.answer(held.iter().any(|m| m.id == id && !m.running)),
+            None => request.answer(held.iter().any(|m| m.thread_id == request.thread_id && m.running)),
+        };
+        self.cancels.locked().push(request);
+        Box::pin(async move { Ok(vec![answer]) })
+    }
+
+    fn queue(&self, request: ants_proto::QueueRequest) -> BoxFuture<'_, Result<Vec<ants_proto::QueueReply>>> {
+        let answer = request.answer(self.held.locked().clone(), Some(0), Some(2));
+        self.queues.locked().push(request);
+        Box::pin(async move { Ok(vec![answer]) })
     }
 }
 
@@ -1697,7 +1730,7 @@ async fn assistant(
     (mcp, sent, humans, device, store)
 }
 
-const ASSIST_TOOLS: [&str; 7] = [
+const ASSIST_TOOLS: [&str; 10] = [
     "human_queue",
     "answer_for_human",
     "send_for_human",
@@ -1705,6 +1738,9 @@ const ASSIST_TOOLS: [&str; 7] = [
     "title_for_human",
     "done_for_human",
     "decide_for_human",
+    "queue_for_human",
+    "cancel_for_human",
+    "withdraw_for_human",
 ];
 
 #[tokio::test]
@@ -1724,7 +1760,7 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 
     grant(&humans, &device, Some("dev-a"), false);
     let granted = tools().await;
-    assert_eq!((granted.len(), offered(&granted)), (24, 7), "{granted:?}");
+    assert_eq!((granted.len(), offered(&granted)), (27, 10), "{granted:?}");
     assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
 
     // The same connection loses them at once.
@@ -1802,6 +1838,8 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
     assert_eq!((&message.to, &message.thread_id, message.on_behalf_of.as_ref()), (&dev_b, &thread, Some(&alice)));
     assert_eq!((message.owner.as_ref(), message.text.as_str()), (Some(&alice), "ship it"));
     assert!(sent.try_recv().is_err(), "dev-b's daemon tells alice");
+    let recorded = store.owners.locked().clone();
+    assert_eq!(recorded, [(thread.clone(), dev_b.clone(), alice.clone(), dev_a.clone())], "before the message");
 
     let (ok, titled) =
         call(&client, "title_for_human", serde_json::json!({"thread": thread.to_string(), "title": "Release"})).await;
@@ -1827,6 +1865,58 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
         call(&client, "title_for_human", serde_json::json!({"thread": ThreadId::generate().to_string(), "title": "x"}))
             .await;
     assert!(!ok && refused.contains("alice has no message on thread"), "{refused}");
+}
+
+#[tokio::test]
+async fn the_assistant_lists_cancels_and_withdraws_for_its_human_on_requests_naming_it() {
+    let (mcp, _sent, humans, device, store) = assistant("assist-queue").await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, dev_a, dev_b) = (user("alice"), user("dev-a"), user("dev-b"));
+    let (running, waiting) = (ThreadId::generate(), ThreadId::generate());
+    let held = |thread: &ThreadId, seq, running| ants_proto::QueuedMessage {
+        id: Uuid::now_v7(),
+        thread_id: thread.clone(),
+        from: alice.clone(),
+        channel: None,
+        sent_at: chrono::Utc::now(),
+        seq,
+        running,
+        ahead: 0,
+    };
+    let (prompted, queued) = (held(&running, 1, true), held(&waiting, 2, false));
+    store.held.locked().extend([prompted.clone(), queued.clone()]);
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, listed) = call(&client, "queue_for_human", serde_json::json!({"ant": "dev-b"})).await;
+    assert!(ok && listed.contains(&queued.id.to_string()) && listed.contains("2 more wait"), "{listed}");
+    let (ok, cancelled) =
+        call(&client, "cancel_for_human", serde_json::json!({"ant": "dev-b", "thread": running.to_string()})).await;
+    assert!(ok && cancelled.contains("Cancelled the prompt of dev-b"), "{cancelled}");
+    let (ok, refused) =
+        call(&client, "cancel_for_human", serde_json::json!({"ant": "dev-b", "thread": waiting.to_string()})).await;
+    assert!(!ok && refused.contains("no prompt running"), "{refused}");
+    let withdraw = |id: Uuid| serde_json::json!({"ant": "dev-b", "message_id": id.to_string()});
+    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(prompted.id)).await;
+    assert!(!ok && refused.contains("started on message"), "{refused}");
+    let (ok, withdrew) = call(&client, "withdraw_for_human", withdraw(queued.id)).await;
+    assert!(ok && withdrew.contains("Withdrew message"), "{withdrew}");
+    let (ok, refused) = call(&client, "withdraw_for_human", withdraw(Uuid::now_v7())).await;
+    assert!(!ok && refused.contains("neither held"), "{refused}");
+    let (ok, refused) = call(&client, "queue_for_human", serde_json::json!({"ant": "bob"})).await;
+    assert!(!ok && refused.contains("bob is a human"), "{refused}");
+
+    // Every request names the assistant and the human, so they go on the subjects naming the assistant.
+    let cancels = store.cancels.locked().clone();
+    assert_eq!(cancels.len(), 3);
+    for request in &cancels {
+        assert_eq!((&request.ant, &request.by, request.on_behalf_of.as_ref()), (&dev_b, &dev_a, Some(&alice)));
+        assert!(request.subject().ends_with(".dev-a"), "{}", request.subject());
+    }
+    assert_eq!(cancels[2].withdraw, Some(queued.id));
+    assert_eq!(cancels[2].thread_id, waiting, "on the message's thread");
+    let queues = store.queues.locked().clone();
+    assert!(queues.iter().all(|q| q.subject() == "ants.queue.dev-b.dev-a" && q.on_behalf_of == Some(alice.clone())));
 }
 
 #[tokio::test]

@@ -155,7 +155,8 @@ pub const LINKS_BUCKET: &str = "ants_links";
 /// KV bucket of the owners of the threads humans and webhooks message ants on, keyed by thread id and recipient
 /// ([`owner_key`]): the human that each human's or webhook's message to an ant on the thread names
 /// ([`Envelope::owner`]), put before that message is sent, or kept in the machine's outbox until the bucket sources it
-/// ([`owner_outbox`]). Only humans and webhooks write it, a webhook for its own ant destinations only, every credential
+/// ([`owner_outbox`]). Only humans and webhooks write it, a webhook for its own ant destinations only, and assistants,
+/// each only for its human, under keys naming that human ([`assisted_owner_key`], never outboxed); every credential
 /// reads it by key, and the first record of a thread to an ant stays: its stream refuses a second record of a key,
 /// drops one carrying the first's [`owner_record_id`] within its retention, so none sourced from an outbox is refused,
 /// and denies deletes and purges. Daemons take the owner of an ant's message on a thread no channel post started from

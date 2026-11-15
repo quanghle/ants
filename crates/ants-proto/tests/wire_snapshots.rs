@@ -837,12 +837,26 @@ fn timeline() {
 
 #[test]
 fn cancel_and_queue() {
-    snap(
-        "cancel_request",
-        &CancelRequest { id: id(1), ant: user("dev-a"), thread_id: thread(), by: user("alice"), sent_at: at(0) },
-    );
-    snap("cancel_reply", &CancelReply { request_id: id(1), ant: user("dev-a"), thread_id: thread(), cancelled: true });
-    snap("queue_request", &QueueRequest { id: id(1), ant: user("dev-a"), by: user("alice"), sent_at: at(0) });
+    let cancel = CancelRequest {
+        id: id(1),
+        ant: user("dev-a"),
+        thread_id: thread(),
+        by: user("alice"),
+        sent_at: at(0),
+        on_behalf_of: None,
+        withdraw: None,
+    };
+    snap("cancel_request", &cancel);
+    let withdrawal =
+        CancelRequest { by: user("pa"), on_behalf_of: Some(user("alice")), withdraw: Some(id(2)), ..cancel };
+    snap("cancel_request_withdrawal_for_human", &withdrawal);
+    let reply = CancelReply { request_id: id(1), ant: user("dev-a"), thread_id: thread(), cancelled: true, mark: None };
+    snap("cancel_reply", &reply);
+    let found = MessageMark::Started { thread_id: thread(), at: at(1) };
+    snap("cancel_reply_withdrawal_refused", &CancelReply { cancelled: false, mark: Some(found), ..reply });
+    let queue = QueueRequest { id: id(1), ant: user("dev-a"), by: user("alice"), sent_at: at(0), on_behalf_of: None };
+    snap("queue_request", &queue);
+    snap("queue_request_for_human", &QueueRequest { by: user("pa"), on_behalf_of: Some(user("alice")), ..queue });
     let queued = QueuedMessage {
         id: id(2),
         thread_id: thread(),
@@ -869,7 +883,8 @@ fn cancel_and_queue() {
         &[
             MessageMark::Started { thread_id: thread(), at: at(0) },
             MessageMark::Finished { thread_id: thread(), at: at(1) },
-            MessageMark::Withdrawn { by: user("alice"), at: at(2) },
+            MessageMark::Withdrawn { by: user("alice"), at: at(2), on_behalf_of: None },
+            MessageMark::Withdrawn { by: user("pa"), at: at(3), on_behalf_of: Some(user("alice")) },
         ],
     );
 }

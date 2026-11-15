@@ -39,6 +39,8 @@ struct Bus {
     redactor: Redactor,
     publisher: Option<crate::publish::Publisher>,
     restarts: Restarts,
+    /// The team's account whose assistants' records the daemon takes; none: no record is taken.
+    account: Option<String>,
 }
 
 impl Bus {
@@ -91,6 +93,7 @@ impl Bus {
             redactor: Redactor::default(),
             publisher: None,
             restarts: Restarts::default(),
+            account: None,
         };
         (bus, replies)
     }
@@ -210,7 +213,7 @@ impl Bus {
             webhooks: &Webhooks::new(self.js.clone()),
             roster: &self.roster,
             humans: &self.humans,
-            behalf: Records::new(self.js.clone(), None, None),
+            behalf: Records::new(self.js.clone(), None, self.account.clone()),
             retry_delay: Duration::from_millis(300),
             progress_every,
             timeline_every: Some(Duration::from_millis(300)),
@@ -1234,21 +1237,25 @@ fn a_kept_branch_is_told_to_the_thread_owner_else_the_default_human() {
 /// Ask the daemon to cancel the prompt on `thread` until it answers, as the daemon may not listen yet.
 async fn cancel(bus: &Bus, thread: &ThreadId) -> bool {
     let request = ants_proto::CancelRequest::new(bus.dev.clone(), thread.clone(), UserId::human());
+    ask_cancel(bus, &request, WAIT).await.expect("no answer to the cancel request").cancelled
+}
+
+/// Send `request` until the daemon answers or `wait` passes.
+async fn ask_cancel(bus: &Bus, request: &ants_proto::CancelRequest, wait: Duration) -> Option<ants_proto::CancelReply> {
     let mut answers = bus.client.subscribe(request.reply_subject()).await.unwrap();
-    timeout(WAIT, async {
+    let answer = timeout(wait, async {
         loop {
-            let payload = serde_json::to_vec(&request).unwrap();
+            let payload = serde_json::to_vec(request).unwrap();
             bus.client.publish(request.subject(), payload.into()).await.unwrap();
             if let Ok(Some(msg)) = timeout(Duration::from_millis(200), answers.next()).await {
                 let answer: ants_proto::CancelReply = serde_json::from_slice(&msg.payload).unwrap();
                 assert_eq!(answer.check_subject(&msg.subject), Ok(()));
                 assert_eq!(answer.request_id, request.id);
-                return answer.cancelled;
+                return answer;
             }
         }
-    })
-    .await
-    .expect("no answer to the cancel request")
+    });
+    answer.await.ok()
 }
 
 #[tokio::test]
@@ -1424,7 +1431,10 @@ async fn steer(bus: &Bus, from: UserId, thread: &ThreadId, text: &str) {
 
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
-    let request = QueueRequest::new(bus.dev.clone(), UserId::human());
+    queue_with(bus, QueueRequest::new(bus.dev.clone(), UserId::human())).await
+}
+
+async fn queue_with(bus: &Bus, request: QueueRequest) -> ants_proto::QueueReply {
     let mut answers = bus.client.subscribe(request.reply_subject()).await.unwrap();
     timeout(WAIT, async {
         loop {
@@ -1444,7 +1454,7 @@ async fn queue(bus: &Bus) -> ants_proto::QueueReply {
 
 /// Withdraw `message` as the human, returning the mark found instead if the withdrawal lost.
 async fn withdraw(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
-    crate::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human()).await.unwrap()
+    crate::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human(), None).await.unwrap()
 }
 
 async fn mark_of(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
@@ -3014,6 +3024,89 @@ async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the owner");
+}
+
+/// An assistant lists the queue, withdraws a queued message and cancels a prompt for its human on requests naming
+/// it, the human told of each; the same requests from an ant the human's grant does not name go unanswered.
+#[tokio::test]
+async fn an_assistant_withdraws_and_cancels_for_its_human_and_no_other_ant_does() {
+    use ants_proto::{AssistantRecord, CancelRequest, MessageMark};
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [alice, pa, pb] = ants(["alice", "pa", "pb"]);
+    let device = crate::humans::TestDevice::default();
+    bus.humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    bus.account = Some(device.account());
+    let mut grant =
+        ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));
+    grant.signature = device.sign(&grant.signed());
+    bus.humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+    let devices = jetstream::kv::Config { bucket: ants_proto::DEVICES_BUCKET.to_owned(), ..Default::default() };
+    let devices = bus.js.create_key_value(devices).await.unwrap();
+    for ant in [&pa, &pb] {
+        let record = AssistantRecord { jwt: device.assistant_jwt(ant, &alice) };
+        devices.put(ants_proto::assistant_record_key(ant), serde_json::to_vec(&record).unwrap().into()).await.unwrap();
+    }
+    let mut to_alice = bus.client.subscribe(subject::inbox_of(&alice)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let t1 = ThreadId::generate();
+    bus.send_from(alice.clone(), &t1, "stall").await;
+    let (b, _) = bus.send_from(alice.clone(), &t1, "b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let listing = QueueRequest::new(bus.dev.clone(), pa.clone()).for_human(alice.clone());
+        let listed = timeout(WAIT, async {
+            loop {
+                let answer = queue_with(&bus, listing.clone()).await;
+                if answer.messages.len() == 2 {
+                    return answer;
+                }
+            }
+        });
+        let listed = listed.await.expect("both in hand");
+        assert_eq!((listed.messages[1].id, listed.messages[1].running), (b.id, false));
+        let quiet = Duration::from_millis(600);
+        for by in [&pb, &pa] {
+            let forged = CancelRequest::new(bus.dev.clone(), t1.clone(), by.clone()).withdrawing(b.id);
+            assert_eq!(ask_cancel(&bus, &forged, quiet).await, None, "a withdrawal for none is not answered");
+        }
+        let forged = CancelRequest::new(bus.dev.clone(), t1.clone(), pb.clone()).for_human(alice.clone());
+        assert_eq!(ask_cancel(&bus, &forged.clone().withdrawing(b.id), quiet).await, None, "pb is not alice's");
+        assert_eq!(ask_cancel(&bus, &forged, quiet).await, None);
+        assert_eq!(log.locked().cancelled, 0);
+
+        let request = CancelRequest::new(bus.dev.clone(), t1.clone(), pa.clone()).for_human(alice.clone());
+        let withdrawn = ask_cancel(&bus, &request.clone().withdrawing(b.id), WAIT).await.unwrap();
+        assert!(withdrawn.cancelled);
+        assert!(matches!(mark_of(&bus, &b).await, Some(MessageMark::Withdrawn { by, on_behalf_of: Some(human), .. })
+                if by == pa && human == alice));
+        let told = next_envelope(&mut to_alice).await;
+        assert!(told.text.contains("pa, as the assistant of alice, withdrew message"), "{}", told.text);
+        assert!(ask_cancel(&bus, &request, WAIT).await.unwrap().cancelled);
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts.push(next_envelope(&mut to_alice).await.text);
+        }
+        texts.sort();
+        assert_eq!(
+            texts,
+            [
+                "[ants] Withdrawn by pa for alice before dev-a was prompted with it.".to_owned(),
+                format!(
+                    "[ants] pa, as the assistant of alice, cancelled the prompt of dev-a on thread {t1} for alice."
+                ),
+                "partial\n\n[ants] The prompt was cancelled by pa, the assistant of alice.".to_owned(),
+            ]
+        );
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let done = |log: &fake::Log| (log.cancelled, log.prompted);
+    assert_eq!(done(&log.locked()), (1, 1), "b never reached the harness");
+    assert_eq!(bus.unacked().await, 0);
 }
 
 /// A message claiming to be sent for a human by an ant its grant does not name is the ant's own: answered as any

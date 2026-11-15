@@ -375,11 +375,20 @@ impl TestDevice {
 
     /// The user JWT of the device's credentials, for `human`.
     pub fn jwt(&self, human: &UserId) -> String {
+        self.signed_jwt(human, &self.id.tag())
+    }
+
+    /// The user JWT of the credentials of `assistant` as the assistant of `human`, signed by the team's account.
+    pub fn assistant_jwt(&self, assistant: &UserId, human: &UserId) -> String {
+        self.signed_jwt(assistant, &ants_proto::AssistantOf::tag(human))
+    }
+
+    fn signed_jwt(&self, name: &UserId, tag: &str) -> String {
         use data_encoding::BASE64URL_NOPAD;
         let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
         let claims = serde_json::json!({
-            "sub": self.key.public_key(), "iss": self.account.public_key(), "name": human,
-            "nats": { "type": "user", "tags": [self.id.tag()] },
+            "sub": self.key.public_key(), "iss": self.account.public_key(), "name": name,
+            "nats": { "type": "user", "tags": [tag] },
         });
         let body = BASE64URL_NOPAD.encode(claims.to_string().as_bytes());
         let signature = BASE64URL_NOPAD.encode(&self.account.sign(format!("{header}.{body}").as_bytes()).unwrap());

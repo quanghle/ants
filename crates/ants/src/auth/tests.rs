@@ -848,6 +848,14 @@ async fn credentials_confine_each_user_to_its_role() {
     let _sub = a_raw.subscribe(subject::queue(&dev_b)).await.unwrap();
     let v = next_violation(&a_raw, &mut errors).await;
     assert!(v.contains(&format!("Subscription to \"{}\"", subject::queue(&dev_b))), "{v}");
+    // And it hears the requests naming their sender, an assistant's for its human, to it only.
+    let _own = a_raw.subscribe(subject::cancels_by_of(&dev_a)).await.unwrap();
+    let _own = a_raw.subscribe(subject::queues_by_of(&dev_a)).await.unwrap();
+    for denied in [subject::cancels_by_of(&dev_b), subject::queues_by_of(&dev_b)] {
+        let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
+    }
     // Its own inbox it may watch live; a denial would be the next violation below.
     let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
     let _own = a_raw.subscribe(subject::stored_inbox(&dev_a)).await.unwrap();
@@ -939,9 +947,10 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
 }
 
-/// An assistant decides no approval request on its subject, sends no admin order, cancels no prompt, asks for no
-/// queue, and withdraws no queued message nor records an owner: its decisions wait in its messages for its human's
-/// confirmation, and readers of the rest could not tell its acts from its human's.
+/// An assistant decides no approval request on its subject, sends no admin order, and cancels no prompt, asks for no
+/// queue, withdraws no queued message nor records an owner on the subjects and keys a human uses: its decisions wait
+/// in its messages for its human's confirmation, and readers of the rest could not tell its acts from its human's. It
+/// does those on subjects and keys naming it, and its human for an owner, which readers check against the grant.
 #[tokio::test]
 async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let Some(server) = Server::start() else { return };
@@ -958,11 +967,21 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
         "ants.queue.dev-a",
         "$KV.ants_attempts.dev-a.msg.m1",
         "$KV.ants_owners.t1.dev-a",
+        "ants.cancel.dev-a.t1.pb",
+        "ants.queue.dev-a.pb",
+        "$KV.ants_owners.t1.dev-a.bob.pa",
+        "$KV.ants_owners.t1.dev-a.alice.pb",
     ] {
         client.publish(s, "{}".into()).await.unwrap();
         let v = next_violation(&client, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{s}\"")), "{v}");
     }
+    for s in ["ants.cancel.dev-a.t1.pa", "ants.queue.dev-a.pa", "$KV.ants_owners.t1.dev-a.alice.pa"] {
+        client.publish(s, "{}".into()).await.unwrap();
+    }
+    client.publish("ants.queue.dev-a", "{}".into()).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.contains("Publish to \"ants.queue.dev-a\""), "only the plain subject is refused: {v}");
 }
 
 /// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads

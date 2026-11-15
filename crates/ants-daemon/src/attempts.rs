@@ -117,13 +117,24 @@ impl Attempts {
     }
 
     /// Mark `envelope` as started ([`MessageMark`]) unless it has a mark, right before handling it. Returns who
-    /// withdrew it, when a human's withdrawal came first; a message started already goes on as a redelivery does.
-    pub async fn take_up(&self, envelope: &Envelope) -> Result<Option<UserId>> {
+    /// withdrew it, and for whom when an assistant did, when a withdrawal came first; a message started already goes on
+    /// as a redelivery does.
+    pub async fn take_up(&self, envelope: &Envelope) -> Result<Option<(UserId, Option<UserId>)>> {
         let started = MessageMark::Started { thread_id: envelope.thread_id.clone(), at: chrono::Utc::now() };
         Ok(match mark(&self.kv, &self.ant, &envelope.id, &started).await? {
-            Some(MessageMark::Withdrawn { by, .. }) => Some(by),
+            Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => Some((by, on_behalf_of)),
             Some(MessageMark::Started { .. } | MessageMark::Finished { .. }) | None => None,
         })
+    }
+
+    /// Withdraw `message` for `by`, or for `on_behalf_of` whose assistant `by` is, as [`withdraw`] does.
+    pub async fn withdraw(
+        &self,
+        message: &Uuid,
+        by: &UserId,
+        on_behalf_of: Option<&UserId>,
+    ) -> Result<Option<MessageMark>> {
+        withdraw(&self.kv, &self.ant, message, by, on_behalf_of).await
     }
 
     /// Mark `envelope`, acked or dead-lettered, as finished, so a withdrawal tells so. A failure only leaves it started.
@@ -149,10 +160,18 @@ impl Attempts {
     }
 }
 
-/// Withdraw message `message` from the queue of `ant` for `by` (`ants withdraw`), in `kv`, the attempts bucket, unless
-/// it has a mark already. Returns the mark found instead: the daemon took the message up first, or it was withdrawn.
-pub async fn withdraw(kv: &DirectKv, ant: &UserId, message: &Uuid, by: &UserId) -> Result<Option<MessageMark>> {
-    mark(kv, ant, message, &MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now() }).await
+/// Withdraw message `message` from the queue of `ant` for `by` (`ants withdraw`), or for the human `on_behalf_of` whose
+/// assistant `by` is, in `kv`, the attempts bucket, unless it has a mark already. Returns the mark found instead: the
+/// daemon took the message up first, or it was withdrawn.
+pub async fn withdraw(
+    kv: &DirectKv,
+    ant: &UserId,
+    message: &Uuid,
+    by: &UserId,
+    on_behalf_of: Option<&UserId>,
+) -> Result<Option<MessageMark>> {
+    let on_behalf_of = on_behalf_of.cloned();
+    mark(kv, ant, message, &MessageMark::Withdrawn { by: by.clone(), at: chrono::Utc::now(), on_behalf_of }).await
 }
 
 /// Create the mark of `message` to `ant` as `mark` unless it has one. Returns the mark found instead.

@@ -14,7 +14,7 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     AntRequest, AssistantOf, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs,
-    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key,
+    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key, assisted_owner_key,
     channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
     thread_spend_key, unserved_key,
 };
@@ -357,10 +357,14 @@ impl Permissions {
     /// domain.
     ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
-    /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
-    /// human's: cancelling an ant's prompt or asking for its queue (whose request's `by` no reader can check),
-    /// withdrawing an ant's queued messages, recording a thread's owner, putting dead letters, answering an ant's
-    /// reactions requests or another's renewal, setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor does it
+    /// It cancels an ant's prompt, withdraws a message waiting for one, and asks for an ant's queue only on the subjects
+    /// naming it ([`subject::cancels_by`], [`subject::queues_by`]), whose daemons honour them only for its human, and
+    /// records a thread's owner only under keys naming its human ([`assisted_owner_key`]). It gets none of a human's
+    /// rights whose subjects do not name who acts, which readers could not tell from its human's: cancelling or asking
+    /// for a queue on [`subject::ALL_CANCELS`] and [`subject::ALL_QUEUE_REQUESTS`] (whose request's `by` no reader can
+    /// check), creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
+    /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
+    /// ([`IDENTITIES_BUCKET`]). Nor does it
     /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. Nor does it send admin orders,
@@ -422,6 +426,12 @@ impl Permissions {
         };
         // The record of its credentials, which readers check the claims of its acts for its human against.
         publish.push(subject::assistant_record(assistant));
+        // Acts for its human on subjects and keys naming who acts.
+        publish.extend([
+            subject::cancels_by(assistant),
+            subject::queues_by(assistant),
+            format!("$KV.{OWNERS_BUCKET}.*.*.{human}.{assistant}"),
+        ]);
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
         let attempts = kv_stream(ATTEMPTS_BUCKET);
@@ -710,8 +720,10 @@ impl Permissions {
             subject::ALL_NOTES.to_owned(),
             subject::ALL_CHANNELS.to_owned(),
             format!("{}.*", subject::approvals(user)),
-            subject::cancel_of(user),
+            // Cancel and queue requests, from a human or naming their sender, an assistant.
+            subject::all_cancels_of(user),
             subject::queue(user),
+            subject::queues_by_of(user),
             // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),
