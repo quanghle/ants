@@ -38,6 +38,26 @@ impl Identity {
         self.change(|record| record.prompts += 1).await
     }
 
+    /// The record of `ant`, any ant's: None when absent, or when the bucket is missing.
+    pub async fn of(&self, ant: &UserId) -> Result<Option<AntIdentity>> {
+        let Lookup::Value(value) = self.kv.lookup(ant.as_str()).await? else { return Ok(None) };
+        let record: AntIdentity =
+            serde_json::from_slice(&value).with_context(|| format!("reading the identity of {ant}"))?;
+        record.check_key(ant.as_str())?;
+        Ok(Some(record))
+    }
+
+    /// Store `record` as the ant's, in place of any: a clone's, made by its clone order ([`crate::clone`]).
+    pub async fn replace(&self, record: &AntIdentity) -> Result<()> {
+        record.check_key(self.ant.as_str())?;
+        self.kv.put(self.ant.as_str(), serde_json::to_vec(record)?).await
+    }
+
+    /// Delete the ant's record, as a failed clone order does with the one it stored.
+    pub async fn delete(&self) -> Result<()> {
+        self.kv.delete(self.ant.as_str()).await
+    }
+
     /// Store the record as `change` makes it, by compare-and-set on the one read, a new one when absent; unchanged, a
     /// record found is not stored again.
     async fn change(&self, change: impl Fn(&mut AntIdentity)) -> Result<Option<AntIdentity>> {
@@ -46,7 +66,7 @@ impl Identity {
             let (found, last) = self.kv.lookup_last(key).await?;
             let (mut record, existed) = match found {
                 Lookup::NoBucket => return Ok(None),
-                Lookup::NoValue => (self.born()?, false),
+                Lookup::NoValue => (born(&self.ant)?, false),
                 Lookup::Value(value) => {
                     let record: AntIdentity =
                         serde_json::from_slice(&value).with_context(|| format!("reading the identity of {key}"))?;
@@ -68,13 +88,13 @@ impl Identity {
         }
         bail!("the identity of {key} kept changing while being updated")
     }
+}
 
-    /// A record of the ant born now, with a new random id.
-    fn born(&self) -> Result<AntIdentity> {
-        let mut id = [0; 16];
-        SystemRandom::new().fill(&mut id).map_err(|_| anyhow::anyhow!("no random id"))?;
-        Ok(AntIdentity::new(self.ant.clone(), HEXLOWER.encode(&id), Utc::now()))
-    }
+/// A record of `ant` born now, with a new random id.
+pub fn born(ant: &UserId) -> Result<AntIdentity> {
+    let mut id = [0; 16];
+    SystemRandom::new().fill(&mut id).map_err(|_| anyhow::anyhow!("no random id"))?;
+    Ok(AntIdentity::new(ant.clone(), HEXLOWER.encode(&id), Utc::now()))
 }
 
 #[cfg(test)]

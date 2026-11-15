@@ -23,7 +23,7 @@ use crate::config::{self, edit::toml_value};
 use crate::creds;
 
 /// Settings an order does not give: what the daemon sets itself, or what an ant added from a template has.
-const NOT_GIVEN: [&str; 4] = ["creds", "template", "added_by", "builtin"];
+pub(super) const NOT_GIVEN: [&str; 4] = ["creds", "template", "added_by", "builtin"];
 
 pub(super) async fn apply(
     js: &jetstream::Context,
@@ -101,7 +101,7 @@ async fn add(
     let seed_path = dir.join(format!("{ant}.nk"));
     let key = key_for(&creds_path, &seed_path, ant)?;
     let public_key = key.public_key();
-    let jwt = match ask(js, host_creds, order, &public_key, SIGNER_WAIT).await? {
+    let jwt = match ask(js, host_creds, order, ant, &public_key, SIGNER_WAIT).await? {
         EnrollReply::Approved { jwt, .. } => jwt,
         EnrollReply::Rejected { reason, .. } => {
             bail!("`ants signer` refused the key: {}", reason.as_deref().unwrap_or("no reason given"))
@@ -124,7 +124,7 @@ async fn add(
 }
 
 /// Check that `jwt`, the signer's approval, is the user JWT of `ant` for `public_key`, which one of `accounts` signed.
-fn check_approval(jwt: &str, accounts: &[String], ant: &UserId, public_key: &str) -> Result<()> {
+pub(super) fn check_approval(jwt: &str, accounts: &[String], ant: &UserId, public_key: &str) -> Result<()> {
     let (claims, _) = ants_proto::verified_jwt(jwt).context("the signed credentials")?;
     if !accounts.contains(&claims.iss) {
         bail!("the signed credentials are issued by {}, not by the account of the host credentials", claims.iss);
@@ -140,17 +140,19 @@ fn mark(order: &AdminOrder) -> String {
     format!("# added by {}'s order {}", order.admin, order.id)
 }
 
-/// Whether `line` is the comment above the table of an ant added by an order ([`mark`]).
+/// Whether `line` is the comment above the table of an ant added by an order ([`mark`]), or cloned by one
+/// ([`super::clone`]).
 pub(super) fn is_mark(line: &str) -> bool {
     let line = line.trim_end();
     line.strip_prefix("# added by ")
+        .or_else(|| line.strip_prefix("# cloned from ").and_then(|rest| rest.split_once(" by ")).map(|(_, rest)| rest))
         .and_then(|rest| rest.rsplit_once("'s order "))
         .is_some_and(|(_, id)| id.parse::<ants_proto::Uuid>().is_ok())
 }
 
 /// The key to ask the signer about for `ant`: that of its credentials at `creds` if they are the ant's, else the one
 /// waiting at `seed`, else a new one, kept there.
-fn key_for(creds: &Path, seed: &Path, ant: &UserId) -> Result<KeyPair> {
+pub(super) fn key_for(creds: &Path, seed: &Path, ant: &UserId) -> Result<KeyPair> {
     if creds.exists() {
         let finding = creds::check(creds)?;
         if finding.name != ant.as_str() {
@@ -170,7 +172,7 @@ fn key_for(creds: &Path, seed: &Path, ant: &UserId) -> Result<KeyPair> {
 }
 
 /// The `[[ant]]` table of `ant` with `settings`, its credentials `creds` and `workdir` if given, below `mark`.
-fn entry(
+pub(super) fn entry(
     ant: &UserId,
     creds: &Path,
     workdir: Option<&Path>,
@@ -196,7 +198,7 @@ fn entry(
 }
 
 /// `text` with `entry` appended, as [`config::append`] does.
-fn entry_text(text: &str, entry: &str) -> String {
+pub(super) fn entry_text(text: &str, entry: &str) -> String {
     let mut text = text.to_owned();
     if !text.is_empty() {
         if !text.ends_with('\n') {
@@ -209,7 +211,7 @@ fn entry_text(text: &str, entry: &str) -> String {
 }
 
 /// Write `contents` to `path`, readable by its owner only.
-fn write_secret(path: &Path, contents: &str) -> Result<()> {
+pub(super) fn write_secret(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);

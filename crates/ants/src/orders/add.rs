@@ -50,4 +50,4 @@ pub async fn run(nats: &Nats<'_>, name: &UserId, machine: Machine, options: &Ant
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

@@ -70,8 +70,8 @@ fn refusal(reply: Option<EnrollReply>) -> String {
     }
 }
 
-/// The signer signs a key on an admin's order to add the ant on the machine asking, with its live host credentials,
-/// and that one key only; it refuses an order no admin signed, one altered after signing, one for another machine or
+/// The signer signs a key on an admin's order to add the ant, or clone one as it, on the machine asking, with its live
+/// host credentials, and that one key only; it refuses an order no admin signed, one altered after signing, one for another machine or
 /// ant, and ignores a request not from a machine.
 #[tokio::test]
 async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
@@ -124,6 +124,19 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
         let other_ant = order("alice", &admin_creds, "m1", "dev-e", add());
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &other_ant, WAIT).await);
         assert!(refused.contains("about dev-e, not dev-d"), "{refused}");
+        let clone = AdminOp::Clone { new: p("dev-f"), settings: serde_json::Map::new() };
+        let clone = order("alice", &admin_creds, "m1", "dev-c", clone);
+        let refused = refusal(ask(&client, &host_creds, "dev-c", &second, &clone, WAIT).await);
+        assert!(
+            refused.contains("about dev-f, not dev-c"),
+            "a clone order signs no key of the ant it clones: {refused}"
+        );
+        let third = KeyPair::new_user();
+        let Some(EnrollReply::Approved { jwt, .. }) = ask(&client, &host_creds, "dev-f", &third, &clone, WAIT).await
+        else {
+            panic!("a clone order is signed for the clone")
+        };
+        assert_eq!(ants_proto::verified_jwt(&jwt).unwrap().0.name, "dev-f");
         let unasked = order("alice", &admin_creds, "m1", "dev-d", AdminOp::Pause);
         let refused = refusal(ask(&client, &host_creds, "dev-d", &second, &unasked, WAIT).await);
         assert!(refused.contains("asks nothing of the signer"), "{refused}");

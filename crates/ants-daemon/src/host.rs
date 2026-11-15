@@ -115,6 +115,7 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
     let orders = admin::Orders {
         machine: machine.clone(),
+        nats: host.nats.clone(),
         remote: host.remote_admin,
         accounts,
         config: host.config.clone(),

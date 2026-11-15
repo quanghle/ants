@@ -3,6 +3,7 @@
 //! with where each stands (`ants ant orders`).
 
 pub mod add;
+pub mod clone;
 pub mod retire;
 
 use std::collections::BTreeMap;
@@ -322,7 +323,7 @@ pub(crate) mod tests {
     }
 
     /// [`host_of_m1`], of a process serving the ants `restarts` holds.
-    async fn host_of_m1_serving(
+    pub(crate) async fn host_of_m1_serving(
         server: &Server,
         js: &jetstream::Context,
         remote: bool,

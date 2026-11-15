@@ -9,7 +9,7 @@
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
 //! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
-//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
+//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so; [`clone`] adds a copy of one.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +32,7 @@ use crate::direct_kv::{DirectKv, Lookup};
 
 mod add;
 mod ask;
+mod clone;
 mod memories;
 mod pause;
 pub mod restart;
@@ -58,6 +59,8 @@ pub const NO_CONFIG: &str = "the daemon serves no config file to edit";
 #[derive(Debug, Clone)]
 pub struct Orders {
     pub machine: Machine,
+    /// The NATS server of the host connection, where a clone order connects as the clone.
+    pub nats: String,
     /// The config's `[admin] remote`: false refuses every order.
     pub remote: bool,
     /// The accounts whose admins' orders count: the issuer of the host credentials. None without credentials, which
@@ -301,6 +304,7 @@ async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder, sto
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
         AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
         AdminOp::Retire => retire::apply(js, orders, order).await,
+        AdminOp::Clone { new, settings } => clone::apply(js, orders, order, new, settings).await,
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
     }

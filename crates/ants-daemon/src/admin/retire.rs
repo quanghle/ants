@@ -46,7 +46,7 @@ pub(super) async fn apply(js: &jetstream::Context, orders: &Orders, order: &Admi
             Some(json!({ "stopped": stopped, "revoked": [], "home": home, "note": "no credentials to revoke" })),
         );
     };
-    let (revoked, push_error) = match ask(js, host_creds, order, &key, SIGNER_WAIT).await {
+    let (revoked, push_error) = match ask(js, host_creds, order, &order.ant, &key, SIGNER_WAIT).await {
         Ok(EnrollReply::Retired { revoked, push_error, .. }) => (revoked, push_error),
         Ok(EnrollReply::Rejected { reason, .. }) => {
             let reason = reason.as_deref().unwrap_or("no reason given");
@@ -110,7 +110,7 @@ fn unlist(path: &Path, host_creds: &Path, ant: &UserId) -> Result<Unlisted> {
     Ok(Unlisted { listed: true, creds: entry.creds, key, home })
 }
 
-/// `text` without the comments of an add order ([`super::add::is_mark`]) left above no table, as of the table cut
+/// `text` without the comments of an add or clone order ([`super::add::is_mark`]) left above no table, as of the table cut
 /// below one, and the blank lines that left at its end.
 fn without_mark(text: &str) -> String {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();

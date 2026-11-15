@@ -17,6 +17,8 @@ use async_nats::jetstream::{self, consumer};
 use crate::files::earlier_lines;
 use crate::reading::{self, Reading};
 
+pub mod cloned;
+
 /// The history of a thread as a prompt shows it, read when the prompt needs it and shown within the bytes given.
 pub type History = Box<dyn FnOnce(usize) -> Pin<Box<dyn Future<Output = String> + Send>> + Send>;
 
@@ -37,6 +39,8 @@ pub enum Rebuild {
     Overflow,
     /// The thread's earlier session ran in another harness, the ant's own or a fallback ([`crate::fallback`]).
     Moved,
+    /// The ant is a clone of another, whose session of the thread could not be forked ([`crate::clone`]).
+    Cloned,
 }
 
 /// Most bytes of history a prompt shows when neither a budget nor the context window is known; older entries are
@@ -77,6 +81,10 @@ pub(crate) async fn seed(why: Rebuild, history: Option<History>, budget: usize) 
         Rebuild::Moved => {
             ("The earlier session of this thread ran in another harness, so this one starts over", budget)
         }
+        Rebuild::Cloned => (
+            "This ant is a clone of another, whose session of this thread could not be forked, so this one starts over",
+            budget,
+        ),
     };
     match history {
         Some(history) => {
@@ -88,13 +96,14 @@ pub(crate) async fn seed(why: Rebuild, history: Option<History>, budget: usize) 
 
 /// A thread as an ant's daemon reads its history back: what the ant received on it before the message at stream
 /// sequence `before`, what it sent on it, the thread's notes and, in `channel`, the thread's posts (those of others
-/// before `before`).
+/// before `before`). In a clone, the copy of the history in its `home` ([`cloned`]) comes first.
 pub struct Thread {
     pub js: jetstream::Context,
     pub ant: UserId,
     pub thread: ThreadId,
     pub channel: Option<ChannelId>,
     pub before: u64,
+    pub home: Option<std::path::PathBuf>,
 }
 
 impl Thread {
@@ -102,12 +111,23 @@ impl Thread {
     pub fn history(self) -> History {
         from_fn(move |budget| async move {
             let (entries, failed) = self.read().await;
-            if failed == SOURCES.len() - usize::from(self.channel.is_none()) {
+            let earlier = match &self.home {
+                Some(home) => cloned::earlier(home, &self.thread).await.unwrap_or_else(|e| {
+                    tracing::warn!(thread = %self.thread, error = format!("{e:#}"), "reading the copied history");
+                    None
+                }),
+                None => None,
+            };
+            if failed == SOURCES.len() - usize::from(self.channel.is_none()) && earlier.is_none() {
                 return "[ants] The thread's history could not be read back, so its earlier context is lost."
                     .to_owned();
             }
+            let entries = match earlier {
+                Some((earlier, cut)) => cloned::then(earlier, cut, entries.into_values()),
+                None => entries.into_values().collect(),
+            };
             tracing::info!(thread = %self.thread, entries = entries.len(), budget, "read back the thread's history");
-            let history = format(entries.into_values().collect(), budget);
+            let history = format(entries, budget);
             match failed {
                 0 => history,
                 _ => format!("[ants] Part of the thread's history could not be read back.\n{history}"),

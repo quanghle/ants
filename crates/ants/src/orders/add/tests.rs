@@ -11,10 +11,10 @@ use crate::orders::tests::{WAIT, host_of_m1, p};
 use crate::revoke::{self, Kind};
 
 /// How long an order the signer answers may take: the daemon asks again every 5s.
-const SIGNED: Duration = Duration::from_secs(30);
+pub(crate) const SIGNED: Duration = Duration::from_secs(30);
 
 /// Run `body` while `ants signer` answers over `server` for the team of `server.dir()/auth`.
-async fn with_signer<T>(server: &Server, body: impl Future<Output = T>) -> T {
+pub(crate) async fn with_signer<T>(server: &Server, body: impl Future<Output = T>) -> T {
     let config = server.dir().join("signer.toml");
     std::fs::write(&config, "").unwrap();
     let options = crate::signer::Options {

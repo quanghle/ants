@@ -1,11 +1,13 @@
 //! Enrollment requests carrying an admin's order ([`EnrollRequest::order`]): the daemon of the order's machine, carrying
-//! out an order to add an ant on it ([`AdminOp::Add`]) or to retire one ([`AdminOp::Retire`]), asks with its host
-//! credentials, and the signer answers on the admin's word, with no human asked again.
+//! out an order to add an ant on it ([`AdminOp::Add`]), to clone one under a new name ([`AdminOp::Clone`]) or to
+//! retire one ([`AdminOp::Retire`]), asks with its host credentials, and the signer answers on the admin's word, with
+//! no human asked again.
 //!
 //! The signer trusts neither the machine nor the order without checking both: the request must prove the machine's
 //! live host credentials of the team's account (a request failing that gets no answer, as an enrollment request
 //! failing its proof does), and the order must verify as an admin's ([`AdminOrder::verify`]) at the time the signer
-//! hears it, for that machine and the ant asked about. An order adds one key only: another key asking on the same
+//! hears it, for that machine and the ant asked about: the ant an order adds or retires, or the clone a clone order
+//! names, never the ant it clones. An order adds one key only: another key asking on the same
 //! order is refused, and a retirement revokes only keys of an ant that was there when the admin sent the order.
 
 use std::collections::{BTreeSet, HashMap};
@@ -97,7 +99,7 @@ fn host(approver: &Approver, request: &EnrollRequest, now: DateTime<Utc>) -> Res
 }
 
 /// What to answer `request`, which `machine` proved, carrying `order`: refused, with the reason, unless the order is an
-/// admin's to add or retire the ant asked about on that machine.
+/// admin's to add, clone as or retire the ant asked about on that machine.
 async fn decide(
     approver: &Approver,
     url: &str,
@@ -117,21 +119,27 @@ async fn decide(
     if order.machine != *machine {
         bail!("the order is for {}, not {machine}", order.machine);
     }
-    if order.ant != request.ant {
-        bail!("the order is about {}, not {}", order.ant, request.ant);
+    let about = match &order.op {
+        AdminOp::Clone { new, .. } => new,
+        _ => &order.ant,
+    };
+    if *about != request.ant {
+        bail!("the order is about {about}, not {}", request.ant);
     }
     let leaf = auth::leaf_user(machine);
     if live(dir)?.iter().any(|i| i.kind == Kind::Leaf && i.name == leaf) {
-        bail!("{machine} is a leaf node's machine: adding or retiring an ant there by order is not supported yet");
+        bail!(
+            "{machine} is a leaf node's machine: adding, cloning or retiring an ant there by order is not supported yet"
+        );
     }
     match &order.op {
-        AdminOp::Add { .. } => add(dir, request, order, &revoked),
+        AdminOp::Add { .. } | AdminOp::Clone { .. } => add(dir, request, order, &revoked),
         AdminOp::Retire => retire(dir, url, request, order).await,
         op => bail!("an order to {} asks nothing of the signer", op.describe()),
     }
 }
 
-/// Sign the key `request` asks for, of the ant the order adds: never a key revoked or issued to other credentials than
+/// Sign the key `request` asks for, of the ant the order adds or the clone it makes: never a key revoked or issued to other credentials than
 /// the ant's on an order, nor another key on the same order, nor while the team holds live credentials of the name
 /// for another key.
 fn add(dir: &Path, request: &EnrollRequest, order: &AdminOrder, revoked: &BTreeSet<String>) -> Result<EnrollReply> {
