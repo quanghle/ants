@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, HUMANS_BUCKET, JsDomain, Machine, PERMISSIONS_VERSION,
-    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, subject, tagged_registered,
+    ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, JsDomain, Machine, PERMISSIONS_VERSION, PermissionsVersion, UserId,
+    WEBHOOKS_BUCKET, inbox_prefix, subject, tagged_registered,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
@@ -372,6 +372,17 @@ pub fn check(path: &Path) -> Result<Finding> {
     Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))
 }
 
+/// The account that signed the credentials file at `path`: the issuer of its user JWT.
+pub fn account(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
+    let jwt = creds_jwt(&text).with_context(|| format!("credentials {} without a user JWT", path.display()))?;
+    let claims = claims(jwt).with_context(|| format!("credentials {}", path.display()))?;
+    claims["iss"]
+        .as_str()
+        .map(str::to_owned)
+        .with_context(|| format!("credentials {} without an issuer", path.display()))
+}
+
 /// The claims of a user JWT.
 fn claims(jwt: &str) -> Result<Value> {
     let payload = jwt.trim().split('.').nth(1).context("a malformed user JWT")?;
@@ -619,7 +630,7 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
     {
         return Ok(Kind::Enrollment { ant: ant.parse().map_err(|e| anyhow!("enrollment credentials {name}: {e}"))? });
     }
-    if has(publish, &format!("$KV.{HUMANS_BUCKET}.>")) {
+    if ants_proto::writes_human_entries(publish.iter().map(String::as_str)) {
         return Ok(Kind::Human);
     }
     if has(subscribe, subject::DEAD_ALL) {

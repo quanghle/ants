@@ -489,7 +489,8 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
         "ants.approvals.*.*",
         "ants.dead.>",
         "$JS.API.STREAM.CREATE.KV_ants_humans",
-        "$KV.ants_humans.>",
+        "$KV.ants_humans.*",
+        "$KV.ants_humans.alice.>",
         "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.*",
         "$JS.API.CONSUMER.CREATE.ANTS.notes-alice.ants.notes.>",
     ] {
@@ -519,7 +520,7 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
     let m1: Machine = "m1".parse().unwrap();
     assert_eq!(m1.setup_inbox(&p("alice")), "_INBOX.alice.leaf.m1");
     let leaf = Permissions::for_leaf(&m1, [(&p("alice"), Role::Human), (&p("dev-a"), Role::Ant)]);
-    for s in ["_INBOX.alice.leaf.m1.>", "_INBOX.human.leaf.m1.>", "$KV.ants_humans.>"] {
+    for s in ["_INBOX.alice.leaf.m1.>", "_INBOX.human.leaf.m1.>", "$KV.ants_humans.*", "$KV.ants_humans.alice.>"] {
         assert!(leaf.publish.iter().any(|have| have == s), "{s} missing from {:?}", leaf.publish);
     }
 }

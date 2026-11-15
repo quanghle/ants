@@ -4,14 +4,21 @@
 //! human (config `human`) are humans without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept
 //! current by a watch ([`Registry::watch`]). Until the bucket exists only the humans without an entry are known; the
 //! daemon looks for the bucket again every little while, since an ant may read it but not create it.
+//!
+//! The same watch keeps the humans' assistant grants ([`ants_proto::AssistantGrant`], under `<human>.assistant`),
+//! verified for the team's account ([`Registry::verifying_grants`]): a withdrawal holds as soon as the watch delivers
+//! it, and is announced to whoever listens ([`Registry::withdrawals`]).
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use ants_proto::{Envelope, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId};
+use ants_proto::{
+    Envelope, Grants, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, VerifiedGrant, assistant_grant_of,
+};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::sync::RwLockExt as _;
@@ -19,11 +26,37 @@ use crate::sync::RwLockExt as _;
 /// How long the daemon waits to look for the bucket again, when it is missing or its watch ended.
 pub const RETRY: Duration = Duration::from_secs(30);
 
+/// How many withdrawals a listener may lag behind before it misses some ([`Registry::withdrawals`]).
+const WITHDRAWALS: usize = 64;
+
 /// The humans of the team, shared by the inbox loop and the MCP server.
 #[derive(Debug, Clone)]
 pub struct Registry {
     humans: Arc<RwLock<Humans>>,
     default: UserId,
+    assistants: Arc<Assistants>,
+}
+
+/// The assistant grants a [`Registry`] keeps, behind one pointer for clones of it to share.
+#[derive(Debug)]
+struct Assistants {
+    grants: RwLock<Grants>,
+    /// The team's account, which signs the credentials of the devices whose grants count; none: no grant does.
+    account: Option<String>,
+    withdrawals: broadcast::Sender<Withdrawal>,
+}
+
+impl Assistants {
+    fn new(account: Option<String>) -> Self {
+        Self { grants: RwLock::default(), account, withdrawals: broadcast::channel(WITHDRAWALS).0 }
+    }
+}
+
+/// That `human` stopped designating `assistant` as its assistant: cleared, replaced, deleted or refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withdrawal {
+    pub human: UserId,
+    pub assistant: UserId,
 }
 
 impl Default for Registry {
@@ -35,9 +68,40 @@ impl Default for Registry {
 impl Registry {
     /// A registry knowing only the humans without an entry: `human` and `default`, the default human.
     pub fn new(default: UserId) -> Self {
-        let registry = Self { humans: Arc::default(), default };
+        let registry = Self { humans: Arc::default(), default, assistants: Arc::new(Assistants::new(None)) };
         registry.replace(registry.base());
         registry
+    }
+
+    /// The registry, honouring the assistant grants that devices of the team of `account` (`A...`, the issuer of the
+    /// reader's credentials) signed; without an account, none.
+    #[must_use]
+    pub fn verifying_grants(mut self, account: Option<String>) -> Self {
+        self.assistants = Arc::new(Assistants::new(account));
+        self
+    }
+
+    /// The ant `human` designates as its assistant by a grant standing now. Its acts count for the human only while
+    /// its own user JWT names the human too ([`Registry::honours_assistant`]).
+    pub fn assistant(&self, human: &UserId) -> Option<UserId> {
+        self.assistants.grants.read_locked().designated(human).cloned()
+    }
+
+    /// Whether `assistant`, whose user JWT's assistant_of tag names `assistant_of` (as the reader verified it), acts
+    /// for `human` now ([`ants_proto::VerifiedGrant::honours`]).
+    pub fn honours_assistant(&self, human: &UserId, assistant: &UserId, assistant_of: Option<&UserId>) -> bool {
+        self.assistants.grants.read_locked().honours(human, assistant, assistant_of)
+    }
+
+    /// The record of `human` standing: a grant, or a withdrawal.
+    pub fn grant(&self, human: &UserId) -> Option<VerifiedGrant> {
+        self.assistants.grants.read_locked().grant(human).cloned()
+    }
+
+    /// Each assistant that stops being one from now on, as the watch sees it: whatever it did for its human that
+    /// is not confirmed yet no longer counts.
+    pub fn withdrawals(&self) -> broadcast::Receiver<Withdrawal> {
+        self.assistants.withdrawals.subscribe()
     }
 
     /// The human who gets what is meant for the owner of a thread that has none.
@@ -113,23 +177,59 @@ impl Registry {
         let mut updates = kv.watch_all().await.context("watching the humans")?;
         let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
         let mut humans = self.base();
+        let mut granting = Vec::new();
         for key in keys {
             let value = kv.get(&key).await.with_context(|| format!("reading human {key}"))?;
-            self.set(&mut humans, &key, value.as_deref());
+            if let Some(human) = assistant_grant_of(&key) {
+                granting.push(human);
+                self.set_grant(&key, value.as_deref());
+            } else {
+                self.set(&mut humans, &key, value.as_deref());
+            }
         }
         self.replace(humans);
+        // Grants deleted while the bucket was not watched.
+        let gone: Vec<UserId> = self.assistants.grants.read_locked().designations().map(|(h, _)| h.clone()).collect();
+        for human in gone.into_iter().filter(|h| !granting.contains(h)) {
+            self.set_grant(&ants_proto::assistant_grant_key(&human), None);
+        }
         while let Some(entry) = updates.next().await {
             let entry = entry.context("watching the humans")?;
             let value = (entry.operation == kv::Operation::Put).then_some(&entry.value[..]);
-            let mut humans = self.humans.write_locked();
-            self.set(&mut humans, &entry.key, value);
+            if assistant_grant_of(&entry.key).is_some() {
+                self.set_grant(&entry.key, value);
+            } else {
+                let mut humans = self.humans.write_locked();
+                self.set(&mut humans, &entry.key, value);
+            }
         }
         Ok(())
+    }
+
+    /// Apply `value`, what the grant key `key` holds now, to the grants, announcing the assistant it withdraws.
+    fn set_grant(&self, key: &str, value: Option<&[u8]>) {
+        let Some(account) = &self.assistants.account else { return };
+        let applied = self.assistants.grants.write_locked().apply(key, value, account, chrono::Utc::now());
+        let Some(applied) = applied else { return };
+        if let Some(refused) = &applied.refused {
+            tracing::warn!(key, error = %refused, "not honouring an assistant grant");
+        }
+        if let Some(assistant) = applied.withdrawn() {
+            tracing::info!(human = %applied.human, %assistant, "assistant withdrawn");
+            let _ = self
+                .assistants
+                .withdrawals
+                .send(Withdrawal { human: applied.human.clone(), assistant: assistant.clone() });
+        }
     }
 
     /// Set the human of `key` in `humans` to `value`, or remove it. A malformed entry, or one naming another human
     /// than its key, is skipped and names no human.
     fn set(&self, humans: &mut Humans, key: &str, value: Option<&[u8]>) {
+        // Another key under a human's name, not its entry.
+        if key.contains('.') {
+            return;
+        }
         let Ok(human) = key.parse::<UserId>() else {
             tracing::warn!(key, "skipping a human entry under a key that is no user id");
             return;
@@ -182,6 +282,16 @@ impl Registry {
         registry.replace(known);
         registry
     }
+}
+
+/// The account whose devices' grants a reader with the credentials file `creds` honours
+/// ([`Registry::verifying_grants`]): the one that signed them. None without credentials, or with a warning when they
+/// cannot be read.
+pub fn account(creds: Option<&std::path::Path>) -> Option<String> {
+    let creds = creds?;
+    crate::creds::account(creds)
+        .inspect_err(|e| tracing::warn!(error = format!("{e:#}"), "honouring no assistant grant"))
+        .ok()
 }
 
 /// The watch of [`Registry::watch`], stopped when dropped.

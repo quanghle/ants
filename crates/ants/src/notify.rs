@@ -363,7 +363,7 @@ impl Human {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         let claims = crate::humans::creds_claims(&text).with_context(|| format!("credentials {}", path.display()))?;
         let name = &self.name;
-        let human = crate::humans::may_publish(&claims, &format!("$KV.{}.>", ants_proto::HUMANS_BUCKET));
+        let human = crate::humans::writes_humans(&claims);
         if claims["name"].as_str() != Some(name.as_str()) || !human {
             bail!(
                 "credentials {} are not human {name}'s; issue them with `ants auth user {name} --human`",

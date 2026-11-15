@@ -407,9 +407,11 @@ impl Permissions {
             format!("$JS.API.STREAM.CREATE.{webhooks}"),
             // The version the channel manager runs, for `ants doctor`.
             format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
-            // Put and delete of every channel's and every human's entry.
+            // Put and delete of every channel's and every human's entry, and of the keys under its own name, such
+            // as its assistant grant, which no one else writes.
             format!("$KV.{CHANNELS_BUCKET}.>"),
-            format!("$KV.{HUMANS_BUCKET}.>"),
+            format!("$KV.{HUMANS_BUCKET}.*"),
+            format!("$KV.{HUMANS_BUCKET}.{user}.>"),
             // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
             format!("$KV.{OWNERS_BUCKET}.*.*"),
             "ants.out.owners.*.*".to_owned(),
@@ -902,7 +904,7 @@ impl Permissions {
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(3);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

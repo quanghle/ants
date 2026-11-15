@@ -225,7 +225,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         };
         claimed = Some(revision);
     }
-    let humans = Registry::new(config.human.clone());
+    let humans = Registry::new(config.human.clone()).verifying_grants(crate::humans::account(config.creds.as_deref()));
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
     let redactor = std::sync::Arc::new(redactor(config));
     let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);

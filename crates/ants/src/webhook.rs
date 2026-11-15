@@ -493,7 +493,7 @@ pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destin
     if claims["name"].as_str() != Some(name.as_str()) {
         return Err(issue(&format!("are not {kind} {name}'s")));
     }
-    if crate::humans::may_publish(&claims, &format!("$KV.{}.>", ants_proto::HUMANS_BUCKET)) {
+    if crate::humans::writes_humans(&claims) {
         return Err(issue("are a human's"));
     }
     if !crate::humans::may_publish(&claims, &destination.subject(name)) {

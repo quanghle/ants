@@ -218,6 +218,10 @@ pub(crate) enum Command {
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]
     Notify(NotifyCommand),
+    /// Designate the ant that acts for the CLI's human as its assistant, withdraw it, or show a human's. The human's
+    /// device signs the designation. Needs a human device's credentials, but for `show`.
+    #[command(subcommand)]
+    Assistant(AssistantCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
     /// progress of an ant: state, reply text, tool calls and execution plan.
     Watch {
@@ -567,6 +571,24 @@ pub(crate) enum NotifyCommand {
         /// One JSON object.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum AssistantCommand {
+    /// Designate ANT as the human's assistant, in place of any other. Refused for an ant added from a template; a
+    /// warning for one with a workdir or tools allowed without asking. ANT acts for the human only while its
+    /// credentials also name the human (`ants auth user ANT --assistant-of HUMAN`).
+    Set {
+        #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+    },
+    /// Withdraw the human's assistant, at once for every reader.
+    Clear,
+    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies.
+    Show {
+        #[arg(value_name = "HUMAN")]
+        human: Option<UserId>,
     },
 }
 
