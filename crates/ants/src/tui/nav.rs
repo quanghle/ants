@@ -97,7 +97,7 @@ fn line(
 ) -> Line<'static> {
     let count = |n: usize| if n == 0 { String::new() } else { format!(" {n}") };
     match item {
-        Item::Home => Line::raw(format!("Home{}", count(super::home::items(data).len()))),
+        Item::Home => Line::raw(format!("Home{}", count(super::home::waiting(data, now)))),
         Item::Work(None) => Line::raw(format!("Work{}", count(data.live.order.len()))),
         Item::Work(Some(state)) => {
             let n = counts.get(state).copied().unwrap_or(0);

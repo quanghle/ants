@@ -7,6 +7,7 @@
 //! which draws it and takes its keys.
 
 mod acts;
+mod approvals;
 mod channel;
 mod dm;
 mod frame;
@@ -287,6 +288,7 @@ impl Chat {
             Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
+            Action::Decide(request, verdict) => self.feed.decide(request, verdict, self.model.data.me().clone()),
             Action::Search(search) => self.searches.start(search),
             Action::Refresh => {
                 self.feed.refresh();

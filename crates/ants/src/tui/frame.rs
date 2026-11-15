@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{channel, home, nav, search, thread, work};
+use super::{approvals, channel, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -45,14 +45,17 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let focused = model.focus == Focus::View;
     let data = &model.data;
     match model.page() {
-        Page::Home(page) => page.draw(frame, right, data, now, focused),
+        Page::Home(page) => page.draw(frame, right, model, now, focused),
         Page::Work(page) => page.draw(frame, right, data, now, focused),
         Page::Channel(page) => page.draw(frame, right, data, now, focused),
-        Page::Thread(page) => page.draw(frame, right, data, now, focused),
+        Page::Thread(page) => page.draw(frame, right, model, now, focused),
         Page::Dm(page) => page.draw(frame, right, data, now, focused),
         Page::Search(page) => page.draw(frame, right, data, now, focused),
     }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
+    if let Some(asking) = model.asking.as_ref().filter(|a| a.full) {
+        approvals::draw_full(frame, asking, now);
+    }
     if model.help {
         draw_help(frame);
     }
@@ -78,6 +81,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(prompt) = &model.prompt {
         return prompt.line();
+    }
+    if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
+        return line;
     }
     if let Some(notice) = model.notice_at(now) {
         let style = match notice.level {
@@ -108,6 +114,7 @@ const HELP: &[(&str, &str)] = &[
     ("w", "in a channel: its threads in work"),
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "search messages, as in: deploy from:dev-a"),
     ("R", "read everything again"),
@@ -168,7 +175,8 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        assert!(shown.contains("Enter open its thread · Tab nav/view · / search · ? help · q quit"), "{shown}");
+        let keys = "Enter open · a A r answer a tool request · Tab nav/view · / search · ? help · q quit";
+        assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
@@ -181,6 +189,23 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    #[test]
+    fn a_tool_request_shows_in_full_over_the_view_and_its_verdict_waits_in_the_footer() {
+        let mut m = model();
+        let push = crate::live::tests::request("dev-a", "git push", vec![ants_proto::Verdict::AllowOnce]);
+        m.data.live.approvals = vec![push.clone()];
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("approve") && shown.contains("asks to run execute: git push"), "{shown}");
+        m.key(Key::Enter, at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains(&format!(" Tool request {} ", crate::tools::qualified(&push))), "{shown}");
+        assert!(shown.contains("a allow · r reject · Enter open its thread · Esc back"), "{shown}");
+        m.key(Key::Esc, at(0));
+        m.key(Key::Char('a'), at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("with allow-once? y confirms, any other key cancels"), "{shown}");
     }
 
     #[test]

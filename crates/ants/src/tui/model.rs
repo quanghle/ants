@@ -3,15 +3,19 @@
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use ants_daemon::reactions::Reactions;
-use ants_proto::{ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid};
+use ants_proto::{
+    ApprovalRequest, ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict,
+};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
+use super::approvals::{self, Answer, Asking};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{channel, dm, home, nav, people, search, thread, timeline, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
+use crate::tools::Update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -51,6 +55,8 @@ pub enum Action {
     Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
+    /// Store a decision on a tool request.
+    Decide(ApprovalRequest, Verdict),
     /// Find the messages matching the search, replacing any search running.
     Search(crate::search::Search),
     Quit,
@@ -95,6 +101,8 @@ pub struct Data {
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
     pub calls: timeline::Threads,
+    /// The tool requests settled while the UI runs.
+    pub settled: approvals::Settled,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
 }
@@ -179,6 +187,8 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
+    /// Answer a pending tool request: with the verdict, once confirmed; without, shown in full.
+    Ask(ApprovalRequest, Option<Verdict>),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -194,6 +204,8 @@ pub struct Model {
     pub notice: Option<Notice>,
     /// The search prompt, while open.
     pub prompt: Option<search::Prompt>,
+    /// The tool request being answered.
+    pub asking: Option<Asking>,
 }
 
 impl Model {
@@ -209,10 +221,20 @@ impl Model {
             humans: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
+            settled: approvals::Settled::default(),
             people: people::People::default(),
         };
         let nav = nav::Item::Home;
-        Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None, prompt: None }
+        Self {
+            data,
+            pages: vec![Page::of(&nav)],
+            nav,
+            focus: Focus::View,
+            help: false,
+            notice: None,
+            prompt: None,
+            asking: None,
+        }
     }
 
     pub fn page(&self) -> &Page {
@@ -238,8 +260,9 @@ impl Model {
                 self.data.calls.status(&event);
             }
             live::Event::Following => self.data.live.approvals_reset(),
-            live::Event::Approval(update) => self.data.live.approval(&update),
-            live::Event::FollowEnded(Ok(())) | live::Event::Decided(_) => {}
+            live::Event::Approval(update) => self.approval(update, now),
+            live::Event::Decided(outcome) => self.answered(outcome, now),
+            live::Event::FollowEnded(Ok(())) => {}
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
@@ -297,6 +320,64 @@ impl Model {
             self.data.calls.stored(tool);
         }
         entries
+    }
+
+    /// Take word from following the tool requests: a settled request keeps its card a while.
+    fn approval(&mut self, update: Update, now: DateTime<Utc>) {
+        self.data.live.approval(&update);
+        if let Update::Resolved(request, state) = update {
+            if let Some(asking) = &mut self.asking
+                && !asking.settled(&request, &state)
+            {
+                self.asking = None;
+                let how = approvals::how(&state, &request.ant);
+                self.notify(format!("request {} {how}", crate::tools::qualified(&request)), Level::Info, now);
+            }
+            self.data.settled.add(request, state, now);
+        }
+    }
+
+    /// Take the outcome of storing a decision: the line saying so, or why it was not stored, the first decision
+    /// winning.
+    fn answered(&mut self, outcome: anyhow::Result<String>, now: DateTime<Utc>) {
+        if let Some(asking) = &mut self.asking
+            && asking.storing
+        {
+            asking.storing = false;
+            asking.verdict = None;
+            if outcome.is_ok() || !asking.full {
+                self.asking = None;
+            }
+        }
+        match outcome {
+            Ok(line) => self.notify(line, Level::Info, now),
+            Err(e) => self.notify(format!("{e:#}"), Level::Error, now),
+        }
+    }
+
+    /// Take `key` while a tool request is being answered.
+    fn answer(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+        let asking = self.asking.as_mut()?;
+        match asking.key(key) {
+            Answer::Keep => {}
+            Answer::Close(line) => {
+                self.asking = None;
+                if let Some(line) = line {
+                    self.notify(line, Level::Info, now);
+                }
+            }
+            Answer::Note(line) => self.notify(line, Level::Info, now),
+            Answer::Refused(refusal) => self.notify(refusal, Level::Error, now),
+            Answer::Decide(verdict) => return self.asking.as_ref().map(|a| Action::Decide(a.request.clone(), verdict)),
+            Answer::Open(thread) => {
+                self.asking = None;
+                if self.open() != Some(&thread) {
+                    self.focus = Focus::View;
+                    return self.go(To::Thread(thread), now);
+                }
+            }
+        }
+        None
     }
 
     /// The thread shown, if one is.
@@ -431,6 +512,9 @@ impl Model {
             self.help = false;
             return None;
         }
+        if self.asking.as_ref().is_some_and(Asking::takes_keys) {
+            return self.answer(key, now);
+        }
         if let Some(prompt) = &mut self.prompt {
             return match prompt.key(key) {
                 search::Edit::Typing => None,
@@ -555,6 +639,11 @@ impl Model {
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
         }?;
+        self.go(to, now)
+    }
+
+    /// Go where a view's key leads.
+    fn go(&mut self, to: To, now: DateTime<Utc>) -> Option<Action> {
         match to {
             To::Thread(thread) => {
                 self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
@@ -566,6 +655,13 @@ impl Model {
             }
             To::Work(filter) => {
                 self.pages.push(Page::Work(work::Page::new(filter)));
+                None
+            }
+            To::Ask(request, verdict) => {
+                match Asking::new(request, verdict) {
+                    Ok(asking) => self.asking = Some(asking),
+                    Err(refusal) => self.notify(refusal, Level::Error, now),
+                }
                 None
             }
             To::Do(action) => Some(action),
@@ -582,7 +678,6 @@ pub mod tests {
     use super::*;
     use crate::live::Link;
     use crate::live::tests::{at, message, request, user};
-    use crate::tools::Update;
     use crate::tui::channel::tests::post;
 
     /// The model of alice, with bob a human too and nothing read yet.
