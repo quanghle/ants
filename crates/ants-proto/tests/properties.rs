@@ -362,6 +362,11 @@ proptest! {
                     prop_assert_eq!(destination, format!("ants.{}", expected.join(".")));
                 }
             }
+            // The chunks a user writes, of any sender for a human, under the same handles.
+            let (filter, destination) = machine.admitted_files(&ant, role);
+            let handles = filter.strip_prefix(&format!("ants.in.{m}.ants.out.files.")).unwrap_or_default();
+            prop_assert_eq!(handles, if role.is_human() { ">".to_owned() } else { format!("{ant}.>") });
+            prop_assert_eq!(destination, format!("$O.ants_files.C.{handles}"));
         }
     }
 

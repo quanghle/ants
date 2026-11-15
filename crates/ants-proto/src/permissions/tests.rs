@@ -674,10 +674,18 @@ fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_th
         "ants.out.files.>",
         "$JS.API.STREAM.INFO.OBJ_ants_files",
         "$JS.API.STREAM.CREATE.OBJ_ants_files",
+        "$JS.API.STREAM.UPDATE.OBJ_ants_files",
         "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.>",
     ] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
+    // Admitting an ant new to a leaf node into the store, from the leaf's outbox.
+    let approver = Permissions::for_enroll_approver();
+    assert_eq!(
+        files(&approver),
+        ["$JS.API.STREAM.INFO.OBJ_ants_files", "$JS.API.STREAM.UPDATE.OBJ_ants_files"],
+        "no chunk"
+    );
     let domain: JsDomain = "hub".parse().unwrap();
     let ant_in_domain = ant.clone().with_js_domain(Some(&domain));
     assert!(
