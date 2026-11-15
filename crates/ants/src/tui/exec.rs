@@ -3,6 +3,7 @@
 //! done|title|pin|mute...` run, each returning the line those print and the warnings they log.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::{bus, reactions};
@@ -16,7 +17,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use super::attach;
 use crate::attachments::{self, File, Listed};
 use crate::cmd::{cancel, send};
-use crate::sealed::Sealing;
+use crate::sealed::{Keyring, Sealing};
 use crate::thread::{self, Entry, Kind};
 use crate::thread_meta::{self, Marking, Meta};
 use crate::{humans, quiet};
@@ -31,6 +32,8 @@ pub struct Ctx {
     pub meta: Result<Meta, String>,
     /// What seals messages to another human, and titles on a thread between two humans.
     pub sealing: Sealing,
+    /// What opens the attachments of sealed messages, if anything.
+    pub keyring: Option<Arc<Keyring>>,
 }
 
 impl Ctx {
@@ -241,8 +244,10 @@ impl Job {
                 let changed = reactions::add(&ctx.js, ctx.domain.as_ref(), me, &message, &reaction).await?;
                 Ok(Done::line(send::reacted_line(&reaction, message, false, changed)))
             }
-            Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, &listed).await?)),
-            Self::Save(listed, to) => Ok(Done::line(attach::save(&ctx.js, &listed, to.as_deref()).await?)),
+            Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, ctx.keyring.as_deref(), &listed).await?)),
+            Self::Save(listed, to) => {
+                Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
+            }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }
     }
@@ -394,9 +399,10 @@ mod tests {
         assert_eq!(dm_with(&entries[..2], &me, human), None);
     }
 
-    /// What the bar sends to another human, a reply on their thread and its title are sealed for both.
+    /// What the bar sends to another human, a reply on their thread with a file attached and its title are sealed for
+    /// both.
     #[tokio::test]
-    async fn the_bar_seals_messages_to_a_human_and_titles_on_their_thread() {
+    async fn the_bar_seals_messages_to_a_human_their_files_and_titles_on_their_thread() {
         use ants_proto::Role;
 
         let Some(server) = crate::auth::tests::Server::start() else { return };
@@ -405,15 +411,22 @@ mod tests {
         let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
         let (client, js) = nats[0].connect("test").await.unwrap();
         let (_, bob_js) = nats[1].connect("test").await.unwrap();
-        let _ = js.create_stream(ants_daemon::hub::threads_config()).await;
+        for config in [ants_daemon::hub::threads_config(), ants_daemon::hub::files_config()] {
+            let _ = js.create_stream(config).await;
+        }
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing };
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, keyring: None };
+        let source = server.dir().join("menu.txt");
+        std::fs::write(&source, b"soup").unwrap();
+        let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
 
         let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), steer: false };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
         let reply = Job::Reply { thread: thread.clone(), text: "at noon".into(), steer: false };
-        assert_eq!(Box::pin(reply.run(&ctx)).await.unwrap().line, format!("sent to bob on thread {thread}"));
+        let reply = Job::Attached { job: Box::new(reply), files };
+        let line = Box::pin(reply.run(&ctx)).await.unwrap().line;
+        assert_eq!(line, format!("sent to bob on thread {thread} with 1 file"));
         let title = Job::Title { thread: thread.clone(), text: "Team lunch".into() };
         Box::pin(title.run(&ctx)).await.unwrap();
 
@@ -422,6 +435,16 @@ mod tests {
         let keyring = crate::sealed::Keyring::load(&nats[1], &bob_js).await.unwrap();
         let texts: Vec<String> = unread.into_iter().map(|e| crate::sealed::read(e, Some(&keyring)).0.text).collect();
         assert_eq!(texts, ["lunch?", "at noon"]);
+        let keyring = Arc::new(keyring);
+        let entries = thread::history(&bob_js, &thread, None, false, Some(Arc::clone(&keyring))).await.unwrap();
+        let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
+        assert!(listed.attachment.sealed.is_some(), "{listed:?}");
+        assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));
+        let (stored, _) = attachments::fetch(&bob_js, &listed.handle, None).await.unwrap();
+        assert_eq!(stored.name, ants_proto::SealedAttachment::STORED_NAME, "stored sealed");
+        let path = attach::fetched(&bob_js, Some(&keyring), listed).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"soup");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let title = thread_meta::open(&nats[1], &bob_js).await.unwrap().title(&thread).await.unwrap().unwrap();
         assert_eq!((title.title.as_str(), title.sealed), ("Team lunch", None), "opened on bob's device");
         let unopened = Meta::open(&bob_js, None, &bob).await.unwrap().title(&thread).await.unwrap().unwrap();
@@ -469,7 +492,7 @@ mod tests {
         std::fs::write(&source, b"# plan").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta: Err("unused".into()), sealing };
+        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta: Err("unused".into()), sealing, keyring: None };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), steer: false };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(

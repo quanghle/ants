@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use super::complete::Candidate;
 use super::frame;
 use crate::attachments::{self, File, Listed};
+use crate::sealed::Keyring;
 
 /// Most paths `/attach` completes.
 const MAX_PATHS: usize = 200;
@@ -69,7 +70,7 @@ pub fn line(listed: &Listed) -> Line<'static> {
     let attachment = &listed.attachment;
     match &listed.unavailable {
         None => Line::from(vec![
-            Span::raw(format!("📎 {} ({}) ", attachment.name, attachments::size(attachment.size))),
+            Span::raw(format!("📎 {} ({}) ", attachment.name, attachments::size(listed.size()))),
             Span::styled(attachment.mime.clone(), frame::dim()),
         ]),
         // An invalid name may hold control characters, which are escaped rather than sent to the terminal.
@@ -86,9 +87,10 @@ fn available(listed: &Listed) -> Result<&Listed> {
 }
 
 /// Fetch the attachment `listed` into a new directory of its own under the system's temporary one, readable by the
-/// user alone, and open it with the system's viewer. Returns the line telling so.
-pub async fn open(js: &jetstream::Context, listed: &Listed) -> Result<String> {
-    let path = fetched(js, listed).await?;
+/// user alone, and open it with the system's viewer; one sealed opens with `keyring` first. Returns the line telling
+/// so.
+pub async fn open(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &Listed) -> Result<String> {
+    let path = fetched(js, keyring, listed).await?;
     let opener = opener();
     let status = tokio::process::Command::new(opener)
         .arg(&path)
@@ -101,15 +103,14 @@ pub async fn open(js: &jetstream::Context, listed: &Listed) -> Result<String> {
     if !status.success() {
         bail!("{opener} {status} opening {}", path.display());
     }
-    let attachment = &listed.attachment;
-    Ok(format!("opened {} ({}) with {opener}", attachment.name, attachments::size(attachment.size)))
+    Ok(format!("opened {} ({}) with {opener}", listed.attachment.name, attachments::size(listed.size())))
 }
 
-/// Fetch the attachment `listed`, checking its bytes, into a new private directory under the system's temporary one:
-/// the path of the file written.
-pub async fn fetched(js: &jetstream::Context, listed: &Listed) -> Result<PathBuf> {
+/// Fetch the attachment `listed`, checking its bytes and opening one sealed with `keyring` ([`attachments::open`]),
+/// into a new private directory under the system's temporary one: the path of the file written.
+pub async fn fetched(js: &jetstream::Context, keyring: Option<&Keyring>, listed: &Listed) -> Result<PathBuf> {
     let listed = available(listed)?;
-    let (attachment, bytes) = attachments::fetch(js, &listed.handle, Some(&listed.attachment)).await?;
+    let (attachment, bytes) = attachments::open(js, keyring, &listed.handle, Some(&listed.attachment)).await?;
     let dir = private_dir(&std::env::temp_dir(), attachment.id)?;
     let path = dir.join(&attachment.name);
     attachments::write_new(&path, &bytes)?;
@@ -146,10 +147,16 @@ fn opener_on(os: &str, wsl: impl FnOnce() -> bool) -> &'static str {
 }
 
 /// Save the attachment `listed` as `ants attachment get -o` does: to `out`, in it when a directory, else to its name in
-/// the current directory. Returns the line telling so.
-pub async fn save(js: &jetstream::Context, listed: &Listed, out: Option<&Path>) -> Result<String> {
+/// the current directory, one sealed opened with `keyring`. Returns the line telling so.
+pub async fn save(
+    js: &jetstream::Context,
+    keyring: Option<&Keyring>,
+    listed: &Listed,
+    out: Option<&Path>,
+) -> Result<String> {
     let listed = available(listed)?;
-    let (attachment, size, path) = attachments::save(js, None, &listed.handle, Some(&listed.attachment), out).await?;
+    let expected = Some(&listed.attachment);
+    let (attachment, size, path) = attachments::save(js, keyring, &listed.handle, expected, out).await?;
     Ok(format!("saved {} ({}, {}) to {}", attachment.name, attachments::size(size), attachment.mime, path.display()))
 }
 
@@ -359,7 +366,7 @@ mod tests {
         attachments::store(&js, &files, |id| message.attachment_handle(id)).await.unwrap();
         let [shown] = attachments::listed_on(&message.subject(), &message.attachments).try_into().unwrap();
 
-        let path = fetched(&js, &shown).await.unwrap();
+        let path = fetched(&js, None, &shown).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"findings");
         let dir = path.parent().unwrap();
         #[cfg(unix)]
@@ -367,16 +374,16 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
         }
-        let again = fetched(&js, &shown).await.unwrap();
+        let again = fetched(&js, None, &shown).await.unwrap();
         assert_ne!(again.parent(), Some(dir), "each open has a directory of its own");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(again.parent().unwrap());
 
         let out = server.dir().join("out");
         std::fs::create_dir(&out).unwrap();
-        let line = save(&js, &shown, Some(&out)).await.unwrap();
+        let line = save(&js, None, &shown, Some(&out)).await.unwrap();
         assert_eq!(line, format!("saved report.txt (8 B, text/plain) to {}", out.join("report.txt").display()));
         let gone = Listed { unavailable: Some("its id is repeated".into()), ..shown };
-        assert!(save(&js, &gone, Some(&out)).await.unwrap_err().to_string().contains("is unavailable"));
+        assert!(save(&js, None, &gone, Some(&out)).await.unwrap_err().to_string().contains("is unavailable"));
     }
 }

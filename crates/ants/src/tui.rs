@@ -146,15 +146,16 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     nats.prepare(&js).await;
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
     let sealing = sealed::Sealing::of(nats);
+    let (feed, state) = live::start(nats, client.clone(), js.clone(), since).await?;
     let ctx = exec::Ctx {
-        client: client.clone(),
+        client,
         js: js.clone(),
         me: nats.me.clone(),
         domain: nats.domain.cloned(),
         meta,
         sealing: sealing.clone(),
+        keyring: feed.keyring(),
     };
-    let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
@@ -170,7 +171,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        let images = inline_images.then(|| images::Io::new(images::picker(), js.clone()));
+        let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
         let chat = Chat { feed, reads, acts, people, searches, trees, cards, images, exec, model, edit: None };
         Box::pin(chat.run(&mut screen.terminal)).await

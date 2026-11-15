@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
+use std::sync::Arc;
 
 use ants_proto::AttachmentHandle;
 use anyhow::Result;
@@ -20,6 +21,7 @@ use ratatui_image::{FilterType, Image, Resize};
 
 use super::model::{Model, Page};
 use crate::attachments::{self, Listed};
+use crate::sealed::Keyring;
 
 /// Widest an image is drawn, in cells.
 pub const MAX_COLS: u16 = 48;
@@ -134,13 +136,14 @@ type Encoded = (AttachmentHandle, Option<Protocol>);
 pub struct Io {
     picker: Picker,
     js: jetstream::Context,
+    keyring: Option<Arc<Keyring>>,
     asked: HashSet<AttachmentHandle>,
     jobs: FuturesUnordered<LocalBoxFuture<'static, Encoded>>,
 }
 
 impl Io {
-    pub fn new(picker: Picker, js: jetstream::Context) -> Self {
-        Self { picker, js, asked: HashSet::new(), jobs: FuturesUnordered::new() }
+    pub fn new(picker: Picker, js: jetstream::Context, keyring: Option<Arc<Keyring>>) -> Self {
+        Self { picker, js, keyring, asked: HashSet::new(), jobs: FuturesUnordered::new() }
     }
 
     /// Fetch and encode those of `wanted` not asked for yet, forgetting the rest; whether any are new.
@@ -151,9 +154,10 @@ impl Io {
             if self.asked.insert(listed.handle.clone()) {
                 new = true;
                 let (js, picker, listed) = (self.js.clone(), self.picker.clone(), listed.clone());
+                let keyring = self.keyring.clone();
                 self.jobs.push(
                     async move {
-                        let image = encoded(&js, picker, &listed).await.ok();
+                        let image = encoded(&js, keyring.as_deref(), picker, &listed).await.ok();
                         (listed.handle, image)
                     }
                     .boxed_local(),
@@ -180,9 +184,14 @@ impl Io {
     }
 }
 
-/// The image attachment `listed`, fetched, checked and encoded with `picker`.
-async fn encoded(js: &jetstream::Context, picker: Picker, listed: &Listed) -> Result<Protocol> {
-    let (_, bytes) = attachments::fetch(js, &listed.handle, Some(&listed.attachment)).await?;
+/// The image attachment `listed`, fetched, checked, opened with `keyring` when sealed, and encoded with `picker`.
+async fn encoded(
+    js: &jetstream::Context,
+    keyring: Option<&Keyring>,
+    picker: Picker,
+    listed: &Listed,
+) -> Result<Protocol> {
+    let (_, bytes) = attachments::open(js, keyring, &listed.handle, Some(&listed.attachment)).await?;
     tokio::task::spawn_blocking(move || encode(&picker, &bytes)).await?
 }
 
@@ -274,7 +283,7 @@ pub mod tests {
         attachments::store(&js, &files, |id| message.attachment_handle(id)).await.unwrap();
         let listed = attachments::listed_on(&message.subject(), &message.attachments);
 
-        let mut io = Io::new(Picker::halfblocks(), js);
+        let mut io = Io::new(Picker::halfblocks(), js, None);
         assert!(io.want(&listed));
         assert!(!io.want(&listed), "asked once");
         let mut got = HashMap::new();
