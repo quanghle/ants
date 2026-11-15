@@ -134,14 +134,16 @@ impl Data {
         self.marker.as_ref().is_some_and(|m| !m.is_read(seq))
     }
 
-    /// The thread's title, else the title an ant suggested, else its opening line.
+    /// The thread's title, else the title an ant suggested, else its opening line; after a lock when a sealed message
+    /// is on it.
     pub fn title(&self, thread: &ThreadId) -> String {
         let Some(summary) = self.live.summary(thread) else { return thread.to_string() };
-        summary
+        let title = summary
             .title
             .clone()
             .or_else(|| summary.suggested.as_ref().map(|(_, title)| title.clone()))
-            .unwrap_or_else(|| summary.opening.clone())
+            .unwrap_or_else(|| summary.opening.clone());
+        if summary.sealed { format!("{} {title}", super::dm::LOCK) } else { title }
     }
 }
 

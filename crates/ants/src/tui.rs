@@ -147,7 +147,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
-    let searches = Searches::new(js.clone());
+    let searches = Searches::new(js.clone(), feed.keyring());
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
