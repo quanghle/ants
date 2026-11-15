@@ -493,7 +493,7 @@ impl Ctx {
     ) -> Result<ants_proto::Envelope> {
         let envelope = summary::request_envelope(&self.me.id, config.ant.clone(), text, request);
         // Subscribe first so a fast reply is not missed.
-        let mut replies = bus::caught_up_inbox(&self.client, &self.js, &self.me.id, self.me.role).await?;
+        let mut replies = bus::caught_up_inbox(&self.client, &self.js, &self.me.id, self.me.reading()).await?;
         warnings.extend(roster::unserved_warnings(&self.js, &[&envelope.to]).await);
         if send::deliver(&self.js, self.domain.as_ref(), &envelope).await? == bus::Stored::Outbox {
             warnings.push(send::OUTBOX.to_owned());

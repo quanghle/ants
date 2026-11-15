@@ -158,6 +158,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let sealing = sealed::Sealing::of(nats);
     let summaries = catchup::Io::open(nats, client.clone(), js.clone()).await;
     let (feed, state) = live::start(nats, client.clone(), js.clone(), since).await?;
+    let meta = meta.map(|m| m.checking(feed.behalf()));
     let ctx = exec::Ctx {
         client,
         js: js.clone(),
@@ -171,7 +172,12 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
-    let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
+    let acts = Acts::new(
+        js.clone(),
+        nats.domain.cloned(),
+        me.clone(),
+        thread_meta::open(nats, &js).await.map(|m| m.checking(feed.behalf())),
+    );
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
     let searches = Searches::new(js.clone(), feed.keyring(), feed.behalf());

@@ -52,12 +52,17 @@ fn made_at(id: Uuid) -> Option<SystemTime> {
 
 /// The question `ant` asked that `envelope`, a message to it, answers validly ([`Envelope::answers`]), or answers for
 /// the human its `on_behalf_of` names, which the caller verified ([`answerer`]), read back through the ant's
-/// [`sent_reader`]; None for a message carrying no answer, or an invalid one.
-pub async fn asked(js: &jetstream::Context, ant: &UserId, envelope: &Envelope) -> Result<Option<Envelope>> {
+/// [`sent_reader`], or as `reading` says; None for a message carrying no answer, or an invalid one.
+pub async fn asked(
+    js: &jetstream::Context,
+    ant: &UserId,
+    reading: Reading,
+    envelope: &Envelope,
+) -> Result<Option<Envelope>> {
     let Some(answer) = &envelope.answer else { return Ok(None) };
     let question = {
-        let _one = crate::history::SENT_READS.lock().await;
-        find(js, &sent_reader(ant), Reading::Consumer, &subject::inbox_from(ant), answer.question)
+        let _one = if reading == Reading::Consumer { Some(crate::history::SENT_READS.lock().await) } else { None };
+        find(js, &sent_reader(ant), reading, &subject::inbox_from(ant), answer.question)
             .await
             .context("reading back the question answered")?
     };

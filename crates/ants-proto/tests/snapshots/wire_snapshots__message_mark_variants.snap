@@ -17,5 +17,11 @@ expression: value
     "state": "withdrawn",
     "by": "alice",
     "at": "2025-01-01T12:02:00Z"
+  },
+  {
+    "state": "withdrawn",
+    "by": "pa",
+    "at": "2025-01-01T12:03:00Z",
+    "on_behalf_of": "alice"
   }
 ]

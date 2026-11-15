@@ -1,15 +1,22 @@
 //! The tools an assistant ant acts for its human with ([`ants_proto::AssistantGrant`]): `human_queue` reads what
 //! waits in the human's home in ants chat, or one of its threads; `answer_for_human`, `send_for_human`,
 //! `post_for_human`, `notes_for_human`, `react_for_human`, `title_for_human` and `done_for_human` answer questions,
-//! send messages, post in channels and thread notes, react and title or mark threads done for it; `decide_for_human` decides a tool request waiting for it, held by the requesting ant's daemon
-//! until the human confirms it or a pre-allow rule of the human covers it ([`crate::approvals`]); `order_for_human`
-//! sends an admin order for it, held likewise by the daemon of the ant's machine ([`crate::admin::held`]).
+//! send messages, post in channels and thread notes, react and title or mark threads done for it; `mark_for_human`
+//! and `snooze_for_human` pin, archive and snooze its threads in its own entries, naming the ant
+//! ([`ants_proto::ThreadMarks::by`], [`ants_proto::Snooze::by`]), which its devices honour only while the grant
+//! names the ant; `decide_for_human`
+//! decides a tool request waiting for it, held by the requesting ant's daemon until the human confirms it or a
+//! pre-allow rule of the human covers it ([`crate::approvals`]); `order_for_human` sends an admin order for it, held
+//! likewise by the daemon of the ant's machine ([`crate::admin::held`]); `queue_for_human`, `cancel_for_human` and
+//! `withdraw_for_human` list an ant's queue, cancel its prompt on a thread and withdraw a message waiting for it,
+//! asking the ant's daemons on subjects naming the ant ([`ants_proto::CancelRequest::for_human`]).
 //!
 //! The tools are offered only while the human's grant names the ant ([`Hub::acting_for`]), and each call checks it
 //! again, so a withdrawal ends them at once. Everything they publish is the ant's own, carrying `on_behalf_of` naming
 //! the human, which readers verify against the grant. The human hears of each act in its inbox: from the recipient's
-//! daemon for a message to an ant or a decision ([`crate::behalf`]), else from the ant itself, as for a post, which
-//! every daemon sees. Sealed messages open,
+//! daemon for a message to an ant, a decision, a cancel or a withdrawal ([`crate::behalf`]), else from the ant itself,
+//! as for a post, which every daemon sees. Before a message to an ant, the ant records the human as the thread's owner
+//! for that ant ([`crate::owners::record_for_human`]). Sealed messages open,
 //! and messages to humans are sealed, only while the human enrolled the ant as one of its devices
 //! ([`crate::sealing::AssistantSealing`]).
 
@@ -21,28 +28,43 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_proto::{
-    Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, Choice, Envelope, JsDomain,
-    Machine, NotesPost, READ_BUCKET, Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadTitle, UserId,
-    Uuid, Verdict, done_key, subject, title_key,
+    Act, AdminOp, AdminOrder, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelId, ChannelPost,
+    Choice, Envelope, JsDomain, Machine, MessageMark, NotesPost, QueueReply, QueueRequest, QueuedMessage, READ_BUCKET,
+    Reaction, ReadMarker, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSnoozes, ThreadTitle, UserId, Uuid,
+    Verdict, done_key, marks_key, snoozed_key, subject, title_key,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
+use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{ErrorData, schemars, tool, tool_router};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use super::{Hub, POST_TRIES, Tools, text};
 use crate::direct_kv::DirectKv;
 use crate::reading::{self, Reading};
 use crate::sealing::{AssistantSealing, Opening};
-use crate::{behalf, reactions};
+use crate::{behalf, owners, reactions};
 
 /// How far back the human's messages and the tool requests waiting for it are read.
 const LOOKBACK: Duration = Duration::from_hours(7 * 24);
 /// The most entries of each kind `human_queue` lists, the latest ones.
 const SHOWN: usize = 30;
+/// How long the cancel and queue tools wait for a daemon of the ant to answer.
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
+/// How long they wait on after a first answer, for another daemon of the same ant.
+const ANSWER_GRACE: Duration = Duration::from_millis(500);
+/// How many times a change of the human's marks or snoozes is tried again when its devices changed them meanwhile.
+const CONFLICTS: usize = 16;
+/// How long `snooze_for_human` snoozes a thread for by default.
+const SNOOZE: Duration = Duration::from_hours(1);
+
+/// A change of a human's pins and archives, or of its snoozes ([`HumanStore::change_marks`]): whether it changed
+/// anything.
+pub type Change<T> = Box<dyn Fn(&mut T) -> bool + Send + Sync>;
 
 /// A message as stored, with its stream sequence.
 #[derive(Clone, Debug)]
@@ -52,7 +74,7 @@ pub struct HumanMessage {
 }
 
 /// What the assistant tools read and write for the human: its messages, the tool requests waiting for it, its read
-/// marker, and its threads' titles, done marks and reactions.
+/// marker, its threads' titles, done marks and reactions, and its pins, archives and snoozes.
 pub trait HumanStore: Send + Sync {
     /// The messages to and from `human` stored since `since`, and those `assistant` sent for it, in the order stored,
     /// each checked against its subject.
@@ -68,6 +90,11 @@ pub trait HumanStore: Send + Sync {
     fn last_sequence(&self) -> BoxFuture<'_, Result<u64>>;
     fn put_title(&self, title: ThreadTitle) -> BoxFuture<'_, Result<()>>;
     fn put_done(&self, done: ThreadDone) -> BoxFuture<'_, Result<()>>;
+    /// Change `human`'s pins and archives with `change`, on top of whatever its devices changed meanwhile. Whether
+    /// that changed anything.
+    fn change_marks(&self, human: UserId, change: Change<ThreadMarks>) -> BoxFuture<'_, Result<bool>>;
+    /// Change `human`'s snoozes so.
+    fn change_snoozes(&self, human: UserId, change: Change<ThreadSnoozes>) -> BoxFuture<'_, Result<bool>>;
     /// Add `by`'s reaction to `message` for `human`, or remove it. Whether anything changed.
     fn react(
         &self,
@@ -77,6 +104,14 @@ pub trait HumanStore: Send + Sync {
         remove: bool,
         human: UserId,
     ) -> BoxFuture<'_, Result<bool>>;
+    /// Record `human` as the owner of `thread` that the message `assistant` sends for it to `to` names.
+    fn record_owner(&self, thread: ThreadId, to: UserId, human: UserId, assistant: UserId)
+    -> BoxFuture<'_, Result<()>>;
+    /// The answers of the daemons of the ant to `request`, as many as come within [`ANSWER_WAIT`], and within
+    /// [`ANSWER_GRACE`] of the first.
+    fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>>;
+    /// The answers to `request`, as [`HumanStore::cancel`] gathers them.
+    fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>>;
     /// Sign `order` with the ant's credentials and send it to the hub's stream, once stored: the order as sent.
     fn send_order(&self, order: AdminOrder) -> BoxFuture<'_, Result<AdminOrder>>;
 }
@@ -137,6 +172,54 @@ impl JetStreamStore {
 
     async fn threads(&self) -> Result<DirectKv> {
         DirectKv::new(&self.js, self.js_domain.as_ref(), THREADS_BUCKET).await
+    }
+
+    /// Change the entry under `key` of [`THREADS_BUCKET`] with `change`, by compare-and-set.
+    async fn change<T: Default + Serialize + DeserializeOwned>(&self, key: String, change: Change<T>) -> Result<bool> {
+        let threads = self.threads().await?;
+        for _ in 0..CONFLICTS {
+            let (mut value, last) = match threads.lookup_last(&key).await? {
+                (crate::direct_kv::Lookup::NoBucket, _) => anyhow::bail!("there is no bucket {THREADS_BUCKET}"),
+                (crate::direct_kv::Lookup::NoValue, last) => (T::default(), last),
+                (crate::direct_kv::Lookup::Value(value), last) => {
+                    (serde_json::from_slice(&value).unwrap_or_default(), last)
+                }
+            };
+            if !change(&mut value) {
+                return Ok(false);
+            }
+            if threads.update(&key, serde_json::to_vec(&value)?, last).await? {
+                return Ok(true);
+            }
+        }
+        anyhow::bail!("storing {key}: it kept changing")
+    }
+
+    /// Publish `payload` on `subject` with core NATS, and gather the answers on `reply` that `keep` takes.
+    async fn ask<T: DeserializeOwned>(
+        &self,
+        subject: String,
+        reply: String,
+        payload: Vec<u8>,
+        keep: impl Fn(&T, &str) -> bool,
+    ) -> Result<Vec<T>> {
+        let client = self.js.client();
+        let mut answers = client.subscribe(reply).await?;
+        client.publish(subject, payload.into()).await?;
+        client.flush().await?;
+        let mut deadline = tokio::time::Instant::now() + ANSWER_WAIT;
+        let mut found = Vec::new();
+        while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, answers.next()).await {
+            let Ok(answer) = serde_json::from_slice::<T>(&msg.payload) else { continue };
+            if !keep(&answer, &msg.subject) {
+                continue;
+            }
+            if found.is_empty() {
+                deadline = deadline.min(tokio::time::Instant::now() + ANSWER_GRACE);
+            }
+            found.push(answer);
+        }
+        Ok(found)
     }
 }
 
@@ -219,6 +302,14 @@ impl HumanStore for JetStreamStore {
         Box::pin(async move { self.threads().await?.put(done_key(&done.thread_id), serde_json::to_vec(&done)?).await })
     }
 
+    fn change_marks(&self, human: UserId, change: Change<ThreadMarks>) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(self.change(marks_key(&human), change))
+    }
+
+    fn change_snoozes(&self, human: UserId, change: Change<ThreadSnoozes>) -> BoxFuture<'_, Result<bool>> {
+        Box::pin(self.change(snoozed_key(&human), change))
+    }
+
     fn react(
         &self,
         by: UserId,
@@ -234,6 +325,33 @@ impl HumanStore for JetStreamStore {
             } else {
                 reactions::add_for(&self.js, domain, &by, &message, &reaction, Some(human)).await
             }
+        })
+    }
+
+    fn record_owner(
+        &self,
+        thread: ThreadId,
+        to: UserId,
+        human: UserId,
+        assistant: UserId,
+    ) -> BoxFuture<'_, Result<()>> {
+        let domain = self.js_domain.as_ref();
+        Box::pin(async move { owners::record_for_human(&self.js, domain, &thread, &to, &human, &assistant).await })
+    }
+
+    fn cancel(&self, request: CancelRequest) -> BoxFuture<'_, Result<Vec<CancelReply>>> {
+        Box::pin(async move {
+            let payload = serde_json::to_vec(&request)?;
+            let keep = |a: &CancelReply, at: &str| a.request_id == request.id && a.check_subject(at).is_ok();
+            self.ask(request.subject(), request.reply_subject(), payload, keep).await
+        })
+    }
+
+    fn queue(&self, request: QueueRequest) -> BoxFuture<'_, Result<Vec<QueueReply>>> {
+        Box::pin(async move {
+            let payload = serde_json::to_vec(&request)?;
+            let keep = |a: &QueueReply, at: &str| a.request_id == request.id && a.check_subject(at).is_ok();
+            self.ask(request.subject(), request.reply_subject(), payload, keep).await
         })
     }
 
@@ -482,7 +600,7 @@ impl Hub {
     }
 
     async fn send_for_human(&self, args: SendForHuman) -> Result<String, String> {
-        let (human, _) = self.acting_for()?;
+        let (human, store) = self.acting_for()?;
         let to: UserId = args.to.trim().trim_start_matches('@').parse().map_err(|e| format!("{e}"))?;
         if to == human || to == self.ant {
             return Err(format!("{to} is {human} or this ant; send to someone else"));
@@ -498,6 +616,11 @@ impl Hub {
         .with_owner(Some(human.clone()));
         let excerpt = behalf::excerpt(&envelope.text);
         if !self.humans.is_human(&to) {
+            // Before the message, so the ant's own messages on the thread name the human as their owner.
+            let thread = envelope.thread_id.clone();
+            if let Err(e) = store.record_owner(thread.clone(), to.clone(), human.clone(), self.ant.clone()).await {
+                tracing::warn!(%thread, %to, error = format!("{e:#}"), "recording the thread's owner for the human");
+            }
             self.send(&envelope).await?;
             return Ok(format!(
                 "Sent {to} message {} on thread {} for {human}; its daemon tells {human}.",
@@ -636,6 +759,202 @@ impl Hub {
         store.put_done(done).await.map_err(|e| format!("{e:#}"))?;
         let told = self.tell(&human, format!("marked thread {thread} done for {human}.")).await;
         Ok(format!("Marked thread {thread} done for {human}; a new message on it brings it back.{told}"))
+    }
+
+    async fn mark_for_human(&self, args: MarkForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let messages = self.human_messages(&human, store).await?;
+        let thread = self.human_thread(&messages, &args.thread)?;
+        let ant = self.ant.clone();
+        let (change, (done, did), already): (Change<ThreadMarks>, _, _) = match args.mark.trim() {
+            "pin" => {
+                let t = thread.clone();
+                (Box::new(move |m| m.pin_by(&t, Some(&ant))), ("Pinned", "pinned"), "is pinned already")
+            }
+            "archive" => {
+                let after = store.last_sequence().await.map_err(|e| format!("{e:#}"))?;
+                let t = thread.clone();
+                (
+                    Box::new(move |m| m.archive_by(&t, after, Some(&ant))),
+                    ("Archived", "archived"),
+                    "is archived already",
+                )
+            }
+            "unpin" => {
+                let t = thread.clone();
+                (Box::new(move |m| m.unpin(&t)), ("Unpinned", "unpinned"), "is not pinned")
+            }
+            "unarchive" => {
+                let t = thread.clone();
+                (Box::new(move |m| m.unarchive(&t)), ("Unarchived", "unarchived"), "is not archived")
+            }
+            other => return Err(format!("mark: {other:?} is none of pin, unpin, archive and unarchive")),
+        };
+        if !store.change_marks(human.clone(), change).await.map_err(|e| format!("{e:#}"))? {
+            return Ok(format!("Thread {thread} {already} for {human}; nothing changed."));
+        }
+        let told = self.tell(&human, format!("{did} thread {thread} for {human}.")).await;
+        Ok(format!("{done} thread {thread} for {human}.{told}"))
+    }
+
+    async fn snooze_for_human(&self, args: SnoozeForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let messages = self.human_messages(&human, store).await?;
+        let thread = self.human_thread(&messages, &args.thread)?;
+        let now = chrono::Utc::now();
+        let t = thread.clone();
+        if args.duration.as_deref().map(str::trim) == Some("off") {
+            let woke = store.change_snoozes(human.clone(), Box::new(move |s| s.wake(&t, now)));
+            if !woke.await.map_err(|e| format!("{e:#}"))? {
+                return Ok(format!("Thread {thread} is not snoozed for {human}; nothing changed."));
+            }
+            let told = self.tell(&human, format!("ended the snooze of thread {thread} for {human}.")).await;
+            return Ok(format!("Ended the snooze of thread {thread} for {human}.{told}"));
+        }
+        let duration = match args.duration.as_deref().map(str::trim) {
+            None | Some("") => SNOOZE,
+            Some(text) => ants_proto::duration::parse(text).map_err(|e| format!("duration: {e}"))?,
+        };
+        let duration =
+            chrono::TimeDelta::from_std(duration).unwrap_or(ants_proto::SNOOZE_MAX).min(ants_proto::SNOOZE_MAX);
+        if duration <= chrono::TimeDelta::zero() {
+            return Err("duration: a snooze lasts longer than 0".to_owned());
+        }
+        let (until, ant) = (now + duration, self.ant.clone());
+        let snoozed = store.change_snoozes(
+            human.clone(),
+            Box::new(move |s| {
+                s.snooze_by(&t, now, until, Some(&ant));
+                true
+            }),
+        );
+        snoozed.await.map_err(|e| format!("{e:#}"))?;
+        let until = until.format("%Y-%m-%d %H:%M UTC");
+        let told = self.tell(&human, format!("snoozed thread {thread} on the home of {human} until {until}.")).await;
+        Ok(format!(
+            "Snoozed thread {thread} on the home of {human} until {until}, or until something for {human} arrives on \
+             it.{told}"
+        ))
+    }
+
+    /// The ant `ant` names, whose queue the assistant reads or acts on for its human.
+    fn queued_ant(&self, ant: &str) -> Result<UserId, String> {
+        let ant: UserId = ant.trim().trim_start_matches('@').parse().map_err(|e| format!("{e}"))?;
+        if self.humans.is_human(&ant) {
+            return Err(format!("{ant} is a human; only an ant has a queue"));
+        }
+        Ok(ant)
+    }
+
+    /// Why no daemon of `ant` answered a request for `human`.
+    fn unanswered(&self, ant: &UserId, human: &UserId) -> String {
+        format!(
+            "no daemon serving {ant} answered within {}s (one answers only while the grant of {human} names {})",
+            ANSWER_WAIT.as_secs(),
+            self.ant
+        )
+    }
+
+    /// The messages the daemons of `ant` hold, oldest first, and how many more wait in the stream.
+    async fn held(
+        &self,
+        human: &UserId,
+        store: &dyn HumanStore,
+        ant: &UserId,
+    ) -> Result<(Vec<QueuedMessage>, u64), String> {
+        let request = QueueRequest::new(ant.clone(), self.ant.clone()).for_human(human.clone());
+        let answers = store.queue(request).await.map_err(|e| format!("{e:#}"))?;
+        if answers.is_empty() {
+            return Err(self.unanswered(ant, human));
+        }
+        let mut held: Vec<QueuedMessage> = answers.iter().flat_map(|a| a.messages.iter().cloned()).collect();
+        held.sort_by_key(|m| m.seq);
+        held.dedup_by_key(|m| m.seq);
+        Ok((held, answers.iter().filter_map(|a| a.undelivered).max().unwrap_or(0)))
+    }
+
+    async fn queue_for_human(&self, args: QueueForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let ant = self.queued_ant(&args.ant)?;
+        let (held, undelivered) = self.held(&human, store, &ant).await?;
+        let mut out = if held.is_empty() {
+            format!("The daemon of {ant} holds no message.")
+        } else {
+            format!("Messages the daemon of {ant} holds, oldest first:")
+        };
+        for m in &held {
+            let state = if m.running { "running".to_owned() } else { format!("{} ahead on its thread", m.ahead) };
+            let at = m.sent_at.format("%Y-%m-%d %H:%M UTC");
+            let _ = write!(out, "\n- message {} on thread {} from {}, sent {at}: {state}", m.id, m.thread_id, m.from);
+        }
+        if undelivered > 0 {
+            let _ = write!(out, "\n{undelivered} more wait in the stream, not taken up yet.");
+        }
+        Ok(out)
+    }
+
+    async fn cancel_for_human(&self, args: CancelForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let ant = self.queued_ant(&args.ant)?;
+        let thread: ThreadId = args.thread.trim().parse().map_err(|e| format!("{e}"))?;
+        let request = CancelRequest::new(ant.clone(), thread.clone(), self.ant.clone()).for_human(human.clone());
+        let answers = store.cancel(request).await.map_err(|e| format!("{e:#}"))?;
+        if answers.is_empty() {
+            return Err(self.unanswered(&ant, &human));
+        }
+        if !answers.iter().any(|a| a.cancelled) {
+            return Err(format!("{ant} has no prompt running on thread {thread}"));
+        }
+        Ok(format!(
+            "Cancelled the prompt of {ant} on thread {thread} for {human}; the partial reply follows on the thread, and \
+             the daemon of {ant} tells {human}."
+        ))
+    }
+
+    async fn withdraw_for_human(&self, args: WithdrawForHuman) -> Result<String, String> {
+        let (human, store) = self.acting_for()?;
+        let ant = self.queued_ant(&args.ant)?;
+        let id: Uuid = args.message_id.trim().parse().map_err(|e| format!("message_id: {e}"))?;
+        let (held, _) = self.held(&human, store, &ant).await?;
+        let thread = match held.iter().find(|m| m.id == id) {
+            Some(m) if m.running => {
+                let thread = &m.thread_id;
+                return Err(format!(
+                    "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread}"
+                ));
+            }
+            Some(m) => m.thread_id.clone(),
+            None => {
+                let messages = self.human_messages(&human, store).await?;
+                let sent = messages.find(id).filter(|m| m.envelope.to == ant && messages.by_human(&m.envelope));
+                sent.map(|m| m.envelope.thread_id.clone()).ok_or_else(|| {
+                    format!(
+                        "message {id} is neither held by the daemon of {ant} nor one of {human} to it; \
+                         queue_for_human lists those held"
+                    )
+                })?
+            }
+        };
+        let request =
+            CancelRequest::new(ant.clone(), thread, self.ant.clone()).for_human(human.clone()).withdrawing(id);
+        let answers = store.cancel(request).await.map_err(|e| format!("{e:#}"))?;
+        if answers.iter().any(|a| a.cancelled) {
+            return Ok(format!(
+                "Withdrew message {id} from the queue of {ant} for {human}; its thread is told once its turn comes, \
+                 and the daemon of {ant} tells {human}."
+            ));
+        }
+        match answers.into_iter().find_map(|a| a.mark) {
+            Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) => {
+                let by = on_behalf_of.map_or_else(|| by.to_string(), |h| format!("{by} for {h}"));
+                Ok(format!("Message {id} was withdrawn already, by {by}."))
+            }
+            Some(MessageMark::Started { thread_id, .. }) => Err(format!(
+                "{ant} started on message {id} already; cancel_for_human stops its prompt on thread {thread_id}"
+            )),
+            Some(MessageMark::Finished { .. }) => Err(format!("{ant} finished message {id} already")),
+            None => Err(self.unanswered(&ant, &human)),
+        }
     }
 
     async fn order_for_human(&self, args: OrderForHuman) -> Result<String, String> {
@@ -779,11 +1098,50 @@ pub(super) struct DoneForHuman {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct MarkForHuman {
+    /// A thread of the human's.
+    thread: String,
+    /// pin, unpin, archive or unarchive.
+    mark: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct SnoozeForHuman {
+    /// A thread of the human's.
+    thread: String,
+    /// How long: 30m, 2h, 1d, at most 7d (longer is cut to 7d); 1h by default; `off` ends the snooze.
+    #[serde(default)]
+    duration: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(super) struct DecideForHuman {
     /// The request, as human_queue lists it: `<ant>/<id>`, or its id alone.
     request: String,
     /// allow_once, allow_always or reject.
     verdict: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct QueueForHuman {
+    /// The ant whose queue to list.
+    ant: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct CancelForHuman {
+    /// The ant running the prompt.
+    ant: String,
+    /// The thread it runs on.
+    thread: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(super) struct WithdrawForHuman {
+    /// The ant the message waits for.
+    ant: String,
+    /// The id of the message, as queue_for_human lists it, or of a message of the human's to the ant.
+    message_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -857,6 +1215,23 @@ impl Tools {
         Ok(text(self.hub.done_for_human(args).await))
     }
 
+    #[tool(description = "As the assistant of a human, pin, unpin, archive or unarchive one of its threads for it \
+        (`mark`), for all its devices. A pin or archive set so names this ant and counts only while the human's grant \
+        names it; the human pinning or archiving the thread itself makes the mark its own. The human is told.")]
+    async fn mark_for_human(&self, Parameters(args): Parameters<MarkForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.mark_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, snooze one of its threads off its home for `duration` (1h \
+        by default, at most 7d), or until something for the human arrives on it; `off` ends a snooze. A snooze set so \
+        names this ant and counts only while the human's grant names it. The human is told.")]
+    async fn snooze_for_human(
+        &self,
+        Parameters(args): Parameters<SnoozeForHuman>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.snooze_for_human(args).await))
+    }
+
     #[tool(description = "As the assistant of a human, decide a tool request waiting for it (human_queue lists \
         them): `verdict` is allow_once, allow_always or reject. The decision is held by the requesting ant's daemon \
         until the human confirms it or a pre-allow rule of the human covers the call; the human is told and may \
@@ -866,6 +1241,32 @@ impl Tools {
         Parameters(args): Parameters<DecideForHuman>,
     ) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.decide_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, list the messages the daemon of an ant holds for it to \
+        answer, each with its message id, thread and sender, and how many more wait in the stream. The daemon answers \
+        only while the human's grant names this ant.")]
+    async fn queue_for_human(&self, Parameters(args): Parameters<QueueForHuman>) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.queue_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, cancel the prompt an ant runs on a thread for it; the \
+        partial reply follows on the thread, and the ant's daemon tells the human.")]
+    async fn cancel_for_human(
+        &self,
+        Parameters(args): Parameters<CancelForHuman>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.cancel_for_human(args).await))
+    }
+
+    #[tool(description = "As the assistant of a human, withdraw a message waiting for an ant (queue_for_human \
+        lists them) for it, so the ant is never prompted with it; its thread is told once its turn comes, and the \
+        ant's daemon tells the human. Needs a daemon of the ant serving.")]
+    async fn withdraw_for_human(
+        &self,
+        Parameters(args): Parameters<WithdrawForHuman>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(text(self.hub.withdraw_for_human(args).await))
     }
 
     #[tool(description = "As the assistant of a human, send an admin order for it to an ant's machine: pause, \

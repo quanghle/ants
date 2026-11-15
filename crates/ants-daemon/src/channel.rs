@@ -608,10 +608,20 @@ impl Threads {
     /// The owner of `thread`, a thread no channel post started, for an ant's message on or linking to it, when `sender`
     /// has a link to it: the one a human's or a webhook's message to it on the thread named ([`Owners::recorded`]),
     /// else the one such a message named to an ant that passed the link on to it, directly or through ants it passed
-    /// the link on to in turn ([`links::passed_on`]). None otherwise: no ant names the owner of a message thread it has
-    /// no link to.
-    pub async fn owner_for(&self, thread: &ThreadId, sender: &UserId) -> Result<Option<UserId>> {
-        let recorded = async |ant: &UserId| self.owners.recorded(thread, ant).await;
+    /// the link on to in turn ([`links::passed_on`]). With `assisted`, a human and the assistant its grant names, that
+    /// human too when the assistant recorded it as the owner its message for it to such an ant named
+    /// ([`Owners::assisted`]). None otherwise: no ant names the owner of a message thread it has no link to.
+    pub async fn owner_for(
+        &self,
+        thread: &ThreadId,
+        sender: &UserId,
+        assisted: Option<(&UserId, &UserId)>,
+    ) -> Result<Option<UserId>> {
+        let recorded = async |ant: &UserId| match (self.owners.recorded(thread, ant).await?, assisted) {
+            (Some(owner), _) => Ok(Some(owner)),
+            (None, Some((human, assistant))) => self.owners.assisted(thread, ant, human, assistant).await,
+            (None, None) => Ok(None),
+        };
         if let Some(owner) = recorded(sender).await? {
             return Ok(Some(owner));
         }

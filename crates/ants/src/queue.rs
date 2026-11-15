@@ -41,6 +41,9 @@ pub struct Waiting {
     pub delivered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawn_by: Option<UserId>,
+    /// The human whose assistant `withdrawn_by` withdrew it, as its daemon checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawn_for: Option<UserId>,
 }
 
 /// The messages waiting for `ant`, as `ants queue` lists them, and how many more wait in the stream unlisted; None
@@ -55,8 +58,8 @@ pub async fn read(
     let (mut waiting, more) = waiting(js, ant, &answers, UNDELIVERED_SHOWN).await?;
     let kv = DirectKv::new(js, domain, ATTEMPTS_BUCKET).await?;
     for message in waiting.iter_mut().filter(|m| !m.running) {
-        if let Some(MessageMark::Withdrawn { by, .. }) = mark(&kv, ant, &message.id).await? {
-            message.withdrawn_by = Some(by);
+        if let Some(MessageMark::Withdrawn { by, on_behalf_of, .. }) = mark(&kv, ant, &message.id).await? {
+            (message.withdrawn_by, message.withdrawn_for) = (Some(by), on_behalf_of);
         }
     }
     Ok(Some((waiting, more)))
@@ -110,7 +113,7 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
             bail!("message {message} is not waiting for {ant}; ants queue {ant} lists the messages that are");
         }
     }
-    match ants_daemon::attempts::withdraw(&kv, &ant, &message, me).await? {
+    match ants_daemon::attempts::withdraw(&kv, &ant, &message, me, None).await? {
         Some(found) => refused(&ant, &message, found),
         None if answered.is_none() => {
             println!(
@@ -129,8 +132,8 @@ pub async fn withdraw(nats: &crate::Nats<'_>, ant: UserId, message: Uuid) -> Res
 /// The outcome of withdrawing `message` when it has a mark already.
 fn refused(ant: &UserId, message: &Uuid, found: MessageMark) -> Result<()> {
     match found {
-        MessageMark::Withdrawn { by, .. } => {
-            println!("message {message} was withdrawn already, by {by}");
+        MessageMark::Withdrawn { by, on_behalf_of, .. } => {
+            println!("message {message} was withdrawn already, by {}", withdrawer(&by, on_behalf_of.as_ref()));
             Ok(())
         }
         MessageMark::Started { thread_id, .. } => bail!(
@@ -203,6 +206,7 @@ async fn waiting(
             ahead: m.ahead,
             delivered: true,
             withdrawn_by: None,
+            withdrawn_for: None,
         })
         .collect();
     let delivered = answers.iter().filter_map(|a| a.delivered).max();
@@ -246,6 +250,7 @@ async fn waiting(
             ahead: *before,
             delivered: false,
             withdrawn_by: None,
+            withdrawn_for: None,
         });
         *before += 1;
     }
@@ -284,10 +289,18 @@ pub fn state(m: &Waiting) -> String {
         return "running".to_owned();
     }
     if let Some(by) = &m.withdrawn_by {
-        return format!("withdrawn by {by}");
+        return format!("withdrawn by {}", withdrawer(by, m.withdrawn_for.as_ref()));
     }
     let place = if m.ahead == 0 { "next".to_owned() } else { format!("{} ahead", m.ahead) };
     if m.delivered { place } else { format!("{place}, in the stream") }
+}
+
+/// Who withdrew a message: `by`, or the human `on_behalf_of` via its assistant `by`.
+fn withdrawer(by: &UserId, on_behalf_of: Option<&UserId>) -> String {
+    match on_behalf_of {
+        Some(human) => format!("{human} via {by}"),
+        None => by.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +319,7 @@ mod tests {
             ahead,
             delivered,
             withdrawn_by: None,
+            withdrawn_for: None,
         }
     }
 
@@ -313,17 +327,23 @@ mod tests {
     fn the_table_shows_where_each_message_stands() {
         let mut withdrawn = waiting(3, "t1", false, 2, true);
         withdrawn.withdrawn_by = Some("alice".parse().unwrap());
+        let mut assisted = waiting(5, "t2", false, 1, false);
+        (assisted.withdrawn_by, assisted.withdrawn_for) = (Some("pa".parse().unwrap()), Some("bob".parse().unwrap()));
         let rows = [
             waiting(1, "t1", true, 0, true),
             waiting(2, "t1", false, 1, true),
             withdrawn,
             waiting(4, "t2", false, 0, false),
+            assisted,
         ];
         let table = table(&rows, Utc::now());
         let states: Vec<&str> = table.lines().skip(1).map(|l| l.split("  ").last().unwrap().trim()).collect();
         assert!(table.starts_with("MESSAGE"), "{table}");
         assert!(table.lines().nth(1).unwrap().contains(" 3m "), "{table}");
-        assert_eq!(states, ["running", "1 ahead", "withdrawn by alice", "next, in the stream"]);
+        assert_eq!(
+            states,
+            ["running", "1 ahead", "withdrawn by alice", "next, in the stream", "withdrawn by bob via pa"]
+        );
     }
 
     #[tokio::test]

@@ -111,6 +111,13 @@ pub fn owner_key(thread: &ThreadId, to: &UserId) -> String {
     format!("{thread}.{to}")
 }
 
+/// Key in [`OWNERS_BUCKET`] of `human`, the owner of `thread` that a message to `to` on it names, recorded by
+/// `assistant` for it: only the credentials of `assistant` as the assistant of `human` write the keys ending in both,
+/// and a reader takes the record only while the human's grant names that assistant.
+pub fn assisted_owner_key(thread: &ThreadId, to: &UserId, human: &UserId, assistant: &UserId) -> String {
+    format!("{thread}.{to}.{human}.{assistant}")
+}
+
 /// The message id (`Nats-Msg-Id`) of every record of `key` in [`OWNERS_BUCKET`], whoever writes it, so the bucket
 /// drops a second one, as from an outbox, rather than refuse it.
 pub fn owner_record_id(key: &str) -> String {

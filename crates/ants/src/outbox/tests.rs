@@ -3,6 +3,7 @@
 use std::assert_matches;
 use std::process::Command;
 
+use ants_daemon::reading::Reading;
 use ants_daemon::{bus, files, links, notes, owners};
 use ants_proto::{ATTACHMENT_CHUNK, ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
 use ants_test_support::NatsServer;
@@ -109,14 +110,14 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     // delivers what the hub never got.
     let (h_leaf, h_leaf_js) = connect(&leaf_node.url, &human).await;
     let mut waiters = [
-        bus::caught_up_inbox(&h_leaf, &h_leaf_js, &human, Role::Human).await.unwrap(),
-        bus::caught_up_inbox(&h, &h_js, &human, Role::Human).await.unwrap(),
+        bus::caught_up_inbox(&h_leaf, &h_leaf_js, &human, Reading::Gets).await.unwrap(),
+        bus::caught_up_inbox(&h, &h_js, &human, Reading::Gets).await.unwrap(),
     ];
     h.flush().await.unwrap();
     h_leaf.flush().await.unwrap();
     // So does dev-a's CLI on the machine, with dev-a's credentials.
     let (a_cli, a_cli_js) = connect(&leaf_node.url, &dev_a).await;
-    let mut ant_waiter = bus::caught_up_inbox(&a_cli, &a_cli_js, &dev_a, Role::Ant).await.unwrap();
+    let mut ant_waiter = bus::caught_up_inbox(&a_cli, &a_cli_js, &dev_a, Reading::Spare).await.unwrap();
     a_cli.flush().await.unwrap();
 
     // Before the outbox exists, a publish that cannot reach the hub fails outright.
@@ -351,7 +352,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
         let room = client.subscribe(subject::chan_room(&ops)).await.unwrap();
         client.flush().await.unwrap();
         let stored = bus::store_acked(js, post.subject(), post, &post.id.to_string()).await.unwrap();
-        let me = Me { id: post.from.clone(), role: Role::by_default(&post.from) };
+        let me = Me { id: post.from.clone(), role: Role::by_default(&post.from), assistant_of: None };
         let posts = channel::caught_up_posts(room, js, &me, post, stored.as_ref().map(|ack| ack.sequence));
         (stored.is_some(), Box::pin(channel::thread_posts(posts, post, true)))
     };

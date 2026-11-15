@@ -138,6 +138,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
                 store: &store,
                 identity: Some(&identity),
                 launch: None,
+                reading: ants_daemon::reading::Reading::Consumer,
             };
             _ = request.done.send(source.snapshot(&request.new, async |_| None).await);
         }

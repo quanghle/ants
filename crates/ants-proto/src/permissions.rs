@@ -14,7 +14,7 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     AntRequest, AssistantOf, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs,
-    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key,
+    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, admin_outcome_key, assisted_owner_key,
     channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
     thread_spend_key, unserved_key,
 };
@@ -346,16 +346,27 @@ impl Permissions {
     /// What the credentials of `assistant`, the assistant of `human` ([`AssistantOf`]), allow: everything an ant may do,
     /// as it is one run by a daemon, and what a human may read and keep of its own besides ([`Self::for_user`]): it
     /// watches all ants traffic, so its human's home queue, reads the stream and the buckets a human reads, sets
-    /// titles, TL;DRs and done states, puts its own reactions, pins, archives and read markers, and reads every
-    /// attachment and every device's encryption key. Of its human's own keys it reads, by direct gets, never writes,
-    /// the read markers, pins, archives and snoozed threads ([`read_marker_rights`], [`thread_rights`]) and the markers
-    /// of messages kept waiting ([`unserved_key`]), so it sees what its human has read and set aside.
+    /// titles, TL;DRs and done states, puts its own reactions and read markers, and reads every attachment and every
+    /// device's encryption key. Of its human's own keys it reads, by direct gets, never writes, the read markers
+    /// ([`read_marker_rights`]) and the markers of messages kept waiting ([`unserved_key`]), so it sees what its human
+    /// has read and set aside. It keeps no pins, archives or snoozed threads of its own: it reads and writes its
+    /// human's ([`thread_rights`]), each pin, archive or snooze it sets naming it ([`ThreadMarks::by`],
+    /// [`crate::Snooze::by`]), which readers honour only while the human's grant names it.
+    ///
+    /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its
+    /// dead letters' (its inbox and channel consumers still deliver), no spare of one, and no consumer of a human's
+    /// notifications: their rights would not fit a token within `max_control_line` once doubled for a JetStream
+    /// domain.
     ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
-    /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
-    /// human's: cancelling an ant's prompt or asking for its queue (whose request's `by` no reader can check),
-    /// withdrawing an ant's queued messages, recording a thread's owner, putting dead letters, answering an ant's
-    /// reactions requests or another's renewal, setting another ant's avatar ([`IDENTITIES_BUCKET`]). Nor does it
+    /// It cancels an ant's prompt, withdraws a message waiting for one, and asks for an ant's queue only on the subjects
+    /// naming it ([`subject::cancels_by`], [`subject::queues_by`]), whose daemons honour them only for its human, and
+    /// records a thread's owner only under keys naming its human ([`assisted_owner_key`]). It gets none of a human's
+    /// rights whose subjects do not name who acts, which readers could not tell from its human's: cancelling or asking
+    /// for a queue on [`subject::ALL_CANCELS`] and [`subject::ALL_QUEUE_REQUESTS`] (whose request's `by` no reader can
+    /// check), creating message marks in [`ATTEMPTS_BUCKET`], recording an owner under any key, putting dead letters,
+    /// answering an ant's reactions requests or another's renewal, setting another ant's avatar
+    /// ([`IDENTITIES_BUCKET`]). Nor does it
     /// decide approval requests on [`subject::ALL_APPROVAL_DECISIONS`]: it decides one for its human in a message to
     /// the ant (`on_behalf_of`), which waits for its human's confirmation, as readers ignore a stored decision carrying
     /// `on_behalf_of` and one stored there would keep its human's own from being stored. It sends admin orders for its
@@ -369,7 +380,18 @@ impl Permissions {
         Self::ant_rights(assistant, &mut publish, &mut subscribe);
         let mut as_human = Vec::new();
         Self::human_rights(assistant, &mut as_human, &mut subscribe);
+        // It reads the stream back by direct gets, as a human does: no reader consumer of an ant's but its dead
+        // letters' (the inbox and channel consumers deliver), no spare of one, and no consumer of a human's
+        // notifications, which it has no preferences for.
+        let (inbox, notes, chan_read) = (inbox_consumer(assistant), notes_consumer(assistant), chan_reader(assistant));
+        let mut readers: Vec<String> =
+            [&inbox, &notes, &chan_read].into_iter().flat_map(|r| spare_readers(r)).collect();
+        readers.extend([notes, chan_read, sent_reader(assistant), notify_consumer(assistant)]);
+        let reads_through = |s: &str| s.split('.').any(|token| readers.iter().any(|r| r == token));
+        publish.retain(|s| !reads_through(s));
+        as_human.retain(|s| !reads_through(s));
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
+        let own_marks = [marks_key(assistant), snoozed_key(assistant)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}"));
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
             // Acts for its human that wait for the human's confirmation, which these subjects cannot carry.
@@ -395,8 +417,14 @@ impl Permissions {
                     .iter()
                     .any(|prefix| s.starts_with(prefix))
         };
-        as_human
-            .retain(|s| !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s));
+        let marks_of_its_own = |s: &str| own_marks.iter().any(|k| s.ends_with(k.as_str()));
+        as_human.retain(|s| {
+            !devices_only.contains(s)
+                && !notify.contains(s)
+                && !unattributed.contains(s)
+                && !withheld(s)
+                && !marks_of_its_own(s)
+        });
         publish.extend(as_human);
         let chunks = format!("$O.{FILES_BUCKET}.C");
         publish.push(format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunks}.>"));
@@ -405,8 +433,16 @@ impl Permissions {
         };
         // The record of its credentials, which readers check the claims of its acts for its human against.
         publish.push(subject::assistant_record(assistant));
+        // Acts for its human on subjects and keys naming who acts.
+        publish.extend([
+            subject::cancels_by(assistant),
+            subject::queues_by(assistant),
+            format!("$KV.{OWNERS_BUCKET}.*.*.{human}.{assistant}"),
+        ]);
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
+        // Its human's pins, archives and snoozes, which it sets naming itself.
+        publish.extend([marks_key(human), snoozed_key(human)].map(|k| format!("$KV.{THREADS_BUCKET}.{k}")));
         let attempts = kv_stream(ATTEMPTS_BUCKET);
         publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
         let mut seen = std::collections::HashSet::new();
@@ -416,6 +452,8 @@ impl Permissions {
         publish.retain(|s| !wider.iter().any(|other| other != s && covers(other, s)));
         let mut seen = std::collections::HashSet::new();
         subscribe.retain(|s| seen.insert(s.clone()));
+        let wider = subscribe.clone();
+        subscribe.retain(|s| !wider.iter().any(|other| other != s && covers(other, s)));
         Self { publish, subscribe }
     }
 
@@ -691,8 +729,10 @@ impl Permissions {
             subject::ALL_NOTES.to_owned(),
             subject::ALL_CHANNELS.to_owned(),
             format!("{}.*", subject::approvals(user)),
-            subject::cancel_of(user),
+            // Cancel and queue requests, from a human or naming their sender, an assistant.
+            subject::all_cancels_of(user),
             subject::queue(user),
+            subject::queues_by_of(user),
             // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),

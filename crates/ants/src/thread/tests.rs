@@ -468,7 +468,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
-    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let resolve = |pick: &str| pick.parse::<Pick>().unwrap().resolve(&js, &me);
     assert!(resolve("last").await.unwrap_err().to_string().contains("no message to or from alice"));
 
@@ -507,7 +507,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     // A whole id needs no read, whoever's thread it is.
     assert_eq!(resolve(others.thread_id.as_str()).await.unwrap(), others.thread_id);
 
-    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
+    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant, assistant_of: None };
     let refused = Pick::Last.resolve(&js, &ant).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole thread id"), "{refused}");
 }
@@ -518,7 +518,7 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
-    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let me = crate::humans::Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let resolve = |pick: &str| pick.parse::<MessagePick>().unwrap().resolve(&js, &me);
 
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
@@ -565,7 +565,7 @@ async fn a_human_picks_a_message_by_a_start_of_its_id() {
     let whole = Uuid::now_v7();
     assert_eq!(resolve(&whole.to_string()).await.unwrap(), whole);
 
-    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant };
+    let ant = crate::humans::Me { id: dev_a, role: ants_proto::Role::Ant, assistant_of: None };
     let start = MessagePick::Prefix(start(reply.id));
     let refused = start.resolve(&js, &ant).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole message id"), "{refused}");

@@ -153,6 +153,7 @@ fn span(delta: TimeDelta) -> String {
 pub struct Watch {
     sender: UserId,
     role: Role,
+    reading: Reading,
     js: jetstream::Context,
     attempts: DirectKv,
     roster: Roster,
@@ -183,10 +184,20 @@ impl Watch {
         Ok(Self::with(sender, role, js.clone(), attempts, roster))
     }
 
+    /// Read the messages sent as `reading` says instead: an assistant's daemon by direct gets
+    /// ([`Reading::daemon`]).
+    #[must_use]
+    pub fn reading(mut self, reading: Reading) -> Self {
+        self.reading = reading;
+        self
+    }
+
     fn with(sender: UserId, role: Role, js: jetstream::Context, attempts: DirectKv, roster: Roster) -> Self {
+        let reading = if role.is_human() { Reading::Gets } else { Reading::Consumer };
         Self {
             sender,
             role,
+            reading,
             js,
             attempts,
             roster,
@@ -301,8 +312,8 @@ impl Watch {
         let (sender, mut read, mut next) = (&self.sender, Vec::new(), self.next);
         let filter = subject::inbox_from(sender);
         let reader = sent_reader(sender);
-        let reading = if self.role.is_human() { Reading::Gets } else { Reading::Consumer };
-        let _one = if self.role.is_human() { None } else { Some(crate::history::SENT_READS.lock().await) };
+        let reading = self.reading;
+        let _one = if reading == Reading::Consumer { Some(crate::history::SENT_READS.lock().await) } else { None };
         let role = self.role;
         reading::read_back(&self.js, &reader, reading, &filter, start, |seq, _, subject, payload| {
             next = Some(seq + 1);

@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
-use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Reading, Stored, load, read_back};
+use ants_daemon::channel::{CLOCK_SLACK, OriginFold, Stored, load, read_back};
 use ants_daemon::webhooks::Webhooks;
 use ants_proto::{ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadOrigin, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
@@ -389,7 +389,7 @@ impl ReadBack {
             None => consumer::DeliverPolicy::ByStartTime { start_time: self.since.into() },
         };
         let (own, after, mut posts) = (self.own, &mut self.after, Vec::new());
-        let reading = Reading::cli(self.reader.role);
+        let reading = self.reader.reading();
         let read = read_back(&self.js, &self.reader.id, reading, &self.room, start, |seq, _, subject, post| {
             match post {
                 Ok(post) if after.is_some() => posts.push(post),
@@ -437,7 +437,7 @@ impl Seen {
 }
 
 /// The posts of `channel` stored at stream sequence `from` or after (0: every one kept), oldest first, each with its
-/// sequence, read as the CLI reads channels back as `reader` ([`Reading::cli`]): a human by message gets, an ant
+/// sequence, read as the CLI reads channels back as `reader` ([`Me::reading`]): a human or an assistant by message gets, an ant
 /// through a free spare of its reader consumer, taken for the read and deleted after it, so any number of reads, and
 /// the ant's daemon's, may run at once. Posts whose sender or channel disagrees with their subject are dropped with a
 /// warning.
@@ -469,7 +469,7 @@ async fn scan(
     start: consumer::DeliverPolicy,
     mut take: impl FnMut(u64, ChannelPost) -> ControlFlow<()>,
 ) -> Result<()> {
-    let reading = Reading::cli(reader.role);
+    let reading = reader.reading();
     read_back(js, &reader.id, reading, &subject::chan_room(channel), start, |seq, _, subject, post| match post {
         Ok(post) => take(seq, post),
         Err(error) => {

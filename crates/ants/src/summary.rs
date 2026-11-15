@@ -96,7 +96,7 @@ pub async fn ask(nats: &Nats<'_>, js: &jetstream::Context, envelope: &Envelope) 
     let me = &nats.me;
     let client = js.client();
     // Subscribe first so a fast reply is not missed.
-    let mut replies = bus::caught_up_inbox(&client, js, &me.id, me.role).await?;
+    let mut replies = bus::caught_up_inbox(&client, js, &me.id, me.reading()).await?;
     let unserved = roster::unserved_warnings(js, &[&envelope.to]).await;
     for warning in &unserved {
         tracing::warn!("{warning}");

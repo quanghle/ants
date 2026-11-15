@@ -571,7 +571,7 @@ mod tests {
         let account = devices::account_of(Some(&creds)).unwrap();
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
         humans::ensure(&js).await.unwrap();
-        let me = humans::Me { id: alice.clone(), role: Role::Human };
+        let me = humans::Me { id: alice.clone(), role: Role::Human, assistant_of: None };
         let messenger = Recipient::from(UserId::messenger());
 
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "no grant");
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(unaddressed(&js, &me, None).await, messenger, "not verified without an account");
         let foreign = Some("AAOTHERACCOUNT");
         assert_eq!(unaddressed(&js, &me, foreign).await, messenger, "signed for another team");
-        let ant = humans::Me { id: alice.clone(), role: Role::Ant };
+        let ant = humans::Me { id: alice.clone(), role: Role::Ant, assistant_of: None };
         assert_eq!(unaddressed(&js, &ant, account.as_deref()).await, messenger, "an ant has no assistant");
         put(&js, &creds, &alice, None, Sealing::Off).await.unwrap();
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "withdrawn");
@@ -821,6 +821,68 @@ mod tests {
         revoke::revoke(&team, Some("pa"), &[]).unwrap();
         crate::devices::record_revocations(&server.url, None, &team).await.unwrap();
         comes_to(Acting::Forged(alice.clone())).await;
+    }
+
+    /// pa pins, archives and snoozes alice's threads in her own entries, naming itself: her devices honour them while
+    /// her grant names pa, and her own pin takes one of pa's over. pa keeps none of its own, nor touches bob's.
+    #[tokio::test]
+    async fn an_assistant_s_marks_and_snoozes_count_for_its_human_while_granted() {
+        use ants_daemon::direct_kv::DirectKv;
+        use std::collections::BTreeSet;
+
+        use ants_proto::{THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSnoozes, marks_key, snoozed_key};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, bob) = (p("alice"), p("pa"), p("bob"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+            .unwrap();
+        let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+
+        let (mine, pinned, archived, snoozed) =
+            (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let meta = crate::thread_meta::Meta::open(&js, None, &alice)
+            .await
+            .unwrap()
+            .checking(Some(std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js))));
+        assert!(meta.change_marks(|m| m.pin(&mine)).await.unwrap());
+        let kv = DirectKv::new(&pa_js, None, THREADS_BUCKET).await.unwrap();
+        let (found, last) = kv.lookup_last(marks_key(&alice)).await.unwrap();
+        let ants_daemon::direct_kv::Lookup::Value(value) = found else { panic!("pa reads alice's marks") };
+        let mut marks: ThreadMarks = serde_json::from_slice(&value).unwrap();
+        assert!(marks.pin_by(&pinned, Some(&pa)) && marks.archive_by(&archived, 1, Some(&pa)));
+        assert!(kv.update(marks_key(&alice), serde_json::to_vec(&marks).unwrap(), last).await.unwrap());
+        let now = chrono::Utc::now();
+        let mut snoozes = ThreadSnoozes::default();
+        snoozes.snooze_by(&snoozed, now, now + TimeDelta::hours(1), Some(&pa));
+        kv.put(snoozed_key(&alice), serde_json::to_vec(&snoozes).unwrap()).await.unwrap();
+        for key in [marks_key(&bob), snoozed_key(&bob), marks_key(&pa), snoozed_key(&pa)] {
+            assert!(kv.put(&key, "{}").await.is_err(), "pa puts {key}");
+        }
+
+        let read = meta.marks().await.unwrap();
+        assert_eq!(read.pinned.keys().collect::<BTreeSet<_>>(), [&mine, &pinned].into());
+        assert!(read.archived.contains_key(&archived) && read.by.get(&pinned) == Some(&pa));
+        assert!(meta.snoozes().await.unwrap().get(&snoozed, now).is_some());
+
+        put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
+        let unchecked = crate::thread_meta::Meta::open(&js, None, &alice).await.unwrap();
+        let fresh = unchecked.checking(Some(std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js))));
+        let read = fresh.marks().await.unwrap();
+        assert_eq!(read.pinned.keys().collect::<Vec<_>>(), [&mine], "withdrawn, pa's marks count no more");
+        assert!(read.archived.is_empty() && fresh.snoozes().await.unwrap().0.is_empty());
+        assert!(fresh.change_marks(|m| m.pin(&pinned)).await.unwrap(), "alice's own pin takes pa's over");
+        assert_eq!(fresh.marks().await.unwrap().pinned.len(), 2);
     }
 
     /// pa's reaction for alice reads as hers through pa, a claim of bob, who is no assistant, is not even read,

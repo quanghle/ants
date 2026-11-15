@@ -4,7 +4,8 @@
 //! created for the read and deleted after it, one read at a time. The CLI with the ant's credentials reads through a
 //! spare of that reader ([`spare_readers`]) taken by a strict create, so it never deletes a consumer the daemon or
 //! another CLI read is reading through. A human gets the messages with no consumer, in batches of direct gets
-//! (`$JS.API.DIRECT.GET.ANTS`), one request per batch.
+//! (`$JS.API.DIRECT.GET.ANTS`), one request per batch, and so does an assistant, its daemon and the CLI with its
+//! credentials alike, which hold no reader consumers but its dead letters' ([`ants_proto::Permissions::for_assistant`]).
 
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
@@ -33,14 +34,26 @@ pub enum Reading {
     /// it: the CLI with an ant's credentials, while the ant's daemon reads through the reader itself.
     Spare,
     /// By getting the messages in batches of direct gets, with no consumer, so any number of reads at once: a
-    /// human's.
+    /// human's, and an assistant's.
     Gets,
 }
 
 impl Reading {
-    /// How the CLI with credentials in `role` reads.
-    pub fn cli(role: Role) -> Self {
-        if role.is_human() { Self::Gets } else { Self::Spare }
+    /// How the CLI with credentials in `role` reads, an assistant's when `assistant`.
+    pub fn cli(role: Role, assistant: bool) -> Self {
+        if role.is_human() || assistant { Self::Gets } else { Self::Spare }
+    }
+
+    /// How an ant's daemon reads through its own readers, an assistant's when `assistant`.
+    pub fn daemon(assistant: bool) -> Self {
+        if assistant { Self::Gets } else { Self::Consumer }
+    }
+
+    /// How a read beside the daemon's own reads of the same reader goes, the daemon reading as `self`: through a spare
+    /// of the reader, unless by gets.
+    #[must_use]
+    pub fn beside(self) -> Self {
+        if self == Self::Gets { Self::Gets } else { Self::Spare }
     }
 }
 

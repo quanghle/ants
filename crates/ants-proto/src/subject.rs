@@ -308,7 +308,8 @@ pub fn status_on(thread: &ThreadId) -> String {
 }
 
 /// Where a human asks the daemon of `ant` to cancel the prompt running on `thread`
-/// ([`CancelRequest`](super::CancelRequest); core NATS, not stored). Only humans publish here.
+/// ([`CancelRequest`](super::CancelRequest); core NATS, not stored). Only humans publish here; an assistant asks on
+/// [`cancel_by`].
 pub fn cancel(ant: &UserId, thread: &ThreadId) -> String {
     format!("ants.cancel.{ant}.{thread}")
 }
@@ -318,8 +319,30 @@ pub fn cancel_of(ant: &UserId) -> String {
     format!("ants.cancel.{ant}.*")
 }
 
-/// Every cancel request, of all ants.
+/// Every cancel request, of all ants, that names no sender.
 pub const ALL_CANCELS: &str = "ants.cancel.*.*";
+
+/// Where `by`, an assistant, asks for its human the daemon of `ant` to cancel the prompt running on `thread`, or to
+/// withdraw a message waiting on it ([`CancelRequest::on_behalf_of`](super::CancelRequest::on_behalf_of)): the
+/// subject names the sender, so only `by`'s credentials publish there.
+pub fn cancel_by(ant: &UserId, thread: &ThreadId, by: &UserId) -> String {
+    format!("ants.cancel.{ant}.{thread}.{by}")
+}
+
+/// The cancel requests for `ant` naming their sender ([`cancel_by`]), on every thread.
+pub fn cancels_by_of(ant: &UserId) -> String {
+    format!("ants.cancel.{ant}.*.*")
+}
+
+/// Every cancel request for `ant`, naming its sender or not: what its daemon may listen to.
+pub fn all_cancels_of(ant: &UserId) -> String {
+    format!("ants.cancel.{ant}.>")
+}
+
+/// Every cancel request `by` sends naming itself ([`cancel_by`]), to any ant.
+pub fn cancels_by(by: &UserId) -> String {
+    format!("ants.cancel.*.*.{by}")
+}
 
 /// Where a daemon of `ant` answers a cancel request on `thread` ([`CancelReply`](super::CancelReply); core NATS).
 pub fn cancelled(ant: &UserId, thread: &ThreadId) -> String {
@@ -337,8 +360,25 @@ pub fn queue(ant: &UserId) -> String {
     format!("ants.queue.{ant}")
 }
 
-/// Every queue request, of all ants.
+/// Every queue request, of all ants, that names no sender.
 pub const ALL_QUEUE_REQUESTS: &str = "ants.queue.*";
+
+/// Where `by`, an assistant, asks for its human the daemons of `ant` which messages they hold
+/// ([`QueueRequest::on_behalf_of`](super::QueueRequest::on_behalf_of)): the subject names the sender, so only `by`'s
+/// credentials publish there.
+pub fn queue_by(ant: &UserId, by: &UserId) -> String {
+    format!("ants.queue.{ant}.{by}")
+}
+
+/// The queue requests for `ant` naming their sender ([`queue_by`]).
+pub fn queues_by_of(ant: &UserId) -> String {
+    format!("ants.queue.{ant}.*")
+}
+
+/// Every queue request `by` sends naming itself ([`queue_by`]), to any ant.
+pub fn queues_by(by: &UserId) -> String {
+    format!("ants.queue.*.{by}")
+}
 
 /// Where a daemon of `ant` answers a queue request ([`QueueReply`](super::QueueReply); core NATS).
 pub fn queued(ant: &UserId) -> String {

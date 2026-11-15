@@ -80,7 +80,12 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
             printer.line(&format!("{}/{}{forged}: answered {}", d.ant, d.request_id, tools::spelling(d.verdict)))
         } else if let Ok(r) = serde_json::from_slice::<CancelRequest>(&msg.payload) {
             let forged = forged(r.check_subject(&msg.subject).is_ok());
-            printer.line(&format!("[{}] {} asks to cancel the prompt of {}{forged}", r.thread_id, r.by, r.ant))
+            let by = behalf.label(&r.by, r.on_behalf_of.as_ref()).await;
+            let asks = match r.withdraw {
+                Some(message) => format!("to withdraw message {message} from the queue of"),
+                None => "to cancel the prompt of".to_owned(),
+            };
+            printer.line(&format!("[{}] {by} asks {asks} {}{forged}", r.thread_id, r.ant))
         } else if let Ok(r) = serde_json::from_slice::<CancelReply>(&msg.payload) {
             let forged = forged(r.check_subject(&msg.subject).is_ok());
             let outcome = if r.cancelled { "prompt cancelled" } else { "no prompt to cancel" };
@@ -88,7 +93,8 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
         } else if let Ok(r) = serde_json::from_slice::<ants_proto::QueueRequest>(&msg.payload) {
             // After cancel requests: a cancel request has every field of one.
             let forged = forged(r.check_subject(&msg.subject).is_ok());
-            printer.line(&format!("{} asks for the queue of {}{forged}", r.by, r.ant))
+            let by = behalf.label(&r.by, r.on_behalf_of.as_ref()).await;
+            printer.line(&format!("{by} asks for the queue of {}{forged}", r.ant))
         } else if let Ok(r) = serde_json::from_slice::<ants_proto::QueueReply>(&msg.payload) {
             let forged = forged(r.check_subject(&msg.subject).is_ok());
             printer.line(&format!("{}{forged}: {} messages in hand", r.ant, r.messages.len()))

@@ -4,14 +4,18 @@
 //! While the hub is out of reach, a human's record waits in the machine's outbox until the bucket sources it
 //! ([`owner_outbox`]). A daemon takes the owner of an ant's message on a thread no channel post started only from
 //! there ([`Owners::recorded`]), for an ant the record went to or one such an ant passed the link to the thread on to,
-//! so no ant names the owner of such a thread.
+//! so no ant names the owner of such a thread. An assistant records its human as the owner of a thread it messages an
+//! ant on for the human under a key naming both ([`assisted_owner_key`], [`record_for_human`]), which a daemon takes
+//! only while the human's grant names that assistant ([`Owners::assisted`]).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ants_proto::{JsDomain, OWNERS_BUCKET, ThreadId, UserId, owner_key, owner_outbox, owner_record_id};
+use ants_proto::{
+    JsDomain, OWNERS_BUCKET, ThreadId, UserId, assisted_owner_key, owner_key, owner_outbox, owner_record_id,
+};
 use anyhow::{Context as _, Result};
 use async_nats::HeaderMap;
 use async_nats::jetstream;
@@ -71,8 +75,26 @@ impl Owners {
         }
     }
 
+    /// `human`, when `assistant`, its assistant, recorded it as the owner its message for it to `to` on `thread` names
+    /// ([`record_for_human`]). The caller checks that the human's grant names `assistant`.
+    pub async fn assisted(
+        &self,
+        thread: &ThreadId,
+        to: &UserId,
+        human: &UserId,
+        assistant: &UserId,
+    ) -> Result<Option<UserId>> {
+        Ok(match self.read_key(thread, assisted_owner_key(thread, to, human, assistant)).await? {
+            Read::Owner(owner) => Some(owner).filter(|owner| owner == human),
+            Read::NoOwner | Read::NoBucket => None,
+        })
+    }
+
     async fn read(&self, thread: &ThreadId, to: &UserId) -> Result<Read> {
-        let key = owner_key(thread, to);
+        self.read_key(thread, owner_key(thread, to)).await
+    }
+
+    async fn read_key(&self, thread: &ThreadId, key: String) -> Result<Read> {
         if let Some(owner) = self.found.locked().get(&key) {
             return Ok(Read::Owner(owner.clone()));
         }
@@ -154,6 +176,26 @@ pub async fn record(
         "the hub is out of reach; the thread's owner is kept in this machine's outbox"
     );
     Ok(())
+}
+
+/// Record `human` as the owner of `thread` that a message of `assistant`, its assistant, for it to `to` names, in the
+/// owners bucket under [`assisted_owner_key`], unless a record of it is there already: never in the machine's outbox,
+/// which the bucket sources only a human's records from. Needs the credentials of `assistant` as the assistant of
+/// `human`. `js_domain` is the domain `js` was made for.
+pub async fn record_for_human(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    thread: &ThreadId,
+    to: &UserId,
+    human: &UserId,
+    assistant: &UserId,
+) -> Result<()> {
+    let key = assisted_owner_key(thread, to, human, assistant);
+    let kv = DirectKv::new(js, js_domain, OWNERS_BUCKET).await?;
+    match kv.put_as(&key, human.to_string(), &owner_record_id(&key)).await {
+        Err(e) if !format!("{e:#}").contains(RECORDED) => Err(e).context("recording the thread's owner"),
+        _ => Ok(()),
+    }
 }
 
 /// [`record`], logging a failure: the message goes out anyway, and ants' messages on its thread have no owner.

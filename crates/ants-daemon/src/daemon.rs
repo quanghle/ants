@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    Acting, Attachment, AttachmentHandle, AttachmentScope, CancelRequest, ChannelEntry, ChannelId, ChannelPost,
-    DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role,
-    State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid,
-    WEBHOOK_ALLOW, subject,
+    Acting, Attachment, AttachmentHandle, AttachmentScope, CancelReply, CancelRequest, ChannelEntry, ChannelId,
+    ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, MessageMark,
+    QueueRequest, QueuedMessage, Role, State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId,
+    ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -42,6 +42,7 @@ use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::publish::{Publish, Publisher};
 use crate::ratelimit::{self, Backoffs, Limited, Throttle};
+use crate::reading::Reading;
 use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
@@ -293,7 +294,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let roster = crate::mcp::jetstream_roster(js.clone());
-    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone());
+    let reading = Reading::daemon(crate::creds::is_assistant(config.creds.as_deref()));
+    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(config, &sessions_kv);
@@ -312,7 +314,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     connect_mcp(&mut mcp, config, &client, &js, &redactor, &humans).await?;
     let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
-    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
+    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
@@ -329,6 +331,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         client: &client,
         js: &js,
         ant: &config.ant,
+        reading,
         pool: &pool,
         cancels: Cancels::default(),
         restarts,
@@ -739,7 +742,8 @@ where
 {
     let mut unserved =
         unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.roster.clone())
-            .await?;
+            .await?
+            .reading(inbox.reading);
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -946,10 +950,12 @@ struct Cancel {
 }
 
 /// What a prompt is cancelled for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Why {
     /// `ants cancel`.
     Cancel,
+    /// A cancel request of an assistant for this human, whose grant names it.
+    CancelFor(UserId),
     /// A steer message ([`Envelope::steer`]), which the thread takes next.
     Steer,
     /// An admin's order to restart the ant's harnesses now ([`crate::admin::restart`]).
@@ -960,8 +966,9 @@ impl Cancel {
     /// The `[ants]` line ending the cancelled prompt's reply.
     fn notice(&self, ant: &UserId) -> String {
         let by = &self.by;
-        match self.why {
+        match &self.why {
             Why::Cancel => format!("[ants] The prompt was cancelled by {by} (ants cancel)."),
+            Why::CancelFor(human) => format!("[ants] The prompt was cancelled by {by}, the assistant of {human}."),
             Why::Steer => format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer)."),
             Why::Restart => {
                 format!(
@@ -1003,6 +1010,8 @@ struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
+    /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
+    reading: Reading,
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
@@ -1088,8 +1097,10 @@ impl Inbox<'_> {
         let lifting = futures::future::Fuse::terminated();
         let repairing = futures::future::Fuse::terminated();
         tokio::pin!(shutdown, finishing, signing_in, lifting, repairing);
-        let mut asks = match self.client.subscribe(subject::queue(self.ant)).await {
-            Ok(asks) => asks.left_stream(),
+        // Requests naming their sender, an assistant's, apart: credentials older than them allow only the others.
+        let asking = [subject::queue(self.ant), subject::queues_by_of(self.ant)].map(|s| self.client.subscribe(s));
+        let mut asks = match futures::future::try_join_all(asking).await {
+            Ok(asks) => futures::stream::select_all(asks).left_stream(),
             Err(e) => {
                 tracing::warn!(error = %e, "serving without ants queue");
                 futures::stream::pending().right_stream()
@@ -1250,9 +1261,13 @@ impl Inbox<'_> {
         }
     }
 
-    /// Answer a human's [`QueueRequest`] with `messages`, those in hand, and where the inbox consumer stands: the
-    /// messages it has not delivered yet wait in the stream.
+    /// Answer a human's [`QueueRequest`], or an assistant's for its human, with `messages`, those in hand, and where the
+    /// inbox consumer stands: the messages it has not delivered yet wait in the stream.
     async fn answer_queue(&self, request: QueueRequest, messages: Vec<QueuedMessage>) {
+        let assisted = request.on_behalf_of.as_ref();
+        if assisted.is_some() && self.assisted(&request.by, assisted, "queue request").await.is_none() {
+            return;
+        }
         let info = async {
             let stream = self.js.get_stream_no_info(ants_proto::STREAM).await?;
             anyhow::Ok(stream.consumer_info(ants_proto::inbox_consumer(self.ant)).await?)
@@ -1272,10 +1287,13 @@ impl Inbox<'_> {
     }
 
     /// Answer the humans' cancel requests ([`CancelRequest`]) for as long as the daemon serves, cancelling the prompt
-    /// running on the thread each one names.
+    /// running on the thread each one names, and the assistants' for their humans, which may withdraw a message instead.
     async fn hear_cancels(&self) {
-        let mut requests = match self.client.subscribe(subject::cancel_of(self.ant)).await {
-            Ok(requests) => requests,
+        // Requests naming their sender, an assistant's, apart: credentials older than them allow only the others.
+        let subscribe =
+            [subject::cancel_of(self.ant), subject::cancels_by_of(self.ant)].map(|s| self.client.subscribe(s));
+        let mut requests = match futures::future::try_join_all(subscribe).await {
+            Ok(requests) => futures::stream::select_all(requests),
             Err(e) => {
                 tracing::warn!(error = %e, "serving without ants cancel");
                 return std::future::pending().await;
@@ -1293,18 +1311,93 @@ impl Inbox<'_> {
                 tracing::warn!(error = %e, "ignoring a forged cancel request");
                 continue;
             }
-            let cancelled =
-                self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
-            if !cancelled {
-                tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
-            }
-            let answer = request.answer(cancelled);
+            let answer = if request.on_behalf_of.is_some() || request.withdraw.is_some() {
+                let Some(human) = self.assisted(&request.by, request.on_behalf_of.as_ref(), "cancel request").await
+                else {
+                    continue;
+                };
+                match self.cancel_for(&request, &human).await {
+                    Ok(answer) => answer,
+                    Err(e) => {
+                        tracing::warn!(by = %request.by, error = format!("{e:#}"), "withdrawing a message");
+                        continue;
+                    }
+                }
+            } else {
+                let cancelled =
+                    self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
+                if !cancelled {
+                    tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
+                }
+                request.answer(cancelled)
+            };
             let payload = serde_json::to_vec(&answer).expect("a cancel answer serializes");
             if let Err(e) = self.client.publish(answer.subject(), payload.into()).await {
                 tracing::warn!(error = %e, "answering a cancel request");
             }
         }
         std::future::pending::<()>().await;
+    }
+
+    /// The human `by`, an assistant, makes `what` for, when it claims `on_behalf_of` and the human's grant names it:
+    /// a request on a subject naming its sender is an assistant's for its human, or none.
+    async fn assisted(&self, by: &UserId, on_behalf_of: Option<&UserId>, what: &str) -> Option<UserId> {
+        match self.behalf.acting(self.humans, by, on_behalf_of).await {
+            Acting::For(human) => Some(human),
+            Acting::Forged(human) => {
+                tracing::warn!(%by, %human, "ignoring a {what} for a human whose grant does not name its sender");
+                None
+            }
+            Acting::Own => {
+                tracing::warn!(%by, "ignoring a {what} naming its sender but no human it acts for");
+                None
+            }
+        }
+    }
+
+    /// Cancel the prompt, or withdraw the message, `request` asks for, for `human` its assistant acts for, and tell the
+    /// human when done: an assistant's withdrawal repeated is answered as done again, untold.
+    async fn cancel_for(&self, request: &CancelRequest, human: &UserId) -> Result<CancelReply> {
+        let (by, thread, ant) = (&request.by, &request.thread_id, self.ant);
+        let (answer, text) = match request.withdraw {
+            Some(message) => {
+                let found = self.attempts.withdraw(&message, by, Some(human)).await?;
+                match found {
+                    None => {
+                        tracing::info!(%thread, %by, %human, %message, "withdrew a message for an assistant's human");
+                        let text = format!(
+                            "[ants] {by}, as the assistant of {human}, withdrew message {message} from the queue of \
+                             {ant} on thread {thread} for {human}."
+                        );
+                        (request.answer(true), Some(text))
+                    }
+                    Some(MessageMark::Withdrawn { by: was, on_behalf_of: Some(for_human), .. })
+                        if &was == by && &for_human == human =>
+                    {
+                        (request.answer(true), None)
+                    }
+                    Some(mark) => (request.found(mark), None),
+                }
+            }
+            None => {
+                let cancel = Cancel { by: by.clone(), why: Why::CancelFor(human.clone()) };
+                let cancelled = self.cancels.cancel(thread, cancel);
+                tracing::info!(%thread, %by, %human, cancelled, "cancel request of an assistant for its human");
+                let text = format!(
+                    "[ants] {by}, as the assistant of {human}, cancelled the prompt of {ant} on thread {thread} for \
+                     {human}."
+                );
+                (request.answer(cancelled), cancelled.then_some(text))
+            }
+        };
+        if let Some(text) = text {
+            let notice = Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone()));
+            let id = format!("on-behalf-{}", request.id);
+            if let Err(e) = bus::store(self.js, notice.subject(), &notice, &id).await {
+                tracing::warn!(%human, error = format!("{e:#}"), "telling the human of its assistant's act");
+            }
+        }
+        Ok(answer)
     }
 
     /// Restart the ant's harnesses on each admin order to ([`crate::admin::restart`]) for as long as the daemon serves:
@@ -1352,6 +1445,7 @@ impl Inbox<'_> {
                     store: self.pool.store(),
                     identity: self.identity,
                     launch: Some(self.pool.launch().clone()),
+                    reading: self.reading,
                 };
                 let root = async |thread: &ThreadId| match self.threads.root(thread, u64::MAX).await {
                     Ok(channel) => channel,
@@ -1603,7 +1697,8 @@ impl Claims<'_> {
     /// creator its posts say ([`Threads::origin_of`]); any other has the owner a human's or a webhook's message on it to
     /// the sender, or to an ant that passed the link to it on to the sender, named ([`Threads::owner_for`]), else that
     /// of the thread it was spun off ([`Envelope::origin_thread`]): a channel thread's under the same check as its
-    /// creator, another's under the same as its own; else none, whatever owner the ant names.
+    /// creator, another's under the same as its own; else, for an assistant's message for its human naming the human,
+    /// the human; else none, whatever owner the ant names.
     pub async fn sender_claims(&self, envelope: &mut Envelope, seq: u64) {
         if envelope.webhook && !self.humans.is_human(&envelope.from) && !self.webhooks.is_webhook(&envelope.from).await
         {
@@ -1636,8 +1731,9 @@ impl Claims<'_> {
             Ok(None) => self.spun_off(envelope, seq, &humans).await,
             Err(e) => {
                 tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's origin");
-                if envelope.owner.is_some() {
-                    envelope.owner = self.recorded_owner(&envelope.thread_id, &envelope.from).await;
+                if let Some(named) = envelope.owner.take() {
+                    let recorded = self.recorded_owner(&envelope.thread_id, &envelope.from, Some(&named)).await;
+                    envelope.owner = recorded.or_else(|| self.assisted_owner(envelope, named));
                 }
                 envelope.creator = None;
                 envelope.origin_thread = None;
@@ -1651,13 +1747,13 @@ impl Claims<'_> {
     /// either.
     async fn spun_off(&self, envelope: &mut Envelope, seq: u64, humans: &Humans) {
         let (named_owner, named_creator) = (envelope.owner.take(), envelope.creator.take());
-        let recorded = match named_owner {
-            Some(_) => self.recorded_owner(&envelope.thread_id, &envelope.from).await,
+        let recorded = match &named_owner {
+            Some(named) => self.recorded_owner(&envelope.thread_id, &envelope.from, Some(named)).await,
             None => None,
         };
         let (linked_owner, linked_creator) = match envelope.origin_thread.take() {
             Some(origin) if (named_owner.is_some() && recorded.is_none()) || named_creator.is_some() => {
-                let (owner, creator) = self.linked(&origin, &envelope.from, seq, humans).await;
+                let (owner, creator) = self.linked(&origin, &envelope.from, named_owner.as_ref(), seq, humans).await;
                 let owner = owner.filter(|_| named_owner.is_some() && recorded.is_none());
                 let creator = creator.filter(|_| named_creator.is_some());
                 if owner.is_some() || creator.is_some() {
@@ -1667,7 +1763,8 @@ impl Claims<'_> {
             }
             _ => (None, None),
         };
-        envelope.owner = recorded.or(linked_owner);
+        let assisted = named_owner.clone().and_then(|named| self.assisted_owner(envelope, named));
+        envelope.owner = recorded.or(linked_owner).or(assisted);
         envelope.creator = linked_creator;
         if named_owner.is_some() && envelope.owner.is_none() || named_creator.is_some() && envelope.creator.is_none() {
             tracing::debug!(
@@ -1686,6 +1783,7 @@ impl Claims<'_> {
         &self,
         origin: &ThreadId,
         sender: &UserId,
+        named: Option<&UserId>,
         seq: u64,
         humans: &Humans,
     ) -> (Option<UserId>, Option<UserId>) {
@@ -1694,7 +1792,8 @@ impl Claims<'_> {
                 let origin = self.threads.origin_for(origin, sender, seq, humans).await?;
                 return anyhow::Ok(origin.map_or((None, None), |o| (o.owner, o.creator)));
             }
-            Ok((self.threads.owner_for(origin, sender).await?.filter(|o| self.humans.is_human(o)), None))
+            let owner = self.recorded_owner_of(origin, sender, named).await?;
+            Ok((owner, None))
         };
         read.await.unwrap_or_else(|e| {
             tracing::warn!(thread = %origin, error = format!("{e:#}"), "reading the origin thread");
@@ -1702,15 +1801,31 @@ impl Claims<'_> {
         })
     }
 
-    /// The owner recorded for `thread` and `sender`, when a human ([`Threads::owner_for`]).
-    async fn recorded_owner(&self, thread: &ThreadId, sender: &UserId) -> Option<UserId> {
-        match self.threads.owner_for(thread, sender).await {
-            Ok(owner) => owner.filter(|o| self.humans.is_human(o)),
-            Err(e) => {
-                tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner");
-                None
-            }
-        }
+    /// The owner recorded for `thread` and `sender`, when a human ([`Threads::owner_for`]), or `named`, the owner the
+    /// message names, as its assistant recorded it.
+    async fn recorded_owner(&self, thread: &ThreadId, sender: &UserId, named: Option<&UserId>) -> Option<UserId> {
+        self.recorded_owner_of(thread, sender, named).await.unwrap_or_else(|e| {
+            tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner");
+            None
+        })
+    }
+
+    async fn recorded_owner_of(
+        &self,
+        thread: &ThreadId,
+        sender: &UserId,
+        named: Option<&UserId>,
+    ) -> Result<Option<UserId>> {
+        let assistant = named.and_then(|human| self.humans.assistant(human));
+        let owner = self.threads.owner_for(thread, sender, named.zip(assistant.as_ref())).await?;
+        Ok(owner.filter(|o| self.humans.is_human(o)))
+    }
+
+    /// `named`, the owner `envelope` names, when the message is its assistant's for it: its sender is the assistant
+    /// the human's grant names now, and it claims to act for the human.
+    fn assisted_owner(&self, envelope: &Envelope, named: UserId) -> Option<UserId> {
+        let assistant = self.humans.assistant(&named);
+        (envelope.on_behalf_of.as_ref() == Some(&named) && assistant.as_ref() == Some(&envelope.from)).then_some(named)
     }
 }
 
@@ -1799,7 +1914,7 @@ impl Inbox<'_> {
         let attempt = Attempt::of(delivered, MAX_ATTEMPTS);
         // Taken up before anything is done for it, unless a human withdrew it first (`ants withdraw`).
         let result = match self.attempts.take_up(envelope).await {
-            Ok(Some(by)) => self.withdrawn(&incoming, &msg, seq, &by).await,
+            Ok(Some((by, on_behalf_of))) => self.withdrawn(&incoming, &msg, seq, &by, on_behalf_of.as_ref()).await,
             Ok(None) => self.take(&mut incoming, &msg, seq, attempt).await,
             Err(e) => Err(e),
         };
@@ -1887,11 +2002,24 @@ impl Inbox<'_> {
     /// notice of it is stored on its thread, so `ants thread show` tells what became of it. The notice answers the
     /// sender, as a reply would, unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant
     /// out of turns, or to a channel post, to the human who withdrew it.
-    async fn withdrawn(&self, incoming: &Incoming, msg: &jetstream::Message, seq: u64, by: &UserId) -> Result<()> {
+    async fn withdrawn(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        seq: u64,
+        by: &UserId,
+        on_behalf_of: Option<&UserId>,
+    ) -> Result<()> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        tracing::info!(%thread, %by, message = %envelope.id, "acking a withdrawn message unprompted");
-        let text = format!("[ants] Withdrawn by {by} before {} was prompted with it (ants withdraw).", self.ant);
+        tracing::info!(%thread, %by, ?on_behalf_of, message = %envelope.id, "acking a withdrawn message unprompted");
+        let ant = self.ant;
+        let text = match on_behalf_of {
+            None => format!("[ants] Withdrawn by {by} before {ant} was prompted with it (ants withdraw)."),
+            Some(human) => format!("[ants] Withdrawn by {by} for {human} before {ant} was prompted with it."),
+        };
+        // The one who asked for the withdrawal: the human an assistant acted for.
+        let by = on_behalf_of.unwrap_or(by);
         let to_human = |to: UserId| {
             let mut notice = envelope.follow_up(self.ant.clone(), to, text.clone());
             notice.in_reply_to = Some(envelope.id);
@@ -2637,7 +2765,7 @@ impl Inbox<'_> {
         if envelope.answer.is_none() || !human {
             return None;
         }
-        match crate::questions::asked(self.js, self.ant, envelope).await {
+        match crate::questions::asked(self.js, self.ant, self.reading, envelope).await {
             Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
             Err(e) => {
                 let thread = &envelope.thread_id;
@@ -2676,6 +2804,7 @@ impl Inbox<'_> {
             thread: thread.clone(),
             channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
             before: seq,
+            reading: self.reading,
             home: Some(self.home.to_owned()),
         };
         let prompt = Prompt {
@@ -3109,7 +3238,7 @@ async fn tell_kept_branches(
 ) {
     for branch in kept {
         let thread = &branch.thread;
-        let owner = match threads.owner_for(thread, ant).await {
+        let owner = match threads.owner_for(thread, ant, None).await {
             Ok(owner) => humans.human_owner(owner.as_ref()),
             Err(e) => {
                 tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner");

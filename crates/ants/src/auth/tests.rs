@@ -848,6 +848,14 @@ async fn credentials_confine_each_user_to_its_role() {
     let _sub = a_raw.subscribe(subject::queue(&dev_b)).await.unwrap();
     let v = next_violation(&a_raw, &mut errors).await;
     assert!(v.contains(&format!("Subscription to \"{}\"", subject::queue(&dev_b))), "{v}");
+    // And it hears the requests naming their sender, an assistant's for its human, to it only.
+    let _own = a_raw.subscribe(subject::cancels_by_of(&dev_a)).await.unwrap();
+    let _own = a_raw.subscribe(subject::queues_by_of(&dev_a)).await.unwrap();
+    for denied in [subject::cancels_by_of(&dev_b), subject::queues_by_of(&dev_b)] {
+        let _sub = a_raw.subscribe(denied.clone()).await.unwrap();
+        let v = next_violation(&a_raw, &mut errors).await;
+        assert!(v.contains(&format!("Subscription to \"{denied}\"")), "{v}");
+    }
     // Its own inbox it may watch live; a denial would be the next violation below.
     let _own = a_raw.subscribe(subject::inbox_of(&dev_a)).await.unwrap();
     let _own = a_raw.subscribe(subject::stored_inbox(&dev_a)).await.unwrap();
@@ -939,10 +947,11 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
 }
 
-/// An assistant decides no approval request on its subject, cancels no prompt, asks for no queue, and withdraws no
-/// queued message nor records an owner: its decisions wait in its messages for its human's confirmation, and readers
-/// of the rest could not tell its acts from its human's. Its admin orders, which name the human they are for, wait
-/// for the human's confirmation at the machine's daemon.
+/// An assistant decides no approval request on its subject, and cancels no prompt, asks for no queue, withdraws no
+/// queued message nor records an owner on the subjects and keys a human uses: its decisions wait in its messages for
+/// its human's confirmation, and readers of the rest could not tell its acts from its human's. It does those on
+/// subjects and keys naming it, and its human for an owner, which readers check against the grant. Its admin orders,
+/// which name the human they are for, wait for the human's confirmation at the machine's daemon.
 #[tokio::test]
 async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let Some(server) = Server::start() else { return };
@@ -958,11 +967,21 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
         "ants.queue.dev-a",
         "$KV.ants_attempts.dev-a.msg.m1",
         "$KV.ants_owners.t1.dev-a",
+        "ants.cancel.dev-a.t1.pb",
+        "ants.queue.dev-a.pb",
+        "$KV.ants_owners.t1.dev-a.bob.pa",
+        "$KV.ants_owners.t1.dev-a.alice.pb",
     ] {
         client.publish(s, "{}".into()).await.unwrap();
         let v = next_violation(&client, &mut errors).await;
         assert!(v.contains(&format!("Publish to \"{s}\"")), "{v}");
     }
+    for s in ["ants.cancel.dev-a.t1.pa", "ants.queue.dev-a.pa", "$KV.ants_owners.t1.dev-a.alice.pa"] {
+        client.publish(s, "{}".into()).await.unwrap();
+    }
+    client.publish("ants.queue.dev-a", "{}".into()).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.contains("Publish to \"ants.queue.dev-a\""), "only the plain subject is refused: {v}");
 }
 
 /// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
@@ -1005,6 +1024,26 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     bus::publish(&pa_js, &Envelope::new(pa.clone(), alice.clone(), "as itself")).await.unwrap();
     let alice_s = async { crate::inbox::Inbox::open(&pa_js, &alice).await?.unread(&Default::default()).await };
     assert!(alice_s.await.is_err(), "it reads no human's inbox");
+
+    // Its daemon reads a thread back by direct gets, holding none of an ant's readers.
+    let thread = to_pa.thread_id.clone();
+    bus::publish(&pa_js, &Envelope::on_thread(thread.clone(), pa.clone(), alice.clone(), "hi")).await.unwrap();
+    notes::publish(&pa_js, &NotesPost::new(thread.clone(), pa.clone(), "noted"), None).await.unwrap();
+    let read = |reading| ants_daemon::history::Thread {
+        js: pa_js.clone(),
+        ant: pa.clone(),
+        thread: thread.clone(),
+        channel: None,
+        before: u64::MAX,
+        reading,
+        home: None,
+    };
+    let history = read(Reading::daemon(true)).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    for said in ["hello", "hi", "noted"] {
+        assert!(history.contains(said), "{said} missing from {history}");
+    }
+    let history = read(Reading::Consumer).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    assert!(history.contains("could not be read back"), "{history}");
 }
 
 #[tokio::test]
@@ -1185,6 +1224,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
         thread: thread.clone(),
         channel: Some(ops),
         before: u64::MAX,
+        reading: Reading::Consumer,
         home: None,
     };
     assert_eq!(
@@ -2729,6 +2769,27 @@ fn a_humans_credentials_fit_max_control_line() {
     for domain in [None, Some(&hub)] {
         let out = dir.join("alice.creds");
         issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
+        let (jwt, _) = read_creds(&out).unwrap();
+        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An assistant's credentials fit in its `CONNECT` line as a human's do ([`a_humans_credentials_fit_max_control_line`]),
+/// with the same room for the rest of the line and rights yet to come.
+#[test]
+fn an_assistants_credentials_fit_max_control_line() {
+    let dir = ants_test_support::scratch_dir("assistant-jwt-size");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let (alice, pa) = (p("alice"), p("pa"));
+    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    for domain in [None, Some(&hub)] {
+        let out = dir.join("pa.creds");
+        let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+        let rights = Permissions::for_assistant(&pa, &alice).with_js_domain(domain);
+        issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &out).unwrap();
         let (jwt, _) = read_creds(&out).unwrap();
         assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
     }

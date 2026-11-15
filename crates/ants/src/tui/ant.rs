@@ -468,6 +468,7 @@ mod tests {
             ahead,
             delivered: true,
             withdrawn_by: None,
+            withdrawn_for: None,
         }
     }
 

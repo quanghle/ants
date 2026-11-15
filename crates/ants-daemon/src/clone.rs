@@ -77,6 +77,8 @@ pub struct Source<'a> {
     pub store: &'a SessionStore,
     pub identity: Option<&'a Identity>,
     pub launch: Option<Launch>,
+    /// How the daemon reads through the ant's own readers.
+    pub reading: crate::reading::Reading,
 }
 
 impl Source<'_> {
@@ -96,6 +98,7 @@ impl Source<'_> {
                 thread: thread.clone(),
                 channel: root(&thread).await,
                 before: u64::MAX,
+                reading: self.reading,
                 home: Some(self.home.to_owned()),
             };
             let history = history.snapshot(at).await?;
