@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::reading::{self, Reading};
@@ -19,6 +20,7 @@ use async_nats::jetstream::{self, consumer};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use clap::ValueEnum as _;
 
+use crate::sealed;
 use crate::thread::{self, Entry, Kind, Parser};
 
 type Time = DateTime<Utc>;
@@ -152,18 +154,22 @@ impl Search {
             && self.channel.as_ref().is_none_or(|channel| entry.channel.as_ref() == Some(channel))
             && self.since.is_none_or(|since| entry.stored_at >= since)
             && self.until.is_none_or(|until| entry.stored_at < until)
-            && self.grep.as_deref().is_none_or(|grep| matched(&entry.text, grep).is_some())
+            && self.grep.as_deref().is_none_or(|grep| entry.matchable() && matched(&entry.text, grep).is_some())
     }
 
     /// The latest [`Self::limit`] matches among the messages `js` reads back, oldest first, and how many earlier
-    /// matches the limit left out.
-    pub async fn run(&self, js: &jetstream::Context) -> Result<(Vec<Entry>, usize)> {
+    /// matches the limit left out. Sealed messages are opened with `keyring`.
+    pub async fn run(
+        &self,
+        js: &jetstream::Context,
+        keyring: Option<Arc<sealed::Keyring>>,
+    ) -> Result<(Vec<Entry>, usize)> {
         let start = match self.since {
             Some(since) => consumer::DeliverPolicy::ByStartTime { start_time: SystemTime::from(since).into() },
             None => consumer::DeliverPolicy::All,
         };
         let kinds = self.kinds();
-        let mut parser = Parser::default();
+        let mut parser = Parser::opening(keyring);
         let mut found: BTreeMap<u64, Entry> = BTreeMap::new();
         let mut omitted = 0;
         for filter in self.filters() {
@@ -240,7 +246,8 @@ pub async fn search(
 ) -> Result<()> {
     (search.since, search.until) = bounds(since, until, Utc::now())?;
     let js = thread::connect(nats).await?;
-    let (entries, omitted) = search.run(&js).await?;
+    let keyring = crate::sealed::Keyring::load(nats, &js).await.map(Arc::new);
+    let (entries, omitted) = search.run(&js, keyring).await?;
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
@@ -369,7 +376,7 @@ mod tests {
 
         let run = |search: Search| {
             let js = js.clone();
-            async move { search.run(&js).await.unwrap() }
+            async move { search.run(&js, None).await.unwrap() }
         };
         let kinds = |search: Search| {
             let run = run(Search { limit: 50, ..search });

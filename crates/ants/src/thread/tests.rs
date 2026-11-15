@@ -643,7 +643,7 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     let reply = ask.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
     js.publish(reply.subject(), json(&reply).into()).await.unwrap().await.unwrap();
 
-    let shown = history(&js, &ask.thread_id, None, true).await.unwrap();
+    let shown = history(&js, &ask.thread_id, None, true, None).await.unwrap();
     let kinds: Vec<_> = shown.iter().map(|e| (e.kind, e.text.as_str())).collect();
     assert_eq!(
         kinds,
@@ -660,7 +660,7 @@ async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
     assert_eq!(line["tool"]["status"], "failed");
     assert_eq!(line["tool"]["duration_ms"], 840);
     assert_eq!(line["tool"]["message"], ask.id.to_string());
-    let without = history(&js, &ask.thread_id, None, false).await.unwrap();
+    let without = history(&js, &ask.thread_id, None, false, None).await.unwrap();
     assert!(without.iter().all(|e| e.kind == Kind::Message), "{without:?}");
     assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
 }

@@ -313,7 +313,7 @@ impl Feed {
         let js = self.js.clone();
         self.history = Some(
             async move {
-                let read = thread::history(&js, &thread, None, tools).await;
+                let read = thread::history(&js, &thread, None, tools, None).await;
                 (thread, read)
             }
             .boxed_local(),
