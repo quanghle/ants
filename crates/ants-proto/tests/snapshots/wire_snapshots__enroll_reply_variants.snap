@@ -8,12 +8,21 @@ expression: value
     "ant": "dev-a",
     "public_key": "UABC",
     "jwt": "eyJ0eXAiOiJKV1QifQ.user",
-    "leaf_jwt": "eyJ0eXAiOiJKV1QifQ.leaf"
+    "leaf_jwt": "eyJ0eXAiOiJKV1QifQ.leaf",
+    "host_jwt": "eyJ0eXAiOiJKV1QifQ.host"
   },
   {
     "outcome": "rejected",
     "ant": "dev-a",
     "public_key": "UABC",
     "reason": "unknown machine"
+  },
+  {
+    "outcome": "retired",
+    "ant": "dev-a",
+    "public_key": "UABC",
+    "revoked": [
+      "UABC"
+    ]
   }
 ]

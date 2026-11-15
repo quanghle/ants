@@ -1,6 +1,11 @@
 //! The ant's identity record ([`AntIdentity`]) in [`IDENTITIES_BUCKET`]: created by its daemon on start when absent, so
 //! the first daemon to start the ant anywhere sets its id and birth, and its completed prompts counted by
-//! compare-and-set by the daemon serving it, so a standby daemon taking it over carries on the same count.
+//! compare-and-set by the daemon serving it, so a standby daemon taking it over carries on the same count. A record
+//! marked moved (`ants ant export --move`) keeps every daemon from serving the ant until `ants ant unseal` clears the
+//! mark: the daemon serving it drains it as on a stop, and a daemon starting it waits ([`Identity::moved`],
+//! [`Identity::unsealed`]).
+
+use std::time::Duration;
 
 use ants_proto::{AntIdentity, IDENTITIES_BUCKET, JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
@@ -13,6 +18,8 @@ use crate::direct_kv::{DirectKv, Lookup};
 
 /// How often a compare-and-set is tried again when another writer changed the record in between.
 const ATTEMPTS: usize = 5;
+/// How often a daemon reads the ant's record for the moved mark, while serving it or waiting for the mark to go.
+pub const MOVED_EVERY: Duration = Duration::from_secs(30);
 
 /// One ant's identity record, read and written by the credentials of the ant, which read every ant's record by direct
 /// gets naming no subject and write only its own.
@@ -36,6 +43,59 @@ impl Identity {
     /// is missing.
     pub async fn count_prompt(&self) -> Result<Option<AntIdentity>> {
         self.change(|record| record.prompts += 1).await
+    }
+
+    /// The record as stored, without creating it: None when absent or when the bucket is missing.
+    pub async fn read(&self) -> Result<Option<AntIdentity>> {
+        let key = self.ant.as_str();
+        match self.kv.lookup_last(key).await?.0 {
+            Lookup::NoBucket | Lookup::NoValue => Ok(None),
+            Lookup::Value(value) => {
+                let record: AntIdentity =
+                    serde_json::from_slice(&value).with_context(|| format!("reading the identity of {key}"))?;
+                record.check_key(key)?;
+                Ok(Some(record))
+            }
+        }
+    }
+
+    /// Whether the record is marked moved; a record that cannot be read counts as not moved, which the warning says.
+    pub async fn is_moved(&self) -> bool {
+        match self.read().await {
+            Ok(record) => record.is_some_and(|r| r.moved.is_some()),
+            Err(e) => {
+                tracing::warn!(ant = %self.ant, error = format!("{e:#}"), "reading the ant's identity for a move");
+                false
+            }
+        }
+    }
+
+    /// Return once the record is marked moved, reading it every `every`.
+    pub async fn moved(&self, every: Duration) {
+        loop {
+            tokio::time::sleep(every).await;
+            if self.is_moved().await {
+                return;
+            }
+        }
+    }
+
+    /// Return once the record is not marked moved, reading it every `every`; at once when it is not.
+    pub async fn unsealed(&self, every: Duration) {
+        let mut told = false;
+        while self.is_moved().await {
+            if !told {
+                tracing::warn!(
+                    ant = %self.ant,
+                    "the ant is marked moved to another bus: not serving it until `ants ant unseal` or `ants auth revoke`"
+                );
+                told = true;
+            }
+            tokio::time::sleep(every).await;
+        }
+        if told {
+            tracing::info!(ant = %self.ant, "the ant's moved mark is gone; serving it");
+        }
     }
 
     /// Store the record as `change` makes it, by compare-and-set on the one read, a new one when absent; unchanged, a

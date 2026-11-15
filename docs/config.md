@@ -194,6 +194,8 @@ ants signer --config ~/.ants/config.toml
 
 It verifies the manager's account signature and evaluates the request against its **own** `--config` `[[ant_template]]` tables (reread per request) and live issued keys in `issued.jsonl` (`ants auth revoke NAME` frees a slot). Policy-compliant requests are signed immediately for the manager's `js_domain` (recording `template` and `added_by` in `issued.jsonl`). Out-of-policy requests publish a manager `ApprovalRequest` (`request_ant: add ant NAME from template T (why)`, `allow_once` or `reject`), visible in `ants tools`, `ants inbox -f`, `ants dash` and all `ants webhook serve` notification sinks, waiting up to `--approval-timeout` (default `15m`, capped by request expiry). Forged requests, human/manager/reserved/taken names, templated managers, and > 3 pending human approvals per manager are refused outright. Pending human requests drop on signer restart and re-trigger on the manager's next 5 s retry.
 
+The signer also signs and revokes keys on admins' `add` and `retire` orders, which machines' daemons carry out with their host credentials, with no human asked again ([auth.md](auth.md#adding-and-retiring-an-ant-by-order)): an ant added so gets an `[[ant]]` table of its own below the comment `# added by <admin>'s order <id>`, no template's.
+
 The signer also answers ants' reactions requests (MCP `react` and `list_reactions`, `ants react` with ant credentials) in queue group `reactions`: ant credentials neither read nor write `ants_reactions`, so the signer lists the reactions to a message, or adds or removes the ant's own, once it finds that the ant reads the message. With authentication, `react` therefore needs a running `ants signer` (listings are also answered by `ants webhook serve` with a `[[human]]` entry); a daemon without credentials answers its ants itself. Behind a leaf node, the signer's machine needs its uplink issued with `--enroll-approver` (see [auth.md](auth.md#wire-acls-and-verification-invariants)).
 
 ### Retiring an added ant
@@ -401,6 +403,52 @@ asks the terminal for its background colour (OSC 11) and waits up to 200 ms for 
 else takes `dark`. With `NO_COLOR` set, or off a terminal, faces show without colour and the head as ASCII. `[cli]`
 `animate = false` keeps the heads in `ants chat` still; otherwise only the head on screen moves, and the screen is drawn
 again only when its frame changes.
+
+## Exporting and importing an ant
+
+`ants ant export ANT` writes the ant to one plain JSON file (default `./ANT.ant`, mode `0600`, never overwritten) for
+another bus, as for a new job; `ants ant import FILE` there adds it from the file, as `ants add` does, with a new key.
+The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files"}`:
+
+- `bus`: the public key of the account of the bus exported from.
+- `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
+- `settings`: of its `[[ant]]`, `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`.
+- `files`: each file of its home (`home`, default `~/.ants/<name>`) as `{path, kind, data}`, `data` in base64, at
+  most 64 MiB in all. `kind` is `harness` for the files of its harness's [memory files](#memory-files) globs, taken
+  relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
+  links not followed.
+
+Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `.git`, `.beads` and `.bd`, the task
+database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
+`escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
+sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
+
+The export runs on the machine whose config file lists the ant, with a human's credentials. While another machine
+serves the ant it warns that the home here may be behind; while this one serves it working, it waits up to 2 minutes
+for its prompts in flight to end, so the files are packed between prompts. Nothing signs or encrypts the file: keep it
+safe, as it may hold sensitive memory.
+
+`--move` then marks the ant moved in its identity record. The daemon serving it drains it as on a stop (it takes no
+new message, hands back those waiting and finishes the prompts in flight) and leaves the roster, every daemon listing
+it waits for the mark to go before serving it, and messages to it get the notice of an ant no daemon serves. `ants
+roster`, `ants doctor`, `ants ant show` and the ant view of `ants chat` show it moved. `ants ant unseal ANT` clears
+the mark; `ants auth revoke ANT` ends the ant on the old bus once the import succeeded
+([auth.md](auth.md#moving-an-ant-to-another-bus)).
+
+`ants ant import FILE [--as NEW]` takes the flags of `ants add` and:
+
+1. Refuses a config file already listing the ant, and a home (`--home`, default `~/.ants/<name>`) not empty.
+2. Creates its identity record on the bus by a KV create, refused when a record holds its name, or its id under any
+   name, so no bus holds two copies of one ant. The id is looked up by reading the whole `ants_identities` bucket, one
+   record per ant.
+3. Restores its files into its home, leaving out its harness memory files, with a warning, when the ant runs another
+   harness here (`--harness`, else the exported one, else the file's top-level `harness`).
+4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
+   add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
+   them later.
+
+A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
+name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.
 
 ## Catch-up summaries
 

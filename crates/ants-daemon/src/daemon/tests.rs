@@ -1300,20 +1300,17 @@ async fn a_restart_stops_idle_harnesses_and_working_ones_after_their_prompt() {
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     bus.send(&t1, "one").await;
-    bus.send(&t2, "hold two").await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        let mut replies = vec![next_reply(&mut to_human).await];
+        // One thread after the other, so t2's session is s2.
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "one".to_owned()));
+        bus.send(&t2, "hold two").await;
         until("the held prompt to run", || log.locked().prompted == 2).await;
         until("the first message to be handled", || bus.workload.handling() == 1).await;
         assert_eq!(restart(&bus, false).await, Restarted { stopped: 1, after_prompt: 1, cancelled: 0 });
         gate.add_permits(1);
-        replies.push(next_reply(&mut to_human).await);
-        replies.sort();
-        let mut want = vec![(t1.clone(), "one".to_owned()), (t2.clone(), "hold two".to_owned())];
-        want.sort();
-        assert_eq!(replies, want, "the working prompt ends");
+        assert_eq!(next_reply(&mut to_human).await, (t2.clone(), "hold two".to_owned()), "the working prompt ends");
         bus.send(&t2, "again").await;
         assert_eq!(next_reply(&mut to_human).await, (t2.clone(), "again".to_owned()));
         ctrl_c.add_permits(1);

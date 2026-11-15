@@ -863,7 +863,10 @@ impl Permissions {
     /// and acking them, after recording the outcome of each beside the machine's record ([`admin_outcome_key`]), which it
     /// reads back by direct gets, and looking up the revocation records of the credentials that signed them
     /// ([`subject::revoked_devices`]). It hears its own replies under [`host_inbox_prefix`], apart from every user's.
-    /// Nothing else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
+    /// Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request carrying the
+    /// order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the answers
+    /// ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped. Nothing
+    /// else: no other machine's record or outcomes, no message to or from an ant. No ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
         let record = subject::machine_record(machine);
         let consumer = admin_consumer(machine);
@@ -877,9 +880,12 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{ROSTER_BUCKET}.*", kv_stream(ROSTER_BUCKET)),
+            subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
         publish.extend(ack_subjects(STREAM, &consumer));
-        Self { publish, subscribe: vec![format!("{}.>", host_inbox_prefix(machine))] }
+        let subscribe = vec![format!("{}.>", host_inbox_prefix(machine)), subject::ALL_ENROLL_REPLIES.to_owned()];
+        Self { publish, subscribe }
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
@@ -1104,6 +1110,14 @@ impl Permissions {
         }
     }
 
+    /// What `ants signer` also allows itself, on the machine holding the account key, to say where that key is: putting
+    /// the [`AccountHolder`](crate::AccountHolder) record in [`MACHINES_BUCKET`] ([`subject::account_holder`]), no
+    /// other key of the bucket, with the replies of its JetStream requests under [`ENROLL_INBOX`], as those of
+    /// [`Permissions::for_enroll_approver`], with which it is issued.
+    pub fn for_account_holder() -> Self {
+        Self { publish: vec![subject::account_holder()], subscribe: vec![format!("{ENROLL_INBOX}.>")] }
+    }
+
     /// What `ants signer` allows itself on top of [`Permissions::for_enroll_approver`]: hearing every registration
     /// request and answering it. Leaf uplinks never carry these, as registration happens on the hub only.
     pub fn for_registrar() -> Self {
@@ -1122,7 +1136,8 @@ impl Permissions {
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_assistant`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_host`],
 /// [`Permissions::for_enrollment`],
-/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_device_revoker`]
+/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_account_holder`],
+/// [`Permissions::for_device_revoker`]
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.

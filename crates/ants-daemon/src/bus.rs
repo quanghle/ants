@@ -600,7 +600,7 @@ fn uncaptured_hint(subject: &str) -> String {
 }
 
 /// `e`, the error of a publish to `subject`, with [`uncaptured_hint`] when `uncaptured`.
-pub(crate) fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
+pub fn explained(e: jetstream::context::PublishError, subject: &str, uncaptured: bool) -> anyhow::Error {
     let e = anyhow::Error::new(e);
     if uncaptured { e.context(uncaptured_hint(subject)) } else { e }
 }

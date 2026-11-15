@@ -12,6 +12,10 @@
 //! the approval renews the leaf's uplink credentials to carry the ant too, keeps the ant among the leaf's members in
 //! the team directory ([`members::enrolled`]), and admits the ant into the hub's stream from the leaf's outbox
 //! ([`outbox::admit_ant`]).
+//!
+//! A machine without host credentials asks for its own in the same request ([`HostAsk`], [`ants_proto::EnrollHost`]),
+//! which the approval of the ant grants too, after checks that bind them to the asking machine
+//! ([`Approver::approve_with`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -19,8 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_daemon::{bus, roster};
 use ants_proto::{
-    Destination, ENROLL_INBOX, ENROLL_REPEAT, EnrollLeaf, EnrollReply, EnrollRequest, JsDomain, Machine, Permissions,
-    Role, UserId, subject,
+    Destination, ENROLL_INBOX, ENROLL_REPEAT, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, JsDomain, Machine,
+    Permissions, Role, UserId, host_user, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::{ClientError, Event, ServerError};
@@ -28,6 +32,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 
+use crate::revoke::Kind;
 use crate::{auth, members, outbox, revoke};
 
 /// How long `ants enroll` listens for requests: one repeat of every machine still asking, and some slack.
@@ -40,11 +45,20 @@ pub struct Leaf {
     pub creds: std::path::PathBuf,
 }
 
-/// An approval: the user JWT of the ant, and for a request naming a leaf node, the renewed uplink JWT of the leaf.
+/// The host credentials an asking machine without any asks for too: the machine's name and the key generated for
+/// them, whose seed stays there.
+pub struct HostAsk {
+    pub machine: Machine,
+    pub key: KeyPair,
+}
+
+/// An approval: the user JWT of the ant, for a request naming a leaf node the renewed uplink JWT of the leaf, and for
+/// one asking for host credentials the host's user JWT, when they were granted too.
 #[derive(Debug)]
 pub struct Approval {
     pub jwt: String,
     pub leaf_jwt: Option<String>,
+    pub host_jwt: Option<String>,
 }
 
 /// Ask for the credentials of `ant` for the public key of `user`, with the enrollment credentials at `creds`, over
@@ -58,6 +72,22 @@ pub async fn request(
     ant: &UserId,
     user: &KeyPair,
     leaf: Option<&Leaf>,
+    repeat: Duration,
+    stop: impl Future<Output = ()>,
+) -> Result<Approval> {
+    request_with(url, creds, ant, user, leaf, None, repeat, stop).await
+}
+
+/// [`request`], asking for the `host` credentials of the machine too: an approval's host JWT is checked to be the
+/// account's for the host's key and machine.
+#[allow(clippy::too_many_arguments)]
+pub async fn request_with(
+    url: &str,
+    creds: &Path,
+    ant: &UserId,
+    user: &KeyPair,
+    leaf: Option<&Leaf>,
+    host: Option<&HostAsk>,
     repeat: Duration,
     stop: impl Future<Output = ()>,
 ) -> Result<Approval> {
@@ -93,7 +123,7 @@ pub async fn request(
         loop {
             tokio::select! {
                 _ = repeats.tick() => {
-                    uplink = sign_request(&mut request, &enrollment_key, leaf)?;
+                    uplink = sign_request(&mut request, &enrollment_key, leaf, host)?;
                     client.publish(request.subject(), serde_json::to_vec(&request)?.into()).await?;
                     client.flush().await?;
                 }
@@ -108,12 +138,14 @@ pub async fn request(
                         }
                     };
                     match reply {
-                        EnrollReply::Approved { jwt, leaf_jwt, .. } => {
-                            let checked = check_approval(&jwt, &enrollment, ant, &public_key).and_then(|()| {
-                                check_leaf_approval(leaf_jwt.as_deref(), &enrollment, leaf, uplink.as_ref())
-                            });
+                        EnrollReply::Approved { jwt, leaf_jwt, host_jwt, .. } => {
+                            let checked = check_approval(&jwt, &enrollment, ant, &public_key)
+                                .and_then(|()| {
+                                    check_leaf_approval(leaf_jwt.as_deref(), &enrollment, leaf, uplink.as_ref())
+                                })
+                                .and_then(|()| check_host_approval(host_jwt.as_deref(), &enrollment, host));
                             match checked {
-                                Ok(()) => return Ok(Approval { jwt, leaf_jwt }),
+                                Ok(()) => return Ok(Approval { jwt, leaf_jwt, host_jwt }),
                                 Err(e) => tracing::warn!(error = format!("{e:#}"), "ignoring an enrollment approval"),
                             }
                         }
@@ -121,6 +153,7 @@ pub async fn request(
                             Some(reason) => bail!("the enrollment of {ant} was rejected: {reason}"),
                             None => bail!("the enrollment of {ant} was rejected"),
                         },
+                        EnrollReply::Retired { .. } => continue,
                     }
                 }
             }
@@ -160,8 +193,14 @@ pub async fn request(
 }
 
 /// Sign `request` with the enrollment key and, for a machine behind `leaf`, with the leaf's uplink key, read again so
-/// that the request carries the latest uplink credentials; returns the uplink key.
-fn sign_request(request: &mut EnrollRequest, enrollment_key: &KeyPair, leaf: Option<&Leaf>) -> Result<Option<KeyPair>> {
+/// that the request carries the latest uplink credentials, and the `host` credentials asked for with the enrollment key;
+/// returns the uplink key.
+fn sign_request(
+    request: &mut EnrollRequest,
+    enrollment_key: &KeyPair,
+    leaf: Option<&Leaf>,
+    host: Option<&HostAsk>,
+) -> Result<Option<KeyPair>> {
     let mut uplink = None;
     if let Some(leaf) = leaf {
         let (jwt, key) = auth::read_creds(&leaf.creds).context("the leaf node's uplink credentials")?;
@@ -171,6 +210,15 @@ fn sign_request(request: &mut EnrollRequest, enrollment_key: &KeyPair, leaf: Opt
         uplink = Some(key);
     }
     request.signature = auth::sign(enrollment_key, &request.signed())?;
+    request.host_creds = host.map(|host| EnrollHost {
+        machine: host.machine.clone(),
+        public_key: host.key.public_key(),
+        signature: String::new(),
+    });
+    if let Some(signed) = request.host_signed() {
+        let signature = auth::sign(enrollment_key, &signed)?;
+        request.host_creds.as_mut().expect("the host just set").signature = signature;
+    }
     Ok(uplink)
 }
 
@@ -224,6 +272,31 @@ fn check_leaf_approval(
     Ok(())
 }
 
+/// Check that `host_jwt`, the host JWT of an approval, is there only when the request asked for `host` credentials, and
+/// is then the account's for the host's key and machine. None while they were asked for is no error: the approver
+/// granted the ant alone.
+fn check_host_approval(host_jwt: Option<&str>, enrollment: &auth::Claims, host: Option<&HostAsk>) -> Result<()> {
+    let (jwt, host) = match (host_jwt, host) {
+        (None, _) => return Ok(()),
+        (Some(jwt), Some(host)) => (jwt, host),
+        (Some(_), None) => bail!("grants host credentials no one asked for"),
+    };
+    let claims = auth::verified(jwt).context("the host credentials")?;
+    if claims.iss != enrollment.iss {
+        bail!("the host credentials are signed by {}, not by the account {}", claims.iss, enrollment.iss);
+    }
+    let name = host_user(&host.machine);
+    if claims.sub != host.key.public_key() || claims.name != name {
+        bail!(
+            "the host credentials are issued to {} ({}), not to {name} ({})",
+            claims.name,
+            claims.sub,
+            host.key.public_key()
+        );
+    }
+    Ok(())
+}
+
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -250,6 +323,29 @@ pub struct Approved {
     pub public_key: String,
     /// The leaf node the request came through, if it named one.
     pub leaf: Option<LeafApproved>,
+    /// What came of the host credentials the request asked for too, if it did.
+    pub host: Option<HostApproved>,
+}
+
+/// What came of the host credentials of `machine` an enrollment request asked for too.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HostApproved {
+    Granted(Machine),
+    /// Not granted, and why.
+    Refused(Machine, String),
+}
+
+impl HostApproved {
+    /// What came of them, in words.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Granted(machine) => format!("host credentials of {machine} granted"),
+            Self::Refused(machine, why) => format!(
+                "host credentials of {machine} not granted: {why}; issue them with `ants auth host {machine}` if \
+                 the machine needs them"
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -330,6 +426,10 @@ impl Approver {
             auth::check_signature(&uplink.sub, &signed, &leaf.signature)
                 .with_context(|| format!("the uplink credentials of {}", leaf.machine))?;
         }
+        if let (Some(host), Some(signed)) = (&request.host_creds, request.host_signed()) {
+            auth::check_signature(&enrollment.sub, &signed, &host.signature)
+                .with_context(|| format!("the host credentials of {} asked for", host.machine))?;
+        }
         Ok(())
     }
 
@@ -356,6 +456,10 @@ impl Approver {
                         tracing::warn!("{e}");
                         continue;
                     }
+                    // `ants signer` answers those carrying an admin's order, with no human asked.
+                    if request.order.is_some() {
+                        continue;
+                    }
                     if let Err(e) = self.check(&request) {
                         tracing::warn!(ant = %request.ant, "ignoring an enrollment request: {e:#}");
                         continue;
@@ -380,7 +484,8 @@ impl Approver {
         for r in pending {
             let age = (Utc::now() - r.sent_at).num_seconds().max(0);
             let leaf = r.leaf.map_or_default(|l| format!("  leaf {}", l.machine));
-            println!("{}  {}  host {}{leaf}  asked {age}s ago", r.ant, r.public_key, r.host);
+            let host_creds = r.host_creds.map_or_default(|h| format!("  with host creds of {}", h.machine));
+            println!("{}  {}  host {}{leaf}{host_creds}  asked {age}s ago", r.ant, r.public_key, r.host);
         }
         Ok(())
     }
@@ -390,8 +495,24 @@ impl Approver {
     /// through a leaf node also gets the leaf's uplink credentials renewed to carry the ant, the ant kept among the
     /// leaf's members in `dir`, for later `ants auth leaf` runs, and admitted into the hub's stream from the leaf's
     /// outbox, if the hub sources it; uplink credentials the hub would refuse fail the approval before anything is
-    /// signed or recorded.
+    /// signed or recorded. Host credentials the request asks for too are granted when they pass the checks of
+    /// [`Approver::approve_with`].
     pub async fn approve(&self, dir: &Path, ant: &UserId, public_key: Option<&str>) -> Result<Approved> {
+        self.approve_with(dir, ant, public_key, true).await
+    }
+
+    /// [`Approver::approve`], granting the host credentials the request asks for too only with `host`, and only when
+    /// nothing tells they are another machine's: through a leaf node, only the leaf's machine's; for a machine with
+    /// live uplink credentials, only through its leaf node; never while the team holds live host credentials of the
+    /// machine for another key, nor for a key revoked or issued to other credentials. Refused, they leave the ant
+    /// approved, telling why ([`HostApproved::Refused`]).
+    pub async fn approve_with(
+        &self,
+        dir: &Path,
+        ant: &UserId,
+        public_key: Option<&str>,
+        host: bool,
+    ) -> Result<Approved> {
         if ant.is_human() {
             bail!("{ant} is the default human; issue its credentials with `ants auth user`");
         }
@@ -408,6 +529,20 @@ impl Approver {
             None => None,
         };
         let jwt = auth::sign_user(dir, ant, Role::Ant, domain, &request.public_key)?;
+        let (host, host_jwt) = match &request.host_creds {
+            None => (None, None),
+            Some(asked) if !host => (
+                Some(HostApproved::Refused(asked.machine.clone(), "approved without them (--no-host)".to_owned())),
+                None,
+            ),
+            Some(asked) => match self.host_grantable(dir, &request, asked) {
+                Ok(()) => {
+                    let jwt = auth::sign_host(dir, &asked.machine, domain, &asked.public_key)?;
+                    (Some(HostApproved::Granted(asked.machine.clone())), Some(jwt))
+                }
+                Err(e) => (Some(HostApproved::Refused(asked.machine.clone(), format!("{e:#}"))), None),
+            },
+        };
         let leaf = match (&request.leaf, &renewed) {
             (Some(leaf), Some(_)) => {
                 members::enrolled(dir, &leaf.machine, ant)
@@ -420,8 +555,48 @@ impl Approver {
             }
             _ => None,
         };
-        let public_key = self.send(&request, jwt, renewed).await?;
-        Ok(Approved { public_key, leaf })
+        let public_key = self.send(&request, jwt, renewed, host_jwt).await?;
+        Ok(Approved { public_key, leaf, host })
+    }
+
+    /// Whether the host credentials `asked` for with `request` may be granted, as [`Approver::approve_with`] tells.
+    fn host_grantable(&self, dir: &Path, request: &EnrollRequest, asked: &EnrollHost) -> Result<()> {
+        let (machine, key) = (&asked.machine, asked.public_key.as_str());
+        auth::check_user_key(key)?;
+        if key == request.public_key {
+            bail!("the request asks for them with the ant's own key");
+        }
+        let live = crate::signer::live(dir)?;
+        match &request.leaf {
+            Some(leaf) if leaf.machine != *machine => {
+                bail!("the request asks for those of {machine} through the leaf node of {}", leaf.machine)
+            }
+            Some(_) => {}
+            None => {
+                let leaf = auth::leaf_user(machine);
+                if live.iter().any(|i| i.kind == Kind::Leaf && i.name == leaf) {
+                    bail!("{machine} runs a leaf node, and the request did not come through it");
+                }
+            }
+        }
+        if self.revoked.contains(key) || revoke::revoked(dir)?.iter().any(|r| r.key == key) {
+            bail!("the key {key} is revoked");
+        }
+        let name = host_user(machine);
+        if let Some(other) =
+            revoke::issued(dir)?.iter().find(|i| i.key == key && (i.name != name || i.kind != Kind::Host))
+        {
+            bail!("the key {key} was issued to {} already", other.name);
+        }
+        if let Some(other) = live.iter().find(|i| i.name == name && i.kind == Kind::Host && i.key != key) {
+            bail!(
+                "the team holds live host credentials of {machine} (key {}); revoke them first with `ants auth \
+                 revoke --key {}` if the machine lost them",
+                other.key,
+                other.key
+            );
+        }
+        Ok(())
     }
 
     /// Sign the credentials webhook `webhook` asks for (`ants webhook add --enroll`), with the rights
@@ -443,15 +618,21 @@ impl Approver {
         }
         let permissions = Permissions::for_webhook(webhook, destinations).with_js_domain(self.js_domain.as_ref());
         let jwt = auth::sign_with(dir, webhook, revoke::Kind::Webhook, permissions, &request.public_key)?;
-        self.send(&request, jwt, None).await
+        self.send(&request, jwt, None, None).await
     }
 
-    /// Send the approval of `request`, its user JWT `jwt` and the leaf's renewed uplink JWT `leaf_jwt`, until the
-    /// machine stops asking. Returns the public key approved.
-    async fn send(&self, request: &EnrollRequest, jwt: String, leaf_jwt: Option<String>) -> Result<String> {
+    /// Send the approval of `request`, its user JWT `jwt`, the leaf's renewed uplink JWT `leaf_jwt` and the host's
+    /// `host_jwt`, until the machine stops asking. Returns the public key approved.
+    async fn send(
+        &self,
+        request: &EnrollRequest,
+        jwt: String,
+        leaf_jwt: Option<String>,
+        host_jwt: Option<String>,
+    ) -> Result<String> {
         let ant = &request.ant;
         let public_key = request.public_key.clone();
-        let reply = EnrollReply::Approved { ant: ant.clone(), public_key: public_key.clone(), jwt, leaf_jwt };
+        let reply = EnrollReply::Approved { ant: ant.clone(), public_key: public_key.clone(), jwt, leaf_jwt, host_jwt };
         // An answer lost on the way leaves the machine asking: answer again while it does.
         for _ in 0..3 {
             self.answer(&reply).await?;
