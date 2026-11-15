@@ -169,8 +169,8 @@ impl Looks {
 const NODS_FOR: Duration = Duration::from_secs(4);
 
 /// What `ant` does at `now`, as its head shows it: offline when no daemon serving it beats or its harness is signed
-/// out; stuck when its harness keeps failing to start or a prompt of it failed; paused while a provider limit holds
-/// it back; waiting on a human for a tool request or a question; nodding a few seconds after a message from it
+/// out; stuck when its harness keeps failing to start or a prompt of it failed; paused while an admin paused it or a
+/// provider limit holds it back; waiting on a human for a tool request or a question; nodding a few seconds after a message from it
 /// arrived; chewing on a tool call; thinking; else idle.
 pub fn mood(data: &Data, ant: &UserId, now: DateTime<Utc>) -> Mood {
     let entries: Vec<&RosterEntry> =
@@ -182,7 +182,7 @@ pub fn mood(data: &Data, ant: &UserId, now: DateTime<Utc>) -> Mood {
     if entries.iter().any(|e| e.failing.is_some()) || stands.iter().any(|(s, _)| **s == Stand::Failed) {
         return Mood::Stuck;
     }
-    if entries.iter().any(|e| e.limited.is_some()) {
+    if entries.iter().any(|e| e.paused.is_some() || e.limited.is_some()) {
         return Mood::Paused;
     }
     let asks = data.live.order.iter().any(|t| data.question(t).is_some_and(|q| q.from == *ant));
@@ -305,6 +305,10 @@ mod tests {
         let tool = StatusUpdate::Tool { id: "t1".to_owned(), title: None, tool_kind: None, status: None, paths: None };
         m.take(crate::live::Event::Status(StatusEvent::new(dev.clone(), thread, tool)), at(9));
         assert_eq!(mood(&m.data, &dev, at(9)), Mood::Tool);
+        let mut paused = entry("dev-a", 3600, 2, at(2));
+        paused.paused = Some(ants_proto::Paused { since: at(8), by: None });
+        m.data.live.roster(vec![paused], at(9));
+        assert_eq!(mood(&m.data, &dev, at(9)), Mood::Paused, "paused by an admin");
         let mut out = entry("dev-a", 3600, 2, at(2));
         out.signed_out = Some(SignInNeeded { since: at(1), sign_in: None });
         m.data.live.roster(vec![out], at(9));

@@ -603,6 +603,7 @@ fn enrollment() {
             enrollment: "eyJ0eXAiOiJKV1QifQ.enroll".to_owned(),
             signature: "c2lnLWVucm9sbA".to_owned(),
             leaf: Some(enroll_leaf()),
+            order: None,
         },
     );
     snap("enroll_leaf", &enroll_leaf());
@@ -619,6 +620,12 @@ fn enrollment() {
                 ant: user("dev-a"),
                 public_key: Some("UABC".to_owned()),
                 reason: Some("unknown machine".to_owned()),
+            },
+            EnrollReply::Retired {
+                ant: user("dev-a"),
+                public_key: "UABC".to_owned(),
+                revoked: vec!["UABC".to_owned()],
+                push_error: None,
             },
         ],
     );

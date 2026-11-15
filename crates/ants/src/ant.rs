@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use ants_daemon::caps::Caps;
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{RosterEntry, SESSIONS_BUCKET, UserId};
+use ants_proto::{MovedMark, RosterEntry, SESSIONS_BUCKET, UserId};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -18,11 +18,14 @@ use crate::{orders, queue, settings, spend, thread};
 /// How many of its most recently active threads `ants ant show` lists.
 const THREADS_SHOWN: usize = 10;
 
-/// The ant's state in a few words: `live, working`, `stale, idle`, or `not in the roster`.
-pub fn state(entry: Option<&RosterEntry>, now: DateTime<Utc>) -> String {
-    match entry {
-        Some(e) => format!("{}, {}", State::of(e, now).as_str(), roster::activity(e)),
-        None => "not in the roster".to_owned(),
+/// The ant's state in a few words: `live, working`, `stale, idle`, `not in the roster`, or, `moved` (by `ants ant export
+/// --move`), `moved` or `moved, draining` while its daemon still serves it.
+pub fn state(entry: Option<&RosterEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> String {
+    match (entry, moved) {
+        (Some(_), Some(_)) => "moved, draining".to_owned(),
+        (None, Some(_)) => "moved".to_owned(),
+        (Some(e), None) => format!("{}, {}", State::of(e, now).as_str(), roster::activity(e)),
+        (None, None) => "not in the roster".to_owned(),
     }
 }
 
@@ -43,10 +46,13 @@ pub fn about(e: &RosterEntry, now: DateTime<Utc>) -> Vec<(&'static str, String)>
     ]
 }
 
-/// What holds `ant` back now, one line each: no daemon serving it, a stale entry, a harness signed out, failing to
-/// start or held by a provider limit, a fallback answering for it, low memory on its machine. Empty when nothing
-/// does.
-pub fn holds(ant: &UserId, entry: Option<&RosterEntry>, now: DateTime<Utc>) -> Vec<String> {
+/// What holds `ant` back now, one line each: its move to another bus (`moved`), no daemon serving it, a stale entry, a
+/// harness signed out, failing to start or held by a provider limit, a fallback answering for it, low memory on its
+/// machine. Empty when nothing does.
+pub fn holds(ant: &UserId, entry: Option<&RosterEntry>, moved: Option<&MovedMark>, now: DateTime<Utc>) -> Vec<String> {
+    if let Some(mark) = moved {
+        return vec![crate::export::moved_line(ant, mark, now)];
+    }
     let Some(e) = entry else { return roster::unserved(ant, None, true, now).into_iter().collect() };
     if State::of(e, now) == State::Stale {
         return roster::unserved(ant, Some(e), true, now).into_iter().collect();
@@ -121,7 +127,8 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
     let reading = settings::read(nats, &js, &ant, settings::READ_WAIT).await?;
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let now = Utc::now();
-    let holds = holds(&ant, entry.as_ref(), now);
+    let moved = faces.identity(&ant).and_then(|i| i.moved.as_ref());
+    let holds = holds(&ant, entry.as_ref(), moved, now);
     if json {
         let roster = entry.as_ref().map(|e| roster::json(e, now, &faces)).transpose()?;
         let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
@@ -143,7 +150,7 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         println!("{}", serde_json::to_string(&shown)?);
         return Ok(());
     }
-    println!("{}: {}", faces.named(&ant), state(entry.as_ref(), now));
+    println!("{}: {}", faces.named(&ant), state(entry.as_ref(), moved, now));
     if let Some(e) = &entry {
         for (label, value) in about(e, now) {
             let value = value.lines().collect::<Vec<_>>().join(&format!("\n  {:13} ", ""));
@@ -221,23 +228,30 @@ mod tests {
         e.model = AntModel::of(Some("gpt-5".to_owned()), Some("high".to_owned()), None);
         let rows: BTreeMap<&str, String> = about(&e, now()).into_iter().collect();
         assert_eq!(rows["model"], "gpt-5, effort high");
-        assert_eq!(state(Some(&e), now()), "live, idle");
-        assert_eq!(state(None, now()), "not in the roster");
+        assert_eq!(state(Some(&e), None, now()), "live, idle");
+        assert_eq!(state(None, None, now()), "not in the roster");
+        let mark = MovedMark { at: now(), by: "alice".parse().unwrap() };
+        assert_eq!(state(Some(&e), Some(&mark), now()), "moved, draining");
+        assert_eq!(state(None, Some(&mark), now()), "moved");
     }
 
     #[test]
     fn holds_name_what_keeps_the_ant_from_answering() {
         let ant: UserId = "dev-a".parse().unwrap();
-        assert_eq!(holds(&ant, None, now()), ["dev-a is not in the roster: no daemon serves dev-a now"]);
+        assert_eq!(holds(&ant, None, None, now()), ["dev-a is not in the roster: no daemon serves dev-a now"]);
         let stale = entry("dev-a", 7200, 600, now());
-        assert!(holds(&ant, Some(&stale), now())[0].starts_with("dev-a is stale in the roster"));
+        assert!(holds(&ant, Some(&stale), None, now())[0].starts_with("dev-a is stale in the roster"));
         let mut e = entry("dev-a", 7200, 3, now());
-        assert!(holds(&ant, Some(&e), now()).is_empty());
+        assert!(holds(&ant, Some(&e), None, now()).is_empty());
         e.signed_out = Some(SignInNeeded { since: now() - chrono::Duration::minutes(5), sign_in: None });
         e.memory_low = Some(MemoryLow { since: now(), available: 512 << 20, max_harnesses: 1 });
-        let lines = holds(&ant, Some(&e), now());
+        let lines = holds(&ant, Some(&e), None, now());
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("harness copilot signed out for 5m"), "{lines:?}");
         assert!(lines[1].starts_with("memory low on m1"), "{lines:?}");
+        let mark = MovedMark { at: now() - chrono::Duration::minutes(5), by: "alice".parse().unwrap() };
+        let lines = holds(&ant, Some(&e), Some(&mark), now());
+        assert_eq!(lines.len(), 1, "a moved ant is held by its move alone: {lines:?}");
+        assert!(lines[0].starts_with("dev-a was moved to another bus by alice 5m ago"), "{lines:?}");
     }
 }

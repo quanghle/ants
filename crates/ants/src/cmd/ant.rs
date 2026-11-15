@@ -8,8 +8,9 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
+use crate::serve::AntOptions;
 use crate::settings::{self, Assignment};
-use crate::{ant, avatars, completions, memories, orders, pause, restart};
+use crate::{ant, avatars, completions, export, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -38,6 +39,34 @@ pub(crate) enum AntCommand {
         /// One JSON object per order.
         #[arg(long)]
         json: bool,
+    },
+    /// Add the ant NAME on MACHINE by admin order: its daemon generates the ant's key, has `ants signer` sign it on
+    /// the order, writes its credentials, appends its `[[ant]]` table with the settings given and starts it. Paths
+    /// are MACHINE's; the workdir defaults to the ant's home, ~/.ants/NAME there. Needs a human device's admin
+    /// credentials, and `ants signer` running.
+    Add {
+        name: UserId,
+        /// The machine to run the ant on.
+        #[arg(long = "on", value_name = "MACHINE")]
+        on: Machine,
+        #[command(flatten)]
+        options: Box<AntOptions>,
+        /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", default_value = "3m", value_parser = ants_proto::duration::parse)]
+        wait: Duration,
+    },
+    /// Retire ANT by admin order, templated or not: its machine's daemon removes its `[[ant]]` table, which stops
+    /// it, has `ants signer` revoke its key on the order and deletes its credentials; its home stays. Needs a human
+    /// device's admin credentials, and `ants signer` running.
+    Retire {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// The machine running the ant (default: the one that last recorded serving it).
+        #[arg(long)]
+        machine: Option<Machine>,
+        /// How long to wait for the daemon's outcome (a duration such as 90s, 10m or 1h).
+        #[arg(long, value_name = "DURATION", default_value = "8m", value_parser = ants_proto::duration::parse)]
+        wait: Duration,
     },
     /// Change settings of ANT in the config file of the machine serving it, with an admin order: read them first, as
     /// `ants ant show` does, and expect each field to hold the value read, so the daemon refuses the order, naming the
@@ -119,6 +148,36 @@ pub(crate) enum AntCommand {
         #[command(flatten)]
         order: Order,
     },
+    /// Export ANT to a file another bus imports it from (`ants ant import`): its identity record (id, birth, avatar,
+    /// prompts), the settings that make it (whoami, harness, model, reasoning_effort, context, fallback) and its
+    /// home's memory files, packed between prompts. Leaves out its task database, other settings, credentials,
+    /// environment, workdir, worktrees, sessions and history. Plain JSON, not encrypted. Runs on the machine whose
+    /// config file lists ANT, with a human's credentials.
+    Export {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// The file to write (default: ./ANT.ant); never overwritten.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Mark ANT moved once exported: its daemon drains it and leaves the roster, and no daemon starts it until
+        /// `ants ant unseal`.
+        #[arg(long = "move")]
+        seal: bool,
+        /// Config file listing ANT (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
+    },
+    /// Import an ant from a file `ants ant export` wrote, as `ants add` adds one: create its identity record on this
+    /// bus, refused when an ant there holds its name or its id, list it in the config file with the exported settings
+    /// (the flags given win), give it a new key and restore its memories into its empty home, with no tasks. Harness
+    /// memory files are left out, with a warning, when the ant runs another harness here. Needs a human's
+    /// credentials.
+    Import(Box<crate::export::ImportArgs>),
+    /// Clear the moved mark `ants ant export --move` set on ANT, so a daemon listing it serves it again.
+    Unseal {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+    },
 }
 
 /// Where an order goes, and how long to wait for its outcome.
@@ -145,6 +204,8 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
             Box::pin(ant::show(nats, ant, &caps, json)).await
         }
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
+        AntCommand::Add { name, on, options, wait } => orders::add::run(nats, &name, on, &options, wait).await,
+        AntCommand::Retire { ant, machine, wait } => orders::retire::run(nats, &ant, machine, wait).await,
         AntCommand::Set { ant, changes, no_wait } => {
             let wait = if no_wait { std::time::Duration::ZERO } else { settings::SET_WAIT };
             settings::set(nats, &ant, &changes, wait).await
@@ -162,5 +223,8 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         AntCommand::Resume { order: Order { ant, machine, wait } } => {
             pause::run(nats, &ant, machine, false, wait).await
         }
+        AntCommand::Export { ant, out, seal, config } => export::export(nats, &ant, out, seal, config).await,
+        AntCommand::Import(args) => Box::pin(export::import(nats, *args)).await,
+        AntCommand::Unseal { ant } => export::unseal(nats, &ant).await,
     }
 }

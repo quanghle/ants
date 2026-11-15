@@ -9,7 +9,8 @@
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
 //! their record ([`crate::shared`]); [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
-//! [`memories`] reads the ant's memories, only while online.
+//! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
+//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,14 +31,20 @@ use tokio::sync::Notify;
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
+mod add;
+mod ask;
 mod memories;
+pub use memories::files_under;
 mod pause;
 pub mod restart;
+mod retire;
 mod set;
 mod settings;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
+/// How often an order in hand for long tells the stream so ([`in_progress`]).
+const PROGRESS: Duration = Duration::from_secs(20);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -45,8 +52,6 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Why every order is refused while the config sets `[admin] remote = false` (requirement: a machine may opt out).
 pub const REMOTE_OFF: &str = "this machine's config sets [admin] remote = false";
-/// Why an order is refused that the daemon cannot carry out yet.
-pub const NOT_SUPPORTED: &str = "not supported yet";
 
 /// Why an order to edit the config is refused by a daemon serving no config file.
 pub const NO_CONFIG: &str = "the daemon serves no config file to edit";
@@ -62,6 +67,11 @@ pub struct Orders {
     pub accounts: Vec<String>,
     /// The config file the daemon serves whole, which orders edit; none refuses those.
     pub config: Option<ConfigFile>,
+    /// The host credentials, which ask `ants signer` to sign an added ant's key or revoke a retired one's, and beside
+    /// which an added ant's credentials go; none refuses those orders.
+    pub creds: Option<PathBuf>,
+    /// The hub's JetStream domain, where a retirement reads the roster.
+    pub js_domain: Option<JsDomain>,
     /// The ants the process serves, which restart their harnesses on an order.
     pub restarts: restart::Restarts,
 }
@@ -172,7 +182,8 @@ async fn handle(
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let mut outcome = decide(stores, orders, &msg.subject, &order, stored_at).await?;
+                        let deciding = decide(js, stores, orders, &msg.subject, &order, stored_at);
+                        let mut outcome = in_progress(msg, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
@@ -192,6 +203,23 @@ async fn handle(
         }
     }
     bus::double_ack(&js.client(), msg).await
+}
+
+/// `work` on the order in `msg`, telling the stream every [`PROGRESS`] that it is in hand, so that an order taking
+/// longer than [`ACK_WAIT`] (an ant to stop, the signer to answer) is not delivered again meanwhile.
+async fn in_progress<T>(msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
+    tokio::pin!(work);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
+    loop {
+        tokio::select! {
+            done = &mut work => return done,
+            _ = ticks.tick() => {
+                if let Err(e) = msg.ack_with(AckKind::Progress).await {
+                    tracing::debug!(error = %e, "telling the stream the order is in hand");
+                }
+            }
+        }
+    }
 }
 
 /// What a message of the machine's consumer holds.
@@ -250,6 +278,7 @@ struct Stores {
 /// administration and an admin of the team signed it with credentials not revoked, as [`Stores::devices`] records
 /// them; else what carrying it out ([`apply`]) gave.
 async fn decide(
+    js: &jetstream::Context,
     stores: &Stores,
     orders: &Orders,
     subject: &str,
@@ -273,20 +302,26 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => apply(stores, orders, order, stored_at).await,
+        Ok(_) => apply(js, stores, orders, order, stored_at).await,
     }
 }
 
 /// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
 /// refuses it when it cannot. Fails, for the order to be taken again, only when a bucket it writes does not answer.
-async fn apply(stores: &Stores, orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> Result<AdminOutcome> {
+async fn apply(
+    js: &jetstream::Context,
+    stores: &Stores,
+    orders: &Orders,
+    order: &AdminOrder,
+    stored_at: DateTime<Utc>,
+) -> Result<AdminOutcome> {
     Ok(match &order.op {
         AdminOp::Set { changes } => set::apply(&stores.identities, orders, order, changes).await?,
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
-        AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
-        AdminOp::Retire => refused(order, NOT_SUPPORTED),
+        AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
+        AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
     })

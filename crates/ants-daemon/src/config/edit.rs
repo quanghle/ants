@@ -305,7 +305,7 @@ fn value_json(value: &toml_edit::Value) -> Value {
     }
 }
 
-fn toml_value(value: &Value) -> Result<toml_edit::Value> {
+pub(crate) fn toml_value(value: &Value) -> Result<toml_edit::Value> {
     Ok(match value {
         Value::Null => bail!("null is no TOML value: leave the value out to remove the field"),
         Value::Bool(b) => (*b).into(),

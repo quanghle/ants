@@ -365,14 +365,22 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<RosterEntry>> {
 pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
     let (_, js) = nats.connect("ants-roster").await?;
     let entries = list(&js).await?;
-    let faces = Faces::stdout(avatars::read_or_none(&js).await);
+    let identities = avatars::read_or_none(&js).await;
     let now = Utc::now();
+    let moved: Vec<String> = identities
+        .values()
+        .filter_map(|i| i.moved.as_ref().map(|mark| crate::export::moved_line(&i.ant, mark, now)))
+        .collect();
+    let faces = Faces::stdout(identities);
     if json {
         for entry in &entries {
             println!("{}", self::json(entry, now, &faces)?);
         }
     } else if entries.is_empty() {
         println!("no ants registered");
+        if !moved.is_empty() {
+            println!("\n{}", moved.join("\n"));
+        }
     } else {
         println!("{}", faced(&table(&entries, now), &entries, &faces));
         if let Some(note) = crate::versions::roster_note(&entries, now) {
@@ -382,7 +390,7 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
             println!("{note}");
         }
         let collisions = faces.collisions(entries.iter().map(|e| &e.ant));
-        let notes = [held(&entries, now), memory_low(&entries, now), drifted(&entries), collisions].concat();
+        let notes = [moved, held(&entries, now), memory_low(&entries, now), drifted(&entries), collisions].concat();
         if !notes.is_empty() {
             println!("\n{}", notes.join("\n"));
         }

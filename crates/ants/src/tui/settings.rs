@@ -73,7 +73,7 @@ pub struct Pane {
 
 impl Pane {
     pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · a ask · w work · r \
-                            restart · p pause/resume · Esc back";
+                            restart · p (un)pause · X retire · Esc back";
     pub const DRAFT_KEYS: &str = "KEY = VALUE, a TOML value or a word; KEY = removes · Enter send · Esc cancel";
 
     fn read(&self) -> Option<&settings::Read> {

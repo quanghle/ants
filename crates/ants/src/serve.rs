@@ -627,7 +627,7 @@ impl HostRun {
         let started = wanted.clone();
         let task = tokio::spawn(
             async move {
-                if let Err(e) = host::run(started, receiver).await {
+                if let Err(e) = Box::pin(host::run(started, receiver)).await {
                     tracing::error!(error = format!("{e:#}"), "host connection stopped");
                 }
             }

@@ -180,10 +180,13 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Resu
         tracing::warn!(ant = %config.ant, fix = config.harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
-    while Box::pin(serve(&config, stop, restarts)).await? == Served::HandedOver {
-        tracing::info!("another daemon serves the ant; waiting for it to stop");
+    loop {
+        match Box::pin(serve(&config, stop, restarts)).await? {
+            Served::Stopped => return Ok(()),
+            Served::HandedOver => tracing::info!("another daemon serves the ant; waiting for it to stop"),
+            Served::Moved => tracing::info!("the ant moved to another bus; waiting for `ants ant unseal`"),
+        }
     }
-    Ok(())
 }
 
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
@@ -216,20 +219,47 @@ enum Served {
     Stopped,
     /// Another daemon took over the ant's roster entry.
     HandedOver,
+    /// The ant's identity record was marked moved ([`ants_proto::AntIdentity::moved`]).
+    Moved,
 }
 
 /// For an assistant's credentials, keeps their record for readers of what it does for its human and lets its tools
-/// act for the human ([`Mcp::with_assisting`]).
-async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context) {
+/// act for the human ([`Mcp::with_assisting`]), opening and sealing the human's sealed messages with the ant's sealing
+/// key when it has one ([`crate::sealing::AssistantSealing`]).
+async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context, humans: &Registry) {
     let Some(creds) = &config.creds else { return };
-    match crate::behalf::keep_record(js, config.js_domain.as_ref(), &config.ant, creds).await {
-        Ok(Some(human)) => mcp.with_assisting(human),
+    let human = match crate::behalf::keep_record(js, config.js_domain.as_ref(), &config.ant, creds).await {
+        Ok(Some(human)) => human,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "keeping the record of an assistant; nothing it does counts for its human"
+            );
+            return;
+        }
+    };
+    mcp.with_assisting(human);
+    mcp.with_human_store(crate::mcp::jetstream_store(js.clone(), config.js_domain.clone()));
+    match assistant_sealing(config, creds, js, humans).await {
+        Ok(Some(sealing)) => mcp.with_sealing(std::sync::Arc::new(sealing)),
         Ok(None) => {}
-        Err(e) => tracing::warn!(
-            error = format!("{e:#}"),
-            "keeping the record of an assistant; nothing it does counts for its human"
-        ),
+        Err(e) => tracing::warn!(error = format!("{e:#}"), "opening and sealing none of the human's sealed messages"),
     }
+}
+
+/// What an assistant opens and seals its human's messages with: none without a sealing key beside its credentials
+/// at `creds`.
+async fn assistant_sealing(
+    config: &Config,
+    creds: &std::path::Path,
+    js: &async_nats::jetstream::Context,
+    humans: &Registry,
+) -> Result<Option<crate::sealing::AssistantSealing>> {
+    let Some(xkey) = crate::sealing::load_key(creds)? else { return Ok(None) };
+    let Some(account) = crate::humans::account(Some(creds)) else { return Ok(None) };
+    let directory = crate::devices::Directory::open(js, &account).await?;
+    Ok(Some(crate::sealing::AssistantSealing::new(config.ant.clone(), xkey, humans.clone(), directory)))
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
@@ -240,6 +270,9 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
     };
+    if !unsealed(config, &js, stop).await {
+        return Ok(Served::Stopped);
+    }
     let metrics = crate::metrics::ant(&config.ant);
     let workload = std::sync::Arc::new(roster::Workload::default());
     workload.set_paused(config.pause.get());
@@ -274,7 +307,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         Some(escalator.clone()),
     )
     .await?;
-    connect_mcp(&mut mcp, config, &client, &js, &redactor).await?;
+    connect_mcp(&mut mcp, config, &client, &js, &redactor, &humans).await?;
     let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
@@ -328,14 +361,29 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         fallback_retry: crate::fallback::RETRY_AFTER,
         identity: identity.as_ref(),
     };
-    let handed_over = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
+    let served = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     registration.deregister().await;
     pool.shutdown().await;
-    if handed_over {
-        return Ok(Served::HandedOver);
+    if served == Served::Stopped {
+        tracing::info!("stopped");
     }
-    tracing::info!("stopped");
-    Ok(Served::Stopped)
+    Ok(served)
+}
+
+/// Wait while the ant's identity record is marked moved, so no daemon starts a moved ant: false when `stop` comes
+/// first. A record that cannot be read does not keep the ant from being served.
+async fn unsealed(config: &Config, js: &jetstream::Context, stop: &Stop) -> bool {
+    let identity = match Identity::new(js, config.js_domain.as_ref(), &config.ant).await {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "reading the ant's identity for a move");
+            return true;
+        }
+    };
+    tokio::select! {
+        () = identity.unsealed(crate::identity::MOVED_EVERY) => true,
+        () = stopped(stop) => false,
+    }
 }
 
 /// Keep the ant's escalation chain past the roster, and return its identity record, created when absent: None when it
@@ -480,6 +528,7 @@ async fn connect_mcp(
     client: &async_nats::Client,
     js: &jetstream::Context,
     redactor: &std::sync::Arc<Redactor>,
+    humans: &Registry,
 ) -> Result<()> {
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
@@ -495,7 +544,7 @@ async fn connect_mcp(
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
-    assist(mcp, config, js).await;
+    assist(mcp, config, js, humans).await;
     Ok(())
 }
 
@@ -670,7 +719,8 @@ fn log_serving(config: &Config) {
     );
 }
 
-/// Serve the inbox, and the ant's watches beside it, until a stop or the hand-over: whether another daemon took over.
+/// Serve the inbox, and the ant's watches beside it, until a stop, the hand-over or the move: which one ended it. A
+/// hand-over or a move drains the ant as a first stop does.
 async fn serve_inbox<S, E>(
     inbox: &Inbox<'_>,
     messages: S,
@@ -679,7 +729,7 @@ async fn serve_inbox<S, E>(
     stop: &Stop,
     registration: &roster::Registration,
     storage: &crate::storage::Watcher,
-) -> Result<bool>
+) -> Result<Served>
 where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
     E: Display,
@@ -687,17 +737,27 @@ where
     let mut unserved =
         unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.roster.clone())
             .await?;
-    let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
-    // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
-    // only Ctrl-C or a stop request.
+    let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
+    // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
+    // the second only Ctrl-C or a stop request.
     let stop_or_hand_over = || {
         asked += 1;
-        let (first, stopping) = (asked == 1, &stopping);
+        let (first, stopping, moving) = (asked == 1, &stopping, &moving);
         async move {
+            let moved = async {
+                match inbox.identity {
+                    Some(identity) => identity.moved(crate::identity::MOVED_EVERY).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = stopped(stop) => stopping.set(true),
                 () = registration.lost(), if first => {
                     tracing::info!("another daemon took over the ant; taking no more messages");
+                }
+                () = moved, if first => {
+                    tracing::info!("the ant was moved to another bus; taking no more messages");
+                    moving.set(true);
                 }
             }
         }
@@ -714,7 +774,15 @@ where
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
-    Ok(registration.is_lost() && !stopping.get())
+    Ok(if stopping.get() {
+        Served::Stopped
+    } else if moving.get() {
+        Served::Moved
+    } else if registration.is_lost() {
+        Served::HandedOver
+    } else {
+        Served::Stopped
+    })
 }
 
 /// Ctrl-C, SIGTERM or a request on `stop`, whichever comes first.
@@ -2508,10 +2576,12 @@ impl Inbox<'_> {
         }
     }
 
-    /// The `[ants]` line telling that `envelope`, a human's message, answers a question the ant asked on the thread
-    /// ([`crate::questions::answer_line`]); none for any other message, which is prompted as an ordinary one.
+    /// The `[ants]` line telling that `envelope`, a human's message or one an assistant sent for its human, verified
+    /// on arrival, answers a question the ant asked on the thread ([`crate::questions::answer_line`]); none for any
+    /// other message, which is prompted as an ordinary one.
     async fn answer_line(&self, envelope: &Envelope, humans: &Humans) -> Option<String> {
-        if envelope.answer.is_none() || !envelope.sender_role(humans).is_human() {
+        let human = envelope.on_behalf_of.is_some() || envelope.sender_role(humans).is_human();
+        if envelope.answer.is_none() || !human {
             return None;
         }
         match crate::questions::asked(self.js, self.ant, envelope).await {

@@ -121,6 +121,7 @@ pub async fn request(
                             Some(reason) => bail!("the enrollment of {ant} was rejected: {reason}"),
                             None => bail!("the enrollment of {ant} was rejected"),
                         },
+                        EnrollReply::Retired { .. } => continue,
                     }
                 }
             }
@@ -354,6 +355,10 @@ impl Approver {
                     };
                     if let Err(e) = request.check_subject(&msg.subject) {
                         tracing::warn!("{e}");
+                        continue;
+                    }
+                    // `ants signer` answers those carrying an admin's order, with no human asked.
+                    if request.order.is_some() {
                         continue;
                     }
                     if let Err(e) = self.check(&request) {

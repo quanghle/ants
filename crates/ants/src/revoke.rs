@@ -114,6 +114,9 @@ pub struct Issued {
     /// The human an assistant's credentials make the ant the assistant of ([`ants_proto::AssistantOf`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_of: Option<ants_proto::UserId>,
+    /// The admin order that added the ant on its machine (`ants ant add`), which `ants signer` signed the key on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<ants_proto::Uuid>,
 }
 
 impl Issued {
@@ -139,6 +142,7 @@ impl Issued {
             withdrawn: None,
             admin: false,
             assistant_of: None,
+            order: None,
         })
     }
 

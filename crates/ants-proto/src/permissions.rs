@@ -808,8 +808,11 @@ impl Permissions {
     /// ([`subject::revoked_devices`]). It reads and writes every ant's shared settings in [`IDENTITIES_BUCKET`]
     /// ([`subject::all_shared_settings`]), creating those of the machine's ants and applying admin orders to them; any
     /// machine's host credentials may write any ant's. It hears its own replies under [`host_inbox_prefix`], apart from
-    /// every user's. Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or
-    /// from an ant. No ant gets any of it.
+    /// every user's. Carrying out an order to add or retire an ant, it asks `ants signer` with an enrollment request
+    /// carrying the order ([`subject::enroll`], [`EnrollRequest::order`](crate::EnrollRequest::order)) and hears the
+    /// answers ([`subject::ALL_ENROLL_REPLIES`]), and reads the roster by direct gets to see a retired ant stopped.
+    /// Nothing else: no other machine's record or outcomes, no ant's identity record, no message to or from an ant. No
+    /// ant gets any of it.
     pub fn for_host(machine: &Machine) -> Self {
         let record = subject::machine_record(machine);
         let consumer = admin_consumer(machine);
@@ -825,9 +828,12 @@ impl Permissions {
             format!("$JS.API.CONSUMER.INFO.{STREAM}.{consumer}"),
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{consumer}.{}", subject::admin_orders(machine)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{consumer}"),
+            format!("$JS.API.DIRECT.GET.{}.$KV.{ROSTER_BUCKET}.*", kv_stream(ROSTER_BUCKET)),
+            subject::ALL_ENROLL_REQUESTS.to_owned(),
         ];
         publish.extend(ack_subjects(STREAM, &consumer));
-        Self { publish, subscribe: vec![format!("{}.>", host_inbox_prefix(machine))] }
+        let subscribe = vec![format!("{}.>", host_inbox_prefix(machine)), subject::ALL_ENROLL_REPLIES.to_owned()];
+        Self { publish, subscribe }
     }
 
     /// What the credentials of the channel manager (`ants channel serve`) allow: hearing every channel management
