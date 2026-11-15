@@ -12,7 +12,8 @@
 //! The signer answers ants' reactions requests as well ([`reactions::serve`]): an ant's credentials neither read nor
 //! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
 //! ant's own, once it found the ant reads the message. It also registers humans' devices after a GitHub sign-in, and
-//! renews the credentials such registrations granted ([`crate::registrar`]).
+//! renews the credentials such registrations granted ([`crate::registrar`]), and answers the enrollment requests a
+//! machine's daemon sends carrying an admin's order to add or retire an ant there ([`ordered`]).
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
@@ -40,6 +41,8 @@ use nkeys::KeyPair;
 use crate::enroll::{Approver, Leaf};
 use crate::registrar::{self, Registrar};
 use crate::{auth, members, outbox, revoke};
+
+mod ordered;
 
 /// Most requests of one manager waiting for a human at once; more are refused.
 pub const MAX_WAITING: usize = 3;
@@ -141,12 +144,14 @@ pub async fn serve(
 ) -> Result<()> {
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
     let mut registrar = Registrar::new(url, dir, options.config, js_domain, options.approval_timeout, registrar::print);
+    let mut ordered = ordered::Ordered::default();
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
         let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
         let mut logins = approver.client.subscribe(subject::ALL_LOGIN_REQUESTS).await?;
         let mut renewals = approver.client.subscribe(subject::ALL_RENEW_REQUESTS).await?;
+        let mut enrollments = approver.client.subscribe(subject::ALL_ENROLL_REQUESTS).await?;
         let answering = reactions::serve(
             approver.client.clone(),
             approver.hub().clone(),
@@ -175,6 +180,10 @@ pub async fn serve(
                 msg = renewals.next() => {
                     let msg = msg.context("the NATS connection closed")?;
                     registrar.renewal(&approver, &msg).await?;
+                }
+                msg = enrollments.next() => {
+                    let msg = msg.context("the NATS connection closed")?;
+                    ordered.heard(&approver, url, &msg).await?;
                 }
                 update = registrar.next() => registrar.progressed(&approver, update).await?,
                 _ = ticks.tick() => {

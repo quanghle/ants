@@ -2,6 +2,9 @@
 //! for its outcome, which the daemon of the ant's machine records ([`AdminOutcome`]); and listing the orders to an ant
 //! with where each stands (`ants ant orders`).
 
+pub mod add;
+pub mod retire;
+
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -108,6 +111,19 @@ async fn sent(
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// What a command says of `order` still pending when it stopped waiting.
+fn pending_note(order: &AdminOrder) -> String {
+    format!(
+        "order {} sent; the daemon of {} has not decided it yet: `ants ant orders {}` shows its outcome",
+        order.id, order.machine, order.ant
+    )
+}
+
+/// Why the daemon refused an order, as its outcome says.
+fn reason(outcome: &AdminOutcome) -> &str {
+    outcome.reason.as_deref().unwrap_or("no reason given")
 }
 
 /// Publish `order` to the hub's stream, as message id its id, and wait until the stream stored it.
@@ -290,7 +306,7 @@ pub(crate) mod tests {
 
     pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
-    fn p(s: &str) -> UserId {
+    pub(super) fn p(s: &str) -> UserId {
         s.parse().unwrap()
     }
 

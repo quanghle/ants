@@ -118,6 +118,8 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         remote: host.remote_admin,
         accounts,
         config: host.config.clone(),
+        creds: host.creds.clone(),
+        js_domain: host.js_domain.clone(),
         restarts: host.restarts.clone(),
     };
     tokio::select! {

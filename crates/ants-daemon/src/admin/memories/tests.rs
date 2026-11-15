@@ -179,6 +179,8 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
         accounts: vec![],
         config: Some(config),
         restarts: Restarts::default(),
+        creds: None,
+        js_domain: None,
     };
     let order = |ant: &str| {
         AdminOrder::new(

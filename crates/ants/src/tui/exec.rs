@@ -135,6 +135,10 @@ pub enum Job {
         job: Box<Job>,
         files: Rc<[File]>,
     },
+    /// Retire `ant` by admin order, as `ants ant retire` does.
+    Retire {
+        ant: UserId,
+    },
 }
 
 /// What a job did.
@@ -285,6 +289,7 @@ impl Job {
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
             }
+            Self::Retire { ant } => retire(ctx, &ant).await,
             Self::Pause { ant, paused } => {
                 let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
                 Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
@@ -292,6 +297,13 @@ impl Job {
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }
     }
+}
+
+/// Retire `ant` by admin order, as `ants ant retire` does.
+async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
+    let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+    let said = crate::orders::retire::retire(admin, &ctx.js, ant, None, crate::orders::retire::WAIT).await?;
+    Ok(Done::line(said.replace('\n', " ")))
 }
 
 /// The warning for a message kept in the leaf node's outbox.

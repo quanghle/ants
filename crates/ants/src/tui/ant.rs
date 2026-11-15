@@ -91,9 +91,9 @@ pub struct Page {
 
 impl Page {
     pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask \
-                                    · w work · r restart · p pause/resume · Esc back";
+                                    · w work · r restart · p (un)pause · X retire · Esc back";
     pub const QUEUE_KEYS: &str =
-        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p pause/resume · Esc back";
+        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, cancelling the \
                                   prompts · any other key keeps them";
 
@@ -163,6 +163,7 @@ impl Page {
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
             Key::Char('p') => {
                 let paused = data.live.roster.iter().any(|e| e.ant == self.ant && e.paused.is_some());
                 let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
