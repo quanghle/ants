@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::bus;
@@ -45,24 +45,59 @@ pub async fn send(
     op: AdminOp,
     wait: Duration,
 ) -> Result<(AdminOrder, Option<AdminOutcome>)> {
-    let creds = admin_creds(nats)?;
-    let (jwt, key) = auth::read_creds(creds)?;
-    let (_, claims) = ants_proto::verified_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
-    let tags = claims["nats"]["tags"].as_array().map_or(&[][..], Vec::as_slice);
-    if !tags.iter().any(|tag| tag.as_str() == Some(ADMIN_TAG)) {
-        bail!(
-            "the credentials of {} carry no admin role: `ants auth user NAME --human --admin` issues them",
-            nats.me.id
-        );
+    Admin::of(nats)?.send(js, machine, ant, op, wait).await
+}
+
+/// The admin whose device credentials sign the orders it sends, apart from the connection that sends them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admin {
+    pub id: UserId,
+    creds: PathBuf,
+}
+
+impl Admin {
+    /// The human of `nats`, if its credentials are a device's.
+    pub fn of(nats: &Nats<'_>) -> Result<Self> {
+        Ok(Self { id: nats.me.id.clone(), creds: admin_creds(nats)?.to_owned() })
     }
-    let machine = match machine {
-        Some(machine) => machine,
-        None => machines::machines_of(js, ant).await?.into_iter().next().with_context(|| {
-            format!("no machine recorded serving {ant}: its daemon records it once it runs with host credentials")
-        })?,
-    };
-    let mut order = AdminOrder::new(nats.me.id.clone(), machine, ant.clone(), op, jwt);
-    order.signature = auth::sign(&key, &order.signed())?;
+
+    /// [`send`] with these credentials.
+    pub async fn send(
+        &self,
+        js: &jetstream::Context,
+        machine: Option<Machine>,
+        ant: &UserId,
+        op: AdminOp,
+        wait: Duration,
+    ) -> Result<(AdminOrder, Option<AdminOutcome>)> {
+        let creds = &self.creds;
+        let (jwt, key) = auth::read_creds(creds)?;
+        let (_, claims) = ants_proto::verified_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
+        let tags = claims["nats"]["tags"].as_array().map_or(&[][..], Vec::as_slice);
+        if !tags.iter().any(|tag| tag.as_str() == Some(ADMIN_TAG)) {
+            bail!(
+                "the credentials of {} carry no admin role: `ants auth user NAME --human --admin` issues them",
+                self.id
+            );
+        }
+        let machine = match machine {
+            Some(machine) => machine,
+            None => machines::machines_of(js, ant).await?.into_iter().next().with_context(|| {
+                format!("no machine recorded serving {ant}: its daemon records it once it runs with host credentials")
+            })?,
+        };
+        let mut order = AdminOrder::new(self.id.clone(), machine, ant.clone(), op, jwt);
+        order.signature = auth::sign(&key, &order.signed())?;
+        sent(js, order, wait).await
+    }
+}
+
+/// Publish the signed `order` and wait up to `wait` for its outcome.
+async fn sent(
+    js: &jetstream::Context,
+    order: AdminOrder,
+    wait: Duration,
+) -> Result<(AdminOrder, Option<AdminOutcome>)> {
     publish(js, &order).await?;
     let started = tokio::time::Instant::now();
     loop {
@@ -244,6 +279,7 @@ fn table(orders: &[Listed], now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use ants_daemon::admin::ConfigFile;
+    use ants_daemon::admin::restart::{Restarted, Restarts};
     use ants_daemon::direct_kv::DirectKv;
     use ants_daemon::host::{self, Host};
     use ants_proto::{FieldChange, MACHINES_BUCKET, Permissions, Role};
@@ -267,10 +303,21 @@ mod tests {
         remote: bool,
         config: Option<ConfigFile>,
     ) -> (tokio::sync::watch::Sender<Vec<UserId>>, tokio::task::JoinHandle<Result<()>>) {
+        host_of_m1_serving(server, js, remote, config, Restarts::default()).await
+    }
+
+    /// [`host_of_m1`], of a process serving the ants `restarts` holds.
+    async fn host_of_m1_serving(
+        server: &Server,
+        js: &jetstream::Context,
+        remote: bool,
+        config: Option<ConfigFile>,
+        restarts: Restarts,
+    ) -> (tokio::sync::watch::Sender<Vec<UserId>>, tokio::task::JoinHandle<Result<()>>) {
         let creds = server.dir().join("host-m1.creds");
         issue_host(&server.dir().join("auth"), &"m1".parse().unwrap(), None, &creds).unwrap();
         let (url, creds) = (server.url.clone(), Some(creds));
-        let host = Host { machine: None, nats: url, creds, js_domain: None, remote_admin: remote, config };
+        let host = Host { machine: None, nats: url, creds, js_domain: None, remote_admin: remote, config, restarts };
         let (ants, watched) = tokio::sync::watch::channel(vec![p("dev-a")]);
         let task = tokio::spawn(host::run(host, watched));
         tokio::time::timeout(WAIT, async {
@@ -375,6 +422,53 @@ mod tests {
         let (_, off) = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
         let off = off.expect("the daemon decides at once");
         assert_eq!((off.state, off.reason.as_deref()), (OrderState::Refused, Some(ants_daemon::admin::REMOTE_OFF)));
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// A restart order reaches the daemon serving the ant, whose outcome tells what it stopped; one to an ant the
+    /// machine does not serve is refused.
+    #[tokio::test]
+    async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let admin_creds = server.dir().join("alice-admin.creds");
+        let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human);
+        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+        let admin = crate::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let (_, js) = admin.connect("test").await.unwrap();
+        let restarts = Restarts::default();
+        let (ants, task) = host_of_m1_serving(&server, &js, true, None, restarts.clone()).await;
+        let restart = AdminOp::Restart { now: true };
+
+        let (_, refused) = send(&admin, &js, None, &dev_a, restart.clone(), WAIT).await.unwrap();
+        let refused = refused.expect("the daemon decides at once");
+        assert_eq!(
+            (refused.state, refused.reason.as_deref()),
+            (OrderState::Refused, Some("machine m1 serves no ant dev-a"))
+        );
+
+        let _served = restarts.serve(&dev_a);
+        let mut listening = restarts.listen(&dev_a);
+        let daemon = async {
+            let request = listening.next().await;
+            assert_eq!((&request.by, request.now), (&alice, true));
+            request.done.send(Restarted { stopped: 1, after_prompt: 1, cancelled: 1 }).unwrap();
+        };
+        let (sent, ()) = tokio::join!(send(&admin, &js, None, &dev_a, restart, WAIT), daemon);
+        let (order, applied) = sent.unwrap();
+        let applied = applied.expect("the daemon decides once the restart is under way");
+        assert_eq!((applied.state, applied.reason.as_deref()), (OrderState::Applied, None));
+        let told = crate::restart::told(&order, Some(applied)).unwrap();
+        assert_eq!(
+            told,
+            "restarting dev-a on m1: 1 idle harness stopped, 1 working stops once the prompt ends (1 cancelled)"
+        );
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }

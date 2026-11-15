@@ -163,6 +163,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         sealing: sealing.clone(),
         account: nats.account.clone(),
         keyring: feed.keyring(),
+        admin: crate::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));

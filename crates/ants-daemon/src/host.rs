@@ -33,6 +33,8 @@ pub struct Host {
     pub remote_admin: bool,
     /// The config file the daemon serves whole, which admin orders edit; none refuses those.
     pub config: Option<admin::ConfigFile>,
+    /// The ants the process serves, which restart their harnesses on an admin order.
+    pub restarts: admin::restart::Restarts,
 }
 
 static OFF_TOLD: AtomicBool = AtomicBool::new(false);
@@ -57,7 +59,15 @@ impl Host {
             }
             return None;
         }
-        Some(Self { machine, nats, creds, js_domain, remote_admin: true, config: None })
+        Some(Self {
+            machine,
+            nats,
+            creds,
+            js_domain,
+            remote_admin: true,
+            config: None,
+            restarts: admin::restart::Restarts::default(),
+        })
     }
 }
 
@@ -103,8 +113,13 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
     let machine = machine_of(host.machine.as_ref(), host.creds.as_deref(), &hostname)?;
     let accounts = host.creds.as_deref().map(creds::account).transpose()?.into_iter().collect();
     let Some(js) = connect(&host, &machine).await? else { return Ok(()) };
-    let orders =
-        admin::Orders { machine: machine.clone(), remote: host.remote_admin, accounts, config: host.config.clone() };
+    let orders = admin::Orders {
+        machine: machine.clone(),
+        remote: host.remote_admin,
+        accounts,
+        config: host.config.clone(),
+        restarts: host.restarts.clone(),
+    };
     tokio::select! {
         recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
