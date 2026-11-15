@@ -440,7 +440,7 @@ mod tests {
         let [listed] = &entries[1].attachments[..] else { panic!("{entries:?}") };
         assert!(listed.attachment.sealed.is_some(), "{listed:?}");
         assert_eq!((listed.attachment.name.as_str(), listed.size()), ("menu.txt", 4));
-        let (stored, _) = attachments::fetch(&bob_js, &listed.handle, None).await.unwrap();
+        let (stored, _) = attachments::fetch(&bob_js, &listed.handle, None, None).await.unwrap();
         assert_eq!(stored.name, ants_proto::SealedAttachment::STORED_NAME, "stored sealed");
         let path = attach::fetched(&bob_js, Some(&keyring), listed).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"soup");
@@ -504,7 +504,8 @@ mod tests {
         let entries = thread::history(&js, &thread, None, false, None).await.unwrap();
         let [listed] = &entries[0].attachments[..] else { panic!("{entries:?}") };
         assert_eq!(listed.attachment, files[0].attachment);
-        let (_, bytes) = attachments::fetch(&js, &listed.handle, Some(&listed.attachment)).await.unwrap();
+        let (_, bytes) =
+            attachments::fetch(&js, &listed.handle, Some(&listed.attachment), listed.stored).await.unwrap();
         assert_eq!(bytes, b"# plan");
     }
 }

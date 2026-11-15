@@ -343,7 +343,7 @@ impl Parser {
             note,
             text,
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
-            attachments: attachments::listed_on(subject, &e.attachments),
+            attachments: attachments::stored_on(subject, &e.attachments, stored_at),
             forged,
             stuck: e.escalation.as_ref().map(|x| x.stuck.clone()),
             sealed,
@@ -371,7 +371,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
-                attachments: attachments::listed_on(subject, &post.attachments),
+                attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
@@ -390,7 +390,7 @@ impl Parser {
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
             return Some(Entry {
-                attachments: attachments::listed_on(subject, &post.attachments),
+                attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
                 note,
