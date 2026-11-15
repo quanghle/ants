@@ -1,0 +1,11 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "since": "2025-01-01T12:00:00Z",
+  "counts": {
+    "approval": 2,
+    "completion": 1
+  }
+}

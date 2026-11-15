@@ -139,8 +139,9 @@ pub const READ_BUCKET: &str = "ants_read";
 pub const PRESENCE_BUCKET: &str = "ants_presence";
 /// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
-/// webhook serve` before each notice. Each human reads and writes only its own key ([`Permissions::for_user`]); entries
-/// never expire, what they hold ends at the deadlines it carries.
+/// webhook serve` before each notice; and of what a snooze or quiet hours held back from it ([`HeldNotices`]), keyed by
+/// [`held_key`], for the digest `ants webhook serve` sends when they end. Each human reads and writes only its own keys
+/// ([`Permissions::for_user`]); entries never expire, what they hold ends at the deadlines it carries.
 pub const NOTIFY_BUCKET: &str = "ants_notify";
 /// KV bucket of the reactions to messages: one [`ReactionEntry`] per reactor, message and reaction, keyed by
 /// [`reaction_key`]. Each user writes, and deletes, only its own keys ([`Permissions::for_user`]), a human's devices sharing

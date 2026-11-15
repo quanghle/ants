@@ -11,8 +11,9 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, EnrollRequest, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate, channel_manager_serving_key,
-    daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate,
+    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
+    thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -60,16 +61,19 @@ fn presence_rights(human: &UserId) -> [String; 3] {
 }
 
 /// What a human's credentials need to hold back its notifications ([`NOTIFY_BUCKET`]): creating the bucket and reading
-/// and writing its own [`NotifyPrefs`] only, by key, so no human snoozes or mutes another's; `ants webhook serve`
-/// reads them with the human's own credentials.
-fn notify_prefs_rights(human: &UserId) -> [String; 4] {
+/// and writing its own [`NotifyPrefs`] and [`HeldNotices`] only, by key, so no human snoozes or mutes another's;
+/// `ants webhook serve` reads them, and counts and claims the held notices, with the human's own credentials.
+fn notify_prefs_rights(human: &UserId) -> [String; 6] {
     let notify = kv_stream(NOTIFY_BUCKET);
     let prefs = subject::notify_prefs(human);
+    let held = subject::notify_held(human);
     [
         format!("$JS.API.STREAM.INFO.{notify}"),
         format!("$JS.API.STREAM.CREATE.{notify}"),
         format!("$JS.API.DIRECT.GET.{notify}.{prefs}"),
         prefs,
+        format!("$JS.API.DIRECT.GET.{notify}.{held}"),
+        held,
     ]
 }
 
@@ -169,8 +173,8 @@ impl Permissions {
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
-    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications
-    /// ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
+    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
+    /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
     /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it

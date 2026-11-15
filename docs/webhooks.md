@@ -72,6 +72,7 @@ completions = true                            # ants' replies to alice (default 
 quiet = "22:00-07:00"                         # optional local quiet window (start inclusive, end exclusive)
 timezone = "America/New_York"                 # optional per-human zone (requires `quiet`)
 bypass = ["approvals"]                        # optional kinds bypassing quiet hours and snooze: approvals, escalations
+digest = true                                 # one digest of the held notices when quiet hours or snooze end (default false)
 ```
 
 - **Delivery & presence:** each human reads shared durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so multiple `ants webhook serve` instances send each notice once (skipping decided/expired/forged requests and escalations > 24 h old). Sinks with `device = "<id>"` (`ants auth devices alice`) skip notices while that device records active presence in `ants_presence` (`ants tools list -f`, `ants dash`, or `ants inbox -f` without `--thread`/`--json` for approvals; `ants inbox -f` without `--thread` for escalations and completions). Unreadable presence defaults to away.
@@ -93,10 +94,12 @@ All sinks run concurrently within `timeout` (`1s`–`30s`, default `10s`); failu
 
 Held notices for approvals, escalations and completions are dropped (logged as `held back a notice`, leaving requests pending and inbox messages unread); unserved-ant notices (`unserved`) wait until quiet hours or snooze end. `bypass` never overrides a muted thread.
 
+- **Digest:** with `digest = true`, each approval, escalation or completion held back by quiet hours or a snooze (not by a mute) is counted per kind in KV `ants_notify` under `held.<human>` (`{since, counts}`), with compare-and-set by whichever instance took it. Once neither quiet hours nor a snooze hold (checked every minute and before the next notice sent, so `ants notify resume` ends one early), one instance claims the count by deleting it at the revision it read and sends a single `digest` notice to every sink: the counts per kind since the first held notice, and the tool requests still pending (up to 10 in the text, all in the [JSON notice](#json-notice)). The count survives restarts and is shared by every instance listing the human, which should all set `digest` alike; a digest is sent at most once, a lost one is not retried, and nothing is marked read or decided. Credentials issued before digests send none and log the renewal command.
+
 - **Snooze:** `ants notify snooze DUR` (`1s`–`365d`), `ants notify resume`, `ants notify status [--json]`.
 - **Thread mute:** `ants thread mute THREAD [--for DUR]` (default `30d`) and `ants thread unmute THREAD`.
 
-Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted}`), updated via CAS across devices and read by direct get before each notice.
+Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted}`), updated via CAS across devices and read by direct get before each notice; the digest's count lives beside them under `held.<human>`.
 
 ### Approve and reject links
 
@@ -109,10 +112,11 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | Field | Kinds | Meaning |
 |---|---|---|
 | `version` | all | `1` |
-| `kind` | all | `approval`, `escalation`, `completion`, `unserved`, or `test` |
-| `id` | all | Request ID, message ID, first waiting message ID, or fresh test UUID (deduplicate on `(kind, id)`) |
+| `kind` | all | `approval`, `escalation`, `completion`, `unserved`, `digest`, or `test` |
+| `id` | all | Request ID, message ID, first waiting message ID, or fresh digest or test UUID (deduplicate on `(kind, id)`) |
 | `human`, `title`, `text`, `urgent`, `sent_at`, `links` | all | Target human, formatted notice, urgency (`true` for `approval`), RFC 3339 UTC timestamp, `{verdict, label, url}[]` |
 | `ant`, `thread` | `approval`, `escalation`, `completion` | Source ant and thread ID to answer on |
 | `request`, `seq`, `tool`, `options`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, RFC 3339 expiry |
 | `reason`, `stuck`, `level` | `escalation` | Escalation reason, stuck ant, chain level (`0` = direct) |
 | `ant`, `messages` | `unserved` | Unserved ant and waiting message UUIDs |
+| `since`, `counts`, `pending` | `digest` | RFC 3339 time of the first held notice, `{kind: n}` held back per kind, `{request, ant, thread, title, expires_at}[]` of the tool requests still pending (`urgent` when any) |

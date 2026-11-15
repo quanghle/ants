@@ -214,6 +214,13 @@ fn kv_entries() {
         },
     );
     snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted: BTreeMap::from([(thread(), at(45))]) });
+    snap(
+        "held_notices",
+        &HeldNotices {
+            since: at(0),
+            counts: BTreeMap::from([("approval".to_owned(), 2), ("completion".to_owned(), 1)]),
+        },
+    );
     snap("following_variants", &[Following::Inbox, Following::Approvals]);
     snap("presence", &Presence { human: user("alice"), device: device(), following: Following::Inbox, since: at(0) });
 }

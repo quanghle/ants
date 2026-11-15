@@ -516,6 +516,23 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
 }
 
 #[test]
+fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$KV.ants_notify.alice",
+        "$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.alice",
+        "$KV.ants_notify.held.alice",
+        "$JS.API.DIRECT.GET.KV_ants_notify.$KV.ants_notify.held.alice",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let notify: Vec<&String> = human.publish.iter().filter(|s| s.contains("$KV.ants_notify")).collect();
+    assert!(notify.iter().all(|s| s.ends_with(".alice") && !s.contains('*') && !s.contains('>')), "{notify:?}");
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert!(!ant.publish.iter().any(|s| s.contains("ants_notify")));
+}
+
+#[test]
 fn humans_set_every_title_but_only_their_own_pins_and_archives_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
