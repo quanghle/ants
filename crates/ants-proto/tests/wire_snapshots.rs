@@ -604,6 +604,11 @@ fn enrollment() {
             signature: "c2lnLWVucm9sbA".to_owned(),
             leaf: Some(enroll_leaf()),
             order: None,
+            host_creds: Some(EnrollHost {
+                machine: machine(),
+                public_key: "UHOST".to_owned(),
+                signature: "c2lnLWhvc3Q".to_owned(),
+            }),
         },
     );
     snap("enroll_leaf", &enroll_leaf());
@@ -615,6 +620,7 @@ fn enrollment() {
                 public_key: "UABC".to_owned(),
                 jwt: "eyJ0eXAiOiJKV1QifQ.user".to_owned(),
                 leaf_jwt: Some("eyJ0eXAiOiJKV1QifQ.leaf".to_owned()),
+                host_jwt: Some("eyJ0eXAiOiJKV1QifQ.host".to_owned()),
             },
             EnrollReply::Rejected {
                 ant: user("dev-a"),

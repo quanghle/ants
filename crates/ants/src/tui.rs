@@ -180,7 +180,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let memories = memories::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
-        credentials::Io::new(nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
+        credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;

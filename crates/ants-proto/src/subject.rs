@@ -355,6 +355,11 @@ pub fn machine_record(machine: &Machine) -> String {
     format!("$KV.{}.{machine}", super::MACHINES_BUCKET)
 }
 
+/// Where `ants signer` puts the record of the machine holding the team's account key ([`super::AccountHolder`]).
+pub fn account_holder() -> String {
+    format!("$KV.{}.{}", super::MACHINES_BUCKET, super::ACCOUNT_HOLDER_KEY)
+}
+
 /// Every admin order to the ants of `machine`, `ants.admin.<machine>.<ant>`, which the machine's daemon takes from the
 /// stream with its host credentials ([`super::admin_consumer`]).
 pub fn admin_orders(machine: &Machine) -> String {

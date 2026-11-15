@@ -1,15 +1,16 @@
 //! `ants add`: list an ant in the machine's config file and give it credentials, its user NKey generated
 //! here and its seed kept here, in a file or, with `--store-key`, in the OS credential store only ([`keys`]). The
 //! account key signs the public key elsewhere: out of band with `ants auth user NAME --public-key` and `--jwt`, or
-//! over NATS with `--enroll` and `ants enroll approve`.
+//! over NATS with `--enroll` and `ants enroll approve`. Over NATS, a machine without host credentials asks for its
+//! own too ([`HostPlan`]).
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use ants_daemon::config::{self, Ant, Summary};
+use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::creds::{self, Seed};
 use ants_daemon::keystore::{self, Store};
-use ants_proto::{ENROLL_REPEAT, JsDomain, UserId};
+use ants_proto::{ENROLL_REPEAT, JsDomain, Machine, UserId};
 use anyhow::{Context as _, Result, bail};
 use nkeys::KeyPair;
 
@@ -80,6 +81,8 @@ pub(crate) struct Listing {
     pub entry: Option<(Ant, String)>,
     /// The harness it runs: its own, else the file's top-level one.
     pub harness: Option<String>,
+    /// The file's `[host]` settings, for the host credentials an enrollment asks for too.
+    host: HostSettings,
 }
 
 /// Check `ants add` of `args` before anything is written: the ant's new entry, from `base` with the flags' settings
@@ -105,7 +108,7 @@ pub(crate) fn listing(args: &AddArgs, base: Ant, nats: &str, js_domain: Option<&
         None => Some(entry(args, base, &summary, &out, nats, js_domain)?),
     };
     let harness = entry.as_ref().and_then(|(ant, _)| ant.harness.clone()).or_else(|| summary.harness.clone());
-    Ok(Listing { path, out, entry, harness })
+    Ok(Listing { path, out, entry, harness, host: summary.host })
 }
 
 /// Give the ant of `listing` its credentials, then list it in the config file if new there.
@@ -123,7 +126,7 @@ pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, s
         }
         (None, Some(enrollment)) => {
             url = args.hub.as_deref().unwrap_or(nats);
-            let (jwt, renewed) = enrolled(args, enrollment, url, &user, &public_key).await?;
+            let (jwt, renewed) = enrolled(args, &listing.host, enrollment, url, &user, &public_key).await?;
             uplink = renewed;
             Some(jwt)
         }
@@ -168,10 +171,12 @@ fn creds_out(args: &AddArgs, listed: Option<Option<&Path>>, path: &Path) -> Resu
 /// configuration file.
 type Uplink = (bool, enroll::Leaf, PathBuf);
 
-/// Ask over NATS at `url` for the credentials of the ant holding `user`: the user JWT approved, and the uplink
-/// renewed with it.
+/// Ask over NATS at `url` for the credentials of the ant holding `user`, and for the machine's host credentials when
+/// the config file's `[host]` settings `host` find none: the user JWT approved, and the uplink renewed with it. Host credentials
+/// granted too are written where the daemon looks for them.
 async fn enrolled(
     args: &AddArgs,
+    host_settings: &HostSettings,
     enrollment: &Path,
     url: &str,
     user: &KeyPair,
@@ -181,18 +186,90 @@ async fn enrolled(
     let mut uplink = None;
     let leaf = leaf_node(args.leaf_config.as_deref())?;
     let through = leaf.as_ref().map_or_default(|(_, l)| format!(" through the leaf node of {}", l.machine));
+    let plan = HostPlan::new(
+        host_settings,
+        leaf.as_ref().map(|(_, l)| &l.machine),
+        &ants_daemon::roster::machine().await,
+        auth::default_dir()?.join("host.creds"),
+    );
+    let host = match plan {
+        HostPlan::Have => None,
+        HostPlan::Conflict(why) => {
+            eprintln!("not asking for host credentials: {why}");
+            None
+        }
+        HostPlan::Ask(machine, out) => {
+            let seed = seed_path(&out);
+            let key = if seed.exists() { auth::read_seed(&seed)? } else { KeyPair::new_user() };
+            auth::write_seed(&seed, &key)?;
+            Some((enroll::HostAsk { machine, key }, out))
+        }
+    };
+    let host_creds = host.as_ref().map_or_default(|(h, _)| format!(" and the host credentials of {}", h.machine));
     eprintln!(
-        "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
+        "asking for the credentials of {name} ({public_key}){host_creds}{through}; approve with `ants enroll approve \
+         {name}`"
     );
     let stop = async {
         let _ = tokio::signal::ctrl_c().await;
     };
+    let leaf_asked = leaf.as_ref().map(|(_, l)| l);
+    let host_asked = host.as_ref().map(|(h, _)| h);
     let approval =
-        enroll::request(url, enrollment, name, user, leaf.as_ref().map(|(_, l)| l), ENROLL_REPEAT, stop).await?;
+        enroll::request_with(url, enrollment, name, user, leaf_asked, host_asked, ENROLL_REPEAT, stop).await?;
     if let (Some((conf, leaf)), Some(renewed)) = (leaf, approval.leaf_jwt) {
         uplink = Some((renew_uplink(&leaf, &renewed)?, leaf, conf));
     }
+    if let Some((host, out)) = &host {
+        match &approval.host_jwt {
+            Some(jwt) => {
+                auth::write_creds(out, jwt, &host.key)?;
+                println!("host credentials of {} in {}", host.machine, out.display());
+            }
+            None => println!(
+                "host credentials of {} not granted; issue them with `ants auth host {}` on the machine holding the \
+                 account key if this machine needs them",
+                host.machine, host.machine
+            ),
+        }
+        let seed = seed_path(out);
+        std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
+    }
     Ok((approval.jwt, uplink))
+}
+
+/// Whether `ants add --enroll` asks for the machine's host credentials too.
+#[derive(Debug, PartialEq, Eq)]
+enum HostPlan {
+    /// The machine has some.
+    Have,
+    /// For the machine, written to the path once granted, its seed waiting beside them as `<name>.nk`.
+    Ask(Machine, PathBuf),
+    /// Not, as the machine's name is in doubt, for this reason.
+    Conflict(String),
+}
+
+impl HostPlan {
+    /// What to ask for, with the file's `host` settings, behind the leaf node of `leaf` if there is one, on the
+    /// machine of host name `hostname`: the host credentials of the `[host]` table's `machine`, else the leaf's, else
+    /// the host name's first label, written to the table's `creds`, else `default_out`; nothing when the credentials
+    /// the daemon would use exist, or when the table names another machine than the leaf's.
+    fn new(host: &HostSettings, leaf: Option<&Machine>, hostname: &str, default_out: PathBuf) -> Self {
+        if host.creds.as_deref().is_some_and(Path::is_file) {
+            return Self::Have;
+        }
+        let machine = match (&host.machine, leaf) {
+            (Some(named), Some(leaf)) if named != leaf => {
+                return Self::Conflict(format!(
+                    "the [host] table names the machine {named}, and its leaf node is the one of {leaf}"
+                ));
+            }
+            (Some(named), _) => named.clone(),
+            (None, Some(leaf)) => leaf.clone(),
+            (None, None) => Machine::from_hostname(hostname),
+        };
+        Self::Ask(machine, host.creds.clone().unwrap_or(default_out))
+    }
 }
 
 /// Complete the credentials at `out` with `jwt`: the seed in the OS credential store when `stored`, proven at `url`,
@@ -334,6 +411,33 @@ pub(crate) fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Renew the uplink credentials of the leaf node configured at `conf` with `renewed` ([`renew_uplink`]) and have the
+/// node connect its uplink again with them, by a reload keeping local connections ([`leaf::reconnect_uplink`]): what
+/// came of it, or None when the credentials changed meanwhile and were left as they are. Blocks while the leaf node's
+/// service reloads.
+pub(crate) fn renew_and_reconnect(conf: &Path, renewed: &str) -> Result<Option<String>> {
+    renew_and_apply(conf, renewed, |action| Services::local().apply(Service::Nats, action, conf))
+}
+
+/// [`renew_and_reconnect`], `apply` reloading the leaf node.
+pub(crate) fn renew_and_apply(
+    conf: &Path,
+    renewed: &str,
+    apply: impl FnOnce(Action) -> Outcome,
+) -> Result<Option<String>> {
+    let (machine, creds) = leaf::read_uplink(conf)?;
+    if !renew_uplink(&enroll::Leaf { machine, creds }, renewed)? {
+        return Ok(None);
+    }
+    let said = leaf::reconnect_uplink(conf, apply).unwrap_or_else(|e| {
+        format!(
+            "{e:#}; a human restarts the leaf node to use them ({})",
+            crate::service::manual(Service::Nats, Action::Restart)
+        )
+    });
+    Ok(Some(said))
+}
+
 /// Where the seed waits for its JWT: beside the credentials, as `<name>.nk`.
 pub(crate) fn seed_path(creds: &Path) -> PathBuf {
     creds.with_extension("nk")
@@ -436,6 +540,28 @@ fn check_jwt(jwt: &str, ant: &UserId, public_key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_without_host_credentials_asks_for_those_of_its_name() {
+        let dir = ants_test_support::scratch_dir("add-host-plan");
+        let out = dir.join("host.creds");
+        let m = |s: &str| s.parse::<Machine>().unwrap();
+        let none = HostSettings::default();
+        assert_eq!(HostPlan::new(&none, None, "box.lan", out.clone()), HostPlan::Ask(m("box"), out.clone()));
+        assert_eq!(HostPlan::new(&none, Some(&m("m1")), "box.lan", out.clone()), HostPlan::Ask(m("m1"), out.clone()));
+        let named =
+            HostSettings { machine: Some(m("m1")), creds: Some(dir.join("h.creds")), ..HostSettings::default() };
+        assert_eq!(HostPlan::new(&named, None, "box", out.clone()), HostPlan::Ask(m("m1"), dir.join("h.creds")));
+        assert_eq!(
+            HostPlan::new(&named, Some(&m("m1")), "box", out.clone()),
+            HostPlan::Ask(m("m1"), dir.join("h.creds"))
+        );
+        let HostPlan::Conflict(why) = HostPlan::new(&named, Some(&m("m2")), "box", out.clone()) else { panic!() };
+        assert!(why.contains("names the machine m1") && why.contains("the one of m2"), "{why}");
+        std::fs::write(dir.join("h.creds"), "").unwrap();
+        assert_eq!(HostPlan::new(&named, Some(&m("m2")), "box", out), HostPlan::Have, "the daemon's credentials exist");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_seed_stays_until_the_jwt_completes_the_credentials() {

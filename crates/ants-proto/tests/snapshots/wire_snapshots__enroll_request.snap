@@ -13,5 +13,10 @@ expression: value
     "machine": "studio",
     "jwt": "eyJ0eXAiOiJKV1QifQ.leaf",
     "signature": "c2lnLWxlYWY"
+  },
+  "host_creds": {
+    "machine": "studio",
+    "public_key": "UHOST",
+    "signature": "c2lnLWhvc3Q"
   }
 }

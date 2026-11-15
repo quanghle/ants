@@ -38,7 +38,8 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
             }
         }
         let schedules = scheduler::resolve(listed.schedules, conn.nats, domain)?;
-        let host = serve::host(listed.host, &configs, conn.nats, domain, Some(edited.clone()));
+        let host = serve::host(listed.host, &configs, conn.nats, domain, Some(edited.clone()))
+            .map(|(host, ants)| (ants_daemon::host::Host { leaf: serve::leaf_node(), ..host }, ants));
         Ok(serve::Served { configs, schedules, metrics: listed.metrics, host })
     };
     match serve::run(served()?, served, triggers, upgrade::replaced(args.upgrade.upgrade_check)).await? {
