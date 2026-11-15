@@ -113,14 +113,16 @@ pub enum StatusUpdate {
         to: UserId,
         escalation: Escalation,
     },
-    /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain (`decider`) or its expiry,
-    /// and the ant goes on with `verdict`, a verdict the harness did not offer counting as a rejection. Sent just
-    /// before the [`State::Working`] state, however the decision arrived.
+    /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain or its expiry (`decider`
+    /// names the ant, or the human as its decision names it), and the ant goes on with `verdict`, a verdict the
+    /// harness did not offer counting as a rejection. Sent just before the [`State::Working`] state, however the
+    /// decision arrived.
     Decided {
         request_id: Uuid,
         verdict: Verdict,
         by: DecidedBy,
-        /// The ant of the chain that decided, with [`DecidedBy::Chain`].
+        /// The ant of the chain that decided, with [`DecidedBy::Chain`]; with [`DecidedBy::Human`], the human its
+        /// [`ApprovalDecision::by`](crate::ApprovalDecision::by) names, as its client claims, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decider: Option<UserId>,
     },

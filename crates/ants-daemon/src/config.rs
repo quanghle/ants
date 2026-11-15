@@ -30,6 +30,7 @@
 //! workdir = "~/src/repo-a"
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
+//! stand_in = "bob"                  # human who also gets its escalations and tool requests while their human is away
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
 //! worktrees = true                  # a git worktree per thread, under the ant's home; unset: on for a git
 //!                                   # workdir git does not ignore, with max_harnesses above 1
@@ -238,6 +239,9 @@ pub struct Ant {
     /// daily after that; 0 never reminds.
     #[serde(default = "default_escalation_reminder", deserialize_with = "ants_proto::duration::deserialize")]
     pub escalation_reminder: Duration,
+    /// The human who also gets the ant's escalations and tool requests while the human they are for is away, in place
+    /// of that human's own stand-in.
+    pub stand_in: Option<UserId>,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -336,6 +340,7 @@ impl Ant {
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
+            stand_in: None,
             builtin: false,
             pool: None,
             redact: true,
@@ -406,6 +411,7 @@ impl Ant {
                 max_hops: self.max_escalation_hops,
                 after: Some(self.escalate_after).filter(|t| !t.is_zero()),
                 remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
+                stand_in: self.stand_in,
             },
             ant: self.name,
             defer_to_others: self.builtin,
@@ -424,10 +430,14 @@ impl Ant {
         }
     }
 
-    /// The escalation chain names other ants, each once, and the spend warning comes short of the caps.
+    /// The escalation chain names other ants, each once, the stand-in is not the ant, and the spend warning comes short
+    /// of the caps.
     fn validate(&self) -> Result<()> {
         if self.spend_warn_percent >= 100 {
             bail!("ant {}: spend_warn_percent must be below 100 (0 for no warning)", self.name);
+        }
+        if self.stand_in.as_ref() == Some(&self.name) {
+            bail!("ant {}: stand_in names the ant itself, not a human", self.name);
         }
         let mut seen = BTreeSet::new();
         for member in &self.escalate_to {
@@ -1201,6 +1211,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
     }
     if !ant.escalate_to.is_empty() {
         set("escalate_to", strings(&mut ant.escalate_to.iter().map(UserId::as_str)));
+    }
+    if let Some(stand_in) = &ant.stand_in {
+        set("stand_in", toml_string(stand_in.as_str()));
     }
     let numbers = [
         ("max_harnesses", ant.max_harnesses as u64, default.max_harnesses as u64),

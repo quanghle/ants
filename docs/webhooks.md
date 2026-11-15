@@ -87,6 +87,7 @@ quiet = "22:00-07:00"                         # optional local quiet window (sta
 timezone = "America/New_York"                 # optional per-human zone (requires `quiet`)
 bypass = ["approvals"]                        # optional kinds bypassing quiet hours and snooze: approvals, escalations
 digest = true                                 # one digest of the held notices when quiet hours or snooze end (default false)
+stand_in = "bob"                              # optional human relayed what waits for alice while away
 ```
 
 - **Delivery & presence:** each human reads shared durable consumer `notify-<human>` on `ANTS` (deliver new, explicit ack), so multiple `ants webhook serve` instances send each notice once (skipping decided/expired/forged requests and escalations > 24 h old). Sinks with `device = "<id>"` (`ants auth devices alice`) skip notices while that device records active presence in `ants_presence` (`ants tools list -f`, `ants dash`, or `ants inbox -f` without `--thread`/`--json` for approvals; `ants inbox -f` without `--thread` for escalations and completions). Unreadable presence defaults to away.
@@ -116,6 +117,17 @@ Held notices for approvals, escalations and completions are dropped (logged as `
 
 Runtime holds live in KV `ants_notify` under `<human>` (`{snoozed_until, muted}`), updated via CAS across devices and read by direct get before each notice; the digest's count lives beside them under `held.<human>`.
 
+### Stand-in
+
+A human counts as away when quiet hours or a snooze hold back a notice and no `device` of its sinks follows what the notice is about (presence as above). While away, `ants webhook serve` relays to the human's stand-in:
+
+- pending tool requests waiting for the human (`ApprovalRequest.human`: the thread's human owner, else the default human), and
+- escalations an ant sent to the human's inbox, reminders included (not expired-request notices, not muted threads).
+
+The stand-in is the one the ant's daemon stamps on the request or escalation (`stand_in` of its `[[ant]]`, see [config.md](config.md)), else the human's own `stand_in`; it must be a registered human other than the human away, otherwise nothing is relayed. Dead-letter, harness and storage escalations carry no ant stand-in. The relay is an inbox message from the human away to the stand-in, on the escalation's or request's thread, carrying the escalation (an `approval` escalation for a request) with `away = {human, ant}`; it is stored once per notice (`Nats-Msg-Id: standin-<human>-<seq>`), never relayed again, and pushed to the stand-in's own sinks as a notice titled `for <human> (away): …` (subject to the stand-in's own holds; a relayed tool request is skipped when the stand-in is notified of that ant's requests anyway). Relayed notices carry no approve/reject links: the text gives `ants tools approve|reject <ant>/<id>` or `ants ask --thread T @<ant> TEXT`.
+
+The stand-in answers with the same rights any human has: the first stored decision on a tool request wins, and a human's message on a thread ends its escalation. The human away is then told in its inbox: the ant's daemon sends `<stand-in> decided tool request <ant>/<id> … in place of <human>` when the decision names (`ApprovalDecision.by`) another human than the one the request waited for, and `<stand-in> answered the escalation of <ant> … in place of <human>` when another human answers a pending escalation or reminder. Only `ants webhook serve` decides who is away, so relays need the human away listed as a `[[human]]` of a running notifier. A relayed notice still counts in the human's own [digest](#quiet-hours-snooze-and-muted-threads) (with `digest = true`), which lists the tool requests still pending when the hold ends: those the stand-in decided no longer appear.
+
 ### Approve and reject links
 
 With `public_url` and `action_secret_*`, approval notices include `<public_url>/_approval?ant=&id=&seq=&verdict=&by=&exp=&sig=` per offered verdict (`Approve`, `Always allow`, `Reject`). `GET` renders a confirmation page (safe against link previews); `POST` verifies HMAC-SHA256 and expiry, then writes the `ApprovalDecision` using the human's credentials (`200` ok, `400` malformed, `403` bad signature, `404` unknown human/request, `405` method, `409` already decided/expired, `410` expired link, `503` hub unreachable). Keep sink channels private (ntfy topics are public unless token-gated).
@@ -133,5 +145,6 @@ With `public_url` and `action_secret_*`, approval notices include `<public_url>/
 | `ant`, `thread` | `approval`, `escalation`, `completion` | Source ant and thread ID to answer on |
 | `request`, `seq`, `tool`, `options`, `expires_at` | `approval` | `<ant>/<id>`, `ANTS` sequence, `{kind, title, locations?, input?}`, verdicts offered, RFC 3339 expiry |
 | `reason`, `stuck`, `level` | `escalation` | Escalation reason, stuck ant, chain level (`0` = direct) |
+| `stand_in_for` | `escalation` | Present on a [stand-in](#stand-in) relay: the human away; `ant` is then the ant to answer |
 | `ant`, `messages` | `unserved` | Unserved ant and waiting message UUIDs |
 | `since`, `counts`, `pending` | `digest` | RFC 3339 time of the first held notice, `{kind: n}` held back per kind, `{request, ant, thread, title, expires_at}[]` of the tool requests still pending (`urgent` when any) |

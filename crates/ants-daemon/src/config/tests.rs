@@ -61,6 +61,7 @@ Review changes for correctness."""
             max_escalation_hops = 2
             escalate_after = "0"
             escalation_reminder = "0"
+            stand_in = "carol"
 
             [[ant]]
             name = "dev-b"
@@ -103,7 +104,7 @@ Review changes for correctness."""
     assert_eq!(config.caps, caps);
     assert_eq!(config.spend_warn_percent, 90);
     let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
-    let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None };
+    let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None, stand_in: Some("carol".parse().unwrap()) };
     assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
     assert_eq!(config.worktrees, Some(true));
 
@@ -463,6 +464,8 @@ fn rejects_bad_files() {
     assert!(err("[[ant]]\nname = \"Dev.A\"\nworkdir = \".\"").contains("parsing config"));
     let chain = |names: &str| err(&format!("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nescalate_to = {names}"));
     assert!(chain("[\"dev-a\"]").contains("escalate_to names the ant itself"));
+    let stand_in = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nstand_in = \"dev-a\"");
+    assert!(stand_in.contains("stand_in names the ant itself"), "{stand_in}");
     let warn = err("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nspend_warn_percent = 100");
     assert!(warn.contains("spend_warn_percent must be below 100"), "{warn}");
     assert!(chain("[\"lead\", \"lead\"]").contains("escalate_to lists lead twice"));
@@ -613,6 +616,7 @@ fn entries_read_back_as_written() {
     full.allow = vec!["execute:cargo test*".to_owned()];
     full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
     full.escalate_to = vec!["lead".parse().unwrap()];
+    full.stand_in = Some("carol".parse().unwrap());
     full.max_harnesses = 1;
     full.worktrees = Some(false);
     full.prompt_timeout = Duration::ZERO;

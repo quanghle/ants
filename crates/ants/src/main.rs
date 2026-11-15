@@ -122,7 +122,7 @@ async fn run() -> Result<()> {
         Command::Setup(args) => Box::pin(setup::run(&args, &conn)).await,
         Command::Completions { shell, install } => completions::run(shell, install),
         Command::Tools(command) => cmd::tools::run(command, &conn).await,
-        Command::Dead(command) => cmd::dead::run(&nats()?, command).await,
+        Command::Dead(command) => Box::pin(cmd::dead::run(&nats()?, command)).await,
         Command::Daemon(args) => cmd::daemon::run(&args, &conn).await,
         Command::Mcp { socket, token } => ants_daemon::mcp::bridge_stdio(&socket, &token).await,
         Command::Harness(command) => cmd::harness::run(command).await,
@@ -319,7 +319,8 @@ fn escalation_note(x: &Escalation) -> String {
     };
     let visited = x.visited.iter().map(UserId::as_str).collect::<Vec<_>>().join(" > ");
     let (level, stuck, thread, leader) = (x.level, &x.stuck, &x.thread_id, &x.leader);
-    format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}")
+    let away = x.away.as_ref().map_or_default(|a| format!(", relayed while {} is away: answer {}", a.human, a.ant));
+    format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}{away}")
 }
 
 #[cfg(test)]

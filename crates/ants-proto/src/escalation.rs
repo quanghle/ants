@@ -106,6 +106,21 @@ pub struct Escalation {
     pub leader: UserId,
     /// Every ant the escalation went through, in order, the stuck one first and the origin next when another ant.
     pub visited: Vec<UserId>,
+    /// The stand-in of the ant that sent it to a human, who also gets it while that human is away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stand_in: Option<UserId>,
+    /// Set on the copy a human's notifications relay to its stand-in while the human is away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub away: Option<Away>,
+}
+
+/// Whose escalation or tool request a stand-in got, relayed while that human was away ([`Escalation::away`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Away {
+    /// The human away, who relayed it: the relay's sender.
+    pub human: UserId,
+    /// The ant to answer on the escalation's thread, or whose tool request to decide.
+    pub ant: UserId,
 }
 
 /// Where an escalation goes next ([`Escalation::up`]).
@@ -140,6 +155,8 @@ impl Escalation {
             reason,
             request_id: None,
             level: 0,
+            stand_in: None,
+            away: None,
         }
     }
 

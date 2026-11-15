@@ -1,0 +1,26 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-00000000000a",
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "tool": {
+    "kind": "execute",
+    "title": "rm -rf target",
+    "locations": [
+      "/src/app"
+    ],
+    "input": "{\"command\":\"rm -rf target\"}"
+  },
+  "options": [
+    "allow_once",
+    "allow_always",
+    "reject"
+  ],
+  "requested_at": "2025-01-01T12:00:00Z",
+  "expires_at": "2025-01-01T12:05:00Z",
+  "human": "alice",
+  "stand_in": "bob"
+}

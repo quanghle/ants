@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    ApprovalRequest, Following, RosterEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, Verdict, subject,
+    ApprovalRequest, Following, RosterEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::connection::State as Connection;
@@ -179,10 +179,10 @@ fn tail(js: jetstream::Context, mut parser: Parser, after: Option<u64>, since: D
 
 /// Store `verdict` on `request` as `ants tools approve` or `reject` does, a decision stored first winning; returns the
 /// line saying so, with the allow rule an approval suggests.
-async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdict) -> Result<String> {
+async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdict, by: UserId) -> Result<String> {
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
     let (seq, request) = tools::find(&stream, &tools::qualified(&request)).await?;
-    let decision = tools::answer_request(&js, &stream, seq, &request, verdict, Utc::now()).await?;
+    let decision = tools::answer_request(&js, &stream, seq, &request, verdict, &by, Utc::now()).await?;
     let mut text = format!("answered request {}/{}: {}", decision.ant, decision.request_id, tools::spelling(verdict));
     if verdict != Verdict::Reject
         && let Ok(Some(suggestion)) = tools::suggestion(&stream, seq, &request).await
@@ -401,7 +401,7 @@ impl Dash {
                 );
             }
             Action::Decide(request, verdict) => {
-                self.decision = Some(decide(self.js.clone(), request, verdict).boxed_local());
+                self.decision = Some(decide(self.js.clone(), *request, verdict, self.model.me.clone()).boxed_local());
             }
             Action::Refresh => {
                 self.follow = None;

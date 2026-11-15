@@ -76,7 +76,9 @@ the ant rejects it; no decision is stored for an expired request.
 ```
 
 `tool.kind` is an ACP tool kind (`read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`,
-`switch_mode`, `other`); `locations` and `input` may be absent. Check: `subject == "ants.approvals." + ant`.
+`switch_mode`, `other`); `locations` and `input` may be absent. `human` names the human the request waits for and
+`stand_in` the ant's stand-in, both absent from older daemons (see [webhooks.md](webhooks.md#stand-in)). Check:
+`subject == "ants.approvals." + ant`.
 
 ### `ApprovalDecision` on `ants.approvals.<ant>.<request id>`
 
@@ -88,7 +90,8 @@ the requester's [`decided` status update](#decisions) tells of every decision, t
 {"request_id": "019a7d2e-…", "ant": "dev-a", "verdict": "allow_once", "decided_at": "2025-01-01T12:01:00Z"}
 ```
 
-`verdict` is `allow_once`, `allow_always` or `reject`. Check: `subject == "ants.approvals." + ant + "." + request_id`.
+`verdict` is `allow_once`, `allow_always` or `reject`; `by`, when present, names the deciding human as its client
+claims it. Check: `subject == "ants.approvals." + ant + "." + request_id`.
 
 ### `DeadLetter` on `ants.dead.<ant>`
 
@@ -139,7 +142,8 @@ message is not part of it.
 
 `escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked` or
 `context_window`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
-went up any chain, and `leader` who leads at that level. Direct notices that emit no `StatusEvent` here: the
+went up any chain, and `leader` who leads at that level; `stand_in`, when present, names the sending ant's stand-in on
+one sent to a human. Direct notices that emit no `StatusEvent` here: the
 `dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
 notice of a harness failing to start (observed via `failing` in `ants_roster`), and the `storage` capacity warning.
 
@@ -156,7 +160,8 @@ a decision of an ant of its chain sent to its inbox (which observers cannot read
 
 `verdict` is what the ant goes on with (`allow_once`, `allow_always`, `reject`), a verdict the harness did not offer
 counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
-`expiry` (rejected unanswered). A human's decision names no human: the `ApprovalDecision` feed holds it.
+`expiry` (rejected unanswered). A human's decision names its human in `decider` when its `ApprovalDecision` names one
+(`by`, as the deciding client claims it; absent from older clients); the `ApprovalDecision` feed holds it.
 
 ### `RosterEntry` at `ants_roster` key `<ant>`
 

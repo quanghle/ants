@@ -55,6 +55,12 @@ pub struct ApprovalRequest {
     pub options: Vec<Verdict>,
     pub requested_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// The human the request waits for: the owner of the thread the ant answers on, else the ant's default human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human: Option<UserId>,
+    /// The ant's stand-in, who also gets the request while that human is away, in place of the human's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stand_in: Option<UserId>,
 }
 
 impl ApprovalRequest {
@@ -73,7 +79,23 @@ impl ApprovalRequest {
             .ok()
             .and_then(|t| requested_at.checked_add_signed(t))
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
-        Self { id: Uuid::now_v7(), ant, thread_id, tool, options, requested_at, expires_at }
+        Self {
+            id: Uuid::now_v7(),
+            ant,
+            thread_id,
+            tool,
+            options,
+            requested_at,
+            expires_at,
+            human: None,
+            stand_in: None,
+        }
+    }
+
+    /// The same, waiting for `human`, with `stand_in` as the ant's stand-in.
+    #[must_use]
+    pub fn for_human(self, human: Option<UserId>, stand_in: Option<UserId>) -> Self {
+        Self { human, stand_in, ..self }
     }
 
     pub fn subject(&self) -> String {
@@ -104,6 +126,7 @@ impl ApprovalRequest {
             ant: self.ant.clone(),
             verdict: if self.options.contains(&verdict) { verdict } else { Verdict::Reject },
             decided_at: Utc::now(),
+            by: None,
         }
     }
 }
@@ -116,13 +139,22 @@ pub struct ApprovalDecision {
     pub ant: UserId,
     pub verdict: Verdict,
     pub decided_at: DateTime<Utc>,
+    /// The human who decided, as the decider's client tells: the decision subject does not pin it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<UserId>,
 }
 
 impl ApprovalDecision {
     /// A decision on the request `request_id` of `ant`, made now, as an ant of its chain makes one from the
     /// [`Escalation`] alone. The requester maps a verdict it did not offer to [`Verdict::Reject`].
     pub fn new(request_id: Uuid, ant: UserId, verdict: Verdict) -> Self {
-        Self { request_id, ant, verdict, decided_at: Utc::now() }
+        Self { request_id, ant, verdict, decided_at: Utc::now(), by: None }
+    }
+
+    /// The same, decided by the human `by`.
+    #[must_use]
+    pub fn by(self, by: Option<UserId>) -> Self {
+        Self { by, ..self }
     }
 
     pub fn subject(&self) -> String {

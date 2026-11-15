@@ -308,7 +308,7 @@ Every 5 m (first check at 30 s), one ant per daemon/server queries hub and local
 
 ## Webhooks
 
-`ants webhook serve` (`~/.ants/webhooks.toml`) authenticates incoming HTTP `POST <path>/<webhook>` requests (`hmac-sha256`, `bearer`, `token`, `standard-webhooks` such as GitLab's signing token), deduplicates events via `ants_webhooks`, and starts narrowed inbox or channel threads (`ants webhook add` provisions credentials, secrets and presets for GitHub, GitLab and Grafana, or takes a secret given, such as GitLab's signing token). `[[human]]` entries in the same file push tool approvals (with signed `/_approval` buttons), escalations, unserved-ant notices and optional completions to `ntfy`, `slack`, `telegram`, `exec` and `http` sinks, respecting per-device presence, quiet hours, snoozes and muted threads, with an optional digest of what quiet hours or a snooze held back once they end. See [docs/webhooks.md](docs/webhooks.md).
+`ants webhook serve` (`~/.ants/webhooks.toml`) authenticates incoming HTTP `POST <path>/<webhook>` requests (`hmac-sha256`, `bearer`, `token`, `standard-webhooks` such as GitLab's signing token), deduplicates events via `ants_webhooks`, and starts narrowed inbox or channel threads (`ants webhook add` provisions credentials, secrets and presets for GitHub, GitLab and Grafana, or takes a secret given, such as GitLab's signing token). `[[human]]` entries in the same file push tool approvals (with signed `/_approval` buttons), escalations, unserved-ant notices and optional completions to `ntfy`, `slack`, `telegram`, `exec` and `http` sinks, respecting per-device presence, quiet hours, snoozes and muted threads, with an optional digest of what quiet hours or a snooze held back once they end. While a human is away (held by quiet hours or a snooze, no device present), its tool requests and escalations are relayed to an optional stand-in (`stand_in` per `[[human]]` or `[[ant]]`), whose answers the human is then told of. See [docs/webhooks.md](docs/webhooks.md) and its [stand-in](docs/webhooks.md#stand-in) section.
 
 ## Credentials
 
@@ -431,7 +431,7 @@ cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 | `scripts/` | `check.sh` (CI checks run locally), `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |
 | `docs/config.md` | Daemon config, `[[ant_template]]`, manager ants & signer, harnesses, caps, tool permissions, redaction, schedules |
 | `docs/auth.md` | NATS credentials, revocation, age backups, devices, over-NATS enrollment/renewal, permissions versions, OS keystores, wire ACLs |
-| `docs/webhooks.md` | HTTP webhook ingress, `ants webhook add` presets, human notification sinks, quiet hours/snooze/mute/digest, `/_approval` links, JSON notice v1 |
+| `docs/webhooks.md` | HTTP webhook ingress, `ants webhook add` presets, human notification sinks, quiet hours/snooze/mute/digest, stand-ins, `/_approval` links, JSON notice v1 |
 | `docs/transport.md` | Hub, reverse proxy, revocation sync, leaf nodes, store-and-forward, HTTPS bridge, Dev Tunnels, keepalive |
 | `docs/hooks.md` | Hook contract: observer credentials, feed subjects and JSON schemas, versioning |
 

@@ -178,6 +178,69 @@ fn a_mute_holds_back_everything_of_its_thread_and_a_snooze_or_quiet_hours_what_b
 }
 
 #[test]
+fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_to_answer() {
+    let alice = human(&format!("name = \"alice\"\nstand_in = \"bob\"\n{NTFY_SINK}")).unwrap();
+    assert!(error(&format!("name = \"bob\"\nstand_in = \"bob\"\n{NTFY_SINK}")).contains("the human itself"));
+    let is_human = |user: &UserId| ["alice", "bob", "carol"].contains(&user.as_str());
+    let now = Utc::now();
+    let asked = request().for_human(Some(p("alice")), None);
+    let notice = approval_notice(&asked, 9, &p("alice"), None, None, now);
+
+    let relay = relayed(&alice, &notice, "quiet hours", is_human).unwrap();
+    assert_eq!((&relay.from, &relay.to, &relay.thread_id), (&p("alice"), &p("bob"), &asked.thread_id));
+    assert!(
+        relay.text.starts_with("[ants] Relayed to bob, alice's stand-in, while alice is away (quiet hours)"),
+        "{}",
+        relay.text
+    );
+    assert!(relay.text.contains(&format!("ants tools approve dev-a/{}", asked.id)), "{}", relay.text);
+    let escalation = relay.escalation.as_deref().unwrap();
+    assert_eq!(escalation.away, Some(Away { human: p("alice"), ant: p("dev-a") }));
+    assert_eq!((escalation.reason, escalation.request_id), (EscalationReason::Approval, Some(asked.id)));
+
+    let shown = escalation_notice(&relay).unwrap();
+    assert_eq!(
+        (shown.title.as_str(), &shown.human, shown.urgent),
+        ("for alice (away): dev-a asks to run a tool", &p("bob"), true)
+    );
+    let json = notice_json(&shown, now);
+    assert_eq!((&json["ant"], &json["stand_in_for"]), (&json!("dev-a"), &json!("alice")));
+    let bob = human(&format!("name = \"bob\"\n{NTFY_SINK}")).unwrap();
+    let carol = human(&format!("name = \"carol\"\nants = [\"dev-b\"]\n{NTFY_SINK}")).unwrap();
+    assert!(bob.gets_relayed_request(&shown.about), "bob is notified of dev-a's requests anyway");
+    assert!(!carol.gets_relayed_request(&shown.about));
+    assert!(relayed(&bob, &shown, "quiet hours", is_human).is_none(), "a relay is relayed no further");
+
+    let named = asked.clone().for_human(Some(p("alice")), Some(p("carol")));
+    let notice = approval_notice(&named, 9, &p("alice"), None, None, now);
+    assert_eq!(relayed(&alice, &notice, "snoozed", is_human).unwrap().to, p("carol"), "the ant's stand-in");
+    let named = asked.clone().for_human(Some(p("alice")), Some(p("dev-b")));
+    let notice = approval_notice(&named, 9, &p("alice"), None, None, now);
+    assert_eq!(relayed(&alice, &notice, "snoozed", is_human).unwrap().to, p("bob"), "an ant stands in for no one");
+    assert!(relayed(&alice, &notice, "muted thread", is_human).is_none());
+    assert!(relayed(&bob, &notice, "snoozed", is_human).is_none(), "the request waits for another human");
+    let unnamed = human(&format!("name = \"alice\"\n{NTFY_SINK}")).unwrap();
+    let notice = approval_notice(&asked, 9, &p("alice"), None, None, now);
+    assert!(relayed(&unnamed, &notice, "snoozed", is_human).is_none(), "no stand-in");
+
+    let thread = ThreadId::generate();
+    let stuck = Escalation {
+        stand_in: Some(p("carol")),
+        ..Escalation::new(p("dev-a"), thread.clone(), EscalationReason::Asked)
+    };
+    let escalated = Envelope::new(p("dev-a"), p("alice"), "which branch?").with_escalation(Some(stuck));
+    let relay = relayed(&alice, &escalation_notice(&escalated).unwrap(), "snoozed", is_human).unwrap();
+    assert_eq!((&relay.to, &relay.thread_id), (&p("carol"), &thread));
+    let shown = escalation_notice(&relay).unwrap();
+    assert_eq!(shown.title, "for alice (away): dev-a escalates: asked on dev-a");
+    assert!(shown.text.contains(&format!("ants ask --thread {thread} @dev-a TEXT")), "{}", shown.text);
+    let forged = Envelope { from: p("dev-b"), ..relay };
+    assert_eq!(escalation_notice(&forged).unwrap().title, "dev-b escalates: asked on dev-a", "relayed by no one away");
+    let expired = escalated.with_escalation(Some(Escalation::of_request(&asked)));
+    assert!(relayed(&alice, &escalation_notice(&expired).unwrap(), "snoozed", is_human).is_none(), "nothing to answer");
+}
+
+#[test]
 fn a_digest_is_due_once_neither_a_snooze_nor_quiet_hours_hold_whatever_bypass_lets_through() {
     let now = at("2026-03-10T12:00:00Z");
     let text = format!("name = \"bob\"\nquiet = \"11:00-13:00\"\nbypass = [\"approvals\"]\ndigest = true\n{NTFY_SINK}");

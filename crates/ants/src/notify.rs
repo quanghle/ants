@@ -42,13 +42,13 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
-use ants_daemon::humans::Registry;
+use ants_daemon::humans::{Registry, Watching};
 use ants_daemon::redact::Redactor;
 use ants_daemon::sync::MutexExt as _;
 use ants_daemon::unserved::{self, Unserved, Watch};
 use ants_proto::{
-    ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, HeldNotices, JsDomain, NOTIFY_BUCKET,
-    NotifyPrefs, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer, subject,
+    ApprovalRequest, Away, DeviceId, Envelope, Escalation, EscalationReason, Following, HeldNotices, JsDomain,
+    NOTIFY_BUCKET, NotifyPrefs, Role, STREAM, ThreadId, UserId, Uuid, Verdict, held_key, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, kv, stream::Stream};
@@ -129,6 +129,8 @@ pub struct HumanEntry {
     /// What quiet hours and a snooze let through.
     #[serde(default)]
     bypass: Vec<Bypass>,
+    /// The human who also gets the escalations and tool requests waiting for this one while it is away.
+    stand_in: Option<UserId>,
     /// Whether one digest of the notices quiet hours or a snooze held back is sent when they end.
     #[serde(default)]
     digest: bool,
@@ -201,6 +203,8 @@ pub struct Human {
     completions: bool,
     quiet: Option<QuietHours>,
     bypass: Vec<Bypass>,
+    /// Who gets what waits for the human while it is away, unless an ant names its own stand-in ([`relayed`]).
+    stand_in: Option<UserId>,
     digest: bool,
     sinks: Vec<Target>,
 }
@@ -310,6 +314,9 @@ impl Human {
         if approvals.is_none() && !entry.escalations && !entry.completions {
             bail!("approvals, escalations and completions are all off: nothing to notify");
         }
+        if entry.stand_in.as_ref() == Some(&entry.name) {
+            bail!("stand_in names the human itself");
+        }
         let quiet = match (entry.quiet, entry.timezone) {
             (None, Some(_)) => bail!("timezone goes with quiet only"),
             (None, None) => None,
@@ -341,6 +348,7 @@ impl Human {
             completions: entry.completions,
             quiet,
             bypass: entry.bypass,
+            stand_in: entry.stand_in,
             digest: entry.digest,
             sinks,
         })
@@ -400,6 +408,13 @@ impl Human {
 
     fn wants_request_of(&self, ant: &UserId) -> bool {
         self.approvals.as_ref().is_some_and(|ants| ants.is_empty() || ants.contains(ant))
+    }
+
+    /// Whether `about` is a tool request relayed to the human as a stand-in that it is notified of anyway.
+    fn gets_relayed_request(&self, about: &About) -> bool {
+        let About::Escalation { from, escalation, .. } = about else { return false };
+        escalation.reason == EscalationReason::Approval
+            && away_of(from, escalation).is_some_and(|away| self.wants_request_of(&away.ant))
     }
 }
 
@@ -859,15 +874,22 @@ fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "options": request.options.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
             "expires_at": request.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
-        About::Escalation { id, from, escalation } => json!({
-            "kind": "escalation",
-            "id": id,
-            "ant": from,
-            "thread": escalation.thread_id,
-            "reason": escalation.reason.as_str(),
-            "stuck": escalation.stuck,
-            "level": escalation.level,
-        }),
+        About::Escalation { id, from, escalation } => {
+            let away = away_of(from, escalation);
+            let mut facts = json!({
+                "kind": "escalation",
+                "id": id,
+                "ant": away.map_or(from, |away| &away.ant),
+                "thread": escalation.thread_id,
+                "reason": escalation.reason.as_str(),
+                "stuck": escalation.stuck,
+                "level": escalation.level,
+            });
+            if let Some(away) = away {
+                facts["stand_in_for"] = json!(away.human);
+            }
+            facts
+        }
         About::Completion { id, from, thread } => json!({
             "kind": "completion",
             "id": id,
@@ -996,9 +1018,24 @@ fn approval_notice(
 }
 
 /// The notice of an escalation `envelope` brings, if it brings one. The thread to answer on is the escalation's: an
-/// expired tool request's notice comes on a thread of its own.
+/// expired tool request's notice comes on a thread of its own. One relayed by a human away ([`relayed`]) names that
+/// human and the ant to answer, whose answer its text gives.
 fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
     let escalation = envelope.escalation.as_ref()?;
+    if let Some(away) = away_of(&envelope.from, escalation) {
+        let what = match escalation.reason {
+            EscalationReason::Approval => format!("{} asks to run a tool", away.ant),
+            reason => format!("{} escalates: {} on {}", away.ant, reason.as_str(), escalation.stuck),
+        };
+        return Some(Notice {
+            about: About::Escalation { id: envelope.id, from: envelope.from.clone(), escalation: escalation.clone() },
+            human: envelope.to.clone(),
+            title: format!("for {} (away): {what}", away.human),
+            text: cut(&redactor().redact(&envelope.text), 2 * MAX_TEXT),
+            buttons: Vec::new(),
+            urgent: escalation.reason == EscalationReason::Approval,
+        });
+    }
     let thread = &escalation.thread_id;
     let text = format!(
         "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
@@ -1018,6 +1055,45 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
         buttons: Vec::new(),
         urgent: false,
     })
+}
+
+/// Whose escalation or tool request `escalation`, sent by `from`, relays to a stand-in: the human away, who sent it.
+fn away_of<'a>(from: &UserId, escalation: &'a Escalation) -> Option<&'a Away> {
+    escalation.away.as_ref().filter(|away| away.human == *from)
+}
+
+/// The message relaying to `human`'s stand-in the notice `notice`, held back from `human` by `why`, if it is to be
+/// relayed: a pending tool request that waits for `human`, or an escalation an ant sent it, but not the notice of an
+/// expired request nor one relayed already, and not what a muted thread holds back. The stand-in is the one the ant
+/// named on it, else `human`'s own; it must be a human (`is_human`), as an ant would take the relay for a human's
+/// message, and not `human`. The relay goes on the escalation's or request's thread, from `human` to the stand-in,
+/// carrying the escalation (a request's as [`Escalation::of_request`] makes it) marked [`Escalation::away`].
+fn relayed(human: &Human, notice: &Notice, why: &str, is_human: impl Fn(&UserId) -> bool) -> Option<Envelope> {
+    if why == "muted thread" {
+        return None;
+    }
+    let (ant, named, escalation) = match &notice.about {
+        About::Approval { request, .. } if request.human.as_ref() == Some(&human.name) => {
+            (&request.ant, request.stand_in.as_ref(), Escalation::of_request(request))
+        }
+        About::Escalation { from, escalation, .. }
+            if escalation.away.is_none() && escalation.reason != EscalationReason::Approval =>
+        {
+            (from, escalation.stand_in.as_ref(), (**escalation).clone())
+        }
+        _ => return None,
+    };
+    let owner = &human.name;
+    let valid = |user: &&UserId| *user != owner && is_human(user);
+    let stand_in = named.filter(valid).or(human.stand_in.as_ref().filter(valid))?;
+    let text = format!(
+        "[ants] Relayed to {stand_in}, {owner}'s stand-in, while {owner} is away ({why}); an answer acts for \
+         {owner}, who is told of it.\n\n{}\n\n{}",
+        notice.title, notice.text
+    );
+    let escalation = Escalation { away: Some(Away { human: owner.clone(), ant: ant.clone() }), ..escalation };
+    let thread = escalation.thread_id.clone();
+    Some(Envelope::on_thread(thread, owner.clone(), stand_in.clone(), text).with_escalation(Some(escalation)))
 }
 
 /// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
@@ -1290,6 +1366,9 @@ struct HumanBus {
     present: Present,
     /// The human's holds ([`NotifyPrefs`]); none when its credentials may not read them.
     prefs: Option<DirectKv>,
+    /// The humans of the team, kept current while `_watching` lives.
+    humans: Registry,
+    _watching: Watching,
     /// Where the notices held back are counted for a digest ([`HeldNotices`]); none without `digest` or when its
     /// credentials may not write them.
     held: Option<kv::Store>,
@@ -1387,7 +1466,9 @@ pub async fn run(
         }
     };
     let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
-    let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, held });
+    let humans = Registry::new(name.clone());
+    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    let _ = human.bus.set(HumanBus { client, js, stream, present, prefs, humans, _watching, held });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
     let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
@@ -1458,7 +1539,9 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         match serde_json::from_slice::<Envelope>(payload) {
             Ok(envelope) if envelope.check_subject(subject).is_ok() && is_recent(&envelope.id, now) => {
                 match envelope.escalation.is_some() {
-                    true if config.escalations => escalation_notice(&envelope),
+                    true if config.escalations => {
+                        escalation_notice(&envelope).filter(|notice| !config.gets_relayed_request(&notice.about))
+                    }
                     false if config.completions => completion_notice(&envelope),
                     _ => None,
                 }
@@ -1496,9 +1579,11 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
     if let Some(why) = held(config, &notice.about, &prefs, now) {
         // Dropped, not sent later: the message stays unread and a request pending, as for a notice never sent.
         tracing::info!(human = %config.name, why, title = notice.title, "held back a notice");
+        // Counted for the human's digest even when relayed to its stand-in: the digest tells what it missed.
         if why != "muted thread" {
             count_held(config, bus, notice.about.kind(), now).await;
         }
+        relay(config, bus, &notice, why, seq).await;
         return;
     }
     digest(config, bus, &prefs, now).await;
@@ -1508,6 +1593,30 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         tracing::debug!(human = %config.name, devices = ?reading, what = what.as_str(), "skipping devices reading");
     }
     send(config, &notice, |device| !reading.contains(device)).await;
+}
+
+/// Relay `notice`, held back from `human` by `why`, to its stand-in ([`relayed`]) when `human` is away: no device of
+/// its sinks follows what the notice is about. The relay is stored once, whichever process of `human` relays it.
+async fn relay(human: &Human, bus: &HumanBus, notice: &Notice, why: &str, seq: u64) {
+    let Some(relay) = relayed(human, notice, why, |user| bus.humans.is_human(user)) else { return };
+    let what = if matches!(notice.about, About::Approval { .. }) { Following::Approvals } else { Following::Inbox };
+    let reading = bus.present.following(&human.name, human.devices(), what).await;
+    if !reading.is_empty() {
+        tracing::debug!(human = %human.name, devices = ?reading, "not away: no relay to the stand-in");
+        return;
+    }
+    let id = format!("standin-{}-{seq}", human.name);
+    match bus::store(&bus.js, relay.subject(), &relay, &id).await {
+        Ok(_) => {
+            tracing::info!(human = %human.name, stand_in = %relay.to, title = notice.title, "relayed to the stand-in");
+        }
+        Err(e) => tracing::warn!(
+            human = %human.name,
+            stand_in = %relay.to,
+            error = format!("{e:#}"),
+            "relaying to the stand-in"
+        ),
+    }
 }
 
 /// The watch of the messages `human` sends ([`unserved`]), when it takes escalations and its credentials may mark
@@ -1538,10 +1647,8 @@ async fn unserved_watch(human: &Human, js: &jetstream::Context, js_domain: Optio
 /// finds them: those held back by a snooze or quiet hours wait for them to end.
 async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> std::convert::Infallible {
     if let Some(mut watch) = watch {
-        let humans = Registry::new(human.name.clone());
-        let _watching = humans.watch(bus.js.clone(), ants_daemon::humans::RETRY);
         loop {
-            for found in watch.next(|user| humans.is_human(user)).await {
+            for found in watch.next(|user| bus.humans.is_human(user)).await {
                 let now = Utc::now();
                 let notice = unserved_notice(&found, &human.name, now);
                 if let Some(why) = held(human, &notice.about, &holds(human, bus).await, now) {
@@ -1788,7 +1895,7 @@ impl Answers {
             };
             return Ok(page(StatusCode::OK, &format!("{what}: {id}?"), &body));
         }
-        match tools::answer_request(&bus.js, &bus.stream, action.seq, &request, action.verdict, now).await {
+        match tools::answer_request(&bus.js, &bus.stream, action.seq, &request, action.verdict, &action.by, now).await {
             Ok(decision) => {
                 tracing::info!(human = %action.by, request = id, verdict = decision.verdict.as_str(), "decided on a link");
                 let body = format!("{details}<p>Stored: {}.</p>", html(tools::spelling(decision.verdict)));
