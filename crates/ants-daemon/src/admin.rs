@@ -30,6 +30,7 @@ use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
 mod memories;
+pub use memories::files_under;
 mod pause;
 pub mod restart;
 mod set;

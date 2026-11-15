@@ -66,6 +66,25 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
 
 /// [`add`], keeping a seed of the OS credential store in `store`.
 async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store: &dyn Store) -> Result<()> {
+    let listing = listing(&args, Ant::new(args.name.clone(), std::env::current_dir()?), nats, js_domain)?;
+    credentials(&args, &listing, nats, store).await
+}
+
+/// What [`listing`] checked of an ant before anything is written.
+pub(crate) struct Listing {
+    /// The config file.
+    pub path: PathBuf,
+    /// Where its credentials go.
+    out: PathBuf,
+    /// The ant as its new `[[ant]]` entry lists it, and the entry; None when the file lists the ant already.
+    pub entry: Option<(Ant, String)>,
+    /// The harness it runs: its own, else the file's top-level one.
+    pub harness: Option<String>,
+}
+
+/// Check `ants add` of `args` before anything is written: the ant's new entry, from `base` with the flags' settings
+/// in place of its own, unless the config file lists it already, and where its credentials go.
+pub(crate) fn listing(args: &AddArgs, base: Ant, nats: &str, js_domain: Option<&JsDomain>) -> Result<Listing> {
     let name = &args.name;
     if name.is_human() {
         bail!("{name} is the default human, not an ant");
@@ -80,13 +99,19 @@ async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store
     if listed.is_some() && args.options.sets_any() {
         bail!("{name} is already listed in {}; change its settings there", path.display());
     }
-    let out = creds_out(&args, listed, &path)?;
+    let out = creds_out(args, listed, &path)?;
     let entry = match listed {
         Some(_) => None,
-        None => Some(entry(&args, &summary, &out, nats, js_domain)?),
+        None => Some(entry(args, base, &summary, &out, nats, js_domain)?),
     };
+    let harness = entry.as_ref().and_then(|(ant, _)| ant.harness.clone()).or_else(|| summary.harness.clone());
+    Ok(Listing { path, out, entry, harness })
+}
 
-    let (user, stored) = user_key(&out, store, args.store_key)?;
+/// Give the ant of `listing` its credentials, then list it in the config file if new there.
+pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, store: &dyn Store) -> Result<()> {
+    let (name, path, out) = (&args.name, &listing.path, &listing.out);
+    let (user, stored) = user_key(out, store, args.store_key)?;
     let public_key = user.public_key();
     let mut uplink = None;
     let mut url = nats;
@@ -98,21 +123,21 @@ async fn add_with(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>, store
         }
         (None, Some(enrollment)) => {
             url = args.hub.as_deref().unwrap_or(nats);
-            let (jwt, renewed) = enrolled(&args, enrollment, url, &user, &public_key).await?;
+            let (jwt, renewed) = enrolled(args, enrollment, url, &user, &public_key).await?;
             uplink = renewed;
             Some(jwt)
         }
         (None, None) => None,
     };
     if let Some(jwt) = &jwt {
-        complete(&args, &out, jwt, &user, store, stored, url).await?;
+        complete(args, out, jwt, &user, store, stored, url).await?;
     }
-    if let Some(entry) = &entry {
-        config::append(&path, entry)?;
+    if let Some((_, entry)) = &listing.entry {
+        config::append(path, entry)?;
         println!("{name} listed in {}", path.display());
     }
     match jwt {
-        Some(_) => tell_completed(name, &out, uplink.as_ref(), &path),
+        Some(_) => tell_completed(name, out, uplink.as_ref(), path),
         None => println!(
             "public key of {name}: {public_key}\n\
              complete its credentials, either:\n  \
@@ -250,10 +275,17 @@ fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Pat
     }
 }
 
-/// The `[[ant]]` entry of an ant new to the file: the flags' settings, its credentials at `out`, and the server
-/// and JetStream domain where they differ from the file's.
-fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: Option<&JsDomain>) -> Result<String> {
-    let mut p = args.options.apply(Ant::new(args.name.clone(), std::env::current_dir()?));
+/// The `[[ant]]` entry of an ant new to the file, and the ant it lists: `base` with the flags' settings in place of
+/// its own, its credentials at `out`, and the server and JetStream domain where they differ from the file's.
+fn entry(
+    args: &AddArgs,
+    base: Ant,
+    summary: &Summary,
+    out: &Path,
+    nats: &str,
+    js_domain: Option<&JsDomain>,
+) -> Result<(Ant, String)> {
+    let mut p = args.options.apply(base);
     p.workdir = p.workdir.canonicalize().with_context(|| format!("workdir {}", p.workdir.display()))?;
     if let Some(home) = &p.home {
         p.home = Some(std::path::absolute(home)?);
@@ -270,7 +302,8 @@ fn entry(args: &AddArgs, summary: &Summary, out: &Path, nats: &str, js_domain: O
         checked.harness.clone_from(&summary.harness);
     }
     checked.into_config(nats, &summary.harnesses)?;
-    config::entry(&p)
+    let entry = config::entry(&p)?;
+    Ok((p, entry))
 }
 
 /// The configuration of the machine's leaf node, at `path`, or at ~/.config/ants/leaf.conf when it exists, and the
