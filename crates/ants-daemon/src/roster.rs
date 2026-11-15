@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 use crate::bus;
 use crate::daemon::Config;
+use crate::sync::MutexExt as _;
 
 /// An ant listed in the roster. Dropping it stops the heartbeats, so the entry expires;
 /// [`Registration::deregister`] removes it at once.
@@ -60,7 +61,7 @@ impl Workload {
 
     /// Note the agent a harness just started with named itself as, `None` when it did not name itself.
     pub fn set_agent(&self, agent: Option<HarnessAgent>) {
-        let mut current = self.agent.lock().expect("agent");
+        let mut current = self.agent.locked();
         if *current != agent {
             *current = agent;
             self.changed.notify_one();
@@ -68,12 +69,12 @@ impl Workload {
     }
 
     pub fn agent(&self) -> Option<HarnessAgent> {
-        self.agent.lock().expect("agent").clone()
+        self.agent.locked().clone()
     }
 
     /// Note the harness as signed out, or with `None` as signed in.
     pub fn set_signed_out(&self, signed_out: Option<SignInNeeded>) {
-        let mut current = self.signed_out.lock().expect("signed out");
+        let mut current = self.signed_out.locked();
         if *current != signed_out {
             *current = signed_out;
             self.changed.notify_one();
@@ -81,12 +82,12 @@ impl Workload {
     }
 
     pub fn signed_out(&self) -> Option<SignInNeeded> {
-        self.signed_out.lock().expect("signed out").clone()
+        self.signed_out.locked().clone()
     }
 
     /// Note the provider limit messages wait out, or with `None` that they no longer wait.
     pub fn set_limited(&self, limited: Option<HarnessLimit>) {
-        let mut current = self.limited.lock().expect("limited");
+        let mut current = self.limited.locked();
         if *current != limited {
             *current = limited;
             self.changed.notify_one();
@@ -94,12 +95,12 @@ impl Workload {
     }
 
     pub fn limited(&self) -> Option<HarnessLimit> {
-        self.limited.lock().expect("limited").clone()
+        self.limited.locked().clone()
     }
 
     /// Note that the harness's start failures hold the messages, or with `None` that they no longer do.
     pub fn set_failing(&self, failing: Option<HarnessFailing>) {
-        let mut current = self.failing.lock().expect("failing");
+        let mut current = self.failing.locked();
         if *current != failing {
             *current = failing;
             self.changed.notify_one();
@@ -107,7 +108,7 @@ impl Workload {
     }
 
     pub fn failing(&self) -> Option<HarnessFailing> {
-        self.failing.lock().expect("failing").clone()
+        self.failing.locked().clone()
     }
 
     pub fn handling(&self) -> usize {

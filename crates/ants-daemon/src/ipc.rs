@@ -81,14 +81,14 @@ mod windows {
             let name = PathBuf::from(format!(r"\\.\pipe\ants-mcp-{}", uuid::Uuid::new_v4().simple()));
             let sddl = format!("D:P(A;;GA;;;{})", current_user_sid().context("reading the daemon's user")?);
             let sddl: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
-            let next = create(&name, &sddl, true).with_context(|| format!("creating {}", name.display()))?;
+            let next = create(&name, &sddl, Instance::First).with_context(|| format!("creating {}", name.display()))?;
             Ok((Self { name: name.clone(), sddl, next }, name))
         }
 
         pub async fn accept(&mut self) -> io::Result<NamedPipeServer> {
             let connected = self.next.connect().await;
             // On failure the waiting instance stays, and the next accept hands out a client that connected meanwhile.
-            let next = create(&self.name, &self.sddl, false)?;
+            let next = create(&self.name, &self.sddl, Instance::Next)?;
             let server = std::mem::replace(&mut self.next, next);
             connected.map(|()| server)
         }
@@ -108,7 +108,14 @@ mod windows {
         }
     }
 
-    fn create(name: &Path, sddl: &[u16], first: bool) -> io::Result<NamedPipeServer> {
+    /// Which instance of a pipe [`create`] makes: the first, which fails if the pipe exists, or one more.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Instance {
+        First,
+        Next,
+    }
+
+    fn create(name: &Path, sddl: &[u16], instance: Instance) -> io::Result<NamedPipeServer> {
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated; the descriptor is allocated by the call and freed below.
         let converted = unsafe {
@@ -128,7 +135,7 @@ mod windows {
             bInheritHandle: 0,
         };
         let mut options = ServerOptions::new();
-        options.first_pipe_instance(first).reject_remote_clients(true);
+        options.first_pipe_instance(instance == Instance::First).reject_remote_clients(true);
         // SAFETY: `attributes` is a valid SECURITY_ATTRIBUTES whose descriptor lives until after the call.
         let server = unsafe { options.create_with_security_attributes_raw(name, (&raw mut attributes).cast()) };
         // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW, no longer used.

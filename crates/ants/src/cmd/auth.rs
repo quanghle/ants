@@ -6,6 +6,7 @@ use ants_proto::{ChannelId, Destination, JsDomain, Machine, Permissions, UserId}
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
+use crate::members::EnrollApprover;
 use crate::{Connection, auth, backup, channel, keys, members, revoke, team_dir};
 
 #[derive(Subcommand, Debug)]
@@ -375,7 +376,8 @@ fn leaf_creds(
     let set = members::Change::from(members).apply(&machine, kept, || {
         anyhow::anyhow!("{} keeps no members of {machine}: name them with --ant, --human or --webhook", dir.display())
     })?;
-    auth::issue_leaf(&dir, &machine, &set.roles(), &set.webhooks, set.enroll_approver, domain, &out)?;
+    let approver = EnrollApprover::from(set.enroll_approver);
+    auth::issue_leaf(&dir, &machine, &set.roles(), &set.webhooks, approver, domain, &out)?;
     println!("{}\n{}\nmembers of {machine}: {set}", out.display(), auth::leaf_system_creds(&out).display());
     Ok(())
 }

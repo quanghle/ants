@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{Detail, Link, Model, Pane};
+use super::model::{Detail, Level, Link, Model, Pane};
 use crate::{roster, thread, tools};
 
 /// How old the last read of the stream may be before it shows as stale: a few of the dashboard's periodic reads.
@@ -81,7 +81,10 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(notice) = model.notice_at(now) {
-        let style = if notice.error { Style::new().fg(Color::Red) } else { Style::new().fg(Color::Cyan) };
+        let style = match notice.level {
+            Level::Error => Style::new().fg(Color::Red),
+            Level::Info => Style::new().fg(Color::Cyan),
+        };
         return Line::styled(format!(" {}", notice.text), style);
     }
     let keys = match (&model.detail, model.focus) {

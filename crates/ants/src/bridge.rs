@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ants_daemon::metrics::{self, Exposition, Kind};
+use ants_daemon::sync::MutexExt as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE64, HEXLOWER};
 use http_body_util::{BodyExt as _, Full, Limited};
@@ -252,7 +253,7 @@ impl Server {
     }
 
     async fn open(&self) -> Response<Full<Bytes>> {
-        if self.sessions.lock().unwrap().len() >= MAX_SESSIONS {
+        if self.sessions.locked().len() >= MAX_SESSIONS {
             return reply(StatusCode::SERVICE_UNAVAILABLE, "too many sessions");
         }
         let stream = match tokio::time::timeout(UPSTREAM_CONNECT, TcpStream::connect(&self.upstream)).await {
@@ -277,20 +278,20 @@ impl Server {
             seen: Mutex::new(Instant::now()),
         };
         let id = session_id();
-        self.sessions.lock().unwrap().insert(id.clone(), Arc::new(session));
+        self.sessions.locked().insert(id.clone(), Arc::new(session));
         self.traffic.opened();
         tracing::info!(session = %id, upstream = %self.upstream, "bridge session opened");
         Response::new(Full::new(Bytes::from(id)))
     }
 
     fn session(&self, id: &str) -> Option<Arc<Session>> {
-        let session = self.sessions.lock().unwrap().get(id).cloned()?;
-        *session.seen.lock().unwrap() = Instant::now();
+        let session = self.sessions.locked().get(id).cloned()?;
+        *session.seen.locked() = Instant::now();
         Some(session)
     }
 
     fn close(&self, id: &str, why: &str) {
-        if let Some(session) = self.sessions.lock().unwrap().remove(id) {
+        if let Some(session) = self.sessions.locked().remove(id) {
             self.traffic.closed();
             session.close();
             tracing::info!(session = %id, "bridge session {why}");
@@ -299,8 +300,8 @@ impl Server {
 
     fn sweep(&self) {
         let idle: Vec<String> = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions.iter().filter(|(_, s)| s.seen.lock().unwrap().elapsed() > IDLE).map(|(id, _)| id.clone()).collect()
+            let sessions = self.sessions.locked();
+            sessions.iter().filter(|(_, s)| s.seen.locked().elapsed() > IDLE).map(|(id, _)| id.clone()).collect()
         };
         for id in idle {
             self.close(&id, "expired");
@@ -312,7 +313,7 @@ impl Session {
     /// Ends the session at once: requests in flight return, and the upstream closes when the last one has.
     fn close(&self) {
         self.reader.abort();
-        let mut state = self.down.state.lock().unwrap();
+        let mut state = self.down.state.locked();
         state.gone = true;
         state.buf = Vec::new();
         drop(state);
@@ -342,7 +343,7 @@ impl Session {
             let mut readable = pin!(self.down.readable.notified());
             readable.as_mut().enable();
             {
-                let mut state = self.down.state.lock().unwrap();
+                let mut state = self.down.state.locked();
                 if state.gone {
                     return reply(StatusCode::NOT_FOUND, "no such session");
                 }
@@ -378,14 +379,14 @@ async fn read_upstream(mut reader: OwnedReadHalf, down: Arc<Down>, traffic: Arc<
         loop {
             let mut room = pin!(down.room.notified());
             room.as_mut().enable();
-            if down.state.lock().unwrap().buf.len() < BUFFER {
+            if down.state.locked().buf.len() < BUFFER {
                 break;
             }
             room.await;
         }
         let n = reader.read(&mut chunk).await.unwrap_or(0);
         traffic.down(n);
-        let mut state = down.state.lock().unwrap();
+        let mut state = down.state.locked();
         if n == 0 {
             state.eof = true;
         } else {
@@ -786,10 +787,17 @@ pub fn token(token: Option<String>, file: Option<&Path>) -> Result<Option<String
     Ok(Some(token.to_owned()))
 }
 
-/// `addr` parsed, and checked to be loopback when `local_only`.
-pub fn listen_addr(addr: &str, local_only: bool) -> Result<SocketAddr> {
+/// Which addresses [`listen_addr`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listen {
+    Any,
+    LoopbackOnly,
+}
+
+/// `addr` parsed, and checked to be loopback with [`Listen::LoopbackOnly`].
+pub fn listen_addr(addr: &str, listen: Listen) -> Result<SocketAddr> {
     let parsed: SocketAddr = addr.parse().with_context(|| format!("--listen {addr}: expected host:port"))?;
-    if local_only && !parsed.ip().is_loopback() {
+    if listen == Listen::LoopbackOnly && !parsed.ip().is_loopback() {
         bail!("--listen {addr}: the bridge serves this machine only; use a loopback address");
     }
     Ok(parsed)

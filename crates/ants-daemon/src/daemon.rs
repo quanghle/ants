@@ -24,7 +24,7 @@ use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::breaker::{self, Breaker, StartFailed};
 use crate::caps::{Caps, Ledger, Recorded, Warning};
-use crate::channel::{self, Channels, Context, Threads, Wake};
+use crate::channel::{self, Channels, Context, Earlier, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
@@ -38,6 +38,7 @@ use crate::ratelimit::{self, Backoffs, Limited, Throttle};
 use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
+use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
 use crate::{bus, roster, unserved};
@@ -640,6 +641,13 @@ struct Retry {
     until: tokio::time::Instant,
 }
 
+/// A dead letter to bury: a new one, or one kept in the machine's outbox on an earlier delivery.
+#[derive(Clone, Copy)]
+enum Letter {
+    New,
+    Kept,
+}
+
 /// How handling a message ended.
 enum Handled {
     /// Answered, acked or buried.
@@ -669,14 +677,14 @@ impl Cancels {
     /// Make the prompt about to run on `thread` cancellable until the guard drops; the cancels arrive on the receiver.
     fn register<'a>(&'a self, thread: &ThreadId) -> (Cancellable<'a>, tokio::sync::mpsc::Receiver<UserId>) {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        self.0.lock().unwrap().insert(thread.clone(), tx);
+        self.0.locked().insert(thread.clone(), tx);
         (Cancellable { cancels: self, thread: thread.clone() }, rx)
     }
 
     /// Cancel the prompt running on `thread` for `by`, if one is; one cancelled already stays so.
     fn cancel(&self, thread: &ThreadId, by: UserId) -> bool {
         use tokio::sync::mpsc::error::TrySendError;
-        let cancels = self.0.lock().unwrap();
+        let cancels = self.0.locked();
         cancels.get(thread).is_some_and(|tx| !matches!(tx.try_send(by), Err(TrySendError::Closed(_))))
     }
 }
@@ -688,7 +696,7 @@ struct Cancellable<'a> {
 
 impl Drop for Cancellable<'_> {
     fn drop(&mut self) {
-        self.cancels.0.lock().unwrap().remove(&self.thread);
+        self.cancels.0.locked().remove(&self.thread);
     }
 }
 
@@ -1320,7 +1328,7 @@ impl Inbox<'_> {
         if let Some(kept) = self.buried.get(envelope).await {
             // Its dead letter went to the machine's outbox while the hub was out of reach; the redelivery finishes it.
             tracing::info!(%thread, "burying a message whose dead letter is in the outbox");
-            match self.bury_letter(&incoming, &msg, &kept.dead, true).await {
+            match self.bury_letter(&incoming, &msg, &kept.dead, Letter::Kept).await {
                 Ok(()) => {
                     self.attempts.forget(seq).await;
                     self.attempts.finish(envelope).await;
@@ -1585,11 +1593,11 @@ impl Inbox<'_> {
     async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
         let dead = dead::letter_for(self.ant, msg, envelope, error)?;
-        self.bury_letter(incoming, msg, &dead, false).await
+        self.bury_letter(incoming, msg, &dead, Letter::New).await
     }
 
-    /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, `kept` in the machine's outbox on an earlier delivery, as the
-    /// letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
+    /// Bury `msg` as `dead` ([`dead::bury_letter`]), or, [`Letter::Kept`] in the machine's outbox on an earlier delivery,
+    /// as the letter the hub's stream may hold already ([`dead::bury_kept`]). A dead letter kept in the machine's outbox is
     /// noted in `buried`, so the redelivery buries it again, even in a restarted daemon; on the last delivery, with its
     /// ack subject, for [`Inbox::finish_buried`].
     async fn bury_letter(
@@ -1597,18 +1605,18 @@ impl Inbox<'_> {
         incoming: &Incoming,
         msg: &jetstream::Message,
         dead: &DeadLetter,
-        kept: bool,
+        letter: Letter,
     ) -> Result<()> {
         let post = incoming.post.as_ref().map(|posted| &posted.post);
         let escalator = Some(self.escalator);
-        let burial = if kept {
-            dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await?
-        } else {
-            dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?
+        let burial = match letter {
+            Letter::Kept => dead::bury_kept(self.js, msg, dead, post, self.humans, escalator).await?,
+            Letter::New => {
+                let burial = dead::bury_letter(self.js, msg, dead, post, self.humans, escalator).await?;
+                self.metrics.buried();
+                burial
+            }
         };
-        if !kept {
-            self.metrics.buried();
-        }
         match burial {
             Burial::Hub(_) => self.buried.forget(&incoming.envelope).await,
             Burial::Outbox => {
@@ -1656,12 +1664,12 @@ impl Inbox<'_> {
     /// Returns whether to answer the message: a member's notice that it sent the ant's escalation higher is the
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
-        let human = self.humans.sender_role(&incoming.envelope).is_human();
-        if incoming.post.is_none() && !human && self.escalator.took_climb(&incoming.envelope).await? {
+        let sender = self.humans.sender_role(&incoming.envelope);
+        if incoming.post.is_none() && !sender.is_human() && self.escalator.took_climb(&incoming.envelope).await? {
             return Ok(false);
         }
-        let renewed = self.escalator.arrived(&mut incoming.envelope, human).await?;
-        self.narrow(incoming, human).await?;
+        let renewed = self.escalator.arrived(&mut incoming.envelope, sender).await?;
+        self.narrow(incoming, sender).await?;
         // Not a message from ask_agent or send_message: an ask_agent call waits for the answer in the leader's inbox.
         if renewed && incoming.post.is_none() && incoming.envelope.in_reply_to.is_some() {
             let pending = self.escalator.ledger().pending(&incoming.envelope.thread_id).await?;
@@ -1673,10 +1681,10 @@ impl Inbox<'_> {
     /// Set the tool rules of the message, and of its post, to those its thread is narrowed to: a human's message lifts
     /// the narrowing ([`Ledger::reset`]) and has none, a thread keeps the first rules a message brought it, and a
     /// webhook's message brings [`WEBHOOK_ALLOW`] when it has none of its own.
-    async fn narrow(&self, incoming: &mut Incoming, human: bool) -> Result<()> {
+    async fn narrow(&self, incoming: &mut Incoming, sender: Role) -> Result<()> {
         let envelope = &mut incoming.envelope;
         let carried = envelope.allow.take();
-        if !human {
+        if !sender.is_human() {
             let carried = match carried {
                 None if envelope.webhook => Some(WEBHOOK_ALLOW.map(str::to_owned).to_vec()),
                 carried => carried,
@@ -1719,7 +1727,7 @@ impl Inbox<'_> {
         // A post's thread has the turns its posts since left, which other members' replies may have spent.
         let humans = self.humans.humans();
         let read = match &incoming.post {
-            Some(posted) => Some(self.threads.context(&posted.post, seq, true, &humans).await?),
+            Some(posted) => Some(self.threads.context(&posted.post, seq, Earlier::Unseen, &humans).await?),
             None => None,
         };
         let spent = match (&incoming.post, &read) {
@@ -1869,7 +1877,7 @@ impl Inbox<'_> {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
                 let humans = self.humans.humans();
-                let later = match self.threads.context(&posted.post, seq, false, &humans).await {
+                let later = match self.threads.context(&posted.post, seq, Earlier::Omitted, &humans).await {
                     Ok(now) => now.later,
                     Err(e) => {
                         tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
@@ -2217,7 +2225,7 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
         Some((incoming, msg)) => {
             t.busy = true;
             t.in_flight = stream_seq(msg);
-            t.running = queued_message(incoming, msg, true, 0);
+            t.running = queued_message(incoming, msg, Place::Running);
         }
         None => {
             entry.remove();
@@ -2233,8 +2241,9 @@ fn in_hand(threads: &HashMap<ThreadId, Thread>) -> Vec<QueuedMessage> {
         .flat_map(|t| {
             let before = usize::from(t.busy) + usize::from(t.retry.is_some());
             let waiting = t.waiting.iter().enumerate();
-            let waiting =
-                waiting.filter_map(move |(at, (incoming, msg))| queued_message(incoming, msg, false, before + at));
+            let waiting = waiting.filter_map(move |(at, (incoming, msg))| {
+                queued_message(incoming, msg, Place::Waiting { ahead: before + at })
+            });
             t.running.clone().into_iter().chain(waiting)
         })
         .collect();
@@ -2242,8 +2251,22 @@ fn in_hand(threads: &HashMap<ThreadId, Thread>) -> Vec<QueuedMessage> {
     messages
 }
 
-fn queued_message(incoming: &Incoming, msg: &jetstream::Message, running: bool, ahead: usize) -> Option<QueuedMessage> {
+/// Where a message in hand stands on its thread.
+#[derive(Clone, Copy)]
+enum Place {
+    Running,
+    /// Waiting with `ahead` messages of its thread before it.
+    Waiting {
+        ahead: usize,
+    },
+}
+
+fn queued_message(incoming: &Incoming, msg: &jetstream::Message, place: Place) -> Option<QueuedMessage> {
     let envelope = &incoming.envelope;
+    let (running, ahead) = match place {
+        Place::Running => (true, 0),
+        Place::Waiting { ahead } => (false, ahead),
+    };
     Some(QueuedMessage {
         id: envelope.id,
         thread_id: envelope.thread_id.clone(),

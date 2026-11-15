@@ -11,6 +11,7 @@ use futures::StreamExt as _;
 
 use super::*;
 use crate::humans::Me;
+use crate::members::EnrollApprover;
 use crate::{auth, channel, leaf};
 
 pub(crate) fn free_port() -> u16 {
@@ -72,7 +73,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     // The CLI runs on m1 too.
     let alice: UserId = "alice".parse().unwrap();
     let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
-    auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
     let listen = format!("127.0.0.1:{}", free_port());
     let configure = |dir: &Path, port: u16| {
@@ -281,7 +282,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
 
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
-    auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
     let listen = format!("127.0.0.1:{}", free_port());
     let configure = |dir: &Path, port: u16| {
@@ -412,7 +413,7 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
     bus::init_stream(&h_js).await.unwrap();
     let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
     let leaf_creds = hub.dir().join("leaf-m1.creds");
-    auth::issue_leaf(&team, &m1, &on_m1, &[], false, Some(&domain), &leaf_creds).unwrap();
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
     let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
     let _leaf_node = NatsServer::spawn_with(|dir| {

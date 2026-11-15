@@ -17,6 +17,7 @@ use async_nats::HeaderMap;
 use async_nats::jetstream::{self, stream};
 
 use crate::direct_kv::{DirectKv, Lookup};
+use crate::sync::MutexExt as _;
 
 /// Most owners kept in memory; past it they are read again.
 const MAX_KEPT: usize = 4096;
@@ -72,7 +73,7 @@ impl Owners {
 
     async fn read(&self, thread: &ThreadId, to: &UserId) -> Result<Read> {
         let key = owner_key(thread, to);
-        if let Some(owner) = self.found.lock().expect("owners").get(&key) {
+        if let Some(owner) = self.found.locked().get(&key) {
             return Ok(Read::Owner(owner.clone()));
         }
         // A direct get alone, so no stream info lists the threads of every owner.
@@ -97,7 +98,7 @@ impl Owners {
         let Some(owner) = std::str::from_utf8(&value).ok().and_then(|v| v.parse::<UserId>().ok()) else {
             return Ok(Read::NoOwner);
         };
-        let mut found = self.found.lock().expect("owners");
+        let mut found = self.found.locked();
         if found.len() >= MAX_KEPT {
             found.clear();
         }

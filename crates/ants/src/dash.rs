@@ -20,7 +20,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use self::model::{Action, Key, Model};
+use self::model::{Action, Key, Level, Model};
 use crate::thread::{self, Entry, Parser};
 use crate::{presence, progress, roster, tools};
 
@@ -259,7 +259,7 @@ impl Dash {
                     let log = progress::last_held_log();
                     if log != logged {
                         if let Some(warning) = log.as_deref().and_then(warning) {
-                            self.model.notify(warning, true, Utc::now());
+                            self.model.notify(warning, Level::Error, Utc::now());
                             dirty = true;
                         }
                         logged = log;
@@ -282,7 +282,7 @@ impl Dash {
                     let action = match read {
                         Ok((entries, last)) => self.model.stored(entries, last, Utc::now()),
                         Err(e) => {
-                            self.model.notify(format!("{e:#}"), true, Utc::now());
+                            self.model.notify(format!("{e:#}"), Level::Error, Utc::now());
                             None
                         }
                     };
@@ -305,7 +305,7 @@ impl Dash {
                     self.follow = None;
                     self.follow_at = Instant::now() + REREAD;
                     if let Err(e) = followed {
-                        self.model.notify(format!("following the tool requests: {e:#}"), true, Utc::now());
+                        self.model.notify(format!("following the tool requests: {e:#}"), Level::Error, Utc::now());
                     }
                     dirty = true;
                 }
@@ -313,7 +313,7 @@ impl Dash {
                     self.roster = None;
                     match read {
                         Ok(entries) => self.model.roster(entries, Utc::now()),
-                        Err(e) => self.model.notify(format!("reading the roster: {e:#}"), true, Utc::now()),
+                        Err(e) => self.model.notify(format!("reading the roster: {e:#}"), Level::Error, Utc::now()),
                     }
                     dirty = true;
                 }

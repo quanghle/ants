@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use ants_proto::{UserId, WEBHOOKS_BUCKET, webhook_marker_subject};
 use async_nats::jetstream::{self, stream::DirectGetErrorKind};
 
+use crate::sync::MutexExt as _;
+
 /// How long a marker found is trusted before it is read again.
 const KEEP: Duration = Duration::from_hours(1);
 /// Most webhooks kept in memory; past it they are read again.
@@ -28,7 +30,7 @@ impl Webhooks {
     /// Whether `sender` is a webhook: its marker is in the webhooks bucket. A marker that cannot be read counts as
     /// none.
     pub async fn is_webhook(&self, sender: &UserId) -> bool {
-        if self.found.lock().expect("webhooks").get(sender).is_some_and(|at| at.elapsed() < KEEP) {
+        if self.found.locked().get(sender).is_some_and(|at| at.elapsed() < KEEP) {
             return true;
         }
         let found = match self.read(sender).await {
@@ -43,7 +45,7 @@ impl Webhooks {
                 false
             }
         };
-        let mut kept = self.found.lock().expect("webhooks");
+        let mut kept = self.found.locked();
         if found {
             if kept.len() >= MAX_KEPT {
                 kept.clear();

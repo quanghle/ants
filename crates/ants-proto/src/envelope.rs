@@ -121,11 +121,13 @@ impl Envelope {
     }
 
     /// The envelope with `owner` as the human who started its thread.
+    #[must_use]
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
     }
 
     /// The envelope as a webhook's message ([`Envelope::webhook`]).
+    #[must_use]
     pub fn from_webhook(self) -> Self {
         Self { webhook: true, ..self }
     }
@@ -136,23 +138,27 @@ impl Envelope {
     }
 
     /// The envelope narrowed to the tool rules `allow` ([`Envelope::allow`]).
+    #[must_use]
     pub fn with_allow(self, allow: Option<Vec<String>>) -> Self {
         Self { allow, ..self }
     }
 
     /// The envelope with `creator` as the ant that started its thread with a channel post.
+    #[must_use]
     pub fn with_creator(self, creator: Option<UserId>) -> Self {
         Self { creator, ..self }
     }
 
     /// The envelope linking to `origin_thread`, the thread its creator or owner comes from
     /// ([`Envelope::origin_thread`]): none without a creator or an owner, set first, or on that thread itself.
+    #[must_use]
     pub fn with_origin_thread(self, origin_thread: Option<ThreadId>) -> Self {
         let origin_thread = origin_thread.filter(|t| self.links_origin() && *t != self.thread_id);
         Self { origin_thread, ..self }
     }
 
     /// The envelope carrying `escalation`.
+    #[must_use]
     pub fn with_escalation(self, escalation: Option<Escalation>) -> Self {
         Self { escalation: escalation.map(Box::new), ..self }
     }
@@ -182,6 +188,7 @@ impl Envelope {
 
     /// A message on this envelope's thread, with a fresh budget and the same owner, creator, origin thread and tool
     /// rules.
+    #[must_use]
     pub fn follow_up(&self, from: UserId, to: UserId, text: impl Into<String>) -> Self {
         let follow_up = Self::on_thread(self.thread_id.clone(), from, to, text)
             .with_owner(self.owner.clone())
@@ -192,6 +199,7 @@ impl Envelope {
 
     /// The envelope moved to `thread`, spun off this one's: it keeps the link to the thread its creator or owner
     /// comes from ([`Envelope::origin_thread`]), this thread unless it was spun off one itself.
+    #[must_use]
     pub fn spun_off(self, thread: ThreadId) -> Self {
         let origin = self.origin_thread.clone().unwrap_or_else(|| self.thread_id.clone());
         let origin_thread = (self.links_origin() && origin != thread).then_some(origin);

@@ -5,7 +5,6 @@ use std::hash::{Hash as _, Hasher as _};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::PoisonError;
 use std::time::Duration;
 
 use ants_proto::{
@@ -23,6 +22,7 @@ use crate::direct_kv::DirectKv;
 use crate::hub;
 use crate::keystore::{self, Store};
 use crate::reading::{self, Reading};
+use crate::sync::MutexExt as _;
 
 /// How long the stream keeps messages, the sessions bucket a thread's session, and the attempts bucket a marker: a
 /// message can be redelivered for as long as the stream keeps it.
@@ -581,7 +581,8 @@ pub async fn store_acked<T: serde::Serialize>(
     };
     if let Err(e) = kept {
         if uncaptured {
-            return Err(explained(unreachable, &subject, true)).context("waiting for JetStream to store the message");
+            return Err(explained(unreachable, &subject, uncaptured))
+                .context("waiting for JetStream to store the message");
         }
         return Err(anyhow::anyhow!(e)).with_context(|| {
             format!(
@@ -648,8 +649,7 @@ fn subject_kind(subject: &str) -> &str {
 /// Warn that the hub's stream does not capture `subject` ([`uncaptured_hint`]), once per process for each kind of
 /// subject ([`subject_kind`]), then only at debug level. True when it warned.
 fn warn_uncaptured(subject: &str, done: &str) -> bool {
-    let first =
-        WARNED_UNCAPTURED.lock().unwrap_or_else(PoisonError::into_inner).insert(subject_kind(subject).to_owned());
+    let first = WARNED_UNCAPTURED.locked().insert(subject_kind(subject).to_owned());
     if first {
         tracing::warn!(%subject, "{}; {done}", uncaptured_hint(subject));
     } else {

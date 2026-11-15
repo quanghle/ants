@@ -56,6 +56,7 @@ use crate::escalation::{self, Escalated, Escalator, Stuck};
 use crate::harness::McpServers;
 use crate::humans::Registry;
 use crate::notes::NotesStore;
+use crate::sync::MutexExt as _;
 use crate::{bus, ipc, links, reactions, roster};
 
 /// Environment variable carrying the session's token to `ants mcp`.
@@ -380,7 +381,7 @@ impl Mcp {
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
-        self.hub.sessions.lock().expect("sessions").current.insert(envelope.thread_id.clone(), envelope.clone());
+        self.hub.sessions.locked().current.insert(envelope.thread_id.clone(), envelope.clone());
         Turn { hub: self.hub.clone(), thread: envelope.thread_id.clone() }
     }
 }
@@ -393,7 +394,7 @@ pub struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.hub.sessions.lock().expect("sessions").current.remove(&self.thread);
+        self.hub.sessions.locked().current.remove(&self.thread);
     }
 }
 
@@ -480,7 +481,7 @@ struct Hub {
 impl Hub {
     /// The token of `thread`'s sessions, made on first use.
     fn token(&self, thread: &ThreadId) -> String {
-        let mut sessions = self.sessions.lock().expect("sessions");
+        let mut sessions = self.sessions.locked();
         if let Some(token) = sessions.by_thread.get(thread) {
             return token.clone();
         }
@@ -491,7 +492,7 @@ impl Hub {
     }
 
     fn caller(&self, token: &str) -> Option<ThreadId> {
-        self.sessions.lock().expect("sessions").tokens.get(token).cloned()
+        self.sessions.locked().tokens.get(token).cloned()
     }
 
     /// A message from the ant, following on from the one `thread` is handling and keeping its owner: on the same
@@ -502,7 +503,7 @@ impl Hub {
         if to == self.ant {
             return Err(format!("{to} is this ant; message another one"));
         }
-        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; messages go out only while one is")?;
         let role = if self.humans.is_human(&to) { Role::Human } else { self.humans.sender_role(&current) };
         let mut envelope = current
@@ -534,7 +535,7 @@ impl Hub {
     /// Post `text` to the notes of `thread`, spending one of its turns. The post that spends the last one escalates
     /// the thread up its origin chain, in the end to its owner, else the default human.
     async fn post_notes(&self, thread: &ThreadId, text: String) -> Result<String, String> {
-        let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| {
+        let current = self.sessions.locked().current.get(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
             let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone(), e.origin_thread.clone());
             (e.turn_budget, owner, self.humans.owner_of(e), carried, e.allow.clone())
@@ -602,7 +603,7 @@ impl Hub {
         let message = match args.message_id.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
             Some(id) => id.parse().map_err(|e| format!("message_id {id:?}: {e}"))?,
             None => {
-                let current = self.sessions.lock().expect("sessions").current.get(thread).map(|e| e.id);
+                let current = self.sessions.locked().current.get(thread).map(|e| e.id);
                 current.ok_or("no message is being handled on this thread; name the message by message_id")?
             }
         };
@@ -618,7 +619,7 @@ impl Hub {
     /// Escalate `thread` for `issue`: up its origin chain or, for the leader of the escalation group the thread's
     /// message is from, one level above that escalation. Returns where it went.
     async fn escalate(&self, thread: &ThreadId, issue: String) -> Result<String, String> {
-        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current = self.sessions.locked().current.get(thread).cloned();
         let current =
             current.ok_or("no message is being handled on this thread; escalations go out only while one is")?;
         if let Some(e) = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval)
@@ -671,7 +672,7 @@ impl Hub {
     /// the ant creates, with no owner and the turns the message `thread` is handling leaves, as `send_message` spends
     /// them. Returns the new thread and whom the post wakes or notifies (its daemon sends the notices).
     async fn post_channel(&self, thread: &ThreadId, channel: &str, text: String) -> Result<String, String> {
-        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         let channel: ChannelId = channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
         let access = self.channels.get().ok_or("channels are not served here; post_channel is unavailable")?;
@@ -719,7 +720,7 @@ impl Hub {
     async fn decide_approval(&self, thread: &ThreadId, verdict: &str) -> Result<String, String> {
         let verdict: Verdict = serde_json::from_value(serde_json::Value::String(verdict.trim().replace('-', "_")))
             .map_err(|_| format!("unknown verdict {verdict}: allow_once, allow_always or reject"))?;
-        let current = self.sessions.lock().expect("sessions").current.get(thread).cloned();
+        let current = self.sessions.locked().current.get(thread).cloned();
         let current =
             current.ok_or("no message is being handled on this thread; decisions go out only while one is")?;
         let request = current.escalation.as_deref().filter(|e| e.reason == EscalationReason::Approval);

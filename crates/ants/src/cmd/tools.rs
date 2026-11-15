@@ -57,7 +57,7 @@ pub(crate) enum ToolsCommand {
 pub(crate) async fn run(command: ToolsCommand, conn: &Connection<'_>) -> Result<()> {
     let nats = || conn.nats();
     match command {
-        ToolsCommand::List { follow, json } => tools::list(&nats()?, follow, json).await,
+        ToolsCommand::List { follow, json } => tools::list(&nats()?, crate::Listing { follow, json }).await,
         ToolsCommand::Show { id, json } => tools::show(&nats()?, &id, json).await,
         ToolsCommand::Approve { id, always, rule, config } => {
             let verdict = if always { Verdict::AllowAlways } else { Verdict::AllowOnce };

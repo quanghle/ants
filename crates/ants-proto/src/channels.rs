@@ -222,16 +222,19 @@ impl ChannelPost {
     }
 
     /// The post with `owner` as the human who started its thread.
+    #[must_use]
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
     }
 
     /// The post with `creator` as the ant that started its thread.
+    #[must_use]
     pub fn with_creator(self, creator: Option<UserId>) -> Self {
         Self { creator, ..self }
     }
 
     /// The post narrowed to the tool rules `allow` ([`ChannelPost::allow`]).
+    #[must_use]
     pub fn with_allow(self, allow: Option<Vec<String>>) -> Self {
         Self { allow, ..self }
     }
@@ -246,6 +249,7 @@ impl ChannelPost {
     }
 
     /// The post as a webhook's, mentioning exactly `mentions`, whatever its text says.
+    #[must_use]
     pub fn from_webhook(self, mentions: Vec<UserId>) -> Self {
         Self { mentions, webhook: true, ..self }
     }

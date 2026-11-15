@@ -66,6 +66,13 @@ pub enum Event {
     Retired { revoked: usize, push_error: Option<String> },
 }
 
+/// What approved a request the signer signs: the template's policy, or a human.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovedBy {
+    Policy,
+    Human,
+}
+
 /// Print what the signer did with `request`.
 pub fn print(request: &AntRequest, event: &Event) {
     if request.retire {
@@ -196,7 +203,7 @@ impl Signer<'_> {
             Err(e) => Judgement::Refuse(format!("{e:#}")),
         };
         match judgement {
-            Judgement::Approve => self.sign(approver, &request, false, report).await,
+            Judgement::Approve => self.sign(approver, &request, ApprovedBy::Policy, report).await,
             Judgement::Refuse(reason) => self.refuse(approver, &request, reason, report).await,
             Judgement::Ask(why) => self.ask_humans(approver, request, why, report).await,
         }
@@ -254,14 +261,14 @@ impl Signer<'_> {
         &mut self,
         approver: &Approver,
         request: &AntRequest,
-        human: bool,
+        by: ApprovedBy,
         report: &mut impl FnMut(&AntRequest, &Event),
     ) -> Result<()> {
         let signed = self.signed(approver, request).await;
         let (manager, name, public_key) = (request.manager.clone(), request.name.clone(), request.public_key.clone());
         let reply = match signed {
             Ok((jwt, leaf_jwt)) => {
-                report(request, &Event::Approved { human });
+                report(request, &Event::Approved { human: by == ApprovedBy::Human });
                 AntReply::Approved { manager, name, public_key, jwt, leaf_jwt }
             }
             Err(e) => {
@@ -397,7 +404,7 @@ impl Signer<'_> {
             };
             match decision.map(|d| waiting.approval.decide(d.verdict).verdict) {
                 Some(Verdict::AllowOnce | Verdict::AllowAlways) => {
-                    self.sign(approver, &waiting.request, true, report).await?;
+                    self.sign(approver, &waiting.request, ApprovedBy::Human, report).await?;
                 }
                 Some(Verdict::Reject) => {
                     self.refuse(approver, &waiting.request, "a human rejected the request".to_owned(), report).await?;

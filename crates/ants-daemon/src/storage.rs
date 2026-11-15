@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
+use crate::sync::MutexExt as _;
 
 /// How often the usage is read.
 pub const CHECK_EVERY: Duration = Duration::from_mins(5);
@@ -229,11 +230,11 @@ pub async fn measure(
     let plain = jetstream::new(js.client());
     let (hub, own) = tokio::join!(js.query_account(), plain.query_account());
     let mut found = Vec::new();
-    let hub = hub.map(|account| found.extend(usages(&account, false, settings)));
+    let hub = hub.map(|account| found.extend(usages(&account, JetStream::Hub, settings)));
     if let Ok(account) = own
         && domain(&account).is_some_and(|d| Some(d) != hub_domain.map(JsDomain::as_str))
     {
-        found.extend(usages(&account, true, settings));
+        found.extend(usages(&account, JetStream::Leaf, settings));
     }
     match hub {
         Err(e) if found.is_empty() => Err(e).context("reading the account's JetStream info"),
@@ -245,7 +246,15 @@ fn domain(account: &Account) -> Option<&str> {
     account.domain.as_deref().filter(|d| !d.is_empty())
 }
 
-fn usages(account: &Account, leaf: bool, settings: &Settings) -> Vec<Usage> {
+/// Whose JetStream an account's usage is: the hub's, or the leaf node's own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JetStream {
+    Hub,
+    Leaf,
+}
+
+fn usages(account: &Account, jetstream: JetStream, settings: &Settings) -> Vec<Usage> {
+    let leaf = jetstream == JetStream::Leaf;
     let limit = |own: Option<i64>, leaf_limit: u64, configured: Option<u64>| {
         let own = own.and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0);
         own.or(if leaf { Some(leaf_limit) } else { configured })
@@ -284,7 +293,7 @@ static CHECKED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
 /// Whether this ant reads the usage of `server` now: none of the process's ants did in the last half `every`.
 fn claim(server: &str, every: Duration) -> bool {
     let now = Instant::now();
-    let mut checked = CHECKED.lock().unwrap();
+    let mut checked = CHECKED.locked();
     if checked.get(server).is_some_and(|at| now.duration_since(*at) < every / 2) {
         return false;
     }
@@ -400,12 +409,16 @@ mod tests {
             ..Default::default()
         };
         let configured = Settings { max_file_store: Some(1000), ..Settings::default() };
-        let hub = usages(&account(None, "hub"), false, &configured);
+        let hub = usages(&account(None, "hub"), JetStream::Hub, &configured);
         assert_eq!(hub.len(), 1, "no memory store in use or limited: {hub:?}");
         assert_eq!((hub[0].limit, hub[0].percent()), (Some(1000), Some(90)));
-        assert_eq!(usages(&account(Some(9000), "hub"), false, &configured)[0].percent(), Some(10), "the account's");
-        assert_eq!(usages(&account(None, ""), false, &Settings::default())[0].limit, None, "unknown");
-        let leaf = usages(&account(None, "m1"), true, &configured);
+        assert_eq!(
+            usages(&account(Some(9000), "hub"), JetStream::Hub, &configured)[0].percent(),
+            Some(10),
+            "the account's"
+        );
+        assert_eq!(usages(&account(None, ""), JetStream::Hub, &Settings::default())[0].limit, None, "unknown");
+        let leaf = usages(&account(None, "m1"), JetStream::Leaf, &configured);
         assert_eq!(leaf.iter().map(|u| u.limit).collect::<Vec<_>>(), [Some(LEAF_FILE_STORE), Some(LEAF_MEMORY_STORE)]);
         assert_eq!(leaf[0].domain.as_deref(), Some("m1"));
     }

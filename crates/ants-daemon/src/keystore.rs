@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 
+use crate::sync::MutexExt as _;
+
 /// The service under which seeds are stored.
 pub const SERVICE: &str = "ants";
 
@@ -646,19 +648,29 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Fail every request from now on, as a locked store does, or no longer.
-    pub fn lock(&self, locked: bool) {
-        self.locked.store(locked, Ordering::SeqCst);
+    /// Fail every request from now on, as a locked store does, until [`Memory::unlock`].
+    pub fn lock(&self) {
+        self.locked.store(true, Ordering::SeqCst);
     }
 
-    /// Refuse to store from now on, or no longer, while still reading and deleting.
-    pub fn refuse_writes(&self, refuse: bool) {
-        self.read_only.store(refuse, Ordering::SeqCst);
+    /// Serve requests again after [`Memory::lock`].
+    pub fn unlock(&self) {
+        self.locked.store(false, Ordering::SeqCst);
+    }
+
+    /// Refuse to store from now on, while still reading and deleting, until [`Memory::allow_writes`].
+    pub fn refuse_writes(&self) {
+        self.read_only.store(true, Ordering::SeqCst);
+    }
+
+    /// Store again after [`Memory::refuse_writes`].
+    pub fn allow_writes(&self) {
+        self.read_only.store(false, Ordering::SeqCst);
     }
 
     /// The public keys of the seeds stored.
     pub fn keys(&self) -> Vec<String> {
-        self.seeds.lock().unwrap().keys().cloned().collect()
+        self.seeds.locked().keys().cloned().collect()
     }
 
     fn check(&self) -> Result<()> {
@@ -672,7 +684,7 @@ impl Memory {
 impl Store for Memory {
     fn get(&self, key: &str) -> Result<Option<String>> {
         self.check()?;
-        Ok(self.seeds.lock().unwrap().get(key).cloned())
+        Ok(self.seeds.locked().get(key).cloned())
     }
 
     fn set(&self, key: &str, seed: &str) -> Result<()> {
@@ -680,13 +692,13 @@ impl Store for Memory {
         if self.read_only.load(Ordering::SeqCst) {
             bail!("the credential store denied access");
         }
-        self.seeds.lock().unwrap().insert(key.to_owned(), seed.to_owned());
+        self.seeds.locked().insert(key.to_owned(), seed.to_owned());
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
         self.check()?;
-        self.seeds.lock().unwrap().remove(key);
+        self.seeds.locked().remove(key);
         Ok(())
     }
 }

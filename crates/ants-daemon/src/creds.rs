@@ -576,10 +576,10 @@ mod tests {
         assert_eq!(load(stored_text(&jwt, &key)), Ok((jwt.clone(), key.clone())));
         let err = load(stored_text(&jwt, &other.public_key())).unwrap_err();
         assert!(err.contains("not the key"), "{err}");
-        store.lock(true);
+        store.lock();
         let err = load(stored_text(&jwt, &key)).unwrap_err();
         assert!(err.contains("locked") && !err.contains(&seed), "{err}");
-        store.lock(false);
+        store.unlock();
         store.set(&key, &other.seed().unwrap()).unwrap();
         let err = load(stored_text(&jwt, &key)).unwrap_err();
         assert!(err.contains("another key"), "{err}");

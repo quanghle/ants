@@ -88,7 +88,14 @@ pub enum Link {
 pub struct Notice {
     pub text: String,
     pub at: DateTime<Utc>,
-    pub error: bool,
+    pub level: Level,
+}
+
+/// Whether a notice reports an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Info,
+    Error,
 }
 
 /// How long a notice shows.
@@ -149,8 +156,8 @@ impl Model {
         self.threads.get(thread)
     }
 
-    pub fn notify(&mut self, text: impl Into<String>, error: bool, now: DateTime<Utc>) {
-        self.notice = Some(Notice { text: text.into(), at: now, error });
+    pub fn notify(&mut self, text: impl Into<String>, level: Level, now: DateTime<Utc>) {
+        self.notice = Some(Notice { text: text.into(), at: now, level });
     }
 
     /// The notice to show at `now`, if one is recent.
@@ -194,7 +201,7 @@ impl Model {
                 entries.extend(std::mem::take(&mut history.entries).into_iter().filter(|e| e.seq > after));
                 history.entries = entries;
             }
-            Err(e) => self.notify(format!("reading thread {thread}: {e:#}"), true, now),
+            Err(e) => self.notify(format!("reading thread {thread}: {e:#}"), Level::Error, now),
         }
     }
 
@@ -261,9 +268,9 @@ impl Model {
         match outcome {
             Ok(text) => {
                 self.detail = None;
-                self.notify(text, false, now);
+                self.notify(text, Level::Info, now);
             }
-            Err(e) => self.notify(format!("{e:#}"), true, now),
+            Err(e) => self.notify(format!("{e:#}"), Level::Error, now),
         }
     }
 
@@ -276,7 +283,7 @@ impl Model {
             }
             (true, Link::Down(_)) => {
                 self.link = Link::Connected;
-                self.notify("reconnected: reading what changed meanwhile", false, now);
+                self.notify("reconnected: reading what changed meanwhile", Level::Info, now);
                 Some(Action::Refresh)
             }
             _ => None,
@@ -357,7 +364,7 @@ impl Model {
                 return Some(Action::Decide(detail.request.clone(), verdict));
             }
             let id = tools::qualified(&detail.request);
-            self.notify(format!("request {id} not answered"), false, now);
+            self.notify(format!("request {id} not answered"), Level::Info, now);
             return None;
         }
         let verdict = match key {
@@ -372,9 +379,9 @@ impl Model {
         };
         let id = tools::qualified(&detail.request);
         if detail.state != State::Pending {
-            self.notify(format!("request {id} is answered already"), true, now);
+            self.notify(format!("request {id} is answered already"), Level::Error, now);
         } else if !detail.request.options.contains(&verdict) {
-            self.notify(format!("{} is not offered for request {id}", tools::spelling(verdict)), true, now);
+            self.notify(format!("{} is not offered for request {id}", tools::spelling(verdict)), Level::Error, now);
         } else {
             detail.confirm = Some(verdict);
         }
@@ -463,7 +470,10 @@ pub(crate) mod tests {
         assert_eq!(m.key(Key::Enter, at(0)), None);
         assert_eq!(m.detail.as_ref().map(|d| &d.request), Some(&push));
         m.key(Key::Char('A'), at(1));
-        assert!(m.notice_at(at(1)).is_some_and(|n| n.error && n.text.contains("allow-always is not offered")));
+        assert!(
+            m.notice_at(at(1))
+                .is_some_and(|n| n.level == Level::Error && n.text.contains("allow-always is not offered"))
+        );
         assert_eq!(m.detail.as_ref().unwrap().confirm, None);
         // Any key but y cancels.
         m.key(Key::Char('a'), at(2));

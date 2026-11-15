@@ -216,7 +216,7 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     let lead_says = decide(&lead, request.decide(Verdict::AllowOnce));
     send(&human_js, lead_says.subject(), &lead_says).await;
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
-    assert!(approver.waiting.lock().unwrap().is_empty(), "nothing waits once decided");
+    assert!(approver.waiting.locked().is_empty(), "nothing waits once decided");
     approver.offer(&lead_says);
 }
 

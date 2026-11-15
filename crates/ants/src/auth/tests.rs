@@ -3,7 +3,7 @@
 use std::assert_matches;
 
 use ants_daemon::bus;
-use ants_daemon::channel::{Channels, Reading, Threads};
+use ants_daemon::channel::{Channels, Earlier, Reading, Threads};
 use ants_daemon::daemon::Claims;
 use ants_daemon::dead::{self, Attempt};
 use ants_daemon::direct_kv::DirectKv;
@@ -140,7 +140,7 @@ fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() 
     let dir = ants_test_support::scratch_dir("extend-leaf");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
-    issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], false, None, &out).unwrap();
+    issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], EnrollApprover::Without, None, &out).unwrap();
     let (jwt, key) = read_creds(&out).unwrap();
     let renewed = extend_leaf(&team, &jwt, &m1, Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)])).unwrap();
     assert!(allows_all(&renewed, &jwt).unwrap() && !allows_all(&jwt, &renewed).unwrap());
@@ -205,11 +205,15 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     renewed("channel-manager");
     let m1: Machine = "m1".parse().unwrap();
     let members = members(&[p("dev-a"), p("dev-b")], &[p("alice")]);
-    issue_leaf(&team, &m1, &members, &[p("hook")], true, Some(&hub), &out("leaf-m1")).unwrap();
+    issue_leaf(&team, &m1, &members, &[p("hook")], EnrollApprover::With, Some(&hub), &out("leaf-m1")).unwrap();
     let leaf = renewed("leaf-m1");
     check_leaf(&account_key(&team).unwrap(), &leaf.jwt, &m1).unwrap();
     let kept = crate::members::issued(&team, &m1, &out("none")).unwrap().unwrap();
-    assert_eq!(kept, crate::members::Members::new(&members, &[p("hook")], true), "the registry keeps its members");
+    assert_eq!(
+        kept,
+        crate::members::Members::new(&members, &[p("hook")], EnrollApprover::With),
+        "the registry keeps its members"
+    );
 
     // A lifetime carries over: as long from now as the earlier credentials had from their issue.
     let account = load(&team.join(ACCOUNT_SEED)).unwrap();
@@ -255,7 +259,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
     issue_enrollment(&team, &p("dev-c"), Duration::from_secs(60), &out("enroll-dev-c")).unwrap();
     assert!(refused(&jwt("enroll-dev-c").0, &new()).contains("cannot be renewed"));
     let m1: Machine = "m1".parse().unwrap();
-    issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], false, None, &out("leaf-m1")).unwrap();
+    issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], EnrollApprover::Without, None, &out("leaf-m1")).unwrap();
     let system = read_creds(&leaf_system_creds(&out("leaf-m1"))).unwrap().0;
     assert!(refused(&system, &new()).contains("team's account"), "the system account's");
 
@@ -294,7 +298,7 @@ fn issued_credentials_carry_the_current_permissions_version_and_name_their_renew
     assert_eq!(renewal("channel-manager"), ["ants auth channel-manager"]);
     let m1: Machine = "m1".parse().unwrap();
     let members = members(&[p("dev-a")], &[p("alice")]);
-    issue_leaf(&team, &m1, &members, &[p("hook")], true, Some(&hub), &out("leaf-m1")).unwrap();
+    issue_leaf(&team, &m1, &members, &[p("hook")], EnrollApprover::With, Some(&hub), &out("leaf-m1")).unwrap();
     assert_eq!(
         renewal("leaf-m1"),
         [
@@ -326,7 +330,7 @@ pub(crate) fn uplink_for_most_ants(
     let mut ants = Vec::new();
     loop {
         ants.push(p(&format!("dev-{}", ants.len())));
-        if let Err(e) = issue_leaf(team, machine, &members(&ants, &[]), &[], false, domain, out) {
+        if let Err(e) = issue_leaf(team, machine, &members(&ants, &[]), &[], EnrollApprover::Without, domain, out) {
             ants.pop();
             return (ants, e.to_string());
         }
@@ -360,7 +364,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
     for (domain, least, most) in [(None, 3_800, 4_600), (Some(&hub), 7_500, 8_500)] {
-        issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], false, domain, &out).unwrap();
+        issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();
         for i in 1..=5 {
@@ -1520,7 +1524,7 @@ async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channe
     let seq = bus::publish_json(&h_js, ask.subject(), &ask, None).await.unwrap();
     let threads = Threads::new(a_js.clone(), dev_a.clone(), bus::ensure_sessions(&a_js, None, &dev_a).await.unwrap());
     assert_eq!(
-        threads.context(&ask, seq, true, &ants_proto::Humans::default()).await.unwrap().posts,
+        threads.context(&ask, seq, Earlier::Unseen, &ants_proto::Humans::default()).await.unwrap().posts,
         [note],
         "without dev-a's own post"
     );
@@ -1988,13 +1992,16 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     let m1: Machine = "m1".parse().unwrap();
     let on_m1 = members(std::slice::from_ref(&dev_a), &[]);
-    let missing = issue_leaf(&team, &m1, &on_m1, &[p("ci")], false, Some(&domain), &leaf_creds).unwrap_err();
+    let missing =
+        issue_leaf(&team, &m1, &on_m1, &[p("ci")], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap_err();
     assert!(format!("{missing:#}").contains("ants auth user ci --webhook"), "{missing:#}");
     issue(&team, &p("dev-c"), Role::Ant, Some(&domain), &team.join("dev-c.creds")).unwrap();
-    let ant = issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], false, Some(&domain), &leaf_creds).unwrap_err();
+    let ant =
+        issue_leaf(&team, &m1, &on_m1, &[p("dev-c")], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap_err();
     assert!(format!("{ant:#}").contains("no webhook's"), "{ant:#}");
-    issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), false, None, &leaf_creds).unwrap();
-    issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), false, Some(&domain), &leaf_creds).unwrap();
+    issue_leaf(&team, &m1, &[], std::slice::from_ref(&github), EnrollApprover::Without, None, &leaf_creds).unwrap();
+    issue_leaf(&team, &m1, &on_m1, std::slice::from_ref(&github), EnrollApprover::Without, Some(&domain), &leaf_creds)
+        .unwrap();
     assert!(
         async_nats::ConnectOptions::with_credentials_file(&leaf_creds).await.unwrap().connect(&hub.url).await.is_err(),
         "leaf credentials do not work for clients"

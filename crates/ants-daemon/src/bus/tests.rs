@@ -133,10 +133,10 @@ async fn waits_for_a_locked_credential_store_but_not_for_a_seed_it_lacks() {
     fails_at_once("the seed of another key").await;
 
     store.set(&key.public_key(), &key.seed().unwrap()).unwrap();
-    store.lock(true);
+    store.lock();
     let unlock = async {
         tokio::time::sleep(RETRY_FIRST * 2).await;
-        store.lock(false);
+        store.unlock();
     };
     let (connected, ()) = tokio::time::timeout(RETRY_MAX, async { tokio::join!(connect(), unlock) })
         .await
@@ -207,7 +207,7 @@ async fn through_a_leaf_a_publish_the_hubs_stream_does_not_capture_names_ants_in
     assert!(uncaptured(&js).await);
     let post = post();
     assert_eq!(store(&js, post.subject(), &post, &post.id.to_string()).await.unwrap(), Stored::Outbox);
-    assert!(WARNED_UNCAPTURED.lock().unwrap().contains("ants.chan"), "no warning naming `ants init`");
+    assert!(WARNED_UNCAPTURED.locked().contains("ants.chan"), "no warning naming `ants init`");
 
     drop(hub);
     let start = std::time::Instant::now();

@@ -4,7 +4,7 @@ use ants_daemon::{dead, reactions};
 use ants_proto::{Envelope, Following, Uuid};
 use anyhow::{Result, bail};
 
-use crate::{Nats, inbox, presence, thread, tools};
+use crate::{Listing, Nats, inbox, presence, thread, tools};
 
 /// Why credentials of a human from before the read marker cannot mark replies read.
 pub(crate) const REISSUE_HUMAN: &str = "these credentials predate the read marker every device of a human shares: issue new ones \
@@ -14,9 +14,9 @@ pub(crate) async fn show(
     nats: &Nats<'_>,
     mut select: inbox::Select,
     thread: Option<thread::Pick>,
-    follow: bool,
-    json: bool,
+    listing: Listing,
 ) -> Result<()> {
+    let Listing { follow, json } = listing;
     let me = &nats.me.id;
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's, whose inbox its daemon reads; `ants inbox` reads a human's");

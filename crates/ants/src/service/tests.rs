@@ -1,13 +1,15 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
+use ants_daemon::sync::MutexExt as _;
+
 /// Services of `manager` under `home`, answering commands with `answer` and noting them in the log returned.
 fn fake(manager: Manager, home: &Path, answer: impl Fn(&str) -> Ran + 'static) -> (Services, Arc<Mutex<Vec<String>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let noted = log.clone();
     let run = move |args: &[&str]| {
         let command = args.join(" ");
-        noted.lock().unwrap().push(command.clone());
+        noted.locked().push(command.clone());
         Ok(answer(&command))
     };
     (Services { manager: Some(manager), home: home.to_owned(), run: Box::new(run) }, log)
@@ -32,7 +34,7 @@ fn launchd_reloads_or_restarts_the_running_agent_of_the_file_only() {
     let config = home.join("a & b/config.toml");
     let (mut services, log) = fake(Manager::Launchd, &home, |_| ok(""));
     assert_eq!(services.apply(Service::Daemon, Action::Reload, &config), Outcome::Unmanaged, "not installed");
-    assert!(log.lock().unwrap().is_empty());
+    assert!(log.locked().is_empty());
 
     let plist = |file: &str| format!("<array>\n\t<string>/bin/ants</string>\n\t<string>{file}</string>\n</array>");
     let agents = home.join("Library/LaunchAgents");
@@ -46,7 +48,7 @@ fn launchd_reloads_or_restarts_the_running_agent_of_the_file_only() {
         Outcome::Done("launchctl kill SIGHUP gui/501/ants.daemon".to_owned())
     );
     assert_eq!(
-        *log.lock().unwrap(),
+        *log.locked(),
         ["id -u", "launchctl print gui/501/ants.daemon", "launchctl kill SIGHUP gui/501/ants.daemon"]
     );
 
@@ -59,7 +61,7 @@ fn launchd_reloads_or_restarts_the_running_agent_of_the_file_only() {
 
     let (mut services, log) = services_answering(&home, "\tstate = not running\n");
     assert_eq!(services.apply(Service::Nats, Action::Restart, &leaf), Outcome::NotRunning);
-    assert_eq!(log.lock().unwrap().last().unwrap(), "launchctl print gui/501/ants.nats", "nothing restarted");
+    assert_eq!(log.locked().last().unwrap(), "launchctl print gui/501/ants.nats", "nothing restarted");
     std::fs::remove_dir_all(&home).unwrap();
 
     fn services_answering(home: &Path, print: &'static str) -> (Services, Arc<Mutex<Vec<String>>>) {
@@ -85,7 +87,7 @@ fn systemd_reloads_or_restarts_the_active_unit_of_the_file_and_reports_a_failure
         Outcome::Done("systemctl --user reload ants-daemon".to_owned())
     );
     assert_eq!(
-        *log.lock().unwrap(),
+        *log.locked(),
         ["systemctl --user is-active --quiet ants-daemon", "systemctl --user reload ants-daemon"]
     );
     assert_eq!(services.apply(Service::Nats, Action::Restart, &config), Outcome::Unmanaged);
@@ -100,7 +102,7 @@ fn systemd_reloads_or_restarts_the_active_unit_of_the_file_and_reports_a_failure
     );
     let (mut services, log) = fake(Manager::Systemd, &home, |_| failed(""));
     assert_eq!(services.apply(Service::Daemon, Action::Reload, &config), Outcome::NotRunning);
-    assert_eq!(log.lock().unwrap().len(), 1);
+    assert_eq!(log.locked().len(), 1);
     std::fs::remove_dir_all(&home).unwrap();
 }
 
@@ -220,7 +222,7 @@ fn install_writes_and_starts_a_missing_unit_and_starts_or_keeps_an_installed_one
         Installed::New(plist.clone(), bootstrap.clone())
     );
     assert!(!plist.exists() && !logrotate.exists(), "a dry run writes nothing");
-    assert!(log.lock().unwrap().iter().all(|c| !c.starts_with("launchctl bootstrap")), "nor starts anything");
+    assert!(log.locked().iter().all(|c| !c.starts_with("launchctl bootstrap")), "nor starts anything");
 
     assert_eq!(
         services.install(Service::Daemon, &config, &values, false),
@@ -233,8 +235,8 @@ fn install_writes_and_starts_a_missing_unit_and_starts_or_keeps_an_installed_one
     assert!(
         std::fs::read_to_string(&logrotate).unwrap().contains(&home.join("Library/Logs/ants").display().to_string())
     );
-    assert!(log.lock().unwrap().contains(&bootstrap));
-    assert!(log.lock().unwrap().contains(&format!("launchctl bootstrap gui/501 {}", logrotate.display())));
+    assert!(log.locked().contains(&bootstrap));
+    assert!(log.locked().contains(&format!("launchctl bootstrap gui/501 {}", logrotate.display())));
     assert_eq!(services.state(Service::Daemon, &config), State::Stopped(bootstrap), "found as installed");
 
     let (mut services, log) = launchd("\tstate = not running\n");
@@ -242,7 +244,7 @@ fn install_writes_and_starts_a_missing_unit_and_starts_or_keeps_an_installed_one
         services.install(Service::Daemon, &config, &values, false),
         Installed::Started("launchctl kickstart gui/501/ants.daemon".to_owned())
     );
-    assert!(!log.lock().unwrap().iter().any(|c| c.starts_with("launchctl bootstrap")), "logrotate kept");
+    assert!(!log.locked().iter().any(|c| c.starts_with("launchctl bootstrap")), "logrotate kept");
     let (mut services, _) = launchd("\tpid = 7\n");
     assert_eq!(services.install(Service::Daemon, &config, &values, false), Installed::Running);
     assert_eq!(services.install(Service::Daemon, &home.join("other.toml"), &values, false), Installed::Other(plist));
@@ -259,10 +261,7 @@ fn install_writes_and_starts_a_missing_unit_and_starts_or_keeps_an_installed_one
     assert!(
         text.contains(&format!("ExecStart=\"/bin/nats-server\" -c \"{}\"", home.join("100%%/nats.conf").display()))
     );
-    assert_eq!(
-        *log.lock().unwrap(),
-        ["systemctl --user daemon-reload", "systemctl --user enable --now ants-nats.service"]
-    );
+    assert_eq!(*log.locked(), ["systemctl --user daemon-reload", "systemctl --user enable --now ants-nats.service"]);
     assert_eq!(services.state(Service::Nats, &conf), State::Stopped("systemctl --user start ants-nats".to_owned()));
     std::fs::remove_dir_all(&home).unwrap();
 }

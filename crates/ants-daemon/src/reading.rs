@@ -20,6 +20,8 @@ use async_nats::jetstream::stream::ConsumerCreateStrictErrorKind;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
+use crate::sync::MutexExt as _;
+
 /// How long a reader consumer left behind by an interrupted read lives on.
 const INACTIVE: Duration = Duration::from_secs(30);
 /// Messages asked for at once.
@@ -248,7 +250,7 @@ pub const BATCHES_SINCE: PermissionsVersion = PermissionsVersion(3);
 /// credentials still need the probe, as a leaf node's uplink may predate it. A reconnection probes again.
 pub fn without_batches(client: &async_nats::Client) {
     let info = client.server_info();
-    DIRECT_GETS.lock().unwrap().insert((info.server_id, info.client_id), false);
+    DIRECT_GETS.locked().insert((info.server_id, info.client_id), false);
 }
 
 /// A batched direct get (nats-server 2.11 or later): up to `batch` messages on `next_by_subj`, the first at or after
@@ -284,7 +286,7 @@ async fn read_by_batches(
     let client = js.client();
     let info = client.server_info();
     let connection = (info.server_id, info.client_id);
-    let known = DIRECT_GETS.lock().unwrap().get(&connection).copied();
+    let known = DIRECT_GETS.locked().get(&connection).copied();
     if known == Some(false) {
         return Ok(Batches::Refused);
     }
@@ -292,7 +294,7 @@ async fn read_by_batches(
     let mut wait = if known == Some(true) { full } else { PROBE.min(full) };
     let mut answered = false;
     let found = |works: bool| {
-        DIRECT_GETS.lock().unwrap().insert(connection.clone(), works);
+        DIRECT_GETS.locked().insert(connection.clone(), works);
     };
     let refused = |why: &str| {
         tracing::debug!(why, "reading {STREAM} one message at a time instead of by batched direct gets");
@@ -473,13 +475,13 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(_) = direct.next() => tally.lock().unwrap().0 += 1,
-                    Some(_) = single.next() => tally.lock().unwrap().1 += 1,
+                    Some(_) = direct.next() => tally.locked().0 += 1,
+                    Some(_) = single.next() => tally.locked().1 += 1,
                     else => break,
                 }
             }
         });
-        move || *counts.lock().unwrap()
+        move || *counts.locked()
     }
 
     #[tokio::test]
@@ -528,7 +530,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(requests(), (sent.len().div_ceil(DIRECT_BATCH), 0), "one request per batch");
         let info = client.server_info();
-        assert_eq!(DIRECT_GETS.lock().unwrap().get(&(info.server_id, info.client_id)), Some(&true));
+        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), Some(&true));
 
         // From a sequence, from a time, and up to where the taker stops.
         let from = consumer::DeliverPolicy::ByStartSequence { start_sequence: sent[700].0 };
@@ -550,7 +552,7 @@ mod tests {
             "id-0"
         );
         let info = client.server_info();
-        assert_eq!(DIRECT_GETS.lock().unwrap().get(&(info.server_id, info.client_id)), Some(&false));
+        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), Some(&false));
         let started = std::time::Instant::now();
         let since = consumer::DeliverPolicy::ByStartTime { start_time: moment.unwrap().into() };
         assert_eq!(body(&read(&old, &filter, since, |_| false).await), sent[500..]);
@@ -598,6 +600,6 @@ mod tests {
         let payloads: Vec<_> = got.iter().map(|(_, msg)| msg.payload.clone()).collect();
         assert_eq!(payloads, ["m0", "m1", "m2"]);
         let info = client.server_info();
-        assert_eq!(DIRECT_GETS.lock().unwrap().get(&(info.server_id, info.client_id)), None, "not even tried");
+        assert_eq!(DIRECT_GETS.locked().get(&(info.server_id, info.client_id)), None, "not even tried");
     }
 }

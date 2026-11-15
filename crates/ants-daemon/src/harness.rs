@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -26,6 +26,7 @@ use crate::breaker::StartFailed;
 use crate::history::{History, Rebuild};
 use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
+use crate::sync::MutexExt as _;
 
 /// The harness of an ant that names none, in a file that names none.
 pub const DEFAULT_HARNESS: &str = "copilot";
@@ -475,7 +476,7 @@ pub async fn handshake(launch: &Launch) -> Handshake {
     let methods = Mutex::new(Vec::new());
     let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
         let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-        methods.lock().expect("auth methods").clone_from(&init.auth_methods);
+        methods.locked().clone_from(&init.auth_methods);
         cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?;
         Ok(match &init.agent_info {
             Some(info) => format!("{} {}", info.name, info.version),
@@ -483,7 +484,7 @@ pub async fn handshake(launch: &Launch) -> Handshake {
         })
     });
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, connect).await;
-    let methods = methods.into_inner().expect("auth methods");
+    let methods = methods.into_inner().unwrap_or_else(PoisonError::into_inner);
     checked.sign_in = harness.sign_in_command(&methods);
     checked.readiness = match result {
         Ok(Ok(agent)) => Readiness::Ready { agent },
@@ -564,21 +565,25 @@ impl Launch {
     }
 
     /// The same launch, for sessions serving `thread`.
+    #[must_use]
     pub fn for_thread(&self, thread: &ThreadId) -> Self {
         Self { thread: Some(thread.clone()), ..self.clone() }
     }
 
     /// The same launch, with sessions working in `cwd`.
+    #[must_use]
     pub fn in_dir(self, cwd: PathBuf) -> Self {
         Self { cwd, ..self }
     }
 
     /// The same launch, offering `mcp` to the sessions of each thread.
+    #[must_use]
     pub fn with_mcp(self, mcp: McpServers) -> Self {
         Self { mcp: Some(mcp), ..self }
     }
 
     /// Prepend the ant's instructions to every prompt, including after session/load.
+    #[must_use]
     pub fn with_instructions(self, instructions: String) -> Self {
         Self { instructions, ..self }
     }
@@ -755,7 +760,7 @@ impl Session {
 
     /// The session the harness holds now.
     pub fn id(&self) -> SessionId {
-        self.id.lock().expect("session id").clone()
+        self.id.locked().clone()
     }
 
     /// False once the harness has exited or a prompt failed; the session can then only be resumed in a new one.
@@ -967,14 +972,14 @@ async fn serve(
         .name("ants")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
-                sink.lock().expect("observed").observe(n);
+                sink.locked().observe(n);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
             async move |mut request: RequestPermissionRequest, responder, cx| {
-                known.lock().expect("observed").describe(&mut request.tool_call);
+                known.locked().describe(&mut request.tool_call);
                 tracing::info!(tool = ?request.tool_call, "harness asked for permission");
                 let (policy, thread, workdir) = (policy.clone(), thread.clone(), workdir.clone());
                 let mut cancel = cancels.clone();
@@ -992,11 +997,11 @@ async fn serve(
         )
         .connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
-            methods.lock().expect("auth methods").clone_from(&init.auth_methods);
+            methods.locked().clone_from(&init.auth_methods);
             let caps = &init.agent_capabilities;
             let mcp = launch.mcp_servers(caps.mcp_capabilities.http);
             let mut id = open(&cx, &launch, resume.clone(), caps.load_session, mcp.clone()).await?;
-            *current.lock().expect("session id") = id.clone();
+            *current.locked() = id.clone();
             if let Some(tx) = opened.take() {
                 let agent = init
                     .agent_info
@@ -1028,7 +1033,7 @@ async fn serve(
     if let Err(e) = result {
         match opened {
             Some(tx) => {
-                let _ = tx.send(Err(harness_error(&launch, "session", &e, &methods.lock().expect("auth methods"))));
+                let _ = tx.send(Err(harness_error(&launch, "session", &e, &methods.locked())));
             }
             None => tracing::warn!(error = %e, "{} session ended", launch.harness),
         }
@@ -1064,7 +1069,7 @@ impl Connected<'_> {
         let (done, cut, text, errors_only) = loop {
             let too_many = Arc::new(Notify::new());
             {
-                let mut observed = self.observed.lock().expect("observed");
+                let mut observed = self.observed.locked();
                 // A cost reported after the last prompt ended counts now.
                 if let (Some(tx), Some(total)) = (&spend, observed.cost) {
                     let _ = tx.send(Spend::Cost { session: id.clone(), total });
@@ -1096,13 +1101,8 @@ impl Connected<'_> {
                 .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
                 .block_task();
             let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
-            let (text, errors_only) = self
-                .observed
-                .lock()
-                .expect("observed")
-                .current
-                .take()
-                .map_or_else(Default::default, |c| (c.text, c.errors_only));
+            let (text, errors_only) =
+                self.observed.locked().current.take().map_or_else(Default::default, |c| (c.text, c.errors_only));
             let overflowed = |e: &agent_client_protocol::Error| overflows(&self.launch.harness, &e.to_string());
             match &done {
                 Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
@@ -1110,13 +1110,13 @@ impl Connected<'_> {
                     *id = match new_session(self.cx, self.launch, self.mcp.clone()).await {
                         Ok(id) => id,
                         Err(e) => {
-                            let methods = self.methods.lock().expect("auth methods");
+                            let methods = self.methods.locked();
                             let _ = reply.send(Err(harness_error(self.launch, "session", &e, &methods)));
                             return Err(e);
                         }
                     };
-                    *self.current.lock().expect("session id") = id.clone();
-                    self.observed.lock().expect("observed").cost = None;
+                    *self.current.locked() = id.clone();
+                    self.observed.locked().cost = None;
                     (rebuild, retry) = (Some(Rebuild::Overflow), false);
                 }
                 Some(Err(e)) if cut.is_none() && overflowed(e) => {
@@ -1144,7 +1144,7 @@ impl Connected<'_> {
                 });
             }
             Some(Err(e)) if cut.is_none() => {
-                let error = harness_error(self.launch, "prompt", &e, &self.methods.lock().expect("auth methods"));
+                let error = harness_error(self.launch, "prompt", &e, &self.methods.locked());
                 let _ = reply.send(Err(error));
                 return Err(e);
             }

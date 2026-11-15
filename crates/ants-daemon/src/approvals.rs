@@ -53,6 +53,7 @@ use crate::bus;
 use crate::escalation::Chain;
 use crate::humans::Registry;
 use crate::permission::Approver;
+use crate::sync::MutexExt as _;
 
 /// How long a tool request waits for a human by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
@@ -111,11 +112,13 @@ impl NatsApprover {
     }
 
     /// The same, also asking every ant of `chain`'s escalate_to, which may decide too.
+    #[must_use]
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
     }
 
     /// The same, telling the thread's owner when a human, else the default human of `humans`, of an expired request.
+    #[must_use]
     pub fn with_humans(self, humans: Registry) -> Self {
         Self { humans, ..self }
     }
@@ -124,7 +127,7 @@ impl NatsApprover {
     /// that expires unanswered is told to the owner it names, and carries its creator and the thread it links to.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
         let thread = envelope.thread_id.clone();
-        self.answering.lock().expect("answering").insert(thread.clone(), envelope.clone());
+        self.answering.locked().insert(thread.clone(), envelope.clone());
         Turn { answering: self.answering.clone(), thread }
     }
 
@@ -132,7 +135,7 @@ impl NatsApprover {
     /// expired unanswered and was rejected. Stored before the ant goes on, so before the message being answered is
     /// acked; failing to, it only warns.
     async fn tell_expired(&self, request: &ApprovalRequest, asked: &[UserId]) {
-        let answering = self.answering.lock().expect("answering").get(&request.thread_id).cloned();
+        let answering = self.answering.locked().get(&request.thread_id).cloned();
         let notice = expired_notice(&self.ant, request, self.timeout, answering.as_ref(), &self.humans);
         let id = format!("approval-expired-{}-{}", self.ant, request.id);
         let allow = answering.and_then(|e| e.allow);
@@ -166,7 +169,7 @@ impl NatsApprover {
     /// with it.
     pub fn offer(&self, envelope: &Envelope) {
         let Some(decision) = envelope.approval.as_deref() else { return };
-        let waiting = self.waiting.lock().expect("waiting requests");
+        let waiting = self.waiting.locked();
         let Some((request, chain_decided)) = waiting.get(&decision.request_id) else {
             let (from, request) = (&envelope.from, decision.request_id);
             tracing::debug!(%from, %request, "ignoring a decision on a request no longer waiting");
@@ -194,7 +197,7 @@ impl NatsApprover {
             return Ok(Vec::new());
         };
         let text = chain_text(request, &to);
-        let answering = self.answering.lock().expect("answering").get(&request.thread_id).map(|e| e.allow.clone());
+        let answering = self.answering.locked().get(&request.thread_id).map(|e| e.allow.clone());
         for member in &to {
             let envelope =
                 Envelope::on_thread(request.thread_id.clone(), self.ant.clone(), member.clone(), text.clone())
@@ -233,10 +236,10 @@ impl NatsApprover {
             Some(bus::live_inbox(&self.client, &self.ant).await?)
         };
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
-        self.waiting.lock().expect("waiting requests").insert(request.id, (request.clone(), chain_decided));
+        self.waiting.locked().insert(request.id, (request.clone(), chain_decided));
         // Leaves the waiting map once decided, expired or given up.
         let _pending = DropGuard::new(request.id, |id| {
-            self.waiting.lock().expect("waiting requests").remove(&id);
+            self.waiting.locked().remove(&id);
         });
         self.js
             .publish(request.subject(), serde_json::to_vec(&request)?.into())
@@ -367,7 +370,7 @@ pub struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.answering.lock().expect("answering").remove(&self.thread);
+        self.answering.locked().remove(&self.thread);
     }
 }
 

@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::metrics::{self, Exposition, Kind};
 use ants_daemon::schedule::Mentions;
+use ants_daemon::sync::{MutexExt as _, RwLockExt as _};
 use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
@@ -735,7 +736,7 @@ struct Routes {
 
 impl Server {
     fn routes(&self) -> Arc<Routes> {
-        self.routes.read().unwrap().clone()
+        self.routes.read_locked().clone()
     }
 }
 
@@ -779,7 +780,7 @@ pub async fn serve<L: FnMut() -> Result<Config>>(
                 match (reload.load)() {
                     Ok(config) => {
                         let routes = running.apply(config, &mut tasks, &failed_tx);
-                        *server.routes.write().unwrap() = Arc::new(routes);
+                        *server.routes.write_locked() = Arc::new(routes);
                         tracing::info!(on = trigger.describe(), "reloaded the webhook config");
                     }
                     Err(e) => tracing::error!(
@@ -994,7 +995,7 @@ impl Bus {
         let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
         let keeper = tokio::spawn(async move {
             let (seen, key, marker, marked) = keeping;
-            let put = move || *marked.lock().unwrap() = Some(Instant::now());
+            let put = move || *marked.locked() = Some(Instant::now());
             crate::versions::keep_putting(seen, key, marker, put).await;
         });
         Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
@@ -1057,11 +1058,11 @@ impl Bus {
     /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`SERVING_EVERY`]: without it, daemons
     /// take its messages for an ant's, and answer it in its own inbox.
     async fn mark(&self, name: &UserId) -> Result<()> {
-        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
+        if self.marked.locked().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
             return Ok(());
         }
         self.seen.put(webhook_marker_key(name), self.marker.clone()).await.context("putting the marker")?;
-        *self.marked.lock().unwrap() = Some(Instant::now());
+        *self.marked.locked() = Some(Instant::now());
         Ok(())
     }
 
@@ -1096,13 +1097,13 @@ impl Server {
         let routes = self.routes();
         let name = parts.uri.path().strip_prefix(&routes.prefix);
         if let Some(answers) = routes.answers.as_ref().filter(|_| name == notify::APPROVAL_PATH.strip_prefix('/')) {
-            if let Err(e) = read_body(body, false).await {
+            if let Err(e) = read_body(body, Body::Drain).await {
                 return refuse(StatusCode::BAD_REQUEST, format!("reading the body: {e}"));
             }
             return Ok(answers.answer(&parts.method, parts.uri.query()).await);
         }
         let Some(hook) = name.and_then(|name| routes.hooks.get(name)) else {
-            let _ = read_body(body, false).await;
+            let _ = read_body(body, Body::Drain).await;
             return refuse(StatusCode::NOT_FOUND, "no such webhook");
         };
         let outcome = hook.take(parts, body).await;
@@ -1179,7 +1180,7 @@ impl Hook {
         } else {
             None
         };
-        let body = read_body(body, refused.is_none()).await;
+        let body = read_body(body, if refused.is_none() { Body::Keep } else { Body::Drain }).await;
         if let Some(refused) = refused {
             return Err(refused);
         }
@@ -1206,9 +1207,16 @@ impl Hook {
     }
 }
 
-/// The body when `keep`, or None when it is longer than [`MAX_BODY`]. The rest of the body is read and dropped up
-/// to [`DRAIN`], so the answer reaches the sender rather than a reset connection.
-async fn read_body(mut body: Incoming, keep: bool) -> Result<Option<Vec<u8>>, hyper::Error> {
+/// Whether [`read_body`] keeps the body read, or only drains it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Keep,
+    Drain,
+}
+
+/// The body, empty unless [`Body::Keep`], or None when it is longer than [`MAX_BODY`]. The rest of the body is read
+/// and dropped up to [`DRAIN`], so the answer reaches the sender rather than a reset connection.
+async fn read_body(mut body: Incoming, read: Body) -> Result<Option<Vec<u8>>, hyper::Error> {
     let (mut kept, mut length) = (Vec::new(), 0);
     while let Some(frame) = body.frame().await {
         let Ok(data) = frame?.into_data() else { continue };
@@ -1216,7 +1224,7 @@ async fn read_body(mut body: Incoming, keep: bool) -> Result<Option<Vec<u8>>, hy
         if length > DRAIN {
             break;
         }
-        if keep && length <= MAX_BODY {
+        if read == Body::Keep && length <= MAX_BODY {
             kept.extend_from_slice(&data);
         }
     }
@@ -1240,16 +1248,16 @@ impl Hook {
             })
             .await?;
         if delivered.duplicate {
-            return Ok(accepted(StatusCode::OK, delivered.thread.as_ref(), true));
+            return Ok(accepted(StatusCode::OK, delivered.thread.as_ref(), delivered.duplicate));
         }
         if let Some(thread) = &delivered.thread {
             tracing::info!(webhook = %hook.name, %thread, "event delivered");
         }
-        Ok(accepted(StatusCode::ACCEPTED, delivered.thread.as_ref(), false))
+        Ok(accepted(StatusCode::ACCEPTED, delivered.thread.as_ref(), delivered.duplicate))
     }
 
     fn warn_rejected(&self) {
-        let mut last = self.last_warned.lock().unwrap();
+        let mut last = self.last_warned.locked();
         if last.is_none_or(|at| at.elapsed() >= WARN_EVERY) {
             *last = Some(Instant::now());
             tracing::warn!(webhook = %self.config.name, "rejected a request that failed authentication");

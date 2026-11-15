@@ -12,6 +12,7 @@ use ants_proto::{Envelope, Escalation, EscalationReason, HarnessFailing, ThreadI
 use chrono::{DateTime, Utc};
 
 use crate::humans::Registry;
+use crate::sync::MutexExt as _;
 
 /// Failures to start the harness that open the breaker, within [`WINDOW`] and on at least [`TRIP_THREADS`] threads.
 pub const TRIP_FAILURES: usize = 3;
@@ -133,7 +134,7 @@ impl Breaker {
     }
 
     fn period(&self) -> std::sync::MutexGuard<'_, Period> {
-        self.0.lock().expect("breaker")
+        self.0.locked()
     }
 }
 
