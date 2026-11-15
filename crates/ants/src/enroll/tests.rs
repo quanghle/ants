@@ -348,6 +348,59 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
     let err = approver.approve(&team, &dev_a, None).await.unwrap_err().to_string();
     assert!(err.contains("no enrollment request for dev-a"), "{err}");
     let short = enrollment(&server, &dev_a, Duration::from_secs(1));
-    let err = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending()).await.unwrap_err();
+    let asking = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending());
+    let err = timeout(WAIT, asking).await.expect("the request outlives its enrollment credentials").unwrap_err();
     assert!(format!("{err:#}").contains("expire"), "{err:#}");
+}
+
+/// With the server gone, a flush waits forever for a reconnect: the expiry and `stop` still end a request.
+#[tokio::test]
+async fn the_expiry_or_a_stop_ends_a_request_whose_server_is_gone() {
+    let Some(server) = Server::start() else { return };
+    let (team, url, dev_a, dev_b) = (server.dir().join("auth"), server.url.clone(), p("dev-a"), p("dev-b"));
+    let expiring = enrollment(&server, &dev_a, Duration::from_secs(3));
+    let lasting = enrollment(&server, &dev_b, Duration::ZERO);
+    let approver = Approver::connect(&url, &team, None, LISTEN).await.unwrap();
+    let (a, b) = (KeyPair::new_user(), KeyPair::new_user());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let first = request(&url, &expiring, &dev_a, &a, None, REPEAT, pending());
+    let second = request(&url, &lasting, &dev_b, &b, None, REPEAT, async {
+        let _ = stop_rx.await;
+    });
+    let stopping = async {
+        while approver.pending(None).await.unwrap().len() < 2 {}
+        drop(server);
+        // Long enough for both requests to repeat into a flush that waits.
+        tokio::time::sleep(REPEAT * 3).await;
+        stop_tx.send(()).unwrap();
+    };
+    let (first, second, ()) =
+        Box::pin(timeout(WAIT, async { tokio::join!(first, second, stopping) })).await.expect("a request hangs");
+    let (first, second) = (format!("{:#}", first.unwrap_err()), format!("{:#}", second.unwrap_err()));
+    assert!(first.contains("expired without an answer"), "{first}");
+    assert!(second.contains("stopped before an answer came"), "{second}");
+}
+
+/// The server ending the connection of revoked enrollment credentials and refusing every reconnect ends a request.
+#[tokio::test]
+async fn a_refusal_of_the_enrollment_credentials_ends_the_request() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
+    let creds = enrollment(&server, &dev_a, Duration::from_secs(60));
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let user = KeyPair::new_user();
+
+    let asking = request(&server.url, &creds, &dev_a, &user, None, REPEAT, pending());
+    let revoking = async {
+        while approver.pending(None).await.unwrap().is_empty() {}
+        let (_, key) = auth::read_creds(&creds).unwrap();
+        revoke::revoke(&team, None, &[key.public_key()]).unwrap();
+        let reload = std::process::Command::new("kill").arg("-HUP").arg(server.pid().to_string()).status();
+        assert!(reload.unwrap().success());
+    };
+    let (refused, ()) =
+        Box::pin(timeout(WAIT, async { tokio::join!(asking, revoking) })).await.expect("the request goes on");
+    let err = format!("{:#}", refused.unwrap_err());
+    assert!(err.contains("the NATS server refused the enrollment credentials"), "{err}");
 }
