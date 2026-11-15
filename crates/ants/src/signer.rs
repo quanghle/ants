@@ -11,7 +11,8 @@
 //!
 //! The signer answers ants' reactions requests as well ([`reactions::serve`]): an ant's credentials neither read nor
 //! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
-//! ant's own, once it found the ant reads the message.
+//! ant's own, once it found the ant reads the message. It also registers humans' devices after a GitHub sign-in, and
+//! renews the credentials such registrations granted ([`crate::registrar`]).
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
@@ -139,12 +140,13 @@ pub async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
-    let mut registrar = Registrar::new(dir, options.config, js_domain, options.approval_timeout, registrar::print);
+    let mut registrar = Registrar::new(url, dir, options.config, js_domain, options.approval_timeout, registrar::print);
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
         let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
         let mut logins = approver.client.subscribe(subject::ALL_LOGIN_REQUESTS).await?;
+        let mut renewals = approver.client.subscribe(subject::ALL_RENEW_REQUESTS).await?;
         let answering = reactions::serve(
             approver.client.clone(),
             approver.hub().clone(),
@@ -169,6 +171,10 @@ pub async fn serve(
                 msg = logins.next() => {
                     let msg = msg.context("the NATS connection closed")?;
                     registrar.heard(&approver, &msg).await?;
+                }
+                msg = renewals.next() => {
+                    let msg = msg.context("the NATS connection closed")?;
+                    registrar.renewal(&approver, &msg).await?;
                 }
                 update = registrar.next() => registrar.progressed(&approver, update).await?,
                 _ = ticks.tick() => {

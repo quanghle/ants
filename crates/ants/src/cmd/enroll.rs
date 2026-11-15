@@ -41,7 +41,8 @@ pub(crate) enum EnrollCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// List the renewal requests heard (`ants renew`), the latest of each name and key.
+    /// List the renewal requests heard (`ants renew`), the latest of each name and key, but those of credentials a
+    /// registration granted (`ants login`), which `ants signer` renews.
     Renewals {
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
@@ -49,7 +50,8 @@ pub(crate) enum EnrollCommand {
     },
     /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the team, for the new key,
     /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
-    /// With --auto, renew every credentials asking, as they ask, until stopped.
+    /// With --auto, renew every credentials asking, as they ask, until stopped. Credentials a registration granted
+    /// (`ants login`) are left to `ants signer`.
     Renew {
         /// The name the credentials carry: an ant, a human, a webhook, an observer, channel-manager or leaf-<machine>.
         #[arg(required_unless_present = "auto")]

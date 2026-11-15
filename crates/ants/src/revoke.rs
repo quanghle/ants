@@ -407,6 +407,12 @@ fn withdraw_approvals(dir: &Path, issued: &[Issued], name: &str, now: u64) -> Re
     Ok(())
 }
 
+/// The latest line of the key `key` in the registry `issued`, if a registration signed it: one with a grant
+/// ([`Issued::grant`]), whose renewals `ants signer` answers.
+pub fn registered<'a>(issued: &'a [Issued], key: &str) -> Option<&'a Issued> {
+    issued.iter().rev().find(|i| i.key == key).filter(|i| i.grant.is_some())
+}
+
 /// The approval grant that stands for the GitHub user `github` (a GitHub user id) on the name `name` in the registry
 /// `issued`: a human's approval that registered a key of the name for the user, not withdrawn since
 /// ([`Issued::withdrawn`]).
