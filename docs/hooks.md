@@ -20,7 +20,7 @@ They may:
 - read every approval request, approval decision and dead letter stored in stream `ANTS`, through consumers named
   after the observer, one per feed, whose filter is pinned in the subject creating them (below), and hear the same
   subjects live;
-- hear every ant's live status (`ants.status.<ant>.<thread>`), escalations among them;
+- hear every ant's live status (`ants.status.<ant>.<thread>`), escalations and settled tool requests among them;
 - read and watch the `ants_roster` bucket;
 - ask for their own renewal, and hear their own reply inboxes (`_INBOX.<observer>.>`).
 
@@ -44,6 +44,7 @@ Event payloads can still contain prompt or tool text:
 | `approval-decision` | `ants.approvals.<ant>.<request id>` | Stored; consumer `observe-decisions-<observer>` | `ApprovalDecision` |
 | `dead-letter` | `ants.dead.<ant>` | Stored; consumer `observe-dead-<observer>` | `DeadLetter` |
 | `escalation` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `escalated` |
+| `decided` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `decided` |
 | `status` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` |
 | `roster` | `$KV.ants_roster.<ant>` | Live (KV watch) | `RosterEntry` |
 
@@ -80,7 +81,8 @@ the ant rejects it; no decision is stored for an expired request.
 ### `ApprovalDecision` on `ants.approvals.<ant>.<request id>`
 
 A human's verdict (`ants tools approve|reject`, or a notification's link). The first stored wins. Decisions of the
-ants of the requester's chain (`decide_approval`) travel in the requester's inbox instead and are not part of the feed.
+ants of the requester's chain (`decide_approval`) travel in the requester's inbox instead and are not part of the feed;
+the requester's [`decided` status update](#decisions) tells of every decision, theirs included.
 
 ```json
 {"request_id": "019a7d2e-…", "ant": "dev-a", "verdict": "allow_once", "decided_at": "2025-01-01T12:01:00Z"}
@@ -117,6 +119,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `queued` | `message` (id), `ahead` | A message waits behind `ahead` others |
 | `approval` | `request_id` | A tool request waits for a decision |
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
+| `decided` | `request_id`, `verdict`, `by`, `decider`? | A tool request was settled (below) |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
 
@@ -140,6 +143,21 @@ went up any chain, and `leader` who leads at that level. Direct notices that emi
 `dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
 notice of a harness failing to start (observed via `failing` in `ants_roster`), and the `storage` capacity warning.
 
+#### Decisions
+
+Each tool request settled is told as a `decided` update on the status of the requesting ant, on the request's thread,
+just before its `working` state, however the decision arrived: a human's stored on `ants.approvals.<ant>.<request id>`,
+a decision of an ant of its chain sent to its inbox (which observers cannot read), or the request expiring unanswered.
+
+```json
+{"ant": "dev-a", "thread_id": "019a7d2c-…", "type": "decided", "request_id": "019a7d2e-…", "verdict": "allow_once",
+ "by": "chain", "decider": "lead", "at": "2025-01-01T12:01:00Z"}
+```
+
+`verdict` is what the ant goes on with (`allow_once`, `allow_always`, `reject`), a verdict the harness did not offer
+counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
+`expiry` (rejected unanswered). A human's decision names no human: the `ApprovalDecision` feed holds it.
+
 ### `RosterEntry` at `ants_roster` key `<ant>`
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`?, `harness`, `agent`? (`{name, version}`),
@@ -158,7 +176,7 @@ with the event's document and a newline on its stdin, until stopped. Its stdout 
   the feed, from where it left off: on the first run, from the next event stored. Each event is acked once `CMD` ends,
   whatever its exit status, so a failing command does not stall the feed; an event whose `CMD` was still running when
   `ants hook run` stopped is handed on again. The consumer is removed after 7 days without a reader.
-- **Live feeds** (`escalation`, `status`, `roster`) take events from now on.
+- **Live feeds** (`escalation`, `decided`, `status`, `roster`) take events from now on.
 - At most `--concurrency` (default 4) runs at once; a run lasting past `--timeout` (default `60s`) is killed. Failed
   runs, timeouts and documents that are forged or unreadable (skipped) are logged.
 
@@ -167,7 +185,7 @@ with the event's document and a newline on its stdin, until stopped. Its stdout 
 The subjects, consumer names, documents and their fields above stay as they are within a major version of ants.
 Changes that may come in any release, and which hooks must accept:
 
-- new fields in any document, and new values in enumerations (`type` of a status update, `reason`, `state`,
+- new fields in any document, and new values in enumerations (`type` of a status update, `reason`, `state`, `by`,
   `activity`, `tool.kind`): ignore what is not known;
 - new feeds, subjects and observer rights;
 - fields documented as optional (`?`, or absent from older daemons) being absent.
