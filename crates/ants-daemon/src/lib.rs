@@ -30,6 +30,7 @@ pub mod owners;
 pub mod permission;
 pub mod pool;
 pub mod pressure;
+pub mod publish;
 pub mod ratelimit;
 pub mod reactions;
 pub mod reading;

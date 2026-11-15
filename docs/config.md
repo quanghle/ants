@@ -50,6 +50,8 @@ max_harnesses = 4                          # default
 worktrees = true                           # git worktree per thread; default: on for a git workdir
                                            # not ignored by git, with max_harnesses > 1 (see Worktrees);
                                            # false shares the workdir
+worktree_base = "head"                     # default; "upstream" starts its branch from the fetched remote default branch
+publish = "off"                            # default; "draft-pr" pushes a branch with new commits, opens a draft PR
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -106,6 +108,7 @@ With worktrees on, each thread works in its own git worktree at `<home>/worktree
 
 - Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
 - `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.
+- `worktree_base = "upstream"` starts each new branch from the fetched default branch of the default remote instead of `HEAD`, and `publish = "draft-pr"` pushes a branch with new commits and opens a draft pull request ([README](../README.md#pool-worktrees-and-at-least-once-retries)); both apply whenever worktrees are on, set or by default.
 
 Trade-offs of worktrees:
 
@@ -138,7 +141,8 @@ pool_daily_cost = 25.0                     # optional shared UTC daily cap acros
 whoami = "Implement what the manager assigns." # overridable defaults: whoami, memory, tasks, capabilities
 capabilities = ["rust"]
 env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees (unset: the ant default),
-worktrees = true                           # idle_timeout, approval_timeout, spend_warn_percent
+worktrees = true                           # worktree_base, publish, idle_timeout, approval_timeout,
+                                           # spend_warn_percent
 ```
 
 Allowed per-ant overrides within template bounds:
@@ -327,6 +331,7 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 - **Suggested rules & `--rule`:** once humans approve an identical call 3 times for an ant (`execute:<cmd>`, `<kind>:<abs-path>` for one file, `fetch:<url>`, else `<kind>:<title>`, excluding `*` and shell metacharacters), `ants tools approve` and approval notices print that rule. `ants tools approve ID --rule` appends it to the ant's `allow` in `config.toml` and reloads the daemon (for templated ants, `--rule` approves once and prints the rule to add to `[[ant_template]]`).
 - **Webhook & schedule narrowing:** threads started by a webhook or schedule intersect the ant's allowlist with the entry's `allow` (default read-only: `read:*`, `search`, `think`, and MCP `list_ants`, `check_inbox`, `read_notes`, `post_notes`, `send_message`, `ask_ant`, `route`, `escalate`, `react`, `list_reactions`, `suggest_thread_title`; `["*"]` opts out; `[]` requires human approval for all calls). The narrowing travels on every message, spin-off, channel post, escalation and approval notice on the thread (persisted at `<ant>.<thread>.spend`) until a human messages the ant on the thread or wakes it on the channel thread.
 - **Stand-in:** each request names the human it waits for (`human`: the thread's human owner, else the default human) and the ant's `stand_in`, if set (escalations sent to a human carry it too). While that human is away, `ants webhook serve` relays the request or escalation to the stand-in, which overrides the human's own `[[human]] stand_in` (see [webhooks.md](webhooks.md#stand-in)). Decisions name their human (`by`); when another human decides, the human the request waited for gets an inbox notice (`[ants] <by> decided tool request <ant>/<id> … in place of <human>`); likewise when another human answers a pending human escalation or reminder (`[ants] <by> answered the escalation of <ant> …`). `stand_in` must not name the ant itself; templated ants take no `stand_in` (the `[[human]]` one applies).
+- **Branch pushes:** with `publish = "draft-pr"`, the daemon's own `git push <remote> ants/<ant>/<thread>` goes through the same check as an `execute` call titled `Push branch … and open a draft pull request`: `execute:git push origin ants/dev-a/*` lets dev-a push its thread branches to `origin` unasked; otherwise the push is an approval request on the thread, and a rejection (narrowed threads included) leaves the branch unpushed with an `[ants]` line in the reply.
 - **Expiry:** after `approval_timeout`, the call is rejected; the thread owner (else default human) receives a level-0 `approval` escalation notice on a separate thread (so `ants ask --wait` keeps waiting for the reply), and asked chain ants receive a cancellation notice on the request's thread.
 
 ### Redaction

@@ -35,6 +35,7 @@ use crate::notes::{self, NotesStore};
 use crate::overflow::ContextOverflow;
 use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
+use crate::publish::{Publish, Publisher};
 use crate::ratelimit::{self, Backoffs, Limited, Throttle};
 use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
@@ -107,6 +108,8 @@ pub struct Config {
     /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]); unset,
     /// [`crate::worktrees::per_thread`] decides at start.
     pub worktrees: Option<bool>,
+    /// Where a thread's new worktree branch starts ([`Worktrees::with_base`]).
+    pub worktree_base: crate::worktrees::Base,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
     /// Capabilities the ant advertises in the roster.
@@ -134,6 +137,8 @@ pub struct Config {
     pub requester: crate::mcp::Requester,
     /// Redact secrets from what the ant publishes ([`crate::redact`]).
     pub redact: bool,
+    /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
+    pub publish: crate::publish::Publish,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -217,12 +222,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     }
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
-    let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
-        .with_chain(config.escalation.clone())
-        .with_humans(humans.clone());
     let redactor = std::sync::Arc::new(redactor(config));
-    let policy =
-        PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
+    let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let roster = crate::mcp::jetstream_roster(js.clone());
     let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone());
@@ -254,6 +255,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         Attempts::new(bus::ensure_attempts(&js, config.js_domain.as_ref(), &config.ant).await?, config.ant.clone());
     let (answered, buried) = delivery_marks(config).await;
     let pool = harness_pool(config, launch, sessions, &workload).await;
+    let publisher = publisher(config, &js, &redactor, &pool).await;
     let (messages, channels) = inbox_messages(&js, &stream, config).await?;
     let registration = enter_roster(&js, entry, claimed, &workload).await?;
     log_serving(config);
@@ -269,6 +271,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         buried: &buried,
         mcp: Some(&mcp),
         approvals: Some(&approver),
+        publisher: publisher.as_ref(),
         redactor: &redactor,
         workload: &workload,
         metrics,
@@ -298,6 +301,23 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     }
     tracing::info!("stopped");
     Ok(Served::Stopped)
+}
+
+/// The ant's approver of tool requests, and the permission policy asking it for calls its allowlist does not cover.
+fn approval_policy(
+    config: &Config,
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    humans: &Registry,
+    allow: Allowlist,
+    redactor: &std::sync::Arc<Redactor>,
+) -> (NatsApprover, PermissionPolicy) {
+    let approver = NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), config.approval_timeout)
+        .with_chain(config.escalation.clone())
+        .with_humans(humans.clone());
+    let policy =
+        PermissionPolicy::new(allow, Some(std::sync::Arc::new(approver.clone()))).with_redactor(redactor.clone());
+    (approver, policy)
 }
 
 /// Tell the server the messages waiting in hand are still being worked on, so it does not redeliver them.
@@ -473,11 +493,36 @@ async fn harness_pool(
         None
     };
     if let Some(worktrees) = isolating {
-        pool = pool.with_worktrees(worktrees);
+        pool = pool.with_worktrees(worktrees.with_base(config.worktree_base));
     } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
-        pool = pool.with_worktrees_left_behind(worktrees);
+        pool = pool.with_worktrees_left_behind(worktrees.with_base(config.worktree_base));
     }
     pool
+}
+
+/// What publishes the branches of the ant's threads, when it does ([`crate::publish`]): never without a worktree per
+/// thread in `pool`.
+async fn publisher(
+    config: &Config,
+    js: &jetstream::Context,
+    redactor: &std::sync::Arc<Redactor>,
+    pool: &Pool,
+) -> Option<Publisher> {
+    if config.publish == Publish::Off {
+        return None;
+    }
+    if pool.worktrees().is_none() {
+        tracing::warn!("publish needs each thread in its own git worktree (worktrees = true); publishing nothing");
+        return None;
+    }
+    let publisher = Publisher::new(config.ant.clone()).with_redactor(redactor.clone());
+    Some(match crate::direct_kv::DirectKv::new(js, config.js_domain.as_ref(), ants_proto::THREADS_BUCKET).await {
+        Ok(titles) => publisher.with_titles(titles),
+        Err(e) => {
+            tracing::info!(error = format!("{e:#}"), "pull requests take the opening line, not the thread's title");
+            publisher
+        }
+    })
 }
 
 /// The messages to the ant, from its inbox and the posts to its channels, and the channels; the inbox alone when the
@@ -521,6 +566,8 @@ fn log_serving(config: &Config) {
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
         worktrees = config.worktrees == Some(true),
+        worktree_base = config.worktree_base.as_str(),
+        publish = config.publish.as_str(),
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,
         allow = ?config.allow,
@@ -749,6 +796,8 @@ struct Inbox<'a> {
     mcp: Option<&'a Mcp>,
     /// Takes the decisions ants of the ant's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
+    /// Pushes the branch of a thread holding new commits, with a draft pull request.
+    publisher: Option<&'a Publisher>,
     /// Hides secrets in what the harness streams and answers.
     redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the roster.
@@ -1854,6 +1903,33 @@ impl Inbox<'_> {
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
     /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
     /// recorded is not prompted again.
+    /// The `[ants]` lines for the thread's branch holding new commits, and for publishing it.
+    async fn branch_notices(
+        &self,
+        envelope: &Envelope,
+        msg: &jetstream::Message,
+        cancelled: bool,
+    ) -> [Option<String>; 2] {
+        let thread = &envelope.thread_id;
+        let publishing = self.publisher.zip(self.pool.worktrees());
+        if let Some((publisher, worktrees)) = publishing {
+            publisher.note_opening(worktrees, thread, &envelope.text).await;
+        }
+        let branch = self.pool.branch_ahead(thread).await;
+        let branch_notice = branch.as_ref().map(|branch| {
+            format!("[ants] Branch {} holds {} not in {}.", branch.name, branch.commits_text(), branch.outside())
+        });
+        // What a human cancelled is not published.
+        let publish_notice = match (publishing, &branch) {
+            (Some((publisher, worktrees)), Some(branch)) if !cancelled => {
+                let policy = self.pool.launch().policy();
+                self.acking(msg, publisher.publish(worktrees, branch, policy)).await
+            }
+            _ => None,
+        };
+        [branch_notice, publish_notice]
+    }
+
     async fn answer(
         &self,
         incoming: &Incoming,
@@ -1936,15 +2012,11 @@ impl Inbox<'_> {
         let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
         let limit_notice =
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
+        let cancelled = cancelled_by.is_some();
         let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
-        let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
-            format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
-        });
-        let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let [branch_notice, publish_notice] = self.branch_notices(envelope, msg, cancelled).await;
+        let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice, publish_notice];
+        let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
         let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
@@ -2327,6 +2399,22 @@ impl Inbox<'_> {
     fn progress(&self) -> tokio::time::Interval {
         tokio::time::interval_at(tokio::time::Instant::now() + self.progress_every, self.progress_every)
     }
+
+    /// Wait for `work`, telling the server meanwhile that `msg` is still being worked on.
+    async fn acking<T>(&self, msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
+        tokio::pin!(work);
+        let mut progress = self.progress();
+        loop {
+            tokio::select! {
+                done = &mut work => return done,
+                _ = progress.tick() => {
+                    if let Err(e) = msg.ack_with(AckKind::Progress).await {
+                        tracing::warn!(error = %e, "progress ack");
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Thread {
@@ -2520,8 +2608,9 @@ fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, huma
     let Branch { thread, name, .. } = branch;
     let text = format!(
         "[ants] The session of thread {thread} expired and its git worktree was removed; branch {name} is kept, \
-         holding {} not in the repository's HEAD.",
-        branch.commits_text()
+         holding {} not in {}.",
+        branch.commits_text(),
+        branch.outside()
     );
     let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
     Envelope::on_thread(thread.clone(), ant.clone(), to, text).with_owner(owner)

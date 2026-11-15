@@ -646,6 +646,8 @@ fn entries_read_back_as_written() {
     full.max_thread_cost = Some(2.5);
     full.max_daily_tokens = Some(1000);
     full.spend_warn_percent = 0;
+    full.worktree_base = Base::Upstream;
+    full.publish = Publish::DraftPr;
     let text = entry(&full).unwrap();
     assert!(text.contains("\nidle_timeout = \"1h30m\"\nprompt_timeout = \"0\"\n"), "{text}");
     let read: Vec<_> = parse_here(&text).unwrap().into_iter().filter(|ant| !ant.builtin).collect();

@@ -17,8 +17,8 @@
 //! pool_daily_cost = 40.0                 # all its ants together in a UTC day; also pool_daily_tokens
 //! whoami = "Implement what the manager assigns."   # defaults a request may replace: whoami, memory, tasks,
 //! capabilities = ["rust"]                # capabilities
-//! env = { CARGO_TARGET_DIR = "target" }  # fixed: env, worktrees, idle_timeout, approval_timeout, spend_warn_percent
-//! worktrees = true
+//! env = { CARGO_TARGET_DIR = "target" }  # fixed: env, worktrees, worktree_base, publish, idle_timeout,
+//! worktrees = true                       # approval_timeout, spend_warn_percent
 //! ```
 //!
 //! An ant added from a template ([`Request`], [`AntTemplate::resolve`]) is an `[[ant]]` entry carrying
@@ -40,6 +40,8 @@ use crate::config::{
     Ant, DEFAULT_APPROVAL_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_HARNESSES, DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_PROMPT_TIMEOUT, DEFAULT_SPEND_WARN_PERCENT,
 };
+use crate::publish::Publish;
+use crate::worktrees::Base;
 
 /// What `name_pattern` is unless set: the manager's name, a dash and anything.
 pub const DEFAULT_NAME_PATTERN: &str = "<manager>-*";
@@ -146,6 +148,10 @@ pub struct AntTemplate {
     pub approval_timeout: Duration,
     #[serde(default = "default_spend_warn_percent")]
     pub spend_warn_percent: u8,
+    #[serde(default)]
+    pub worktree_base: Base,
+    #[serde(default)]
+    pub publish: Publish,
 }
 
 fn default_name_pattern() -> String {
@@ -421,6 +427,8 @@ impl AntTemplate {
             max_daily_tokens: ceiling.cap("max_daily_tokens", request.max_daily_tokens, self.max_daily_tokens)?,
             max_daily_cost: ceiling.cap("max_daily_cost", request.max_daily_cost, self.max_daily_cost)?,
             spend_warn_percent: self.spend_warn_percent,
+            worktree_base: self.worktree_base,
+            publish: self.publish,
             escalate_to: vec![manager.clone()],
             ..Ant::new(name.clone(), workdir)
         })

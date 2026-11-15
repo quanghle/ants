@@ -35,6 +35,8 @@
 //! worktrees = true                  # a git worktree per thread, under the ant's home; unset: on for a git
 //!                                   # workdir git does not ignore, with max_harnesses above 1
 //!                                   # (crate::worktrees::per_thread)
+//! worktree_base = "upstream"        # start its branch from the fetched remote default branch, not HEAD
+//! publish = "draft-pr"              # push a branch with new commits and open a draft pull request with gh
 //! harness = "my-agent"
 //! fallback = ["claude", "copilot:gpt-5"]  # tried in order while my-agent cannot serve (crate::fallback)
 //!
@@ -89,9 +91,11 @@ use crate::escalation::{self, Chain};
 use crate::fallback;
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
 use crate::pressure;
+use crate::publish::Publish;
 use crate::schedule::{self, Schedule};
 use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
+use crate::worktrees::Base;
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -248,6 +252,12 @@ pub struct Ant {
     /// The human who also gets the ant's escalations and tool requests while the human they are for is away, in place
     /// of that human's own stand-in.
     pub stand_in: Option<UserId>,
+    /// Where a thread's new worktree branch starts.
+    #[serde(default)]
+    pub worktree_base: Base,
+    /// What becomes of a thread's worktree branch holding new commits.
+    #[serde(default)]
+    pub publish: Publish,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -348,6 +358,8 @@ impl Ant {
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             stand_in: None,
+            worktree_base: Base::Head,
+            publish: Publish::Off,
             builtin: false,
             pool: None,
             redact: true,
@@ -427,6 +439,8 @@ impl Ant {
             defer_to_others: self.builtin,
             requester: crate::mcp::Requester::default(),
             redact: self.redact,
+            worktree_base: self.worktree_base,
+            publish: self.publish,
         })
     }
 
@@ -1174,6 +1188,7 @@ pub fn signer_templates(path: &Path) -> Result<Vec<AntTemplate>> {
 
 /// The `[[ant]]` table of `ant` for the config file: its name, workdir and the settings that differ from those of
 /// [`Ant::new`], paths as they are.
+#[allow(clippy::too_many_lines)]
 pub fn entry(ant: &Ant) -> Result<String> {
     let default = Ant::new(ant.name.clone(), ant.workdir.clone());
     let mut out = String::from("[[ant]]\n");
@@ -1273,6 +1288,12 @@ pub fn entry(ant: &Ant) -> Result<String> {
         if let Some(value) = value {
             set(key, toml_float(value));
         }
+    }
+    if ant.worktree_base != default.worktree_base {
+        set("worktree_base", toml_string(ant.worktree_base.as_str()));
+    }
+    if ant.publish != default.publish {
+        set("publish", toml_string(ant.publish.as_str()));
     }
     Ok(out)
 }
