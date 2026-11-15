@@ -2410,9 +2410,18 @@ async fn show_inbox(
     if follow {
         // A dead letter stored here tells the human through the inbox, like one the daemon stores.
         let watch = async {
-            if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
-                tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
-            }
+            let dead = async {
+                if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
+                    tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
+                }
+            };
+            // Following every thread as text tells of the messages sent that keep waiting for an absent ant.
+            let unserved = async {
+                if select.thread.is_none() && !json {
+                    Box::pin(inbox::tell_unserved(nats, &js)).await;
+                }
+            };
+            tokio::join!(dead, unserved);
             std::future::pending::<()>().await
         };
         let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });

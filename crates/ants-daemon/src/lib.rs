@@ -38,6 +38,7 @@ pub mod signin;
 pub mod status;
 pub mod storage;
 pub mod template;
+pub mod unserved;
 pub mod webhooks;
 pub mod worktrees;
 
