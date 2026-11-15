@@ -893,6 +893,10 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     assert!(assistant.subscribe.iter().any(|s| s == subject::ALL));
     for s in [
         "$JS.API.STREAM.MSG.GET.ANTS",
+        "$JS.API.DIRECT.GET.ANTS",
+        "$JS.API.STREAM.INFO.ANTS",
+        "$JS.API.STREAM.INFO.KV_ants_devices",
+        "$JS.API.CONSUMER.CREATE.KV_ants_devices",
         "$KV.ants_threads.title.*",
         "$KV.ants_threads.done.*",
         "$KV.ants_reactions.pa.>",

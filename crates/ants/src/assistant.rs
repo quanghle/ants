@@ -774,6 +774,77 @@ mod tests {
         assert_eq!(Acting::For(alice.clone()).label("pa"), "alice via pa");
     }
 
+    /// The store the daemon's tools act for a human through reads and writes with its assistant's own credentials:
+    /// the human's messages and the tool requests waiting for it, its read marker, its threads' titles and done marks,
+    /// the assistant's reactions, and the directory its sealing reads device keys from.
+    #[tokio::test]
+    async fn an_assistant_s_credentials_reach_what_its_tools_act_on_for_its_human() {
+        use std::time::SystemTime;
+
+        use ants_proto::{ApprovalRequest, Envelope, ReadMarker, ThreadDone, ThreadId, ThreadTitle, ToolCall};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, pa, dev_a) = (p("alice"), p("bob"), p("pa"), p("dev-a"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, alice_js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        bus::ensure_stream(&alice_js).await.unwrap();
+        alice_js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        alice_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
+        let read = alice_js.create_key_value(ants_daemon::hub::read_config()).await.unwrap();
+        alice_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+            .unwrap();
+        let (_, mut pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        pa_js.set_timeout(Duration::from_secs(2));
+
+        let thread = ThreadId::generate();
+        let (_, dev_js) = server.connect_as(&dev_a, Role::Ant).await;
+        let (_, bob_js) = server.connect_as(&bob, Role::Human).await;
+        let publish = async |js: &async_nats::jetstream::Context, subject: String, payload: Vec<u8>| {
+            js.publish(subject, payload.into()).await.unwrap().await.unwrap().sequence
+        };
+        let asked = Envelope::on_thread(thread.clone(), dev_a.clone(), alice.clone(), "ship it?");
+        let seq = publish(&dev_js, asked.subject(), serde_json::to_vec(&asked).unwrap()).await;
+        let from_bob = Envelope::new(bob.clone(), alice.clone(), "lunch?");
+        publish(&bob_js, from_bob.subject(), serde_json::to_vec(&from_bob).unwrap()).await;
+        let to_bob = Envelope::new(alice.clone(), bob.clone(), "later");
+        publish(&alice_js, to_bob.subject(), serde_json::to_vec(&to_bob).unwrap()).await;
+        let elsewhere = Envelope::new(bob.clone(), dev_a.clone(), "not alice's");
+        publish(&bob_js, elsewhere.subject(), serde_json::to_vec(&elsewhere).unwrap()).await;
+        let call = ToolCall { kind: "execute".into(), title: "git push".into(), ..ToolCall::default() };
+        let request = ApprovalRequest::new(dev_a.clone(), thread.clone(), call, Vec::new(), Duration::from_secs(600))
+            .for_human(Some(alice.clone()), None);
+        publish(&dev_js, request.subject(), serde_json::to_vec(&request).unwrap()).await;
+        let marker = ReadMarker { below: seq, ..ReadMarker::default() };
+        read.put(alice.as_str(), serde_json::to_vec(&marker).unwrap().into()).await.unwrap();
+
+        let store = ants_daemon::mcp::jetstream_store(pa_js.clone(), None);
+        let since = SystemTime::now() - Duration::from_secs(3600);
+        let messages = store.messages(alice.clone(), pa.clone(), since).await.unwrap();
+        let ids: Vec<_> = messages.iter().map(|m| m.envelope.id).collect();
+        assert_eq!(ids, [asked.id, from_bob.id, to_bob.id]);
+        let (requests, decided) = store.approvals(since).await.unwrap();
+        assert_eq!((requests.iter().map(|r| r.id).collect::<Vec<_>>(), decided.len()), (vec![request.id], 0));
+        assert!(store.read_marker(alice.clone()).await.unwrap().is_read(seq));
+        let last = store.last_sequence().await.unwrap();
+        assert!(last > seq);
+
+        let title = ThreadTitle::new(thread.clone(), "Release", pa.clone()).unwrap().on_behalf(Some(alice.clone()));
+        store.put_title(title).await.unwrap();
+        let done = ThreadDone::new(thread.clone(), pa.clone(), last).on_behalf(Some(alice.clone()));
+        store.put_done(done).await.unwrap();
+        let found = store.done(thread.clone()).await.unwrap().unwrap();
+        assert_eq!((found.by, found.on_behalf_of), (pa.clone(), Some(alice.clone())));
+        let check: ants_proto::Reaction = "check".parse().unwrap();
+        assert!(store.react(pa.clone(), asked.id, check.clone(), false, alice.clone()).await.unwrap());
+        assert!(store.react(pa.clone(), asked.id, check, true, alice.clone()).await.unwrap());
+        let account = devices::account_of(Some(&creds)).unwrap().unwrap();
+        ants_daemon::devices::Directory::open(&pa_js, &account).await.expect("its sealing reads the directory");
+    }
+
     /// pa decides three of dev-a's requests for alice: alice confirms one, denies one, and pre-allows the third, so
     /// that her CLI and the daemons reading her records see the first and third decided for her.
     #[tokio::test]
