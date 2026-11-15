@@ -50,13 +50,19 @@ fn read_marker_rights(human: &UserId) -> [String; 4] {
     ]
 }
 
-/// What a human's credentials need to say where its devices read ([`PRESENCE_BUCKET`]): creating the bucket, and
-/// reading by direct gets and writing its own keys only. No stream info, which with a subjects filter lists every key,
-/// so no human sees, let alone moves, where another reads.
-fn presence_rights(human: &UserId) -> [String; 3] {
+/// What a human's credentials need to say where its devices read ([`PRESENCE_BUCKET`]): creating the bucket, writing
+/// its own keys only, so no human moves where another reads, and reading every key, by direct gets and through the
+/// ordered consumers behind listing and watching them, so a CLI shows which humans have a device following.
+fn presence_rights(human: &UserId) -> Vec<String> {
     let presence = kv_stream(PRESENCE_BUCKET);
-    let own = subject::presence_of(human);
-    [format!("$JS.API.STREAM.CREATE.{presence}"), format!("$JS.API.DIRECT.GET.{presence}.{own}"), own]
+    let mut rights = vec![
+        format!("$JS.API.STREAM.CREATE.{presence}"),
+        format!("$JS.API.DIRECT.GET.{presence}.>"),
+        format!("$JS.API.CONSUMER.CREATE.{presence}"),
+        subject::presence_of(human),
+    ];
+    rights.extend(flow_control_subjects("*", &presence));
+    rights
 }
 
 /// What a human's credentials need to hold back its notifications ([`NOTIFY_BUCKET`]): creating the bucket and reading
@@ -206,8 +212,8 @@ impl Permissions {
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
-    /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
-    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
+    /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read,
+    /// reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title and done state and its own pinned and
@@ -688,7 +694,7 @@ impl Permissions {
     /// Nothing else: it publishes no message, decides no approval, cancels nothing and writes no bucket, so it can
     /// neither act for an ant or a human nor change what they see. It reads no inbox, notes or channel, so no
     /// conversation as stored, nor the sessions, attempts, owners, links, chains, humans, channels, webhooks, read or
-    /// presence buckets: where the devices of humans are is not even for other humans to see. It gets no stream info,
+    /// presence buckets: where the devices of humans are is for humans alone to see. It gets no stream info,
     /// which lists every subject stored, so who messages whom, nor message gets, which take any sequence: it finds the
     /// stream through the info of a consumer named after it, as a webhook does.
     pub fn for_observer(observer: &UserId) -> Self {
