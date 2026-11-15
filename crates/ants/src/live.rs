@@ -35,8 +35,18 @@ const ROSTER_EVERY: Duration = Duration::from_secs(10);
 /// Connect as `name` for a live view of what `nats`'s human reads in the window `since`: the feed, and the state to
 /// take its events into, with the threads the human archived or left idle to be left out.
 pub async fn open(nats: &crate::Nats<'_>, name: &str, since: Duration) -> Result<(Feed, State)> {
-    let auto_archive = crate::defaults::auto_archive()?;
     let (client, js) = nats.connect(name).await?;
+    start(nats, client, js, since).await
+}
+
+/// [`open`] on the connection `client` and `js` that `nats` made.
+pub async fn start(
+    nats: &crate::Nats<'_>,
+    client: async_nats::Client,
+    js: jetstream::Context,
+    since: Duration,
+) -> Result<(Feed, State)> {
+    let auto_archive = crate::defaults::auto_archive()?;
     let marks = async { thread_meta::open(nats, &js).await?.marks().await };
     let marks = marks.await.unwrap_or_else(|e| {
         tracing::warn!("not leaving archived threads out: {e:#}");
@@ -127,7 +137,7 @@ async fn decide(js: jetstream::Context, request: ApprovalRequest, verdict: Verdi
 }
 
 /// Await `work` while there is one; it is taken once done.
-async fn maybe<T>(work: &mut Option<LocalBoxFuture<'static, T>>) -> T {
+pub(crate) async fn maybe<T>(work: &mut Option<LocalBoxFuture<'static, T>>) -> T {
     match work {
         Some(work) => work.await,
         None => std::future::pending().await,

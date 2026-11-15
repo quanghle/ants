@@ -79,7 +79,7 @@ impl Inbox {
     }
 
     /// The marker and its revision, 0 when there is none.
-    async fn marker(&self) -> Result<(ReadMarker, u64)> {
+    pub(crate) async fn marker(&self) -> Result<(ReadMarker, u64)> {
         let Some(entry) = self.kv.entry(self.human.as_str()).await.context("reading the read marker")? else {
             return Ok((ReadMarker::default(), 0));
         };

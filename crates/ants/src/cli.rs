@@ -38,8 +38,9 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     pub(crate) js_domain: Option<JsDomain>,
 
+    // None for bare `ants`, which runs `ants chat` on a terminal.
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,6 +205,14 @@ pub(crate) enum Command {
         /// With an ant, follow only this thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+    },
+    /// The full-screen chat UI, also what bare `ants` opens on a terminal: home (what waits on the human), work (the
+    /// threads by state), the human's channels, the ants and the people, kept live as messages, posts, progress and
+    /// tool requests come. Needs a terminal and a human's credentials.
+    Chat {
+        /// How far back to read threads, such as 90m, 24h or 7d; 0 for everything the stream keeps.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "7d")]
+        since: Duration,
     },
     /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the roster, and
     /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
@@ -493,31 +502,43 @@ mod tests {
     fn watch_spend_and_channel_read_take_a_start_of_a_thread_id_or_last() {
         let start = Some(thread::Pick::Prefix("0199".to_owned()));
         let cli = Cli::try_parse_from(["ants", "watch", "dev-a", "0199"]).unwrap();
-        assert_matches!(cli.command, Command::Watch { thread, .. } if thread == start);
+        assert_matches!(cli.command.unwrap(), Command::Watch { thread, .. } if thread == start);
         let cli = Cli::try_parse_from(["ants", "spend", "--thread", "0199"]).unwrap();
-        assert_matches!(cli.command, Command::Spend { thread, .. } if thread == start);
+        assert_matches!(cli.command.unwrap(), Command::Spend { thread, .. } if thread == start);
         let cli = Cli::try_parse_from(["ants", "channel", "read", "ops", "--thread", "last"]).unwrap();
-        let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command else { panic!("not channel read") };
+        let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command.unwrap() else {
+            panic!("not channel read")
+        };
         assert_eq!(thread, Some(thread::Pick::Last));
+    }
+
+    #[test]
+    fn bare_ants_names_no_command_and_chat_reads_a_week_by_default() {
+        let cli = Cli::try_parse_from(["ants", "--nats", "nats://hub:4222"]).unwrap();
+        assert!(cli.command.is_none());
+        let cli = Cli::try_parse_from(["ants", "chat"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_hours(7 * 24));
+        let cli = Cli::try_parse_from(["ants", "chat", "--since", "90m"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_mins(90));
     }
 
     #[test]
     fn ask_steers_only_a_thread() {
         assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
         let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. });
+        assert_matches!(cli.command, Some(Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. }));
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Command::Ask { steer: false, .. });
+        assert_matches!(cli.command, Some(Command::Ask { steer: false, .. }));
     }
 
     #[test]
     fn notes_shows_without_text_and_posts_with_it() {
         let cli = Cli::try_parse_from(["ants", "notes", "t1", "split", "the", "work"]).unwrap();
-        let Command::Notes { thread, text } = cli.command else { panic!("not notes") };
+        let Command::Notes { thread, text } = cli.command.unwrap() else { panic!("not notes") };
         let words = vec!["split".to_owned(), "the".to_owned(), "work".to_owned()];
         assert_eq!((thread, text), (thread::Pick::Prefix("t1".to_owned()), words));
         let cli = Cli::try_parse_from(["ants", "notes", "t1"]).unwrap();
-        assert_matches!(cli.command, Command::Notes { text, .. } if text.is_empty());
+        assert_matches!(cli.command.unwrap(), Command::Notes { text, .. } if text.is_empty());
         assert!(Cli::try_parse_from(["ants", "plan", "t1"]).is_err());
     }
 
@@ -525,10 +546,10 @@ mod tests {
     fn answer_takes_a_message_and_an_option_or_words() {
         let id = Uuid::now_v7();
         let cli = Cli::try_parse_from(["ants", "answer", &id.to_string(), "2"]).unwrap();
-        assert_matches!(cli.command, Command::Answer { message, answer }
+        assert_matches!(cli.command.unwrap(), Command::Answer { message, answer }
             if message == thread::MessagePick::Id(id) && answer == ["2"]);
         let cli = Cli::try_parse_from(["ants", "answer", "019a-", "after", "lunch"]).unwrap();
-        assert_matches!(cli.command, Command::Answer { answer, .. } if answer == ["after", "lunch"]);
+        assert_matches!(cli.command.unwrap(), Command::Answer { answer, .. } if answer == ["after", "lunch"]);
         assert!(Cli::try_parse_from(["ants", "answer", &id.to_string()]).is_err(), "no answer");
     }
 
@@ -536,10 +557,10 @@ mod tests {
     fn react_takes_a_message_id_a_reaction_and_remove() {
         let id = Uuid::now_v7();
         let cli = Cli::try_parse_from(["ants", "react", &id.to_string().to_uppercase(), "--remove", "eyes"]).unwrap();
-        assert_matches!(cli.command, Command::React { message, reaction, remove: true }
+        assert_matches!(cli.command.unwrap(), Command::React { message, reaction, remove: true }
             if message == thread::MessagePick::Id(id) && reaction.as_str() == "eyes");
         let cli = Cli::try_parse_from(["ants", "react", "019A-", "eyes"]).unwrap();
-        assert_matches!(cli.command, Command::React { message: thread::MessagePick::Prefix(p), .. } if p == "019a-");
+        assert_matches!(cli.command.unwrap(), Command::React { message: thread::MessagePick::Prefix(p), .. } if p == "019a-");
         assert!(Cli::try_parse_from(["ants", "react", &id.to_string(), "Eyes!"]).is_err(), "no subject token");
         assert!(Cli::try_parse_from(["ants", "react", "t1", "eyes"]).is_err(), "no message id");
     }
@@ -547,13 +568,13 @@ mod tests {
     #[test]
     fn add_is_a_top_level_command() {
         let cli = Cli::try_parse_from(["ants", "add", "dev-a", "--enroll", "enroll-dev-a.creds"]).unwrap();
-        assert_matches!(cli.command, Command::Add(args) if args.name.as_str() == "dev-a");
+        assert_matches!(cli.command.unwrap(), Command::Add(args) if args.name.as_str() == "dev-a");
         assert!(Cli::try_parse_from(["ants", "ant", "add", "dev-a"]).is_err());
     }
 
     #[test]
     fn tool_requests_are_listed_shown_approved_and_rejected() {
-        let parse = |line: &str| Cli::try_parse_from(line.split(' ')).map(|cli| cli.command);
+        let parse = |line: &str| Cli::try_parse_from(line.split(' ')).map(|cli| cli.command.unwrap());
         assert_matches!(
             parse("ants tools approve dev-a/019a --always"),
             Ok(Command::Tools(ToolsCommand::Approve { id, always: true, rule: false, .. })) if id == "dev-a/019a"
@@ -585,7 +606,7 @@ mod tests {
     #[test]
     fn wait_and_follow_conflict_and_a_timeout_needs_one_of_them() {
         let parse = |args: &str| Cli::try_parse_from(["ants"].into_iter().chain(args.split(' ')));
-        let replies = |args: &str| match parse(args).unwrap().command {
+        let replies = |args: &str| match parse(args).unwrap().command.unwrap() {
             Command::Ask { replies, .. } | Command::Post { replies, .. } => replies,
             _ => panic!("{args}"),
         };
@@ -606,7 +627,7 @@ mod tests {
     fn the_default_messenger_conflicts_with_a_named_one() {
         let parse = |args: &[&str]| Cli::try_parse_from(["ants", "channel", "set", "ops"].iter().chain(args));
         let Command::Channel(ChannelCommand::Set { default_messenger, messenger, .. }) =
-            parse(&["--default-messenger"]).unwrap().command
+            parse(&["--default-messenger"]).unwrap().command.unwrap()
         else {
             panic!("channel set")
         };
@@ -619,7 +640,7 @@ mod tests {
     fn an_owner_is_set_or_cleared_and_never_the_channel_manager() {
         let parse = |args: &[&str]| Cli::try_parse_from(["ants", "channel", "set", "ops"].iter().chain(args));
         let Command::Channel(ChannelCommand::Set { owner, no_owner, .. }) =
-            parse(&["--owner", "@lead"]).unwrap().command
+            parse(&["--owner", "@lead"]).unwrap().command.unwrap()
         else {
             panic!("channel set")
         };
