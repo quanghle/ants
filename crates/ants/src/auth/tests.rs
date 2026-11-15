@@ -2125,3 +2125,50 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
 async fn ask_seq(stream: &jetstream::stream::Stream, envelope: &Envelope) -> u64 {
     stream.get_first_raw_message_by_subject(envelope.subject(), 1).await.unwrap().sequence
 }
+
+#[tokio::test]
+async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answers() {
+    let Some(server) = Server::start() else { return };
+    let (team, out, alice) = (server.dir().join("auth"), server.dir().join("bootstrap.creds"), p("alice"));
+    let (key, exp) = issue_bootstrap(&team, Duration::ZERO, &out).unwrap();
+    assert_eq!(exp, None);
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&out).unwrap().permissions()) & 0o777, 0o644);
+    let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!((finding.kind, finding.key.as_str(), finding.js_domain), (CredsKind::Bootstrap, key.as_str(), None));
+    let issued = revoke::issued(&team).unwrap();
+    assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Bootstrap && i.name == "bootstrap"), "{issued:?}");
+
+    let signer_creds = server.dir().join("signer.creds");
+    std::fs::write(&signer_creds, approver_creds(&team, None).unwrap()).unwrap();
+    let signer = async_nats::ConnectOptions::with_credentials_file(&signer_creds)
+        .await
+        .unwrap()
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let mut requests = signer.subscribe(subject::ALL_LOGIN_REQUESTS).await.unwrap();
+    signer.flush().await.unwrap();
+    let bootstrap = p(ants_proto::BOOTSTRAP_USER);
+    let (client, mut errors) = server.watched_with(&bootstrap, &out).await;
+    let mut answers = client.subscribe(subject::login_reply(&alice)).await.unwrap();
+    client.flush().await.unwrap();
+    client.publish(subject::login(&alice), "hello".into()).await.unwrap();
+    let request = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    assert_eq!((request.subject.as_str(), &request.payload[..]), (subject::login(&alice).as_str(), &b"hello"[..]));
+    signer.publish(subject::login_reply(&alice), "answer".into()).await.unwrap();
+    assert_eq!(&timeout(WAIT, answers.next()).await.unwrap().unwrap().payload[..], b"answer");
+
+    for denied in [subject::inbox(&alice, &bootstrap), format!("$JS.API.STREAM.INFO.{STREAM}")] {
+        client.publish(denied.clone(), "x".into()).await.unwrap();
+        let v = next_violation(&client, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+    }
+    let _sub = client.subscribe(subject::login(&alice)).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.contains(&format!("Subscription to \"{}\"", subject::login(&alice))), "{v}");
+    let big = vec![b'x'; usize::try_from(ants_proto::BOOTSTRAP_MAX_PAYLOAD).unwrap() + 1];
+    client.publish(subject::login(&alice), big.into()).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.to_lowercase().contains("payload"), "{v}");
+}

@@ -715,6 +715,26 @@ impl Permissions {
     }
 }
 
+impl Permissions {
+    /// What the team's public bootstrap credentials allow (`ants auth bootstrap`): asking for the credentials of a
+    /// human's new device on [`subject::login`] and hearing the answers, nothing else, JetStream included.
+    pub fn for_bootstrap() -> Self {
+        Self {
+            publish: vec![subject::ALL_LOGIN_REQUESTS.to_owned()],
+            subscribe: vec![subject::ALL_LOGIN_REPLIES.to_owned()],
+        }
+    }
+
+    /// What `ants signer` allows itself on top of [`Permissions::for_enroll_approver`]: hearing every registration
+    /// request and answering it. Leaf uplinks never carry these, as registration happens on the hub only.
+    pub fn for_registrar() -> Self {
+        Self {
+            publish: vec![subject::ALL_LOGIN_REPLIES.to_owned()],
+            subscribe: vec![subject::ALL_LOGIN_REQUESTS.to_owned()],
+        }
+    }
+}
+
 /// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
 /// uplinks, the channel manager, enrollment), stamped into each user JWT it issues as the tag
 /// [`PermissionsVersion::tag`]. Credentials carrying an older version were issued before the permissions changed:

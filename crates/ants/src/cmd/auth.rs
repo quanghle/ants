@@ -79,6 +79,20 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Issue the team's public bootstrap credentials, which may only ask `ants signer` to register a human's new
+    /// device (`ants login`) and hear its answers: no JetStream, messages of at most 4 KiB. The file is meant to be
+    /// shared, and readable by all; revoke them with `ants auth revoke bootstrap` and issue new ones here.
+    Bootstrap {
+        /// How long the bootstrap credentials stay valid (a duration such as 30d or 1h; 0 for no expiry).
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "0")]
+        ttl: std::time::Duration,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the bootstrap credentials (default: <dir>/bootstrap.creds).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Issue the credentials of the channel manager, `ants channel serve`: it hears channel management requests and
     /// answers each once, reads the roster and the humans, writes the channels and posts in them.
     ChannelManager {
@@ -254,6 +268,24 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             Ok(())
         }
         AuthCommand::Enroll { ant, ttl, dir, out } => enrollment(&ant, ttl, dir, out),
+        AuthCommand::Bootstrap { ttl, dir, out } => {
+            let dir = team_dir(dir)?;
+            let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::BOOTSTRAP_USER)));
+            let (key, exp) = auth::issue_bootstrap(&dir, ttl, &out)?;
+            let expires = match exp {
+                Some(exp) => format!(
+                    "valid until {}",
+                    chrono::DateTime::from_timestamp(i64::try_from(exp)?, 0).context("expiry")?
+                ),
+                None => "valid with no expiry".to_owned(),
+            };
+            println!(
+                "{}\n{key}, {expires}; share the file with the humans who may register: ants login NAME --creds FILE \
+                 --nats HUB, served by ants signer with a [registration] table",
+                out.display()
+            );
+            Ok(())
+        }
         AuthCommand::ChannelManager { dir, out, store_key } => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));

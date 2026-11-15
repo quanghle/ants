@@ -573,7 +573,9 @@ pub fn renew(dir: &Path, current: &str, public_key: &str) -> Result<Renewed> {
             }
             (permissions, json!({ "allowed_connection_types": LEAF_CONNECTIONS }))
         }
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => unreachable!("no registry kind"),
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => {
+            unreachable!("no registry kind")
+        }
     };
     let mut permissions = permissions.with_js_domain(finding.js_domain.as_ref());
     dedup(&mut permissions);
@@ -612,7 +614,7 @@ fn registry_kind(kind: &CredsKind) -> Option<Kind> {
         CredsKind::ChannelManager => Some(Kind::ChannelManager),
         CredsKind::Observer => Some(Kind::Observer),
         CredsKind::Leaf { .. } => Some(Kind::Leaf),
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => None,
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => None,
     }
 }
 
@@ -643,14 +645,38 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     Ok(exp)
 }
 
-/// The text of short-lived credentials for `ants enroll`, which hear enrollment requests and answer them
-/// ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
+/// Issue the team's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
+/// file to `out`, readable by all as they are meant to be shared: they may only ask `ants signer` to register a
+/// human's device and hear its answers ([`Permissions::for_bootstrap`]), with messages of at most
+/// [`ants_proto::BOOTSTRAP_MAX_PAYLOAD`] bytes. Returns their public key and when they expire, in seconds since the
+/// epoch.
+pub fn issue_bootstrap(dir: &Path, ttl: Duration, out: &Path) -> Result<(String, Option<u64>)> {
+    if !ttl.is_zero() && ttl < Duration::from_secs(1) {
+        bail!("a ttl of {ttl:?} is under a second: give at least 1s, or 0 for no expiry");
+    }
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let exp = if ttl.is_zero() { None } else { Some(now()? + ttl.as_secs()) };
+    let name = ants_proto::BOOTSTRAP_USER;
+    let limits = json!({ "payload": ants_proto::BOOTSTRAP_MAX_PAYLOAD });
+    let jwt = user_jwt(&account, &user.public_key(), name, Permissions::for_bootstrap(), limits, exp)?;
+    fs::write(out, creds(&jwt, &seed(&user)?)).with_context(|| format!("writing {}", out.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(out, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), name, Kind::Bootstrap, exp)?)?;
+    Ok((user.public_key(), exp))
+}
+
+/// The text of short-lived credentials for `ants enroll` and `ants signer`, which hear enrollment and registration
+/// requests and answer them ([`Permissions::for_enroll_approver`], [`Permissions::for_registrar`]), for the hub's JetStream domain if it has one, issued afresh from the
 /// account key of each run.
 pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + APPROVER_TTL.as_secs();
-    let permissions = Permissions::for_enroll_approver().with_js_domain(js_domain);
+    let mut permissions = Permissions::for_enroll_approver();
+    merge(&mut permissions, Permissions::for_registrar());
+    let permissions = permissions.with_js_domain(js_domain);
     let jwt = user_jwt(&account, &user.public_key(), "enroll", permissions, json!({}), Some(exp))?;
     Ok(creds(&jwt, &seed(&user)?))
 }

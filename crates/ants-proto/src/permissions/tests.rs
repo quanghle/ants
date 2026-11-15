@@ -621,3 +621,22 @@ fn the_permissions_version_travels_as_a_user_jwt_tag() {
     assert_eq!(PermissionsVersion::from_tags(["ants-perms:x"]), None);
     assert!(PermissionsVersion(0) < PERMISSIONS_VERSION);
 }
+
+#[test]
+fn only_bootstrap_credentials_ask_to_register_and_only_the_signer_hears_them() {
+    let bootstrap = Permissions::for_bootstrap();
+    assert_eq!(bootstrap.publish, [subject::ALL_LOGIN_REQUESTS]);
+    assert_eq!(bootstrap.subscribe, [subject::ALL_LOGIN_REPLIES]);
+    let registrar = Permissions::for_registrar();
+    assert_eq!((registrar.publish, registrar.subscribe), (bootstrap.subscribe, bootstrap.publish));
+    let (dev_a, alice): (UserId, UserId) = ("dev-a".parse().unwrap(), "alice".parse().unwrap());
+    let m1: Machine = "m1".parse().unwrap();
+    let mut leaf = Permissions::for_leaf(&m1, [(&dev_a, Role::Ant), (&alice, Role::Human)]);
+    leaf.publish.extend(Permissions::for_enroll_approver().publish);
+    leaf.subscribe.extend(Permissions::for_enroll_approver().subscribe);
+    let others = [Permissions::for_user(&dev_a, Role::Ant), Permissions::for_user(&alice, Role::Human), leaf];
+    for permissions in others {
+        let subjects = permissions.publish.iter().chain(&permissions.subscribe);
+        assert!(subjects.clone().all(|s| !s.starts_with("ants.login.") && s != ">"), "{subjects:?}");
+    }
+}

@@ -16,7 +16,7 @@ ants auth user alice --human --store-key --js-domain hub  # seed stored in OS cr
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `enroll`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label or leaf members). Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label or leaf members). Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -78,6 +78,17 @@ ants enroll approve dev-c --js-domain hub                         # or: ants enr
 `ants add --enroll` repeats its request every 5 s and stops with an error at a rejection, when the enrollment credentials expire, or when the server refuses them (revoked), even while the server is unreachable.
 
 Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --enroll` signs the request with the leaf uplink key; `ants enroll approve` renews the leaf uplink JWT (up to the 252 KiB limit, ~30 ants with a domain or 60 without; beyond it the approval fails before anything is signed or recorded), records the ant in `issued.jsonl`, admits it to `ANTS_IN` outbox sourcing, and `ants add` has the leaf node reconnect its uplink with the renewed credentials, by a reload keeping local connections (`ants enroll` behind a leaf requires `ants auth leaf --enroll-approver`). After out-of-band `--jwt` behind a leaf, run `ants auth leaf MACHINE --add-ant NAME` and `ants leaf outbox MACHINE`. See [transport.md](transport.md#enrollment-behind-a-leaf-node).
+
+## Registering humans
+
+Humans register their own devices with `ants login`, which `ants signer` answers after a GitHub sign-in. Requests travel with the team's public bootstrap credentials:
+
+```sh
+ants auth bootstrap [--ttl 0] [--out FILE]   # bootstrap.creds (mode 0644; default: no expiry)
+ants auth revoke bootstrap --nats wss://hub.example/nats   # withdraw them; reissue with ants auth bootstrap
+```
+
+Bootstrap credentials are meant to be shared: they only publish registration requests on `ants.login.*` and hear the answers on `ants.login.*.reply`, with messages of at most 4 KiB and no JetStream. They are recorded in `issued.jsonl` (kind `bootstrap`) and revoked like any key. Registration happens on the hub only: leaf uplinks never carry `ants.login` subjects, so both `ants login` and `ants signer` connect to the hub.
 
 ## Renewing over NATS
 

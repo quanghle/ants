@@ -39,6 +39,8 @@ pub enum Kind {
     ChannelManager,
     Enrollment,
     Observer,
+    /// The team's public bootstrap credentials, with which `ants login` asks to register a human's device.
+    Bootstrap,
 }
 
 impl From<ants_proto::Role> for Kind {
@@ -445,6 +447,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
+        Kind::Bootstrap => "ants auth bootstrap".to_owned(),
     }]
 }
 
