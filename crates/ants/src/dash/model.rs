@@ -2,7 +2,9 @@
 //! ([`State`]), the selected thread and its history, the pending tool request selected or opened, and the latest
 //! notice. Keys and changes return the [`Action`]s the dashboard then performs.
 
-use ants_proto::{ApprovalRequest, ThreadId, Verdict};
+use std::collections::HashMap;
+
+use ants_proto::{ApprovalRequest, ThreadDone, ThreadId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::live::{self, History, State};
@@ -86,6 +88,10 @@ pub struct Model {
     pub focus: Pane,
     pub detail: Option<Detail>,
     pub notice: Option<Notice>,
+    /// Each thread's shared done state, whether or not a message since reopened it.
+    pub dones: HashMap<ThreadId, ThreadDone>,
+    /// Why the last read of the done states failed, to tell only once.
+    dones_failed: Option<String>,
 }
 
 impl Model {
@@ -99,6 +105,28 @@ impl Model {
             focus: Pane::Threads,
             detail: None,
             notice: None,
+            dones: HashMap::new(),
+            dones_failed: None,
+        }
+    }
+
+    /// The thread's shared done state, unless a message since reopened it.
+    pub fn done(&self, thread: &ThreadId) -> Option<&ThreadDone> {
+        let last = self.live.summary(thread)?.last_reopening;
+        self.dones.get(thread).filter(|d| d.holds(last))
+    }
+
+    /// Take the done states read, telling why a read failed once.
+    pub fn dones_read(&mut self, read: anyhow::Result<HashMap<ThreadId, ThreadDone>>, now: DateTime<Utc>) {
+        match read {
+            Ok(dones) => (self.dones, self.dones_failed) = (dones, None),
+            Err(e) => {
+                let failed = format!("reading the done states: {e:#}");
+                if self.dones_failed.as_ref() != Some(&failed) {
+                    self.notify(failed.clone(), Level::Error, now);
+                    self.dones_failed = Some(failed);
+                }
+            }
         }
     }
 

@@ -126,17 +126,20 @@ fn draw_threads(frame: &mut Frame, model: &Model, area: Rect, now: DateTime<Utc>
     frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(selected));
 }
 
-/// A thread in the list: whether an ant is busy on it, its id's start, last activity, users and opening line.
+/// A thread in the list: whether an ant is busy on it, its id's start, last activity, users, whether it is done and
+/// its opening line.
 fn thread_row(model: &Model, thread: &ThreadId, _now: DateTime<Utc>) -> Line<'static> {
     let busy = if model.live.progress.contains_key(thread) { "▶ " } else { "  " };
     let short: String = thread.as_str().chars().take(8).collect();
     let Some(summary) = model.live.summary(thread) else { return Line::raw(format!("{busy}{short}")) };
     let users: Vec<String> =
         summary.users.iter().map(ToString::to_string).chain(summary.channels.iter().map(|c| format!("#{c}"))).collect();
+    let done = if model.done(thread).is_some() { " done" } else { "" };
     Line::from(vec![
         Span::styled(busy, Style::new().fg(Color::Green)),
         Span::raw(format!("{short} {} ", short_time(summary.last_at))),
         Span::styled(users.join(","), Style::new().fg(Color::Blue)),
+        Span::styled(done, Style::new().fg(Color::Magenta)),
         Span::raw(format!(" {}", summary.opening)),
     ])
 }
@@ -291,6 +294,30 @@ mod tests {
             (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_owned()).collect::<String>().trim_end().to_owned()
         });
         rows.collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_thread_done_is_marked_until_a_message_reopens_it_and_a_failed_read_tells_once() {
+        let (done, open) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = Model::new(State::new(user("alice"), Duration::from_hours(24)));
+        m.stored(
+            vec![message(1, &done, "alice", "dev-a", "deploy"), message(2, &open, "alice", "dev-b", "test")],
+            at(2),
+        );
+        let read = [(done.clone(), ants_proto::ThreadDone::new(done.clone(), user("alice"), 1))].into();
+        m.dones_read(Ok(read), at(3));
+        let shown = screen(&m, at(3));
+        assert!(shown.contains("alice,dev-a done deploy"), "{shown}");
+        assert!(shown.contains("alice,dev-b test"), "{shown}");
+
+        m.dones_read(Err(anyhow::anyhow!("timed out")), at(4));
+        assert_eq!(m.notice_at(at(4)).map(|n| n.text.as_str()), Some("reading the done states: timed out"));
+        m.notice = None;
+        m.dones_read(Err(anyhow::anyhow!("timed out")), at(5));
+        assert!(m.notice.is_none(), "told once");
+
+        m.stored(vec![message(3, &done, "dev-a", "alice", "deployed")], at(6));
+        assert!(screen(&m, at(6)).contains("alice,dev-a deploy"), "reopened");
     }
 
     #[test]
