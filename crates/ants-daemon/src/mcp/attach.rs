@@ -56,15 +56,14 @@ pub(super) struct Loaded {
 /// Each is named by the base name of its path, with a media type guessed from its extension.
 pub(super) async fn load(dir: &Path, paths: &[String]) -> Result<Vec<Loaded>, String> {
     if paths.len() > MAX_ATTACHMENTS {
-        return Err(format!("attach takes at most {MAX_ATTACHMENTS} files, not {}; nothing sent", paths.len()));
+        return Err(format!("attach takes at most {MAX_ATTACHMENTS} files, not {}", paths.len()));
     }
     let root = tokio::fs::canonicalize(dir)
         .await
-        .map_err(|e| format!("cannot resolve the working directory {}: {e}; nothing sent", dir.display()))?;
+        .map_err(|e| format!("cannot resolve the working directory {}: {e}", dir.display()))?;
     let mut loaded = Vec::with_capacity(paths.len());
     for path in paths {
-        let file =
-            load_one(&root, path.trim()).await.map_err(|why| format!("cannot attach {path:?}: {why}; nothing sent"))?;
+        let file = load_one(&root, path.trim()).await.map_err(|why| format!("cannot attach {path:?}: {why}"))?;
         loaded.push(file);
     }
     Ok(loaded)
@@ -111,7 +110,7 @@ pub(super) async fn store(
     for Loaded { attachment, bytes } in loaded {
         (files.put)(handle_of(attachment.id), attachment.clone(), bytes)
             .await
-            .map_err(|e| format!("cannot store attachment {}: {e:#}; nothing sent", attachment.name))?;
+            .map_err(|e| format!("cannot store attachment {}: {e:#}", attachment.name))?;
         attachments.push(attachment);
     }
     Ok(attachments)

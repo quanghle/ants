@@ -15,7 +15,8 @@
 //! `ask_human` asks the thread's owner, else the default human, a question with options ([`Envelope::question`]) and
 //! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
 //! `send_message`, `ask_ant`, `route`, `post_channel` and `post_notes` attach files from the directory the thread's
-//! session works in, and `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
+//! session works in, `attach_to_reply` attaches them to the turn's final answer ([`Mcp::reply_files`]), and
+//! `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -415,6 +416,21 @@ impl Mcp {
         self.hub.sessions.locked().titles.remove(thread)
     }
 
+    /// Store the files the session of `thread` attached to the final answer of its turn (`attach_to_reply`), read
+    /// again from the directory the thread works in and confined to it as `attach` is, under the handles `handle_of`
+    /// gives their ids, those of the answer, and return their references for it to carry: none when it attached
+    /// none. Fails, the files left out, when one cannot be read or stored now.
+    pub async fn reply_files(
+        &self,
+        thread: &ThreadId,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
+        let paths = self.hub.sessions.locked().reply_files.remove(thread);
+        let Some(paths) = paths else { return Ok(Vec::new()) };
+        let loaded = self.hub.load_files(thread, &paths).await?;
+        self.hub.store_files(loaded, handle_of).await
+    }
+
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
@@ -434,6 +450,7 @@ impl Drop for Turn {
         let mut sessions = self.hub.sessions.locked();
         sessions.current.remove(&self.thread);
         sessions.titles.remove(&self.thread);
+        sessions.reply_files.remove(&self.thread);
     }
 }
 
@@ -474,6 +491,8 @@ struct Sessions {
     titles: HashMap<ThreadId, String>,
     /// The directory each thread's sessions work in.
     dirs: HashMap<ThreadId, PathBuf>,
+    /// The paths of the files each thread's session attached to the final answer of its turn.
+    reply_files: HashMap<ThreadId, Vec<String>>,
 }
 
 /// What `<home>/mcp.json` keeps.
@@ -550,10 +569,15 @@ impl Hub {
 
     /// Read the files at `paths` in the directory `thread` works in, to attach them: none for no paths.
     async fn load(&self, thread: &ThreadId, paths: &[String]) -> Result<Vec<attach::Loaded>, String> {
+        self.load_files(thread, paths).await.map_err(|e| format!("{e}; nothing sent"))
+    }
+
+    /// [`Hub::load`], failing without saying what is not done.
+    async fn load_files(&self, thread: &ThreadId, paths: &[String]) -> Result<Vec<attach::Loaded>, String> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let (_, dir) = self.files(thread).map_err(|e| format!("{e}; nothing sent"))?;
+        let (_, dir) = self.files(thread)?;
         attach::load(&dir, paths).await
     }
 
@@ -563,11 +587,47 @@ impl Hub {
         loaded: Vec<attach::Loaded>,
         handle_of: impl Fn(Uuid) -> AttachmentHandle,
     ) -> Result<Vec<Attachment>, String> {
+        self.store_files(loaded, handle_of).await.map_err(|e| format!("{e}; nothing sent"))
+    }
+
+    /// [`Hub::store`], failing without saying what is not done.
+    async fn store_files(
+        &self,
+        loaded: Vec<attach::Loaded>,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
         if loaded.is_empty() {
             return Ok(Vec::new());
         }
-        let (files, _) = self.files.get().ok_or("attachments are not available here; nothing sent")?;
+        let (files, _) = self.files.get().ok_or("attachments are not available here")?;
         attach::store(files, loaded, handle_of).await
+    }
+
+    /// Have the final answer of the turn on `thread` carry the files at `paths`, in place of any given earlier in the
+    /// turn; none for no paths. They are checked now, and read again as the answer is sent ([`Mcp::reply_files`]).
+    async fn attach_to_reply(&self, thread: &ThreadId, paths: Vec<String>) -> Result<String, String> {
+        if !self.sessions.locked().current.contains_key(thread) {
+            return Err(
+                "no message is being handled on this thread; files are attached to its answer only while one is"
+                    .to_owned(),
+            );
+        }
+        if paths.is_empty() {
+            self.sessions.locked().reply_files.remove(thread);
+            return Ok("The final answer of this turn carries no files.".to_owned());
+        }
+        let loaded = self.load_files(thread, &paths).await.map_err(|e| format!("{e}; nothing attached"))?;
+        let mut sessions = self.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return Err("the turn ended before the files were attached".to_owned());
+        }
+        sessions.reply_files.insert(thread.clone(), paths);
+        let named: Vec<String> = loaded.iter().map(|l| attach::describe(&l.attachment)).collect();
+        Ok(format!(
+            "The final answer of this turn carries {}. They are read again from the working directory as the answer is \
+             sent; attach_to_reply again replaces them.",
+            named.join(", ")
+        ))
     }
 
     /// The attachment `handle` names, if on a message the ant reads: an image as image content, a short text as text,
@@ -1421,6 +1481,14 @@ struct Route {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct AttachToReply {
+    /// Files the final answer carries: paths in the working directory, at most 8 files of up to 8 MiB each; empty
+    /// for none.
+    #[serde(default)]
+    attach: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct ReadAttachment {
     /// The attachment's handle, as listed with its message: `<from>.<inbox|notes|chan>.<target>.<id>`.
     handle: String,
@@ -2034,6 +2102,20 @@ impl Tools {
         Ok(text(result))
     }
 
+    #[tool(description = "Attach files to the final answer of this turn, the reply sent when the turn ends (a \
+        message, a channel post or a thread notes post), rather than sending them with send_message. `attach` lists \
+        files in the working directory, as for send_message; calling again in the same turn replaces them, and an \
+        empty list attaches none. They are checked now and read again as the answer is sent; one that cannot be \
+        attached then leaves the files out, the answer saying why. Spends no turn.")]
+    async fn attach_to_reply(
+        &self,
+        Parameters(args): Parameters<AttachToReply>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.attach_to_reply(&thread, args.attach).await))
+    }
+
     #[tool(description = "Read a file attached to a message this ant reads (one sent to it or by it, a notes \
         post or a channel post) by the handle listed with the message, `<from>.<inbox|notes|chan>.<target>.<id>`. \
         A PNG, JPEG, GIF or WebP image comes back as an image, a text or JSON file of up to 128 KiB as text, and \
@@ -2155,8 +2237,8 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          title for the thread, which the reply carries and which becomes its title unless it ever had one. ask_human \
          asks the thread's owner a question with numbered options and returns at once; the answer arrives later as a \
          message, prefixed with an [ants] line naming the question and the option picked. send_message, \
-         ask_ant, route, post_channel and post_notes attach files from the working directory (attach); \
-         read_attachment reads a file attached to a message by the handle listed with it. Memory and task \
+         ask_ant, route, post_channel and post_notes attach files from the working directory (attach), and \
+         attach_to_reply attaches them to the turn's final answer; read_attachment reads a file attached to a message by the handle listed with it. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {

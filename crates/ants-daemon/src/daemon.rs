@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    Attachment, AttachmentHandle, CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope,
-    Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate,
-    SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
+    Attachment, AttachmentHandle, AttachmentScope, CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter,
+    Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role, State,
+    StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW,
+    subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -2249,12 +2250,20 @@ impl Inbox<'_> {
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
                         let (store, budget) = (self.notes, envelope.turn_budget);
-                        match notes::spend(store, thread, self.ant, &reply.text, budget, title.clone()).await? {
+                        let ant = self.ant.clone();
+                        let handle_of = |id| AttachmentHandle {
+                            from: ant.clone(),
+                            scope: AttachmentScope::Notes(thread.clone()),
+                            id,
+                        };
+                        let (files, left_out) = self.reply_files(thread, handle_of).await;
+                        let text = with_left_out(reply.text, left_out);
+                        match notes::spend(store, thread, self.ant, &text, budget, title.clone(), files).await? {
                             Some(post) => Reply::Notes(post),
                             None => {
                                 let why = "Thread notes out of turns before the answer was posted";
                                 let reason = EscalationReason::Notes;
-                                self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
+                                self.escalate(incoming, why, reason, seq, Some(&text)).await?;
                                 self.done(msg, seq).await?;
                                 return Ok(None);
                             }
@@ -2270,11 +2279,36 @@ impl Inbox<'_> {
             }
         };
         Ok(Some(match reply {
-            Reply::Message(message) => Reply::Message(Box::new(Envelope { title, ..*message })),
-            Reply::Post(post) => Reply::Post(ChannelPost { title, ..post }),
-            // Posted with the title already.
+            Reply::Message(message) => {
+                let (attachments, left_out) = self.reply_files(thread, |id| message.attachment_handle(id)).await;
+                let text = with_left_out(message.text, left_out);
+                Reply::Message(Box::new(Envelope { title, text, attachments, ..*message }))
+            }
+            Reply::Post(post) => {
+                let (attachments, left_out) = self.reply_files(thread, |id| post.attachment_handle(id)).await;
+                let text = with_left_out(post.text, left_out);
+                Reply::Post(ChannelPost { title, text, attachments, ..post })
+            }
+            // Posted with the title and files already.
             Reply::Notes(post) => Reply::Notes(post),
         }))
+    }
+
+    /// Store the files the session of `thread` attached to its final answer under the handles `handle_of` gives,
+    /// returning their references, else none and why they are left out.
+    async fn reply_files(
+        &self,
+        thread: &ThreadId,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> (Vec<Attachment>, Option<String>) {
+        let Some(mcp) = self.mcp else { return (Vec::new(), None) };
+        match mcp.reply_files(thread, handle_of).await {
+            Ok(files) => (files, None),
+            Err(why) => {
+                tracing::warn!(%thread, error = why, "attaching files to the answer");
+                (Vec::new(), Some(why))
+            }
+        }
     }
 
     /// The prompt for `incoming`, given what was read of a post's thread.
@@ -2725,6 +2759,14 @@ fn spent_tokens(spent: &Spend) -> u64 {
     match spent {
         Spend::Tokens(n) => *n,
         Spend::Cost { .. } => 0,
+    }
+}
+
+/// `text`, the answer, followed by an `[ants]` line saying why the files attached to it are left out, if they are.
+fn with_left_out(text: String, left_out: Option<String>) -> String {
+    match left_out {
+        Some(why) => format!("{text}\n\n[ants] The files attached to this answer are left out: {why}."),
+        None => text,
     }
 }
 

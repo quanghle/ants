@@ -142,7 +142,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 16, "{tools:?}");
+    assert_eq!(tools.len(), 17, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1332,6 +1332,69 @@ async fn attach_sends_files_from_the_working_directory_only() {
     let post = posted.locked().pop().unwrap();
     let held = stored.locked().get(&post.attachment_handle(post.attachments[0].id)).cloned().unwrap();
     assert_eq!(held.1, [0x89, b'P', b'N', b'G']);
+}
+
+#[tokio::test]
+async fn attach_to_reply_names_the_files_the_turns_answer_carries() {
+    let home = home("attach-to-reply");
+    let (mcp, _sent) = start(&home).await;
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.clone());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("a.txt"), "aa").unwrap();
+    std::fs::write(work.join("b.txt"), "b").unwrap();
+    std::fs::write(home.join("secret.txt"), "keep out").unwrap();
+    let current = from_human();
+    let thread = &current.thread_id;
+    let client = client_in(&mcp, thread, &work).await;
+    let attach =
+        async |files: serde_json::Value| call(&client, "attach_to_reply", serde_json::json!({"attach": files})).await;
+    let reply = current.reply(user("dev-a"), "done", Role::Human).unwrap();
+    let handle_of = |id| reply.attachment_handle(id);
+
+    let (ok, text) = attach(serde_json::json!(["a.txt"])).await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+
+    let turn = mcp.begin(&current);
+    let (ok, text) = attach(serde_json::json!(["a.txt"])).await;
+    assert!(ok && text.contains("a.txt (text/plain, 2 B)"), "{text}");
+    let (ok, text) = attach(serde_json::json!(["../secret.txt"])).await;
+    assert!(!ok && text.contains("outside the working directory") && text.ends_with("nothing attached"), "{text}");
+    assert!(stored.locked().is_empty(), "stored only as the answer is sent");
+    let files = mcp.reply_files(thread, handle_of).await.unwrap();
+    let got: Vec<_> = files.iter().map(|a| (a.name.as_str(), a.size)).collect();
+    assert_eq!(got, [("a.txt", 2)], "the failed call left the earlier files");
+    let held = stored.locked().get(&reply.attachment_handle(files[0].id)).cloned().unwrap();
+    assert_eq!(held, (files[0].clone(), b"aa".to_vec()), "stored under the answer's handle");
+    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), [], "taken by the answer");
+
+    // A later call replaces them, an empty one clears them.
+    let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
+    assert!(ok);
+    let (ok, _) = attach(serde_json::json!(["b.txt"])).await;
+    assert!(ok);
+    let files = mcp.reply_files(thread, handle_of).await.unwrap();
+    assert_eq!(files.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["b.txt"]);
+    let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
+    assert!(ok);
+    let (ok, text) = attach(serde_json::json!([])).await;
+    assert!(ok && text.contains("carries no files"), "{text}");
+    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), []);
+
+    // The files are read again as the answer is sent.
+    let (ok, _) = attach(serde_json::json!(["b.txt"])).await;
+    assert!(ok);
+    std::fs::remove_file(work.join("b.txt")).unwrap();
+    let why = mcp.reply_files(thread, handle_of).await.unwrap_err();
+    assert!(why.contains("cannot attach \"b.txt\""), "{why}");
+
+    // And forgotten with the turn.
+    let (ok, _) = attach(serde_json::json!(["a.txt"])).await;
+    assert!(ok);
+    drop(turn);
+    let _turn = mcp.begin(&current);
+    assert_eq!(mcp.reply_files(thread, handle_of).await.unwrap(), []);
 }
 
 #[tokio::test]

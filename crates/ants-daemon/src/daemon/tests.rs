@@ -2506,6 +2506,80 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
 }
 
 #[tokio::test]
+async fn the_answer_carries_the_files_attached_during_its_turn() {
+    use agent_client_protocol::v1::schema::McpServer;
+    use rmcp::ServiceExt as _;
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::files_config()).await.unwrap();
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/reply-files");
+    let _ = std::fs::remove_dir_all(&home);
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("report.md"), "# done").unwrap();
+    let (outbox, roster) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await.unwrap();
+    mcp.with_files(crate::mcp::jetstream_files(bus.js.clone()), home.clone());
+    bus.mcp = Some(mcp);
+    let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
+    let thread = ThreadId::generate();
+    bus.send(&thread, "hold on").await;
+
+    let attach_to_reply = async |thread: &ThreadId, files: &[&str]| {
+        let servers = bus.mcp.as_ref().unwrap().servers()(thread, &work, true);
+        let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
+        let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
+        let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let serde_json::Value::Object(args) = serde_json::json!({"attach": files}) else { unreachable!() };
+        let result = client.call_tool(CallToolRequestParams::new("attach_to_reply").with_arguments(args)).await;
+        assert_ne!(result.unwrap().is_error, Some(true));
+    };
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        attach_to_reply(&thread, &["report.md"]).await;
+        gate.add_permits(1);
+        let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
+        let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+        let [report] = &reply.attachments[..] else { panic!("{reply:?}") };
+        assert_eq!((report.name.as_str(), report.mime.as_str()), ("report.md", "text/markdown"));
+        let (_, bytes) = crate::files::get(&bus.js, &reply.attachment_handle(report.id), Some(report)).await.unwrap();
+        assert_eq!(bytes, b"# done");
+
+        // A channel post carries them too; one gone by the end of the turn leaves them out, the answer saying why.
+        let ask = ChannelPost::new(ops.clone(), UserId::human(), "hold: @dev-a the report?");
+        bus.post(&ask).await;
+        until("the post to be prompted", || log.locked().prompted == 2).await;
+        attach_to_reply(&ask.thread_id, &["report.md"]).await;
+        gate.add_permits(1);
+        let post = next_post(&mut posts).await;
+        let [report] = &post.attachments[..] else { panic!("{post:?}") };
+        let (_, bytes) = crate::files::get(&bus.js, &post.attachment_handle(report.id), Some(report)).await.unwrap();
+        assert_eq!(bytes, b"# done");
+
+        bus.send(&thread, "hold again").await;
+        until("the next prompt", || log.locked().prompted == 3).await;
+        attach_to_reply(&thread, &["report.md"]).await;
+        std::fs::remove_file(work.join("report.md")).unwrap();
+        gate.add_permits(1);
+        let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
+        let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+        assert!(reply.attachments.is_empty());
+        let left_out = "\n\n[ants] The files attached to this answer are left out: cannot attach \"report.md\"";
+        assert!(reply.text.contains(left_out), "{}", reply.text);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
 async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
