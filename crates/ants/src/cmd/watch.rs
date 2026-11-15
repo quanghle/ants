@@ -216,13 +216,14 @@ impl Printer {
                 let question = question.text.split_whitespace().collect::<Vec<_>>().join(" ");
                 return self.line(&format!("[{thread}] {who}{forged} asked {to} {question:?} (message {message})"));
             }
-            StatusUpdate::Decided { request_id, verdict, by, decider } => {
+            StatusUpdate::Decided { request_id, verdict, by, decider, via } => {
                 let verdict = tools::spelling(*verdict);
-                let outcome = match (by, decider) {
-                    (DecidedBy::Expiry, _) => format!("expired: {verdict}"),
-                    (_, Some(decider)) => format!("decided {verdict} by {decider}"),
-                    (DecidedBy::Human, None) => format!("decided {verdict} by a human"),
-                    (DecidedBy::Chain, None) => format!("decided {verdict} by its chain"),
+                let outcome = match (by, decider, via) {
+                    (DecidedBy::Expiry, ..) => format!("expired: {verdict}"),
+                    (DecidedBy::Human, Some(decider), Some(via)) => format!("decided {verdict} by {decider} via {via}"),
+                    (_, Some(decider), _) => format!("decided {verdict} by {decider}"),
+                    (DecidedBy::Human, None, _) => format!("decided {verdict} by a human"),
+                    (DecidedBy::Chain, None, _) => format!("decided {verdict} by its chain"),
                 };
                 return self.line(&format!("[{thread}] {who}{forged}: approval {who}/{request_id} {outcome}"));
             }
@@ -336,18 +337,22 @@ mod tests {
         );
 
         let mut printer = Printer::default();
-        let mut told = |by, decider| {
+        let mut told = |by, decider, via| {
             let verdict = ants_proto::Verdict::AllowOnce;
-            let update = StatusUpdate::Decided { request_id: id, verdict, by, decider };
+            let update = StatusUpdate::Decided { request_id: id, verdict, by, decider, via };
             printer.status(&StatusEvent::new(p("dev-a"), "t1".parse().unwrap(), update), "")
         };
         assert_eq!(
-            told(DecidedBy::Chain, Some(p("lead"))),
+            told(DecidedBy::Chain, Some(p("lead")), None),
             format!("[t1] dev-a: approval dev-a/{id} decided allow-once by lead\n")
         );
         assert_eq!(
-            told(DecidedBy::Human, None),
+            told(DecidedBy::Human, None, None),
             format!("[t1] dev-a: approval dev-a/{id} decided allow-once by a human\n")
+        );
+        assert_eq!(
+            told(DecidedBy::Human, Some(p("alice")), Some(p("pa"))),
+            format!("[t1] dev-a: approval dev-a/{id} decided allow-once by alice via pa\n")
         );
     }
 }

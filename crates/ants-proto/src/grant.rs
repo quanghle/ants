@@ -126,32 +126,49 @@ impl AssistantGrant {
         if self.issued_at > now + GRANT_CLOCK_SKEW {
             return Err(GrantError::Ahead(self.issued_at));
         }
-        let jwt = UserJwt::verify(&self.jwt).map_err(GrantError::Signer)?;
-        let signer = |reason: String| Err(GrantError::Signer(reason));
-        if jwt.iss != account {
-            return signer(format!("signed by {}, not by the team's account {account}", jwt.iss));
-        }
-        if jwt.name != self.human.as_str() {
-            return signer(format!("named {}, not {}", jwt.name, self.human));
-        }
-        let Some(device) = DeviceId::from_tags(jwt.tags.iter().map(String::as_str)) else {
-            return signer("not a human device's".to_owned());
-        };
-        if let Some(exp) = jwt.exp.filter(|exp| *exp <= self.issued_at.timestamp()) {
-            return signer(format!("expired at {exp}, before the grant was issued"));
-        }
-        let signature = BASE64URL_NOPAD.decode(self.signature.as_bytes()).map_err(|_| GrantError::BadSignature)?;
-        let key = KeyPair::from_public_key(&jwt.sub).map_err(|e| GrantError::Signer(e.to_string()))?;
-        key.verify(&self.signed(), &signature).map_err(|_| GrantError::BadSignature)?;
+        let (device, signer) =
+            device_signed(&self.human, &self.jwt, &self.signature, &self.signed(), self.issued_at, account)?;
         Ok(VerifiedGrant {
             human: self.human.clone(),
             assistant: self.assistant.clone(),
             issued_at: self.issued_at,
             sealing: self.sealing.clone(),
             device,
-            signer: jwt.sub,
+            signer,
         })
     }
+}
+
+/// Check that `signature` (base64url without padding) over `signed` was made by the credentials whose user JWT is
+/// `jwt`: a device of `human` the team's account `account` signed, not expired at `issued_at`. Returns the device and
+/// the public key (`U...`) that signed. For every record a human's device signs ([`AssistantGrant`],
+/// [`crate::Confirmations`], [`crate::PreAllow`]).
+pub(crate) fn device_signed(
+    human: &UserId,
+    jwt: &str,
+    signature: &str,
+    signed: &[u8],
+    issued_at: DateTime<Utc>,
+    account: &str,
+) -> Result<(DeviceId, String), GrantError> {
+    let jwt = UserJwt::verify(jwt).map_err(GrantError::Signer)?;
+    let signer = |reason: String| Err(GrantError::Signer(reason));
+    if jwt.iss != account {
+        return signer(format!("signed by {}, not by the team's account {account}", jwt.iss));
+    }
+    if jwt.name != human.as_str() {
+        return signer(format!("named {}, not {human}", jwt.name));
+    }
+    let Some(device) = DeviceId::from_tags(jwt.tags.iter().map(String::as_str)) else {
+        return signer("not a human device's".to_owned());
+    };
+    if let Some(exp) = jwt.exp.filter(|exp| *exp <= issued_at.timestamp()) {
+        return signer(format!("expired at {exp}, before the record was issued"));
+    }
+    let signature = BASE64URL_NOPAD.decode(signature.as_bytes()).map_err(|_| GrantError::BadSignature)?;
+    let key = KeyPair::from_public_key(&jwt.sub).map_err(|e| GrantError::Signer(e.to_string()))?;
+    key.verify(signed, &signature).map_err(|_| GrantError::BadSignature)?;
+    Ok((device, jwt.sub))
 }
 
 /// A grant a reader verified ([`AssistantGrant::verify`]).
@@ -426,7 +443,7 @@ mod tests {
         let no_device = unsigned(team.jwt(&team.account, "alice", &[], None));
         assert!(refused(&no_device, "alice.assistant").to_string().contains("not a human device's"));
         let expired = unsigned(team.jwt(&team.account, "alice", &[team.id.tag()], Some(now.timestamp() - 1)));
-        assert!(refused(&expired, "alice.assistant").to_string().contains("before the grant was issued"));
+        assert!(refused(&expired, "alice.assistant").to_string().contains("before the record was issued"));
         let later = unsigned(team.jwt(&team.account, "alice", &[team.id.tag()], Some(now.timestamp() + 60)));
         assert!(later.verify("alice.assistant", &team.account(), now + TimeDelta::hours(1)).is_ok(), "since expired");
 

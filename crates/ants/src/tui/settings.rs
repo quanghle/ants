@@ -72,7 +72,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub const KEYS: &str = "↑↓ field · Enter change · n new field · r read again · ←→ pane · a ask · w work · Esc back";
+    pub const KEYS: &str = "↑↓ field · Enter change · n new field · u read again · ←→ pane · a ask · w work · r \
+                            restart · Esc back";
     pub const DRAFT_KEYS: &str = "KEY = VALUE, a TOML value or a word; KEY = removes · Enter send · Esc cancel";
 
     fn read(&self) -> Option<&settings::Read> {
@@ -111,7 +112,7 @@ impl Pane {
                 self.draft = Some(String::new());
                 self.drop_failure();
             }
-            Key::Char('r') => {
+            Key::Char('u') => {
                 self.reading = None;
                 return Some(To::Do(Action::Settings(Ask::Read(ant.clone()))));
             }
@@ -503,7 +504,7 @@ mod tests {
         assert_eq!(m.key(Key::Enter, at(3)), None);
         assert!(screen(&m).contains("\"nope\" sets nothing"), "{}", screen(&m));
         m.key(Key::Esc, at(3));
-        assert_eq!(m.key(Key::Char('r'), at(3)), Some(Action::Settings(Ask::Read(user("dev-a")))));
+        assert_eq!(m.key(Key::Char('u'), at(3)), Some(Action::Settings(Ask::Read(user("dev-a")))));
         assert_eq!(m.settings_shown(), Some((user("dev-a"), true)));
     }
 }

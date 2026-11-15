@@ -21,6 +21,7 @@ use async_nats::jetstream::{self, AckKind};
 use futures::future::{FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
+use crate::admin::restart::{Restarted, Restarts};
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
 use crate::behalf::Records;
@@ -148,7 +149,7 @@ pub struct Config {
 /// the NATS server can be reached and its JetStream answers the daemon keeps trying ([`bus::connect_retrying`]). A daemon
 /// that defers to others ([`Config::defer_to_others`]) and hands the ant over waits for its turn again.
 pub async fn run(config: Config) -> Result<()> {
-    run_until(config, &Stop::default()).await
+    run_until(config, &Stop::default(), &Restarts::default()).await
 }
 
 /// A request to stop serving one ant, as the first Ctrl-C does: it takes no more messages, hands back those waiting
@@ -163,14 +164,16 @@ impl Stop {
     }
 }
 
-/// [`run`], also stopping on `stop`'s request.
-pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
+/// [`run`], also stopping on `stop`'s request, and restarting the ant's harnesses on the admin orders `restarts`
+/// passes on.
+pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
+    let _served = restarts.serve(&config.ant);
     if let Some(detail) = config.harness.unenforced(&config.allow, !config.escalation.escalate_to.is_empty()) {
         tracing::warn!(ant = %config.ant, fix = config.harness.gated_fix(), "{detail}");
     }
     let config = settle_worktrees(config).await;
-    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
+    while Box::pin(serve(&config, stop, restarts)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
     Ok(())
@@ -223,7 +226,8 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context)
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
-async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
+#[allow(clippy::too_many_lines)]
+async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = connect(config, stop).await? else {
         tracing::info!("stopped before connecting");
@@ -286,6 +290,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         ant: &config.ant,
         pool: &pool,
         cancels: Cancels::default(),
+        restarts,
         attempts: &attempts,
         answered: &answered,
         buried: &buried,
@@ -649,6 +654,7 @@ where
             tell_kept_branches(inbox.js, inbox.threads, inbox.humans, &config.ant, kept).await;
         }) => {}
         () = inbox.hear_cancels() => {}
+        () = inbox.hear_restarts() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
@@ -821,18 +827,32 @@ struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<Canc
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cancel {
     by: UserId,
-    /// Whether it came with a steer message ([`Envelope::steer`]), which the thread takes next.
-    steer: bool,
+    why: Why,
+}
+
+/// What a prompt is cancelled for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// `ants cancel`.
+    Cancel,
+    /// A steer message ([`Envelope::steer`]), which the thread takes next.
+    Steer,
+    /// An admin's order to restart the ant's harnesses now ([`crate::admin::restart`]).
+    Restart,
 }
 
 impl Cancel {
     /// The `[ants]` line ending the cancelled prompt's reply.
     fn notice(&self, ant: &UserId) -> String {
         let by = &self.by;
-        if self.steer {
-            format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer).")
-        } else {
-            format!("[ants] The prompt was cancelled by {by} (ants cancel).")
+        match self.why {
+            Why::Cancel => format!("[ants] The prompt was cancelled by {by} (ants cancel)."),
+            Why::Steer => format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer)."),
+            Why::Restart => {
+                format!(
+                    "[ants] The prompt was cancelled by {by} to restart {ant}'s harnesses (ants ant restart --now)."
+                )
+            }
         }
     }
 }
@@ -871,6 +891,8 @@ struct Inbox<'a> {
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
+    /// Where admin orders to restart the ant's harnesses arrive.
+    restarts: &'a Restarts,
     attempts: &'a Attempts,
     answered: &'a Answered,
     /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
@@ -1085,7 +1107,7 @@ impl Inbox<'_> {
         if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {
             return Some(Steered::Ahead);
         }
-        let cancel = Cancel { by: envelope.from.clone(), steer: true };
+        let cancel = Cancel { by: envelope.from.clone(), why: Why::Steer };
         self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
     }
 
@@ -1145,7 +1167,8 @@ impl Inbox<'_> {
                 tracing::warn!(error = %e, "ignoring a forged cancel request");
                 continue;
             }
-            let cancelled = self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), steer: false });
+            let cancelled =
+                self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), why: Why::Cancel });
             if !cancelled {
                 tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
             }
@@ -1156,6 +1179,33 @@ impl Inbox<'_> {
             }
         }
         std::future::pending::<()>().await;
+    }
+
+    /// Restart the ant's harnesses on each admin order to ([`crate::admin::restart`]) for as long as the daemon serves:
+    /// the idle ones stop at once, the working ones once their prompt ends, cancelled first on an order to restart now.
+    async fn hear_restarts(&self) {
+        let mut listening = self.restarts.listen(self.ant);
+        loop {
+            let request = listening.next().await;
+            let restarting = self.pool.restart();
+            let cancel = Cancel { by: request.by.clone(), why: Why::Restart };
+            let cancelled = if request.now {
+                restarting.working.iter().filter(|thread| self.cancels.cancel(thread, cancel.clone())).count()
+            } else {
+                0
+            };
+            let restarted =
+                Restarted { stopped: restarting.stopped, after_prompt: restarting.working.len(), cancelled };
+            tracing::info!(
+                by = %request.by,
+                now = request.now,
+                stopped = restarted.stopped,
+                after_prompt = restarted.after_prompt,
+                cancelled,
+                "restarting the harnesses"
+            );
+            let _ = request.done.send(restarted);
+        }
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
@@ -2481,7 +2531,7 @@ impl Inbox<'_> {
                     }
                 }
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
-                    tracing::info!(%thread, by = %by.by, steer = by.steer, "cancelling the prompt");
+                    tracing::info!(%thread, by = %by.by, why = ?by.why, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
                         let _ = stop.send(format!("Cancelled by {}", by.by));
                         cut_by_cancel = true;

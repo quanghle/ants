@@ -18,8 +18,8 @@ use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, home, images, nav, people, search, settings, snooze, thread,
-    timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, home, images, memories, nav, people, search, settings, snooze,
+    thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
@@ -894,6 +894,23 @@ impl Model {
             Some(Ok(done)) => self.notify(done, Level::Info, now),
             Some(Err(e)) => self.notify(e, Level::Error, now),
             None => {}
+        }
+    }
+
+    /// The ant whose memories the view wants read, and at which asking: the shown ant's, on its memories pane.
+    pub fn memories_wanted(&self) -> Option<(UserId, u32)> {
+        let Page::Ant(page) = self.page() else { return None };
+        (page.pane == ant::Pane::Memories).then(|| (page.ant.clone(), page.memories.asked))
+    }
+
+    /// Take in what a read of an ant's memories brought.
+    pub fn memories_event(&mut self, memories::Event(ant, asked, read): memories::Event) {
+        for page in &mut self.pages {
+            if let Page::Ant(page) = page
+                && page.ant == ant
+            {
+                page.memories.read(&ant, asked, &read);
+            }
         }
     }
 

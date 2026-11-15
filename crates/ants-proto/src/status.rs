@@ -139,6 +139,10 @@ pub enum StatusUpdate {
         /// [`ApprovalDecision::by`](crate::ApprovalDecision::by) names, as its client claims, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decider: Option<UserId>,
+        /// With [`DecidedBy::Human`], the assistant that made the decision for the human `decider` names, which took
+        /// effect as the human's once it confirmed it or a pre-allow rule it signed covered it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<UserId>,
     },
 }
 
@@ -223,9 +227,11 @@ mod tests {
                 verdict: Verdict::AllowOnce,
                 by: DecidedBy::Chain,
                 decider: Some(p("lead")),
+                via: None,
             },
         );
         let json = serde_json::to_value(&decided).unwrap();
+        assert!(json.get("via").is_none(), "a decision of the decider itself names no assistant");
         assert_eq!(
             (json["type"].as_str(), json["verdict"].as_str(), json["by"].as_str(), json["decider"].as_str()),
             (Some("decided"), Some("allow_once"), Some("chain"), Some("lead"))

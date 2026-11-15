@@ -24,6 +24,7 @@ mod home;
 mod images;
 mod interrupt;
 mod markdown;
+mod memories;
 mod model;
 mod nav;
 mod people;
@@ -165,6 +166,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         sealing: sealing.clone(),
         account: nats.account.clone(),
         keyring: feed.keyring(),
+        admin: crate::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
@@ -174,6 +176,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
+    let memories = memories::Io::new(nats, js.clone());
     let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
         credentials::Io::new(nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
@@ -199,6 +202,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             searches,
             trees,
             ants,
+            memories,
             settings,
             credentials,
             cards,
@@ -261,6 +265,8 @@ struct Chat {
     trees: tree::Io,
     /// The reads of the shown ant's queue.
     ants: ant::Io,
+    /// The reads of the shown ant's memories.
+    memories: memories::Io,
     /// The reads of the shown ant's settings and orders, and the orders sent.
     settings: settings::Io,
     /// The credentials asked for, where the team's account key is.
@@ -344,6 +350,10 @@ impl Chat {
                     self.model.ant_event(event);
                     Some(Vec::new())
                 }
+                event = self.memories.next() => {
+                    self.model.memories_event(event);
+                    Some(Vec::new())
+                }
                 event = self.settings.next() => {
                     self.model.settings_event(event);
                     Some(Vec::new())
@@ -394,6 +404,7 @@ impl Chat {
         self.acts.watch(self.model.open().cloned());
         self.trees.watch(self.model.tree_shown());
         self.ants.watch(self.model.ant_shown());
+        self.memories.watch(self.model.memories_wanted());
         let (shown, unread) = self.model.settings_shown().unzip();
         self.settings.watch(shown, unread.unwrap_or(false));
         if let Some(images) = &mut self.images {
