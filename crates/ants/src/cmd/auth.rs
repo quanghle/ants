@@ -119,6 +119,21 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         store_key: bool,
     },
+    /// Issue a machine's host credentials, with which the daemon serving the whole config file there records the
+    /// machine's ants in the ants_machines bucket, so that each stays addressable on its machine while offline, and
+    /// takes their admin orders. Behind a leaf node, they must name the leaf's machine. They never expire.
+    Host {
+        /// Machine name, as the daemon's [host] table names it, else the first label of its host name: letters,
+        /// digits, '-' and '_'.
+        machine: Machine,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+        /// Where to write the credentials (default: <dir>/host-<machine>.creds, where the daemon finds them on this
+        /// machine; on another, ~/.config/ants/auth/host.creds there).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Issue the uplink credentials of a machine's leaf node (leafnodes.remotes[].credentials), allowing what the
     /// ants and humans on the machine may do and usable only by a leaf node connection, and the system account
     /// credentials of its second uplink, which only hears the account updates `ants auth push` sends the hub.
@@ -139,7 +154,7 @@ pub(crate) enum AuthCommand {
         out: Option<PathBuf>,
     },
     /// Revoke credentials before they expire: every key issued to NAME (an ant, human, webhook or observer,
-    /// `leaf-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
+    /// `leaf-<machine>`, `host-<machine>`, `channel-manager` or `enroll-<ant>`) and each --key. The team's account in server.conf
     /// refuses them from then on, and the account is pushed to the server of --nats, which closes their connections,
     /// as do the leaf nodes connected to it through a system account uplink.
     Revoke {
@@ -317,6 +332,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())
         }
+        AuthCommand::Host { machine, dir, out } => host_creds(&machine, dir, out, domain),
         AuthCommand::Leaf { machine, members, dir, out } => leaf_creds(machine, members, dir, out, domain),
         AuthCommand::Revoke { name, keys, devices, no_push, dir } => {
             revoke_credentials(name, keys, devices, no_push, dir, conn.nats, domain).await
@@ -452,6 +468,16 @@ fn bootstrap(ttl: std::time::Duration, dir: Option<PathBuf>, out: Option<PathBuf
          --bootstrap FILE, served by ants signer with a [registration] table",
         out.display()
     );
+    Ok(())
+}
+
+/// Issue the host credentials of `machine` (`ants auth host`).
+fn host_creds(machine: &Machine, dir: Option<PathBuf>, out: Option<PathBuf>, domain: Option<&JsDomain>) -> Result<()> {
+    let dir = team_dir(dir)?;
+    let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::host_user(machine))));
+    auth::issue_host(&dir, machine, domain, &out)?;
+    let name = ants_proto::host_user(machine);
+    println!("{}\nthe daemon on {machine} reads ~/.config/ants/auth/{name}.creds, else [host] creds", out.display());
     Ok(())
 }
 

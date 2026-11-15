@@ -53,6 +53,11 @@ pub enum Kind {
     LeafSystem {
         machine: Machine,
     },
+    /// The host credentials of `machine`, with which its daemon writes the machine's record and takes its admin
+    /// orders ([`ants_proto::Permissions::for_host`]).
+    Host {
+        machine: Machine,
+    },
     /// Enrollment credentials of `ant`, for `ants add --enroll`.
     Enrollment {
         ant: UserId,
@@ -183,6 +188,7 @@ impl Finding {
             Kind::Observer => format!("observer {}", self.name),
             Kind::Leaf { machine, .. } => format!("the leaf node uplink of {machine}"),
             Kind::LeafSystem { machine } => format!("the system account uplink of the leaf node of {machine}"),
+            Kind::Host { machine } => format!("the host of {machine}"),
             Kind::Enrollment { ant } => format!("the enrollment of {ant}"),
             Kind::Bootstrap => "the bootstrap credentials".to_owned(),
         }
@@ -215,6 +221,7 @@ impl Finding {
             Kind::LeafSystem { machine } => vec![format!(
                 "ants auth leaf {machine} --ant ANT... --human HUMAN... --webhook WEBHOOK... [--js-domain DOMAIN]"
             )],
+            Kind::Host { machine } => vec![format!("ants auth host {machine}{domain}")],
             Kind::Enrollment { ant } => vec![format!("ants auth enroll {ant}")],
             Kind::Bootstrap => vec!["ants auth bootstrap".to_owned()],
         }
@@ -249,7 +256,10 @@ impl Finding {
     /// webhook, the channel manager or a leaf node's uplink, not expired, as the approver renews only credentials still
     /// valid.
     pub fn renewable(&self, now: u64) -> bool {
-        let kind = !matches!(self.kind, Kind::LeafSystem { .. } | Kind::Enrollment { .. } | Kind::Bootstrap);
+        let kind = !matches!(
+            self.kind,
+            Kind::LeafSystem { .. } | Kind::Host { .. } | Kind::Enrollment { .. } | Kind::Bootstrap
+        );
         kind && self.expiry(now) != Expiry::Expired
     }
 
@@ -606,6 +616,11 @@ fn kind(name: &str, publish: &[String], subscribe: &[String], leaf_only: bool) -
         let enroll_approver = has(subscribe, &format!("{ENROLL_INBOX}.>"));
         return Ok(Kind::Leaf { machine, ants, humans, webhooks, enroll_approver });
     }
+    if let Some(machine) = name.strip_prefix("host-").and_then(|machine| machine.parse::<Machine>().ok())
+        && has(publish, &subject::machine_record(&machine))
+    {
+        return Ok(Kind::Host { machine });
+    }
     let user: UserId = name.parse().map_err(|e| anyhow!("credentials named {name:?}: {e}"))?;
     if user == UserId::channel_manager() {
         return Ok(Kind::ChannelManager);
@@ -869,6 +884,21 @@ mod tests {
         assert_eq!(finding.kind, Kind::Webhook { to: vec![p("dev-a")], channels: vec![] });
         let ant = Permissions::for_user(&hook, Role::Ant);
         assert_eq!(Finding::from_claims(&claims("github", &ant, &tags, None)).unwrap().kind, Kind::Ant);
+    }
+
+    #[test]
+    fn host_credentials_name_their_machine_and_its_renewal() {
+        let tags = [PERMISSIONS_VERSION.tag()];
+        let machine: Machine = "Mac_mini".parse().unwrap();
+        let domain: JsDomain = "hub".parse().unwrap();
+        let host = Permissions::for_host(&machine).with_js_domain(Some(&domain));
+        let finding = Finding::from_claims(&claims("host-Mac_mini", &host, &tags, None)).unwrap();
+        assert_eq!(finding.kind, Kind::Host { machine });
+        assert_eq!(finding.holder(), "the host of Mac_mini");
+        assert_eq!(finding.renew(), ["ants auth host Mac_mini --js-domain hub"]);
+        assert!(!finding.renewable(0), "only `ants auth host` renews them");
+        let ant = Permissions::for_user(&p("host-m1"), Role::Ant);
+        assert_eq!(Finding::from_claims(&claims("host-m1", &ant, &tags, None)).unwrap().kind, Kind::Ant);
     }
 
     #[test]

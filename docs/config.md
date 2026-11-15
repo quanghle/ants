@@ -31,6 +31,10 @@ max_memory_store = "1GB"                   # hub max_memory_store (default: unkn
 min_available = "1GB"                      # default; bytes, 1024-based K/M/G/T[B] or a share like "10%"; "0" disables
 max_harnesses = 1                          # default; per-ant harness cap while memory is low (at least 1)
 
+[host]                                     # the machine's host connection (docs/auth.md, Machine host credentials)
+creds = "~/.config/ants/auth/host.creds"   # default: that file, else host-<machine>.creds beside it, if either exists
+machine = "macbook"                        # default: the name the credentials carry, else the host name's first label
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -104,6 +108,7 @@ allow = ["read:*", "execute:cargo test*"]
 
 - Added ants (and previously failed ants still listed) start; removed ants drain prompts in flight and return waiting messages for redelivery; ants whose resolved settings changed (including via top-level defaults, `[harnesses.NAME]`, or `[[ant_template]]`) drain and restart; unchanged ants continue uninterrupted (pool membership changes alone do not restart members).
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
+- The machine's record of its ants in `ants_machines` follows the ants listed; a changed `[host]` table or host credentials file reconnects the host. Only a daemon serving the whole file (no `--ant`) runs the host, with the top-level `nats` and `js_domain`, else `--nats` and `--js-domain`.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
 
 ## Worktrees

@@ -350,6 +350,17 @@ pub fn roster(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::ROSTER_BUCKET)
 }
 
+/// The record of `machine` in [`super::MACHINES_BUCKET`]: the subject its daemon puts [`super::MachineRecord`] on.
+pub fn machine_record(machine: &Machine) -> String {
+    format!("$KV.{}.{machine}", super::MACHINES_BUCKET)
+}
+
+/// Every admin order to the ants of `machine`, `ants.admin.<machine>.<ant>`, which the machine's daemon takes from the
+/// stream with its host credentials ([`super::admin_consumer`]).
+pub fn admin_orders(machine: &Machine) -> String {
+    format!("ants.admin.{machine}.>")
+}
+
 /// The chain of an ant in [`super::CHAINS_BUCKET`]: the subject its daemon puts [`super::ChainEntry`] on.
 pub fn chain(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::CHAINS_BUCKET)

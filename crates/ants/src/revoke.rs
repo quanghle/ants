@@ -38,6 +38,8 @@ pub enum Kind {
     Webhook,
     Leaf,
     ChannelManager,
+    /// A machine's host credentials, `host-<machine>`.
+    Host,
     Enrollment,
     Observer,
     /// The team's public bootstrap credentials, with which `ants login` asks to register a human's device.
@@ -523,6 +525,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::Webhook => format!("ants auth user {name} --webhook --to ANT... --channel CHANNEL... {domain}"),
         Kind::Leaf => format!("ants auth leaf {} {domain}", name.trim_prefix("leaf-")),
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
+        Kind::Host => format!("ants auth host {} {domain}", name.trim_prefix("host-")),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
         Kind::Bootstrap => "ants auth bootstrap".to_owned(),

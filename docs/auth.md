@@ -10,13 +10,14 @@ ants auth user dev-a --js-domain hub                    # dev-a.creds (ant role)
 ants auth user github --webhook --to dev-a --js-domain hub
 ants auth user nightly --webhook --to dev-a --js-domain hub  # schedules use webhook credentials
 ants auth channel-manager --js-domain hub               # channel-manager.creds
+ants auth host macbook --js-domain hub                  # host-macbook.creds (the machine's daemon)
 ants auth user audit --observer --js-domain hub         # audit.creds (read-only, for hooks)
 ants auth user alice --human --store-key --js-domain hub  # seed stored in OS credential store
 ```
 
 ## Issuing and revoking credentials
 
-Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, or leaf members). Credentials stay valid until expiry unless revoked:
+Every key issued or signed (`user`, `enroll`, `bootstrap`, `channel-manager`, `host`, `leaf`, `enroll approve`, `enroll renew`, `signer`) is recorded in `issued.jsonl` (public key, name, kind, issue time, expiry, permissions version, plus device ID/label, GitHub binding and grant, or leaf members). Credentials stay valid until expiry unless revoked:
 
 ```sh
 ants auth revoke alice --nats wss://hub.example/nats        # every key issued to alice, all devices
@@ -31,7 +32,15 @@ ants auth push --nats wss://hub.example/nats                # push account JWT t
 
 Include `server.conf` on the hub followed by `resolver { type: full, dir: "/ABSOLUTE/DIR" }` so pushed revocations persist across hub restarts and offline leaf nodes catch up within 10 s of reconnecting via their `leaf-<machine>.system.creds` uplink. Without a `full` resolver, copy `server.conf` to the hub and reload (`SIGHUP`) after each revocation. Full hub/leaf resolver mechanics live in [transport.md](transport.md#revocation).
 
-Run `ants init` once with human credentials to create stream `ANTS` and all 15 KV buckets (the first connection of any CLI command with human credentials also creates missing objects, after one concurrent round of stream infos). `ants init` only creates, adds the subjects a stream `ANTS` created by an older version lacks (such as `ants.timeline.>`), and widens to 24 h a shorter duplicate window of `ANTS` or `OBJ_ants_files` (such as the 2 min default of a store created before the window was set), in place, keeping their messages: an object already on the hub otherwise keeps its settings, such as the sources `ants leaf outbox` adds. `ants doctor` warns about such a window. It creates `ANTS`, `KV_ants_roster`, `KV_ants_channels` and `KV_ants_humans` with `max_consumers` `10000` rather than the `1000` `nats-server` gives by default (the buckets by a stream update right after creating them), and `ants_roster` with expiry markers.
+Run `ants init` once with human credentials to create stream `ANTS` and all 16 KV buckets (the first connection of any CLI command with human credentials also creates missing objects, after one concurrent round of stream infos). `ants init` only creates, adds the subjects a stream `ANTS` created by an older version lacks (such as `ants.timeline.>`), and widens to 24 h a shorter duplicate window of `ANTS` or `OBJ_ants_files` (such as the 2 min default of a store created before the window was set), in place, keeping their messages: an object already on the hub otherwise keeps its settings, such as the sources `ants leaf outbox` adds. `ants doctor` warns about such a window. It creates `ANTS`, `KV_ants_roster`, `KV_ants_channels` and `KV_ants_humans` with `max_consumers` `10000` rather than the `1000` `nats-server` gives by default (the buckets by a stream update right after creating them), and `ants_roster` with expiry markers.
+
+## Machine host credentials
+
+`ants auth host MACHINE` issues a machine's host credentials (user `host-<machine>`, never expiring, written to `host-<machine>.creds` in the team directory unless `--out` names another file). The daemon serving a whole config file on that machine connects with them once, apart from its ants, over its own inbox prefix `_INBOX_HOST.<machine>`, and keeps the machine's record in `ants_machines` (`<machine>`: the ants it serves) current: on start, and on each reload that changes them. The record is never deleted, so an ant whose daemon stopped and whose roster entry expired still has a machine (`ants machines`).
+
+The daemon finds them as the `[host]` table's `creds` ([config.md](config.md)), else `~/.config/ants/auth/host.creds`, else `host-<machine>.creds` there for the table's `machine` or the first label of the host name. The machine is the table's `machine`, else the one the credentials name, else the first label of the host name; a table naming another machine than its credentials is an error. On the machine holding the team keys, `ants setup` issues them where the daemon finds them once the config file's ants have credentials; elsewhere copy the file to `~/.config/ants/auth/host.creds`. Behind a leaf node, the host connects through the leaf's uplink, which allows what the host of the leaf's own machine may do, so the credentials must name that machine.
+
+A host may only put its own record (`$KV.ants_machines.<machine>`) and, for its machine's admin orders, look up and create the consumer `admin-<machine>` of `ANTS` filtering `ants.admin.<machine>.>`, take its messages and ack them; it reads no inbox, channel or other bucket. No ant, webhook or observer writes `ants_machines`; humans look it up, create it and read all of it, by batched direct gets alone (`$JS.API.DIRECT.GET.KV_ants_machines`, no consumer). A daemon without host credentials, whose ants have credentials, logs once that the record and the admin orders stay off and serves its ants as before; with no credentials anywhere (a hub without `ants auth`), the host connects as no one. `ants doctor` warns of the missing credentials and names the `ants auth host` command. `ants auth renew` renews host credentials as other kinds (new key, current permissions); they do not renew over NATS.
 
 ## Backing up the team keys
 
@@ -235,7 +244,7 @@ Credentials a registration granted (a device registered with `ants login`, whose
 
 ## Credentials across upgrades
 
-Each user JWT carries `ants-perms:<n>` (current: `2`), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
+Each user JWT carries `ants-perms:<n>` (current: `3`: version 3 adds machine host credentials, humans' rights on `ants_machines` and, in leaf uplinks, the host of the leaf's machine), required on every user JWT `ants auth` issues, and live daemons, webhooks, schedules and `ants channel serve` publish their running `ants` and `perms` versions. The version goes up whenever the permissions of a kind of credentials change. Connecting with outdated or soon-to-expire (< 7 d) credentials logs a warning with the exact renewal command (credentials newer than the running ants ask for an upgrade of ants); `ants doctor` (**versions**) verifies that all live services run the current permissions version before rights an older version had are withdrawn by renewing. Leaf uplinks whose members' rights changed need renewal and `ants leaf outbox` too.
 
 ## Private keys in the OS credential store
 

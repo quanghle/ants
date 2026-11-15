@@ -2393,3 +2393,58 @@ async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answ
     let v = next_violation(&client, &mut errors).await;
     assert!(v.to_lowercase().contains("payload"), "{v}");
 }
+
+#[tokio::test]
+async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_ant_is() {
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let m1: Machine = "m1".parse().unwrap();
+    let (_h, h_js) = server.connect(&human).await;
+    let (_a, a_js) = server.connect(&dev_a).await;
+    assert!(a_js.create_key_value(ants_daemon::hub::machines_config()).await.is_err(), "only a human creates it");
+    h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+
+    let creds = server.dir().join("host-m1.creds");
+    issue_host(&server.dir().join("auth"), &m1, None, &creds).unwrap();
+    let host = ants_daemon::host::Host {
+        machine: None,
+        nats: server.url.clone(),
+        creds: Some(creds.clone()),
+        js_domain: None,
+    };
+    let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone(), UserId::messenger()]);
+    let task = tokio::spawn(ants_daemon::host::run(host, watched));
+    let recorded = async |want: &[UserId]| {
+        timeout(WAIT, async {
+            loop {
+                let records = crate::machines::list(&h_js).await.unwrap();
+                if records.iter().any(|r| r.machine == m1 && r.ants == want) {
+                    return records;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the host records its ants")
+    };
+    recorded(std::slice::from_ref(&dev_a)).await;
+    ants.send_replace(vec![dev_b.clone(), dev_a.clone()]);
+    assert_eq!(recorded(&[dev_a.clone(), dev_b.clone()]).await.len(), 1);
+    assert_eq!(crate::machines::machines_of(&h_js, &dev_b).await.unwrap(), std::slice::from_ref(&m1));
+
+    let client = async_nats::ConnectOptions::with_credentials_file(&creds)
+        .await
+        .unwrap()
+        .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m1))
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let mut m_js = jetstream::new(client);
+    m_js.set_timeout(Duration::from_secs(1));
+    let as_host = DirectKv::new(&m_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
+    assert!(as_host.put("m2", b"{}".to_vec()).await.is_err(), "a host writes only its own machine's record");
+    let as_ant = DirectKv::new(&a_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
+    assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
+    drop(ants);
+    timeout(WAIT, task).await.unwrap().unwrap().expect("the host stops once its daemon drops it");
+}
