@@ -1,15 +1,17 @@
 //! Credentials asked for: the enrollment requests of machines running `ants add --enroll` and the renewal requests of
 //! `ants renew`. Only credentials signed with the team's account key hear them, so [`Io`] listens only where that key
 //! is on this machine, as `ants enroll list` and `ants enroll renewals` do, and approves, renews or rejects one once
-//! `y` confirms, as `ants enroll approve`, `renew` and `reject` do. Elsewhere the page tells where they are answered.
+//! `y` confirms, as `ants enroll approve`, `renew` and `reject` do. Elsewhere the page tells where they are answered:
+//! on the machine `ants signer` recorded as holding the key ([`AccountHolder`]), when one did.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use ants_proto::{EnrollRequest, JsDomain, RenewRequest, UserId};
+use ants_proto::{AccountHolder, EnrollRequest, JsDomain, RenewRequest, UserId};
 use anyhow::Result;
+use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
@@ -25,7 +27,7 @@ use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use crate::enroll::{self, Approver};
 use crate::live::maybe;
-use crate::{auth, renew};
+use crate::{auth, machines, renew};
 
 /// How often the requests are gathered; each gathering listens [`enroll::LISTEN`], as machines repeat theirs.
 const GATHER_EVERY: Duration = Duration::from_secs(15);
@@ -132,6 +134,8 @@ pub struct Heard {
     pub read: Option<Result<DateTime<Utc>, String>>,
     /// The order being carried out.
     pub busy: Option<Order>,
+    /// Where `ants signer` recorded the account key to be, read when it is not on this machine.
+    pub recorded: Option<AccountHolder>,
 }
 
 impl Heard {
@@ -140,10 +144,17 @@ impl Heard {
         self.asked.iter().filter(move |a| a.name() == name)
     }
 
-    /// The requests heard, as home's line counts them; None when none are.
+    /// The requests heard, as home's line counts them; else, with the account key on another machine, which one;
+    /// None when neither is known.
     pub fn line(&self) -> Option<Line<'static>> {
         if self.asked.is_empty() {
-            return None;
+            let elsewhere = matches!(self.holder, Some(Holder::Elsewhere(_)));
+            let recorded = self.recorded.as_ref().filter(|_| elsewhere)?;
+            let text = format!(
+                "requests for credentials are answered on machine {}, where the team's account key is",
+                recorded.machine
+            );
+            return Some(Line::styled(text, frame::dim()));
         }
         let names: Vec<String> = self
             .asked
@@ -166,6 +177,10 @@ impl Heard {
             }
             Event::Heard(Err(e)) => {
                 self.read = Some(Err(e));
+                None
+            }
+            Event::Recorded(recorded) => {
+                self.recorded = recorded;
                 None
             }
             Event::Done(order, done) => {
@@ -234,11 +249,16 @@ impl Page {
         match &heard.holder {
             None => about.push(Line::styled("looking for the team's account key…", frame::dim())),
             Some(Holder::Elsewhere(why)) => {
+                let there = match &heard.recorded {
+                    Some(recorded) => machines::held_on(recorded, now),
+                    None => "the machine holding it, where `ants auth init` ran (`ants signer` running there records \
+                             its name)"
+                        .to_owned(),
+                };
                 about.push(Line::raw(format!(
                     "The team's account key is not on this machine ({why}), and only it hears and answers the \
-                     requests: approve them on the machine holding it (where `ants auth init` ran), with `ants \
-                     enroll list` and `ants enroll approve ANT`, or `ants enroll renewals` and `ants enroll renew \
-                     NAME`, or `ants enroll renew --auto` running there."
+                     requests: approve them on {there}, with `ants enroll list` and `ants enroll approve ANT`, or \
+                     `ants enroll renewals` and `ants enroll renew NAME`, or `ants enroll renew --auto` running there."
                 )));
             }
             Some(Holder::Here(dir)) => {
@@ -303,6 +323,8 @@ impl Page {
 /// What a gathering or an order brought.
 pub enum Event {
     Heard(Result<Vec<Asked>, String>),
+    /// Where `ants signer` recorded the account key to be, read where it is not on this machine.
+    Recorded(Option<AccountHolder>),
     /// What carrying the order out did, or why it failed.
     Done(Order, Result<String, String>),
 }
@@ -312,6 +334,8 @@ type Connected = Rc<RefCell<Option<(Rc<Approver>, Instant)>>>;
 
 /// The gatherings of the requests and the orders, where the account key is on this machine.
 pub struct Io {
+    /// Where the record of the machine holding the account key is read.
+    js: jetstream::Context,
     url: String,
     domain: Option<JsDomain>,
     /// The team directory holding the account key; None when it is not on this machine.
@@ -326,8 +350,15 @@ pub struct Io {
 
 impl Io {
     /// The requests over the server at `url`, for the hub's JetStream `domain`, with the account key in the team
-    /// directory `team` if it is there, each gathering listening `listen`; and where the account key is.
-    pub fn new(url: &str, domain: Option<JsDomain>, team: Result<PathBuf>, listen: Duration) -> (Self, Holder) {
+    /// directory `team` if it is there, each gathering listening `listen`; and where the account key is. Where it is
+    /// not, each gathering reads instead which machine holds it, through `js`.
+    pub fn new(
+        js: jetstream::Context,
+        url: &str,
+        domain: Option<JsDomain>,
+        team: Result<PathBuf>,
+        listen: Duration,
+    ) -> (Self, Holder) {
         let holder = match team {
             Ok(dir) => match auth::account_key(&dir) {
                 Ok(_) => Holder::Here(dir),
@@ -341,6 +372,7 @@ impl Io {
         };
         let every = tokio::time::interval(GATHER_EVERY);
         let io = Self {
+            js,
             url: url.to_owned(),
             domain,
             dir,
@@ -381,7 +413,12 @@ impl Io {
     }
 
     fn start_gather(&mut self) {
-        let Some(dir) = self.dir.clone() else { return };
+        let Some(dir) = self.dir.clone() else {
+            let js = self.js.clone();
+            self.gather =
+                Some(async move { Event::Recorded(machines::holder(&js).await.ok().flatten()) }.boxed_local());
+            return;
+        };
         let approver = self.approver(dir);
         self.gather = Some(
             async move {
@@ -555,19 +592,42 @@ mod tests {
             shown.contains("The team's account key is not on this machine (not in /home/a/.config/ants/auth)"),
             "{shown}"
         );
-        assert!(shown.contains("`ants enroll approve ANT`"), "{shown}");
+        assert!(shown.contains("`ants enroll approve ANT`") && shown.contains("where `ants auth init` ran"), "{shown}");
         assert_eq!(m.key(Key::Char('a'), at(1)), None);
         assert!(!screen(&m, at(1)).contains("y to"), "nothing to answer");
+        assert_eq!(m.data.credentials.line(), None, "home says nothing of an unknown machine");
+
+        let recorded = AccountHolder {
+            machine: "keybox".parse().unwrap(),
+            hostname: "keybox.lan".to_owned(),
+            version: String::new(),
+            updated_at: at(1),
+        };
+        m.credentials(Event::Recorded(Some(recorded)), at(1));
+        let shown = screen(&m, at(1) + chrono::Duration::minutes(3));
+        assert!(
+            shown.contains("approve them on machine keybox (host keybox.lan), as `ants signer` there recorded 3m ago"),
+            "{shown}"
+        );
+        assert!(!shown.contains("auth init"), "{shown}");
+        m.key(Key::Esc, at(1));
+        let shown = screen(&m, at(1));
+        assert!(
+            shown.contains("requests for credentials are answered on machine keybox, where the team's account key is"),
+            "{shown}"
+        );
     }
 
     #[tokio::test]
     async fn where_the_account_key_is_the_io_hears_a_request_and_approves_it() {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let listen = Duration::from_millis(400);
-        let (_, holder) = Io::new(&server.url, None, Ok(server.dir().to_owned()), listen);
+        let (_, js) = server.connect_as(&user("alice"), ants_proto::Role::Human).await;
+        let (mut elsewhere, holder) = Io::new(js.clone(), &server.url, None, Ok(server.dir().to_owned()), listen);
         assert!(matches!(holder, Holder::Elsewhere(why) if why.starts_with("not in")));
+        assert!(matches!(elsewhere.next().await, Event::Recorded(None)), "no signer recorded the account key");
         let team = server.dir().join("auth");
-        let (mut io, holder) = Io::new(&server.url, None, Ok(team.clone()), listen);
+        let (mut io, holder) = Io::new(js, &server.url, None, Ok(team.clone()), listen);
         assert_eq!(holder, Holder::Here(team.clone()));
         let dev_c = user("dev-c");
         let creds = server.dir().join("enroll-dev-c.creds");
@@ -584,7 +644,7 @@ mod tests {
                     }
                     Event::Heard(Ok(_)) => io.refresh(),
                     Event::Heard(Err(e)) => panic!("{e}"),
-                    Event::Done(..) => unreachable!(),
+                    Event::Done(..) | Event::Recorded(_) => unreachable!(),
                 }
             }
             assert!(io.order(Order::Approve(dev_c.clone(), key.public_key())));

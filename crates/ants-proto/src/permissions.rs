@@ -1047,6 +1047,14 @@ impl Permissions {
         }
     }
 
+    /// What `ants signer` also allows itself, on the machine holding the account key, to say where that key is: putting
+    /// the [`AccountHolder`](crate::AccountHolder) record in [`MACHINES_BUCKET`] ([`subject::account_holder`]), no
+    /// other key of the bucket, with the replies of its JetStream requests under [`ENROLL_INBOX`], as those of
+    /// [`Permissions::for_enroll_approver`], with which it is issued.
+    pub fn for_account_holder() -> Self {
+        Self { publish: vec![subject::account_holder()], subscribe: vec![format!("{ENROLL_INBOX}.>")] }
+    }
+
     /// What `ants signer` allows itself on top of [`Permissions::for_enroll_approver`]: hearing every registration
     /// request and answering it. Leaf uplinks never carry these, as registration happens on the hub only.
     pub fn for_registrar() -> Self {
@@ -1065,7 +1073,8 @@ impl Permissions {
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_assistant`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_host`],
 /// [`Permissions::for_enrollment`],
-/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_device_revoker`]
+/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_account_holder`],
+/// [`Permissions::for_device_revoker`]
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.

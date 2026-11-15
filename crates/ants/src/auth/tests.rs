@@ -2594,6 +2594,8 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     m_js.set_timeout(Duration::from_secs(1));
     let as_host = DirectKv::new(&m_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
     assert!(as_host.put("m2", b"{}".to_vec()).await.is_err(), "a host writes only its own machine's record");
+    let holder = ants_proto::ACCOUNT_HOLDER_KEY;
+    assert!(as_host.put(holder, b"{}".to_vec()).await.is_err(), "a host never says it holds the account key");
     let as_ant = DirectKv::new(&a_js, None, ants_proto::MACHINES_BUCKET).await.unwrap();
     assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
     drop(ants);

@@ -922,11 +922,12 @@ pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> 
     short_lived_creds(dir, js_domain, permissions)
 }
 
-/// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`] and
-/// [`Permissions::for_reactions_responder`].
+/// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`],
+/// [`Permissions::for_reactions_responder`] and [`Permissions::for_account_holder`].
 fn signer_permissions() -> Permissions {
     let mut permissions = Permissions::for_enroll_approver();
     merge(&mut permissions, Permissions::for_reactions_responder());
+    merge(&mut permissions, Permissions::for_account_holder());
     permissions
 }
 

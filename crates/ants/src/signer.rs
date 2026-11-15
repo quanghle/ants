@@ -12,7 +12,9 @@
 //! The signer answers ants' reactions requests as well ([`reactions::serve`]): an ant's credentials neither read nor
 //! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
 //! ant's own, once it found the ant reads the message. It also registers humans' devices after a GitHub sign-in, and
-//! renews the credentials such registrations granted ([`crate::registrar`]).
+//! renews the credentials such registrations granted ([`crate::registrar`]). Each time it connects, it records its
+//! machine as the one holding the account key ([`AccountHolder`]), for `ants chat` and `ants machines` elsewhere to
+//! name it.
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
@@ -24,12 +26,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_daemon::config;
+use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::reactions;
 use ants_daemon::roster;
 use ants_daemon::template::{AntTemplate, Request};
 use ants_proto::{
-    AntReply, AntRequest, ApprovalDecision, ApprovalRequest, ENROLL_REPEAT, EnrollLeaf, JsDomain, Permissions, STREAM,
-    ThreadId, ToolCall, UserId, Verdict, subject,
+    ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
+    ENROLL_REPEAT, EnrollLeaf, JsDomain, MACHINES_BUCKET, Machine, Permissions, STREAM, ThreadId, ToolCall, UserId,
+    Verdict, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -141,9 +145,11 @@ pub async fn serve(
 ) -> Result<()> {
     let mut signer = Signer { url, dir, options, answered: HashMap::new(), waiting: Vec::new() };
     let mut registrar = Registrar::new(url, dir, options.config, js_domain, options.approval_timeout, registrar::print);
+    let holder = holder(options.config).await;
     tokio::pin!(stop);
     loop {
         let approver = Approver::connect_signer(url, dir, js_domain, crate::enroll::LISTEN).await?;
+        record_holder(&approver, js_domain, &holder).await;
         let mut requests = approver.client.subscribe(subject::ALL_ANT_REQUESTS).await?;
         let mut logins = approver.client.subscribe(subject::ALL_LOGIN_REQUESTS).await?;
         let mut renewals = approver.client.subscribe(subject::ALL_RENEW_REQUESTS).await?;
@@ -187,6 +193,35 @@ pub async fn serve(
                 () = &mut stop => return Ok(()),
             }
         }
+    }
+}
+
+/// The record of this machine holding the account key: its name as the `[host]` table of the config file at `config`
+/// names it, else the first label of its host name.
+async fn holder(config: &Path) -> AccountHolder {
+    let hostname = roster::machine().await;
+    let named = config::Summary::load(config).ok().and_then(|summary| summary.host.machine);
+    AccountHolder {
+        machine: named.unwrap_or_else(|| Machine::from_hostname(&hostname)),
+        hostname,
+        version: ANTS_VERSION.to_owned(),
+        updated_at: Utc::now(),
+    }
+}
+
+/// Put `holder` in [`MACHINES_BUCKET`], as of now, for machines without the account key to name this one; a failure is
+/// only warned about, as answering requests goes on without it.
+async fn record_holder(approver: &Approver, js_domain: Option<&JsDomain>, holder: &AccountHolder) {
+    let holder = AccountHolder { updated_at: Utc::now(), ..holder.clone() };
+    let put = async {
+        let kv = DirectKv::new(approver.hub(), js_domain, MACHINES_BUCKET).await?;
+        kv.put(ACCOUNT_HOLDER_KEY, serde_json::to_vec(&holder)?).await
+    };
+    if let Err(e) = put.await {
+        tracing::warn!(
+            error = format!("{e:#}"),
+            "recording where the account key is failed; `ants init` creates the {MACHINES_BUCKET} bucket"
+        );
     }
 }
 
@@ -895,6 +930,29 @@ mod tests {
         let (added, _) = signing(&server, &config, lead.ask("lead-b", "{}", &KeyPair::new_user())).await;
         let err = format!("{:#}", added.unwrap_err());
         assert!(err.contains("added ants never add ants"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_signer_records_its_machine_as_holding_the_account_key_for_humans_to_read() {
+        let Some(server) = Server::start() else { return };
+        let config = server.dir().join("config.toml");
+        std::fs::write(&config, "[host]\nmachine = \"keybox\"\n").unwrap();
+        let (_, h_js) = server.connect_as(&p("alice"), Role::Human).await;
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        let (recorded, _) = signing(&server, &config, async {
+            loop {
+                if let Some(holder) = crate::machines::holder(&h_js).await.unwrap() {
+                    break holder;
+                }
+                tokio::time::sleep(REPEAT).await;
+            }
+        })
+        .await;
+        assert_eq!(recorded.machine, "keybox".parse::<Machine>().unwrap());
+        assert_eq!((recorded.hostname, recorded.version), (roster::machine().await, ANTS_VERSION.to_owned()));
+        assert_eq!(crate::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
+        let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
+        assert!(as_human.put(ACCOUNT_HOLDER_KEY, b"{}".to_vec()).await.is_err(), "a human only reads it");
     }
 
     #[tokio::test]

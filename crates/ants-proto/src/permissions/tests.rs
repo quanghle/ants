@@ -797,6 +797,19 @@ fn ants_write_only_their_own_chain_and_read_every_one() {
 }
 
 #[test]
+fn only_the_signer_records_where_the_account_key_is() {
+    let holder = Permissions::for_account_holder();
+    assert_eq!(holder.publish, ["$KV.ants_machines._account"]);
+    assert!("_account".parse::<Machine>().is_err(), "no machine's host credentials write it");
+    let in_domain = holder.with_js_domain(Some(&"hub".parse().unwrap()));
+    assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_machines._account"));
+    for (who, role) in [("alice", Role::Human), ("dev-a", Role::Ant)] {
+        let user = Permissions::for_user(&p(who), role);
+        assert!(!user.publish.iter().any(|s| s.contains("_account")), "{who}");
+    }
+}
+
+#[test]
 fn a_host_writes_only_its_own_machine_record_and_takes_only_its_own_orders() {
     let m1: Machine = "m1".parse().unwrap();
     let host = Permissions::for_host(&m1);
