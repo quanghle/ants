@@ -253,6 +253,8 @@ proptest! {
             (subject::enroll_reply(&ant), vec!["ants", "enroll", a, "reply"]),
             (subject::antreq(&ant), vec!["ants", "antreq", a]),
             (subject::antreq_reply(&ant), vec!["ants", "antreq", a, "reply"]),
+            (subject::reactions(&ant), vec!["ants", "reactions", a]),
+            (subject::reactions_reply(&ant), vec!["_INBOX", a, "reactions"]),
             (subject::status(&ant, &thread), vec!["ants", "status", a, t]),
             (subject::cancel(&ant, &thread), vec!["ants", "cancel", a, t]),
             (subject::cancelled(&ant, &thread), vec!["ants", "cancelled", a, t]),

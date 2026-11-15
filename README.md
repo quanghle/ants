@@ -245,6 +245,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `ask_ant(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
 | `check_inbox(all_threads?)` | Drain late `ask_ant` replies arriving after timeout (persisted in `<home>/mcp.json`). |
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message (default: active message); 0 turns, wakes nobody. |
+| `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
 | `route(capability, text, wait?, timeout?)` | Route to the best peer advertising `capability` (healthy > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
 | `post_notes(text)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
@@ -272,7 +273,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 ## Dashboard and reactions
 
 - **`ants dash [--since DUR]`:** full-screen terminal UI (human creds) showing active threads (`▶` while busy), selected thread live progress and history, 10 s roster refresh, and live pending tool requests (`Enter` opens details; `a`/`A`/`r` then `y` confirms `allow_once`/`allow_always`/`reject`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
-- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`.
+- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`. Ants read reactions only to messages they read (their own inbox, messages they sent, thread notes and channel posts) via MCP `list_reactions`: each `[[human]]` connection of `ants webhook serve` answers `ants.reactions.<ant>` on `_INBOX.<ant>.reactions` after finding the message's first copy in `ANTS` on such a subject ([docs/webhooks.md](docs/webhooks.md#notifications)).
 
 ## Channels
 

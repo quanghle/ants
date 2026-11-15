@@ -140,7 +140,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 12, "{tools:?}");
+    assert_eq!(tools.len(), 13, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -202,6 +202,52 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let (ok, text) = call(&client, "react", remove).await;
     assert!(ok && text.starts_with("No reaction eyes"), "{text}");
     assert_eq!(*stored.locked(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
+}
+
+#[tokio::test]
+async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
+    let (mcp, _sent) = start(&home("list-reactions")).await;
+    let current = from_human();
+    let (url, token) = http_server(&mcp, &current.thread_id);
+    let client = http_client(&url, &token).await;
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(!ok && text.contains("not available"), "{text}");
+
+    let (unread, silent) = (Uuid::now_v7(), Uuid::now_v7());
+    let quiet = current.id;
+    mcp.with_reaction_reader(Arc::new(move |message| {
+        let outcome = if message == unread {
+            Some(ants_proto::ReactionsOutcome::Unknown)
+        } else if message == silent {
+            None
+        } else if message == quiet {
+            Some(ants_proto::ReactionsOutcome::Listed { reactions: Vec::new() })
+        } else {
+            let reacted = |reaction: &str, by: &[&str]| ants_proto::Reacted {
+                reaction: reaction.parse().unwrap(),
+                by: by.iter().map(|b| b.parse().unwrap()).collect(),
+            };
+            let reactions = vec![reacted("check", &["dev-b"]), reacted("eyes", &["alice", "dev-b"])];
+            Some(ants_proto::ReactionsOutcome::Listed { reactions })
+        };
+        Box::pin(async move { Ok(outcome) })
+    }));
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(!ok && text.contains("name the message by message_id"), "{text}");
+
+    let _turn = mcp.begin(&current);
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(ok && text == format!("No reactions to message {quiet}."), "{text}");
+    let named = |id: Uuid| serde_json::json!({"message_id": id.to_string()});
+    let other = Uuid::now_v7();
+    let (ok, text) = call(&client, "list_reactions", named(other)).await;
+    assert!(ok && text == format!("Reactions to message {other}: check by dev-b; eyes by alice, dev-b."), "{text}");
+    let (ok, text) = call(&client, "list_reactions", named(unread)).await;
+    assert!(ok && text.contains("none this ant reads"), "{text}");
+    let (ok, text) = call(&client, "list_reactions", named(silent)).await;
+    assert!(!ok && text.contains("ants webhook serve"), "{text}");
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({"message_id": "nope"})).await;
+    assert!(!ok && text.contains("message_id"), "{text}");
 }
 
 /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,

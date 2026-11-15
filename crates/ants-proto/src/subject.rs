@@ -104,6 +104,34 @@ pub fn parse_chanadm(subject: &str) -> Option<(ChannelId, UserId)> {
 /// Every channel management request.
 pub const ALL_CHANADM: &str = "ants.chanadm.*.*";
 
+/// Where `ant` asks for the reactions to a message ([`ReactionsRequest`](super::ReactionsRequest); core NATS, not
+/// stored). Only the ant publishes here.
+pub fn reactions(ant: &UserId) -> String {
+    format!("ants.reactions.{ant}")
+}
+
+/// Where the answer to a reactions request of `ant` goes ([`ReactionsReply`](super::ReactionsReply); core NATS): under
+/// the ant's reply inboxes ([`inbox_prefix`](super::inbox_prefix)), which only it reads, so a leaf uplink carries it
+/// down with no subject of its own. Only humans answer.
+pub fn reactions_reply(ant: &UserId) -> String {
+    format!("{}.reactions", super::inbox_prefix(ant))
+}
+
+/// Every reactions request, of all ants.
+pub const ALL_REACTIONS_REQUESTS: &str = "ants.reactions.*";
+/// Every answer to a reactions request.
+pub const ALL_REACTIONS_REPLIES: &str = "_INBOX.*.reactions";
+
+/// Whether `subject` is that of a message, a notes post or a channel post the credentials of the ant `ant` read: its
+/// own inbox, the messages it sent, the notes of every thread and every channel
+/// ([`Permissions::for_user`](super::Permissions::for_user)). Its dead letters and approval requests are no messages.
+pub fn readable_by(ant: &UserId, subject: &str) -> bool {
+    if let Some((to, from)) = parse_inbox(subject) {
+        return &to == ant || &from == ant;
+    }
+    parse_notes(subject).is_some() || parse_chan(subject).is_some()
+}
+
 /// Permission requests an ant escalates to the human ([`ApprovalRequest`](super::ApprovalRequest)).
 pub fn approvals(ant: &UserId) -> String {
     format!("ants.approvals.{ant}")
@@ -350,6 +378,20 @@ mod tests {
         assert!(msg.check_subject("ants.inbox.dev-c.dev-a").is_err(), "addressed to another inbox");
         for bad in ["ants.inbox.dev-b", "ants.inbox.dev-b.dev-a.x", "ants.notes.t1.dev-a", "ants.inbox.dev-b.*"] {
             assert_eq!(subject::parse_inbox(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_ant_reads_its_own_inbox_what_it_sent_and_every_notes_and_channel_subject() {
+        let ant = p("dev-a");
+        for readable in ["ants.inbox.dev-a.human", "ants.inbox.dev-b.dev-a", "ants.notes.t1.dev-b", "ants.chan.ops.bob"]
+        {
+            assert!(readable_by(&ant, readable), "{readable}");
+        }
+        for unreadable in
+            ["ants.inbox.dev-b.human", "ants.inbox.dev-b.dev-c", "ants.dead.dev-a", "ants.approvals.dev-a"]
+        {
+            assert!(!readable_by(&ant, unreadable), "{unreadable}");
         }
     }
 

@@ -383,6 +383,7 @@ async fn connect_mcp(
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
+    mcp.with_reaction_reader(crate::mcp::nats_reaction_reader(client.clone(), config.ant.clone()));
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
     }

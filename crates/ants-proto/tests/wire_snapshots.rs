@@ -201,6 +201,14 @@ fn kv_entries() {
         "reaction_entry",
         &ReactionEntry { message: id(1), by: user("alice"), reaction: "eyes".parse().unwrap(), at: at(0) },
     );
+    snap("reactions_request", &ReactionsRequest { id: id(1), ant: user("dev-a"), message: id(2), requested_at: at(0) });
+    let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
+    for (kind, outcome) in
+        [("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }), ("unknown", ReactionsOutcome::Unknown)]
+    {
+        let reply = ReactionsReply { request_id: id(1), ant: user("dev-a"), message: id(2), outcome };
+        snap(&format!("reactions_reply_{kind}"), &reply);
+    }
     snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
     snap(
         "thread_title",
