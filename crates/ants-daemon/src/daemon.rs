@@ -177,16 +177,7 @@ enum Served {
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
 async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
-    let Some((client, js)) = bus::connect_retrying(
-        &config.nats_url,
-        config.creds.as_deref(),
-        config.js_domain.as_ref(),
-        &config.ant,
-        &format!("antsd-{}", config.ant),
-        stopped(stop),
-    )
-    .await?
-    else {
+    let Some((client, js)) = connect(config, stop).await? else {
         tracing::info!("stopped before connecting");
         return Ok(Served::Stopped);
     };
@@ -196,14 +187,10 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let mut entry = roster::entry(config).await;
     let mut claimed = None;
     if config.defer_to_others {
-        let kv = bus::ensure_roster(&js, ants_proto::ROSTER_TTL).await?;
-        tokio::select! {
-            revision = roster::wait_for_turn(&kv, &mut entry, ants_proto::ROSTER_HEARTBEAT) => claimed = Some(revision?),
-            () = stopped(stop) => {
-                tracing::info!("stopped before serving");
-                return Ok(Served::Stopped);
-            }
-        }
+        let Some(revision) = wait_for_turn(&js, &mut entry, stop).await? else {
+            return Ok(Served::Stopped);
+        };
+        claimed = Some(revision);
     }
     let humans = Registry::new(config.human.clone());
     let _watching = humans.watch(js.clone(), crate::humans::RETRY);
@@ -218,21 +205,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone());
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
-    let ledger = Ledger::kv(sessions_kv.clone(), config.ant.clone(), config.caps)
-        .warn_at(config.spend_warn_percent)
-        .with_pool(config.pool.clone());
-    let ledger = std::sync::Arc::new(ledger);
-    let escalator = Escalator::new(
-        config.ant.clone(),
-        config.escalation.clone(),
-        roster.clone(),
-        humans.clone(),
-        ledger.clone(),
-        redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
-    )
-    .with_chains(crate::chains::jetstream_chains(js.clone()))
-    .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()));
-    let escalator = std::sync::Arc::new(escalator);
+    let ledger = ledger(config, &sessions_kv);
+    let escalator = escalator(config, &js, &roster, &humans, &ledger, &redactor);
     if let Err(e) = crate::chains::publish(&js, &config.ant, &config.escalation.escalate_to).await {
         tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
     }
@@ -246,82 +220,20 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         Some(escalator.clone()),
     )
     .await?;
-    mcp.listen(bus::live_inbox(&client, &config.ant).await?);
-    mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
-    mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
-    mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
-    if let Some(requester) = &config.requester.0 {
-        mcp.with_requester(requester.clone());
-    }
-    mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
-    let launch = Launch::new(
-        config.harness.clone(),
-        config.workdir.clone(),
-        config.env.clone().into_iter().collect(),
-        policy,
-        config.model_settings.clone(),
-    )
-    .with_instructions(config.instructions.clone())
-    .with_mcp(mcp.servers());
+    connect_mcp(&mut mcp, config, &client, &js, &redactor).await?;
+    let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
     let webhooks = Webhooks::new(js.clone());
-    let storage = crate::storage::Watcher {
-        js: js.clone(),
-        hub_domain: config.js_domain.clone(),
-        notes: sessions_kv.clone(),
-        ant: config.ant.clone(),
-        human: config.human.clone(),
-        settings: config.storage,
-        server: format!("{} {:?}", config.nats_url, config.js_domain),
-    };
+    let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
     let attempts =
         Attempts::new(bus::ensure_attempts(&js, config.js_domain.as_ref(), &config.ant).await?, config.ant.clone());
-    let answered = Answered::new(&config.home);
-    answered.prune(bus::RETENTION).await;
-    let buried = Buried::new(&config.home);
-    buried.prune(bus::RETENTION).await;
-    let mut pool =
-        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
-    let isolating =
-        if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
-    if let Some(worktrees) = isolating {
-        pool = pool.with_worktrees(worktrees);
-    } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
-        pool = pool.with_worktrees_left_behind(worktrees);
-    }
-    let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
-    let messages = bus::inbox_consumer(&stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let (channels, posts) = match channels(&js, &stream, &config.ant, in_hand).await {
-        Ok((channels, posts)) => (channels, Some(posts)),
-        Err(e) => {
-            tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
-            (Channels::default(), None)
-        }
-    };
-    let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
-    let registration = match claimed {
-        Some(revision) => roster::hold(&js, entry, revision, workload.clone()).await?,
-        None => roster::register(&js, entry, workload.clone()).await?,
-    };
-    tracing::info!(
-        ant = %config.ant,
-        harness = %config.harness,
-        model_settings = ?config.model_settings,
-        workdir = %config.workdir.display(),
-        max_harnesses = config.max_harnesses,
-        worktrees = config.worktrees,
-        idle_timeout = ?config.idle_timeout,
-        capabilities = ?config.capabilities,
-        allow = ?config.allow,
-        approval_timeout = ?config.approval_timeout,
-        limits = ?config.limits,
-        caps = ?config.caps,
-        human = %config.human,
-        escalation = ?config.escalation,
-        "serving inbox"
-    );
+    let (answered, buried) = delivery_marks(config).await;
+    let pool = harness_pool(config, launch, sessions, &workload).await;
+    let (messages, channels) = inbox_messages(&js, &stream, config).await?;
+    let registration = enter_roster(&js, entry, claimed, &workload).await?;
+    log_serving(config);
 
     let inbox = Inbox {
         client: &client,
@@ -353,14 +265,263 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
     };
+    let handed_over = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
+    registration.deregister().await;
+    pool.shutdown().await;
+    if handed_over {
+        return Ok(Served::HandedOver);
+    }
+    tracing::info!("stopped");
+    Ok(Served::Stopped)
+}
+
+/// Tell the server the messages waiting in hand are still being worked on, so it does not redeliver them.
+async fn ack_progress(threads: &HashMap<ThreadId, Thread>) {
+    for (_, msg) in threads.values().flat_map(|t| &t.waiting) {
+        if let Err(e) = msg.ack_with(AckKind::Progress).await {
+            tracing::warn!(error = %e, "progress ack");
+        }
+    }
+}
+
+/// Stop waiting for the failed messages not redelivered by their deadline.
+fn give_up_retries(threads: &mut HashMap<ThreadId, Thread>) {
+    let now = tokio::time::Instant::now();
+    for (thread, t) in threads {
+        if t.retry.is_some_and(|r| r.until <= now) {
+            tracing::warn!(%thread, "failed message not redelivered in time; going on with the thread");
+            t.retry = None;
+        }
+    }
+}
+
+/// What came of running a prompt.
+struct Ran {
+    reply: Result<crate::harness::Reply>,
+    /// Who cancelled the prompt, if anyone did.
+    cancelled_by: Option<UserId>,
+    /// Whether the cancel cut the prompt short.
+    cut_by_cancel: bool,
+    /// Whether a tool call started, so tools may have run.
+    worked: bool,
+    /// The cap the prompt's spend reached.
+    reached: Option<String>,
+    /// The spend still to record.
+    spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
+}
+
+/// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
+async fn connect(config: &Config, stop: &Stop) -> Result<Option<(async_nats::Client, jetstream::Context)>> {
+    bus::connect_retrying(
+        &config.nats_url,
+        config.creds.as_deref(),
+        config.js_domain.as_ref(),
+        &config.ant,
+        &format!("antsd-{}", config.ant),
+        stopped(stop),
+    )
+    .await
+}
+
+/// Wait until no other daemon serves the ant: the revision of its roster entry claimed, or `None` when `stop` comes
+/// first.
+async fn wait_for_turn(
+    js: &jetstream::Context,
+    entry: &mut ants_proto::RosterEntry,
+    stop: &Stop,
+) -> Result<Option<u64>> {
+    let kv = bus::ensure_roster(js, ants_proto::ROSTER_TTL).await?;
+    tokio::select! {
+        revision = roster::wait_for_turn(&kv, entry, ants_proto::ROSTER_HEARTBEAT) => revision.map(Some),
+        () = stopped(stop) => {
+            tracing::info!("stopped before serving");
+            Ok(None)
+        }
+    }
+}
+
+/// The ledger of the ant's spending, against its caps and its pool's.
+fn ledger(config: &Config, sessions: &crate::direct_kv::DirectKv) -> std::sync::Arc<Ledger> {
+    let ledger = Ledger::kv(sessions.clone(), config.ant.clone(), config.caps)
+        .warn_at(config.spend_warn_percent)
+        .with_pool(config.pool.clone());
+    std::sync::Arc::new(ledger)
+}
+
+/// The ant's escalator, sending what it cannot settle up its chain.
+fn escalator(
+    config: &Config,
+    js: &jetstream::Context,
+    roster: &Roster,
+    humans: &Registry,
+    ledger: &std::sync::Arc<Ledger>,
+    redactor: &std::sync::Arc<Redactor>,
+) -> std::sync::Arc<Escalator> {
+    let escalator = Escalator::new(
+        config.ant.clone(),
+        config.escalation.clone(),
+        roster.clone(),
+        humans.clone(),
+        ledger.clone(),
+        redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
+    )
+    .with_chains(crate::chains::jetstream_chains(js.clone()))
+    .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()));
+    std::sync::Arc::new(escalator)
+}
+
+/// Give the ant's MCP server its live inbox and its ways to the bus.
+async fn connect_mcp(
+    mcp: &mut Mcp,
+    config: &Config,
+    client: &async_nats::Client,
+    js: &jetstream::Context,
+    redactor: &std::sync::Arc<Redactor>,
+) -> Result<()> {
+    mcp.listen(bus::live_inbox(client, &config.ant).await?);
+    mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
+    mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
+    mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
+    if let Some(requester) = &config.requester.0 {
+        mcp.with_requester(requester.clone());
+    }
+    mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
+    Ok(())
+}
+
+/// How the ant's harnesses start.
+fn launch(config: &Config, policy: PermissionPolicy, mcp: &Mcp) -> Launch {
+    Launch::new(
+        config.harness.clone(),
+        config.workdir.clone(),
+        config.env.clone().into_iter().collect(),
+        policy,
+        config.model_settings.clone(),
+    )
+    .with_instructions(config.instructions.clone())
+    .with_mcp(mcp.servers())
+}
+
+fn storage_watcher(
+    config: &Config,
+    js: &jetstream::Context,
+    sessions: &crate::direct_kv::DirectKv,
+) -> crate::storage::Watcher {
+    crate::storage::Watcher {
+        js: js.clone(),
+        hub_domain: config.js_domain.clone(),
+        notes: sessions.clone(),
+        ant: config.ant.clone(),
+        human: config.human.clone(),
+        settings: config.storage,
+        server: format!("{} {:?}", config.nats_url, config.js_domain),
+    }
+}
+
+/// The marks of the messages answered and buried, pruned of those the stream no longer keeps.
+async fn delivery_marks(config: &Config) -> (Answered, Buried) {
+    let answered = Answered::new(&config.home);
+    answered.prune(bus::RETENTION).await;
+    let buried = Buried::new(&config.home);
+    buried.prune(bus::RETENTION).await;
+    (answered, buried)
+}
+
+/// The ant's harness pool, isolating threads in worktrees when asked to, or else cleaning up the ones left behind.
+async fn harness_pool(
+    config: &Config,
+    launch: Launch,
+    sessions: SessionStore,
+    workload: &std::sync::Arc<roster::Workload>,
+) -> Pool {
+    let mut pool =
+        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
+    let isolating =
+        if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
+    if let Some(worktrees) = isolating {
+        pool = pool.with_worktrees(worktrees);
+    } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
+        pool = pool.with_worktrees_left_behind(worktrees);
+    }
+    pool
+}
+
+/// The messages to the ant, from its inbox and the posts to its channels, and the channels; the inbox alone when the
+/// channels fail.
+async fn inbox_messages(
+    js: &jetstream::Context,
+    stream: &jetstream::stream::Stream<()>,
+    config: &Config,
+) -> Result<(impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin, Channels)> {
+    let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
+    let messages = bus::inbox_consumer(stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let (channels, posts) = match channels(js, stream, &config.ant, in_hand).await {
+        Ok((channels, posts)) => (channels, Some(posts)),
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
+            (Channels::default(), None)
+        }
+    };
+    let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
+    Ok((messages, channels))
+}
+
+/// Put the ant on the roster, holding its entry from the revision claimed, if any.
+async fn enter_roster(
+    js: &jetstream::Context,
+    entry: ants_proto::RosterEntry,
+    claimed: Option<u64>,
+    workload: &std::sync::Arc<roster::Workload>,
+) -> Result<roster::Registration> {
+    Ok(match claimed {
+        Some(revision) => roster::hold(js, entry, revision, workload.clone()).await?,
+        None => roster::register(js, entry, workload.clone()).await?,
+    })
+}
+
+fn log_serving(config: &Config) {
+    tracing::info!(
+        ant = %config.ant,
+        harness = %config.harness,
+        model_settings = ?config.model_settings,
+        workdir = %config.workdir.display(),
+        max_harnesses = config.max_harnesses,
+        worktrees = config.worktrees,
+        idle_timeout = ?config.idle_timeout,
+        capabilities = ?config.capabilities,
+        allow = ?config.allow,
+        approval_timeout = ?config.approval_timeout,
+        limits = ?config.limits,
+        caps = ?config.caps,
+        human = %config.human,
+        escalation = ?config.escalation,
+        "serving inbox"
+    );
+}
+
+/// Serve the inbox, and the ant's watches beside it, until a stop or the hand-over: whether another daemon took over.
+async fn serve_inbox<S, E>(
+    inbox: &Inbox<'_>,
+    messages: S,
+    channels: Channels,
+    config: &Config,
+    stop: &Stop,
+    registration: &roster::Registration,
+    storage: &crate::storage::Watcher,
+) -> Result<bool>
+where
+    S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
+    E: Display,
+{
     let mut unserved =
-        unserved::Watch::new(&js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, roster.clone()).await?;
+        unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.roster.clone())
+            .await?;
     let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
     // only Ctrl-C or a stop request.
     let stop_or_hand_over = || {
         asked += 1;
-        let (first, stopping, registration) = (asked == 1, &stopping, &registration);
+        let (first, stopping) = (asked == 1, &stopping);
         async move {
             tokio::select! {
                 () = stopped(stop) => stopping.set(true),
@@ -372,23 +533,16 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     };
     tokio::select! {
         () = inbox.serve(messages, channels, config.idle_timeout, stop_or_hand_over) => {}
-        () = escalator.deadlines() => {}
-        () = pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY, async |kept| {
-            tell_kept_branches(&js, &threads, &humans, &config.ant, kept).await;
+        () = inbox.escalator.deadlines() => {}
+        () = inbox.pool.prune_worktrees_every(PRUNE_WORKTREES_EVERY, async |kept| {
+            tell_kept_branches(inbox.js, inbox.threads, inbox.humans, &config.ant, kept).await;
         }) => {}
         () = inbox.hear_cancels() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
         () = storage.watch(crate::storage::CHECK_EVERY) => {}
-        () = tell_unserved(&js, &humans, &mut unserved) => {}
+        () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
-    let handed_over = registration.is_lost() && !stopping.get();
-    registration.deregister().await;
-    pool.shutdown().await;
-    if handed_over {
-        return Ok(Served::HandedOver);
-    }
-    tracing::info!("stopped");
-    Ok(Served::Stopped)
+    Ok(registration.is_lost() && !stopping.get())
 }
 
 /// The channels, and the posts to them through the ant's channel consumer.
@@ -626,21 +780,9 @@ impl Inbox<'_> {
                 _ = evict.tick() => {
                     self.pool.evict_idle(Instant::now());
                 }
-                _ = progress.tick() => {
-                    for (_, msg) in threads.values().flat_map(|t| &t.waiting) {
-                        if let Err(e) = msg.ack_with(AckKind::Progress).await {
-                            tracing::warn!(error = %e, "progress ack");
-                        }
-                    }
-                }
+                _ = progress.tick() => ack_progress(&threads).await,
                 () = sleep_until(retry_deadline), if retry_deadline.is_some() => {
-                    let now = tokio::time::Instant::now();
-                    for (thread, t) in &mut threads {
-                        if t.retry.is_some_and(|r| r.until <= now) {
-                            tracing::warn!(%thread, "failed message not redelivered in time; going on with the thread");
-                            t.retry = None;
-                        }
-                    }
+                    give_up_retries(&mut threads);
                     ready = Some(threads.keys().cloned().collect());
                 }
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
@@ -665,33 +807,7 @@ impl Inbox<'_> {
                     None => break,
                     Some(Err(e)) => tracing::warn!(error = %e, "inbox stream"),
                     Some(Ok(msg)) => {
-                        let incoming = if is_post(&msg) {
-                            self.admit_post(&msg, &mut channels).await
-                        } else {
-                            self.admit(&msg).await
-                        };
-                        let Some(incoming) = incoming else { continue };
-                        let thread = incoming.envelope.thread_id.clone();
-                        let t = threads.entry(thread.clone()).or_default();
-                        if t.holds(stream_seq(&msg)) {
-                            // The copy in hand gets the ack: the server tracks a message by its stream sequence.
-                            tracing::debug!(%thread, "ignoring a redelivery of a message in hand");
-                            continue;
-                        }
-                        if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
-                            t.retry = None;
-                            t.waiting.push_front((incoming, msg));
-                        } else {
-                            let (message, ahead) = (incoming.envelope.id, t.ahead());
-                            t.waiting.push_back((incoming, msg));
-                            if ahead > 0 {
-                                t.queued.insert(message);
-                                status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
-                            }
-                            if self.sign_in.is_out() {
-                                status::state(self.client, self.ant, &thread, State::SignedOut);
-                            }
-                        }
+                        let Some(thread) = self.take_in(msg, &mut channels, &mut threads).await else { continue };
                         ready = Some(vec![thread]);
                     }
                 }
@@ -725,6 +841,39 @@ impl Inbox<'_> {
                 () = stop() => tracing::warn!("stopping mid-prompt; those messages are redelivered"),
             }
         }
+    }
+
+    /// Admit `msg` and queue it on its thread: the thread, or `None` when the message is not to be handled now.
+    async fn take_in(
+        &self,
+        msg: jetstream::Message,
+        channels: &mut Channels,
+        threads: &mut HashMap<ThreadId, Thread>,
+    ) -> Option<ThreadId> {
+        let incoming = if is_post(&msg) { self.admit_post(&msg, channels).await } else { self.admit(&msg).await };
+        let incoming = incoming?;
+        let thread = incoming.envelope.thread_id.clone();
+        let t = threads.entry(thread.clone()).or_default();
+        if t.holds(stream_seq(&msg)) {
+            // The copy in hand gets the ack: the server tracks a message by its stream sequence.
+            tracing::debug!(%thread, "ignoring a redelivery of a message in hand");
+            return None;
+        }
+        if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
+            t.retry = None;
+            t.waiting.push_front((incoming, msg));
+        } else {
+            let (message, ahead) = (incoming.envelope.id, t.ahead());
+            t.waiting.push_back((incoming, msg));
+            if ahead > 0 {
+                t.queued.insert(message);
+                status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
+            }
+            if self.sign_in.is_out() {
+                status::state(self.client, self.ant, &thread, State::SignedOut);
+            }
+        }
+        Some(thread)
     }
 
     /// Tell the messages waiting on `thread` where they stand now that `started` left the queue, and `started` that
@@ -1606,20 +1755,197 @@ impl Inbox<'_> {
         let _narrowed = self.pool.launch().policy().narrow(thread, envelope.allow.as_deref());
         let _turn = self.mcp.map(|mcp| mcp.begin(envelope));
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
-        let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
-        let (stop_tx, stop) = tokio::sync::oneshot::channel();
-        let mut stop_tx = Some(stop_tx);
-        let mut reached = None;
-        let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
-        let mut status = Status::new(self.client, self.ant, thread, self.redactor);
-        let mut flush =
-            tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
+        let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
+        let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
+        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, mut spend } =
+            self.run_prompt(incoming, msg, seq, text, flush).await;
+        let reply = match reply {
+            // What a human cancelled is answered as it stands, never tried again.
+            Err(e) if cancelled_by.is_some() => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "cancelled prompt failed");
+                crate::harness::Reply { text: String::new(), cut: None }
+            }
+            Err(e) => return self.prompt_failed(e, incoming, msg, seq, cut_off, worked).await,
+            Ok(reply) => reply,
+        };
+        // Spend reported as the prompt ended, such as its tokens.
+        while let Ok(spent) = spend.try_recv() {
+            if let Some(cap) = self.record(envelope, &spent).await {
+                reached.get_or_insert(cap);
+            }
+        }
+
+        // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
+        let cut = reply.cut.is_some() && !cut_by_cancel;
+        let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
+        let limit_notice =
+            limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
+        let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
+        let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
+            format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
+        });
+        let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
+        let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        let text = self.redactor.redact(&text).into_owned();
+        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+            return Ok(());
+        };
+        // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
+        // keeps a second escalation out of the stream.
+        if let Some(limit) = limit
+            && !self.humans.sender_role(envelope).is_human()
+        {
+            self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
+        }
+        // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
+        // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
+        // prompted again.
+        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
+        }
+        self.deliver(incoming, &reply, msg, seq).await
+    }
+
+    /// Settle the message at stream sequence `seq` after its prompt failed with `e`, which is returned unless the
+    /// failure was escalated. `worked` says whether tools may have run.
+    async fn prompt_failed(
+        &self,
+        e: anyhow::Error,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        seq: u64,
+        cut_off: bool,
+        worked: bool,
+    ) -> Result<()> {
+        let envelope = &incoming.envelope;
+        // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started, and
+        // the message can be withdrawn while it waits.
+        if e.is::<SignedOut>() && !cut_off && !worked {
+            self.attempts.forget(seq).await;
+            self.attempts.release(envelope).await;
+            return Err(e);
+        }
+        // Nothing ran: the harness did not start. Its retry, or the message held for the harness to start, carries no
+        // cut-off warning.
+        if e.is::<StartFailed>() {
+            if !cut_off {
+                self.attempts.forget(seq).await;
+            }
+            return Err(e);
+        }
+        // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
+        if e.is::<Limited>() {
+            if !cut_off && !worked {
+                self.attempts.forget(seq).await;
+                self.attempts.release(envelope).await;
+            }
+            return Err(e);
+        }
+        // Not even a new session holds the prompt: no further attempt can, so the owner decides.
+        if e.is::<ContextOverflow>() {
+            self.escalate(incoming, &e.to_string(), EscalationReason::ContextWindow, seq, None).await?;
+            bus::double_ack(self.client, msg).await?;
+            self.attempts.forget(seq).await;
+            status::state(self.client, self.ant, &envelope.thread_id, State::Failed);
+            return Ok(());
+        }
+        Err(e)
+    }
+
+    /// The reply carrying `text`, the answer to `incoming`: `None` when the answer went up the chain or nowhere instead,
+    /// and the message is done with.
+    async fn reply_for(
+        &self,
+        incoming: &Incoming,
+        read: Option<Context>,
+        text: String,
+        limit: Option<&String>,
+        msg: &jetstream::Message,
+        seq: u64,
+    ) -> Result<Option<Reply>> {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        Ok(Some(match (&incoming.post, read) {
+            (Some(posted), Some(read)) => {
+                // Other members' replies stored during the prompt spent the thread's turns too.
+                let humans = self.humans.humans();
+                let later = match self.threads.context(&posted.post, seq, false, &humans).await {
+                    Ok(now) => now.later,
+                    Err(e) => {
+                        tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
+                        read.later
+                    }
+                };
+                match posted.post.reply(self.ant.clone(), text.as_str(), &later, &humans) {
+                    Ok(post) => Reply::Post(post),
+                    Err(ProtoError::BudgetExhausted(_)) => {
+                        // The answer is not posted: the escalation carries it.
+                        let why = "Turn budget spent before the answer was posted";
+                        self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(&text)).await?;
+                        bus::double_ack(self.client, msg).await?;
+                        self.attempts.forget(seq).await;
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            _ if let Some(channel) = &incoming.resume => {
+                let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
+                let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
+                Reply::Post(post.spend(envelope.turn_budget)?)
+            }
+            _ if envelope.webhook => {
+                // Nobody reads a webhook's inbox: the answer goes to the thread's owner, else only to the log.
+                let Some(owner) = self.humans.human_owner(envelope.owner.as_ref()) else {
+                    if let Some(limit) = limit {
+                        self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
+                    }
+                    tracing::info!(%thread, webhook = %envelope.from, answer = text, "answered a webhook with no owner");
+                    self.done(msg, seq).await?;
+                    return Ok(None);
+                };
+                let mut reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
+                reply.to = owner;
+                Reply::Message(reply)
+            }
+            _ => {
+                // A reply on an escalation carries it, so its leader's answer is known as one.
+                let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
+                match escalation::route(self.ant, envelope).map(|(_, route)| route) {
+                    Some(Route::Notes) => {
+                        let (store, budget) = (self.notes, envelope.turn_budget);
+                        match notes::spend(store, thread, self.ant, &reply.text, budget).await? {
+                            Some(post) => Reply::Notes(post),
+                            None => {
+                                let why = "Thread notes out of turns before the answer was posted";
+                                let reason = EscalationReason::Notes;
+                                self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
+                                self.done(msg, seq).await?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    route => {
+                        if let Some(Route::Stuck(stuck)) = route {
+                            reply.to = stuck;
+                        }
+                        Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+                    }
+                }
+            }
+        }))
+    }
+
+    /// The prompt for `incoming`, given what was read of a post's thread.
+    async fn prompt_for(&self, incoming: &Incoming, read: Option<&Context>, humans: &Humans, cut_off: bool) -> String {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
         let late = match self.mcp {
             Some(mcp) => mcp.late_on(thread).await,
             None => 0,
         };
-        let text = match (&incoming.post, &read) {
-            (Some(posted), Some(read)) => self.channel_prompt(posted, read, &humans).await,
+        let text = match (&incoming.post, read) {
+            (Some(posted), Some(read)) => self.channel_prompt(posted, read, humans).await,
             _ => match escalation::group_note(self.ant, envelope) {
                 Some(note) => format!("{note}\n\n{}", envelope.text),
                 None => envelope.text.clone(),
@@ -1632,7 +1958,27 @@ impl Inbox<'_> {
             }
             None => text,
         };
-        let text = prompt_text(&text, cut_off, late);
+        prompt_text(&text, cut_off, late)
+    }
+
+    /// Run the prompt `text` for `incoming`, streaming its status, recording its spend, renewing the message's ack wait
+    /// and cancelling it on request or at a cap.
+    async fn run_prompt(
+        &self,
+        incoming: &Incoming,
+        msg: &jetstream::Message,
+        seq: u64,
+        text: String,
+        mut flush: tokio::time::Interval,
+    ) -> Ran {
+        let envelope = &incoming.envelope;
+        let thread = &envelope.thread_id;
+        let (spend_tx, mut spend) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, stop) = tokio::sync::oneshot::channel();
+        let mut stop_tx = Some(stop_tx);
+        let mut reached = None;
+        let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
+        let mut status = Status::new(self.client, self.ant, thread, self.redactor);
         let history = crate::history::Thread {
             js: self.js.clone(),
             ant: self.ant.clone(),
@@ -1693,145 +2039,7 @@ impl Inbox<'_> {
         }
         status.flush();
         drop((cancellable, prompting));
-        let reply = match reply {
-            // What a human cancelled is answered as it stands, never tried again.
-            Err(e) if cancelled_by.is_some() => {
-                tracing::warn!(%thread, error = format!("{e:#}"), "cancelled prompt failed");
-                crate::harness::Reply { text: String::new(), cut: None }
-            }
-            // Nothing ran: the harness turned the prompt away for want of signing in, so the attempt never started, and
-            // the message can be withdrawn while it waits.
-            Err(e) if e.is::<SignedOut>() && !cut_off && !worked => {
-                self.attempts.forget(seq).await;
-                self.attempts.release(envelope).await;
-                return Err(e);
-            }
-            // Nothing ran: the harness did not start. Its retry, or the message held for the harness to start, carries no
-            // cut-off warning.
-            Err(e) if e.is::<StartFailed>() => {
-                if !cut_off {
-                    self.attempts.forget(seq).await;
-                }
-                return Err(e);
-            }
-            // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
-            Err(e) if e.is::<Limited>() => {
-                if !cut_off && !worked {
-                    self.attempts.forget(seq).await;
-                    self.attempts.release(envelope).await;
-                }
-                return Err(e);
-            }
-            // Not even a new session holds the prompt: no further attempt can, so the owner decides.
-            Err(e) if e.is::<ContextOverflow>() => {
-                self.escalate(incoming, &e.to_string(), EscalationReason::ContextWindow, seq, None).await?;
-                bus::double_ack(self.client, msg).await?;
-                self.attempts.forget(seq).await;
-                status::state(self.client, self.ant, thread, State::Failed);
-                return Ok(());
-            }
-            reply => reply?,
-        };
-        // Spend reported as the prompt ended, such as its tokens.
-        while let Ok(spent) = spend.try_recv() {
-            if let Some(cap) = self.record(envelope, &spent).await {
-                reached.get_or_insert(cap);
-            }
-        }
-
-        // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
-        let cut = reply.cut.is_some() && !cut_by_cancel;
-        let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
-        let limit_notice =
-            limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
-        let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
-        let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
-            format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
-        });
-        let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
-        let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
-        let text = self.redactor.redact(&text).into_owned();
-        let reply = match (&incoming.post, read) {
-            (Some(posted), Some(read)) => {
-                // Other members' replies stored during the prompt spent the thread's turns too.
-                let humans = self.humans.humans();
-                let later = match self.threads.context(&posted.post, seq, false, &humans).await {
-                    Ok(now) => now.later,
-                    Err(e) => {
-                        tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
-                        read.later
-                    }
-                };
-                match posted.post.reply(self.ant.clone(), text.as_str(), &later, &humans) {
-                    Ok(post) => Reply::Post(post),
-                    Err(ProtoError::BudgetExhausted(_)) => {
-                        // The answer is not posted: the escalation carries it.
-                        let why = "Turn budget spent before the answer was posted";
-                        self.escalate(incoming, why, EscalationReason::TurnBudget, seq, Some(&text)).await?;
-                        bus::double_ack(self.client, msg).await?;
-                        self.attempts.forget(seq).await;
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            _ if let Some(channel) = &incoming.resume => {
-                let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);
-                let post = post.with_owner(envelope.owner.clone()).with_creator(envelope.creator.clone());
-                Reply::Post(post.spend(envelope.turn_budget)?)
-            }
-            _ if envelope.webhook => {
-                // Nobody reads a webhook's inbox: the answer goes to the thread's owner, else only to the log.
-                let Some(owner) = self.humans.human_owner(envelope.owner.as_ref()) else {
-                    if let Some(limit) = limit {
-                        self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
-                    }
-                    tracing::info!(%thread, webhook = %envelope.from, answer = text, "answered a webhook with no owner");
-                    return self.done(msg, seq).await;
-                };
-                let mut reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
-                reply.to = owner;
-                Reply::Message(reply)
-            }
-            _ => {
-                // A reply on an escalation carries it, so its leader's answer is known as one.
-                let mut reply = envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope))?;
-                match escalation::route(self.ant, envelope).map(|(_, route)| route) {
-                    Some(Route::Notes) => {
-                        let (store, budget) = (self.notes, envelope.turn_budget);
-                        match notes::spend(store, thread, self.ant, &reply.text, budget).await? {
-                            Some(post) => Reply::Notes(post),
-                            None => {
-                                let why = "Thread notes out of turns before the answer was posted";
-                                let reason = EscalationReason::Notes;
-                                self.escalate(incoming, why, reason, seq, Some(&reply.text)).await?;
-                                return self.done(msg, seq).await;
-                            }
-                        }
-                    }
-                    route => {
-                        if let Some(Route::Stuck(stuck)) = route {
-                            reply.to = stuck;
-                        }
-                        Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
-                    }
-                }
-            }
-        };
-        // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
-        // keeps a second escalation out of the stream.
-        if let Some(limit) = limit
-            && !self.humans.sender_role(envelope).is_human()
-        {
-            self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
-        }
-        // From here on a redelivery sends this reply rather than prompting again. Out of the hub's reach, as while a
-        // leaf node's uplink is down, the reply still goes to the machine's outbox, and `answered` keeps it from being
-        // prompted again.
-        if let Err(e) = self.attempts.replied(seq, envelope, &reply).await {
-            tracing::warn!(%thread, error = format!("{e:#}"), "recording the reply");
-        }
-        self.deliver(incoming, &reply, msg, seq).await
+        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend }
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.

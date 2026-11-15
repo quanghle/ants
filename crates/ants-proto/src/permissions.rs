@@ -183,6 +183,18 @@ impl Permissions {
     /// stream's configuration can copy, transform and republish any subject of the account, so no ant may create or
     /// change one.
     pub fn for_user(user: &UserId, role: Role) -> Self {
+        let mut publish = Self::shared_publish(user, role);
+        let mut subscribe = vec![format!("{}.>", inbox_prefix(user))];
+        if role.is_human() {
+            Self::human_rights(user, &mut publish, &mut subscribe);
+        } else {
+            Self::ant_rights(user, &mut publish, &mut subscribe);
+        }
+        Self { publish, subscribe }
+    }
+
+    /// The publish rights of every user, ant or human.
+    fn shared_publish(user: &UserId, role: Role) -> Vec<String> {
         let consumer = inbox_consumer(user);
         let notes = notes_consumer(user);
         let (chan, chan_read) = (chan_consumer(user), chan_reader(user));
@@ -193,8 +205,6 @@ impl Permissions {
         let links = kv_stream(LINKS_BUCKET);
         let owners = kv_stream(OWNERS_BUCKET);
         let webhooks = kv_stream(WEBHOOKS_BUCKET);
-        let sessions = kv_stream(SESSIONS_BUCKET);
-        let attempts = kv_stream(ATTEMPTS_BUCKET);
         let sendable = subject::sendable(user, role);
         // The same subjects in the leaf's outbox, for when the hub is out of reach.
         let outbox = sendable.iter().map(|s| subject::outbox(s).expect("an outbox subject"));
@@ -259,167 +269,185 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{webhooks}.$KV.{WEBHOOKS_BUCKET}.*.{WEBHOOK_MARKER}"),
         ]);
         publish.extend(reaction_rights(user, role));
-        let mut subscribe = vec![format!("{}.>", inbox_prefix(user))];
-        if role.is_human() {
-            let notify = notify_consumer(user);
-            publish.extend([
-                // Its own renewal, and that of its machine's leaf node uplink, which connects as no client; the
-                // request proves the credentials it renews by signature, whoever carries it. It hears the answers
-                // with everything under `ants.>`.
-                subject::ALL_RENEW_REQUESTS.to_owned(),
-                // Stream info lists every subject stored (who messages whom), so only a human may ask for it.
-                format!("$JS.API.STREAM.INFO.{STREAM}"),
-                // The consumer of its notifications: one filter puts it in the subject, several leave it out.
-                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}"),
-                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}.>"),
-                format!("$JS.API.CONSUMER.INFO.{STREAM}.{notify}"),
-                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notify}"),
-            ]);
-            publish.extend(ack_subjects(STREAM, &notify));
-            publish.extend([
-                format!("$JS.API.STREAM.CREATE.{STREAM}"),
-                // Creating a KV bucket first looks up the account's JetStream limits.
-                "$JS.API.INFO".to_owned(),
-                format!("$JS.API.STREAM.CREATE.{roster_stream}"),
-                // Adding what an older version lacks, such as the markers of expired entries, and room for the
-                // consumers of every daemon watching the bucket, which a KV bucket gets only by an update.
-                format!("$JS.API.STREAM.UPDATE.{roster_stream}"),
-                format!("$JS.API.STREAM.UPDATE.{channels}"),
-                format!("$JS.API.STREAM.UPDATE.{humans}"),
-                // Stream info lists every key of a bucket, so only a human may ask for it of these three.
-                format!("$JS.API.STREAM.INFO.{sessions}"),
-                format!("$JS.API.STREAM.INFO.{attempts}"),
-                format!("$JS.API.STREAM.INFO.{owners}"),
-                // Reading what each ant spent, for `ants spend`: its thread and daily spend keys, not its sessions.
-                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.*.spend"),
-                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
-                format!("$JS.API.STREAM.CREATE.{sessions}"),
-                format!("$JS.API.STREAM.CREATE.{attempts}"),
-                format!("$JS.API.STREAM.CREATE.{channels}"),
-                format!("$JS.API.STREAM.CREATE.{humans}"),
-                format!("$JS.API.STREAM.CREATE.{chains}"),
-                format!("$JS.API.STREAM.CREATE.{links}"),
-                format!("$JS.API.STREAM.CREATE.{owners}"),
-                format!("$JS.API.STREAM.INFO.{webhooks}"),
-                format!("$JS.API.STREAM.CREATE.{webhooks}"),
-                // The version the channel manager runs, for `ants doctor`.
-                format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
-                // Put and delete of every channel's and every human's entry.
-                format!("$KV.{CHANNELS_BUCKET}.>"),
-                format!("$KV.{HUMANS_BUCKET}.>"),
-                // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
-                format!("$KV.{OWNERS_BUCKET}.*.*"),
-                "ants.out.owners.*.*".to_owned(),
-                format!("$JS.API.STREAM.UPDATE.{STREAM}"),
-                format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
-                // Reading the stream back in batches; it reads nothing more than STREAM.MSG.GET, which takes any
-                // sequence.
-                format!("$JS.API.DIRECT.GET.{STREAM}"),
-                format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
-                subject::ALL_APPROVAL_DECISIONS.to_owned(),
-                subject::ALL_CANCELS.to_owned(),
-                subject::ALL_QUEUE_REQUESTS.to_owned(),
-                // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
-                format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
-                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
-                // Its own markers of the messages it was told keep waiting for an ant no daemon serves.
-                format!("$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
-                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
-                subject::DEAD_ALL.to_owned(),
-                // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
-                // leaf's own domain (the plain form is what a leaf maps its own domain to).
-                format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
-                format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
-                format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
-                // And the links and owners buckets' sources from the intake.
-                format!("$JS.API.STREAM.UPDATE.{links}"),
-                format!("$JS.API.STREAM.UPDATE.{owners}"),
-            ]);
-            for op in ["CREATE", "UPDATE", "INFO"] {
-                publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
-                publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
-            }
-            publish.extend(read_marker_rights(user));
-            publish.extend(presence_rights(user));
-            publish.extend(thread_rights(user));
-            publish.extend(notify_prefs_rights(user));
-            subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
-        } else {
-            let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
-            let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
-            let dead_read = dead_reader(user);
-            let sent_read = sent_reader(user);
-            publish.extend([
-                // Get and put of its own sessions.
-                format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
-                own_keys,
-                // Get of every ant's daily spend, which pool caps add up.
-                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
-                // The account's JetStream usage, and the shared notes of the storage warnings given.
-                "$JS.API.INFO".to_owned(),
-                format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
-                format!("$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
-                // Get, put and delete of the markers of its own attempts.
-                format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
-                own_attempts,
-                // Exactly its requests subject: an ant cannot answer its own requests one level below.
-                subject::approvals(user),
-                // Reading the decision stored on one of its requests: a direct get naming the subject in its own
-                // subject returns only the last message on that subject, so nothing else is readable this way.
-                format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(user)),
-                subject::dead(user),
-                subject::outbox(&subject::dead(user)).expect("an outbox subject"),
-                // Reading its own dead letters back, through its own consumer filtering only those.
-                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
-                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
-                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
-                // Reading back the messages it sent, through its own consumer filtering only those.
-                format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::inbox_from(user)),
-                format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
-                format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
-                // Get of the mark of every message to an ant, to tell whether those it sent still wait.
-                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
-                subject::status_of(user),
-                subject::cancelled_of(user),
-                subject::queued(user),
-                subject::chanadm_from(user),
-                // Put and delete of its own roster entry, and of its own escalation chain.
-                subject::roster(user),
-                subject::chain(user),
-                // Put of the links it passed on, and the same in the leaf's outbox.
-                format!("$KV.{LINKS_BUCKET}.{user}.>"),
-                format!("ants.out.links.{user}.>"),
-                subject::renew(user.as_str()),
-                // Asking the signer for an ant added from a template, should it manage one.
-                subject::antreq(user),
-            ]);
-            // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
-            // filter pinned; no ack, so the spares of the inbox consumer only read it.
-            let own_inbox = subject::inbox_of(user);
-            for (reader, filter) in
-                [(&consumer, own_inbox.as_str()), (&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)]
-            {
-                for spare in spare_readers(reader) {
-                    publish.extend([
-                        format!("$JS.API.CONSUMER.CREATE.{STREAM}.{spare}.{filter}"),
-                        format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{spare}"),
-                        format!("$JS.API.CONSUMER.DELETE.{STREAM}.{spare}"),
-                    ]);
-                }
-            }
-            subscribe.extend([
-                subject::ALL_NOTES.to_owned(),
-                subject::ALL_CHANNELS.to_owned(),
-                format!("{}.*", subject::approvals(user)),
-                subject::cancel_of(user),
-                subject::queue(user),
-                // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
-                subject::inbox_of(user),
-                subject::renew_reply(user.as_str()),
-                subject::antreq_reply(user),
-            ]);
+        publish
+    }
+
+    /// What a human may do besides.
+    fn human_rights(user: &UserId, publish: &mut Vec<String>, subscribe: &mut Vec<String>) {
+        let roster_stream = kv_stream(ROSTER_BUCKET);
+        let channels = kv_stream(CHANNELS_BUCKET);
+        let humans = kv_stream(HUMANS_BUCKET);
+        let chains = kv_stream(CHAINS_BUCKET);
+        let links = kv_stream(LINKS_BUCKET);
+        let owners = kv_stream(OWNERS_BUCKET);
+        let webhooks = kv_stream(WEBHOOKS_BUCKET);
+        let sessions = kv_stream(SESSIONS_BUCKET);
+        let attempts = kv_stream(ATTEMPTS_BUCKET);
+        let notify = notify_consumer(user);
+        publish.extend([
+            // Its own renewal, and that of its machine's leaf node uplink, which connects as no client; the
+            // request proves the credentials it renews by signature, whoever carries it. It hears the answers
+            // with everything under `ants.>`.
+            subject::ALL_RENEW_REQUESTS.to_owned(),
+            // Stream info lists every subject stored (who messages whom), so only a human may ask for it.
+            format!("$JS.API.STREAM.INFO.{STREAM}"),
+            // The consumer of its notifications: one filter puts it in the subject, several leave it out.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}"),
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{notify}.>"),
+            format!("$JS.API.CONSUMER.INFO.{STREAM}.{notify}"),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{notify}"),
+        ]);
+        publish.extend(ack_subjects(STREAM, &notify));
+        publish.extend([
+            format!("$JS.API.STREAM.CREATE.{STREAM}"),
+            // Creating a KV bucket first looks up the account's JetStream limits.
+            "$JS.API.INFO".to_owned(),
+            format!("$JS.API.STREAM.CREATE.{roster_stream}"),
+            // Adding what an older version lacks, such as the markers of expired entries, and room for the
+            // consumers of every daemon watching the bucket, which a KV bucket gets only by an update.
+            format!("$JS.API.STREAM.UPDATE.{roster_stream}"),
+            format!("$JS.API.STREAM.UPDATE.{channels}"),
+            format!("$JS.API.STREAM.UPDATE.{humans}"),
+            // Stream info lists every key of a bucket, so only a human may ask for it of these three.
+            format!("$JS.API.STREAM.INFO.{sessions}"),
+            format!("$JS.API.STREAM.INFO.{attempts}"),
+            format!("$JS.API.STREAM.INFO.{owners}"),
+            // Reading what each ant spent, for `ants spend`: its thread and daily spend keys, not its sessions.
+            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.*.spend"),
+            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
+            format!("$JS.API.STREAM.CREATE.{sessions}"),
+            format!("$JS.API.STREAM.CREATE.{attempts}"),
+            format!("$JS.API.STREAM.CREATE.{channels}"),
+            format!("$JS.API.STREAM.CREATE.{humans}"),
+            format!("$JS.API.STREAM.CREATE.{chains}"),
+            format!("$JS.API.STREAM.CREATE.{links}"),
+            format!("$JS.API.STREAM.CREATE.{owners}"),
+            format!("$JS.API.STREAM.INFO.{webhooks}"),
+            format!("$JS.API.STREAM.CREATE.{webhooks}"),
+            // The version the channel manager runs, for `ants doctor`.
+            format!("$JS.API.DIRECT.GET.{webhooks}.{}", channel_manager_serving_subject()),
+            // Put and delete of every channel's and every human's entry.
+            format!("$KV.{CHANNELS_BUCKET}.>"),
+            format!("$KV.{HUMANS_BUCKET}.>"),
+            // Recording the owner of each thread it messages an ant on, and the same in the leaf's outbox.
+            format!("$KV.{OWNERS_BUCKET}.*.*"),
+            "ants.out.owners.*.*".to_owned(),
+            format!("$JS.API.STREAM.UPDATE.{STREAM}"),
+            format!("$JS.API.STREAM.MSG.GET.{STREAM}"),
+            // Reading the stream back in batches; it reads nothing more than STREAM.MSG.GET, which takes any
+            // sequence.
+            format!("$JS.API.DIRECT.GET.{STREAM}"),
+            format!("$JS.API.STREAM.MSG.DELETE.{STREAM}"),
+            subject::ALL_APPROVAL_DECISIONS.to_owned(),
+            subject::ALL_CANCELS.to_owned(),
+            subject::ALL_QUEUE_REQUESTS.to_owned(),
+            // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
+            format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+            format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+            // Its own markers of the messages it was told keep waiting for an ant no daemon serves.
+            format!("$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
+            format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
+            subject::DEAD_ALL.to_owned(),
+            // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
+            // leaf's own domain (the plain form is what a leaf maps its own domain to).
+            format!("$JS.API.STREAM.CREATE.{INTAKE_STREAM}"),
+            format!("$JS.API.STREAM.UPDATE.{INTAKE_STREAM}"),
+            format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+            // And the links and owners buckets' sources from the intake.
+            format!("$JS.API.STREAM.UPDATE.{links}"),
+            format!("$JS.API.STREAM.UPDATE.{owners}"),
+        ]);
+        for op in ["CREATE", "UPDATE", "INFO"] {
+            publish.push(format!("$JS.API.STREAM.{op}.{OUTBOX_STREAM}"));
+            publish.push(format!("$JS.*.API.STREAM.{op}.{OUTBOX_STREAM}"));
         }
-        Self { publish, subscribe }
+        publish.extend(read_marker_rights(user));
+        publish.extend(presence_rights(user));
+        publish.extend(thread_rights(user));
+        publish.extend(notify_prefs_rights(user));
+        subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
+    }
+
+    /// What an ant may do besides.
+    fn ant_rights(user: &UserId, publish: &mut Vec<String>, subscribe: &mut Vec<String>) {
+        let consumer = inbox_consumer(user);
+        let notes = notes_consumer(user);
+        let chan_read = chan_reader(user);
+        let sessions = kv_stream(SESSIONS_BUCKET);
+        let attempts = kv_stream(ATTEMPTS_BUCKET);
+        let own_keys = format!("$KV.{SESSIONS_BUCKET}.{user}.>");
+        let own_attempts = format!("$KV.{ATTEMPTS_BUCKET}.{user}.>");
+        let dead_read = dead_reader(user);
+        let sent_read = sent_reader(user);
+        publish.extend([
+            // Get and put of its own sessions.
+            format!("$JS.API.DIRECT.GET.{sessions}.{own_keys}"),
+            own_keys,
+            // Get of every ant's daily spend, which pool caps add up.
+            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.*.day.*"),
+            // The account's JetStream usage, and the shared notes of the storage warnings given.
+            "$JS.API.INFO".to_owned(),
+            format!("$JS.API.DIRECT.GET.{sessions}.$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
+            format!("$KV.{SESSIONS_BUCKET}.{STORAGE_WARNING_PREFIX}.*.*.warned"),
+            // Get, put and delete of the markers of its own attempts.
+            format!("$JS.API.DIRECT.GET.{attempts}.{own_attempts}"),
+            own_attempts,
+            // Exactly its requests subject: an ant cannot answer its own requests one level below.
+            subject::approvals(user),
+            // Reading the decision stored on one of its requests: a direct get naming the subject in its own
+            // subject returns only the last message on that subject, so nothing else is readable this way.
+            format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(user)),
+            subject::dead(user),
+            subject::outbox(&subject::dead(user)).expect("an outbox subject"),
+            // Reading its own dead letters back, through its own consumer filtering only those.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{dead_read}"),
+            // Reading back the messages it sent, through its own consumer filtering only those.
+            format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::inbox_from(user)),
+            format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
+            format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
+            // Get of the mark of every message to an ant, to tell whether those it sent still wait.
+            format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+            subject::status_of(user),
+            subject::cancelled_of(user),
+            subject::queued(user),
+            subject::chanadm_from(user),
+            // Put and delete of its own roster entry, and of its own escalation chain.
+            subject::roster(user),
+            subject::chain(user),
+            // Put of the links it passed on, and the same in the leaf's outbox.
+            format!("$KV.{LINKS_BUCKET}.{user}.>"),
+            format!("ants.out.links.{user}.>"),
+            subject::renew(user.as_str()),
+            // Asking the signer for an ant added from a template, should it manage one.
+            subject::antreq(user),
+        ]);
+        // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
+        // filter pinned; no ack, so the spares of the inbox consumer only read it.
+        let own_inbox = subject::inbox_of(user);
+        for (reader, filter) in
+            [(&consumer, own_inbox.as_str()), (&notes, subject::ALL_NOTES), (&chan_read, subject::ALL_CHANNELS)]
+        {
+            for spare in spare_readers(reader) {
+                publish.extend([
+                    format!("$JS.API.CONSUMER.CREATE.{STREAM}.{spare}.{filter}"),
+                    format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{spare}"),
+                    format!("$JS.API.CONSUMER.DELETE.{STREAM}.{spare}"),
+                ]);
+            }
+        }
+        subscribe.extend([
+            subject::ALL_NOTES.to_owned(),
+            subject::ALL_CHANNELS.to_owned(),
+            format!("{}.*", subject::approvals(user)),
+            subject::cancel_of(user),
+            subject::queue(user),
+            // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
+            subject::inbox_of(user),
+            subject::renew_reply(user.as_str()),
+            subject::antreq_reply(user),
+        ]);
     }
 }
 

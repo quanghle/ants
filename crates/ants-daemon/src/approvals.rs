@@ -207,6 +207,22 @@ impl NatsApprover {
         Ok(to)
     }
 
+    /// [`Self::ask_chain`], logging whom it asked or why it could not: those it asked.
+    async fn ask_chain_logged(&self, request: &ApprovalRequest) -> Vec<UserId> {
+        match self.ask_chain(request).await {
+            Ok(to) => {
+                if !to.is_empty() {
+                    tracing::info!(request = %request.id, ?to, "asked the ant's chain too");
+                }
+                to
+            }
+            Err(e) => {
+                tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain");
+                Vec::new()
+            }
+        }
+    }
+
     async fn ask(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> Result<Verdict> {
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout);
         // Subscribe first, so a quick answer is not missed.
@@ -228,18 +244,7 @@ impl NatsApprover {
             .await
             .context("waiting for JetStream to store the approval request")?;
         tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
-        let asked = match self.ask_chain(&request).await {
-            Ok(to) => {
-                if !to.is_empty() {
-                    tracing::info!(request = %request.id, ?to, "asked the ant's chain too");
-                }
-                to
-            }
-            Err(e) => {
-                tracing::warn!(request = %request.id, error = format!("{e:#}"), "asking the ant's chain");
-                Vec::new()
-            }
-        };
+        let asked = self.ask_chain_logged(&request).await;
         let waits = ants_proto::StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);

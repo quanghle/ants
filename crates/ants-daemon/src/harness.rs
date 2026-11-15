@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -1007,102 +1008,18 @@ async fn serve(
                 tracing::warn!(lost = %old, session = %id, "the session was not resumed; rebuilding its context");
                 Rebuild::Lost
             });
-            while let Some(Turn { prompt, reply }) = turns.recv().await {
-                let Prompt { text, limits, spend, mut stop, progress, mut history } = prompt;
-                let mut rebuild = lost.take();
-                // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
-                let mut retry = rebuild.is_none();
-                let (done, cut, text, errors_only) = loop {
-                    let too_many = Arc::new(Notify::new());
-                    {
-                        let mut observed = observed.lock().expect("observed");
-                        // A cost reported after the last prompt ended counts now.
-                        if let (Some(tx), Some(total)) = (&spend, observed.cost) {
-                            let _ = tx.send(Spend::Cost { session: id.clone(), total });
-                        }
-                        observed.current = Some(Current {
-                            text: String::new(),
-                            errors_only: true,
-                            tool_calls: HashMap::new(),
-                            max_tool_calls: limits.max_tool_calls,
-                            too_many: too_many.clone(),
-                            spend: spend.clone(),
-                            progress: progress.clone(),
-                        });
-                    }
-                    let seed = match rebuild {
-                        Some(why) => {
-                            let budget = launch.harness.history_budget(&launch.settings);
-                            crate::history::seed(why, history.take(), budget).await
-                        }
-                        None => String::new(),
-                    };
-                    let text = [launch.instructions.as_str(), &seed, &text]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let request = cx
-                        .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
-                        .block_task();
-                    let (done, cut) = bounded(&cx, &id, request, limits, &too_many, &mut stop, &cancelled).await;
-                    let (text, errors_only) = observed
-                        .lock()
-                        .expect("observed")
-                        .current
-                        .take()
-                        .map_or_else(Default::default, |c| (c.text, c.errors_only));
-                    let overflowed = |e: &agent_client_protocol::Error| overflows(&launch.harness, &e.to_string());
-                    match &done {
-                        Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
-                            tracing::warn!(session = %id, error = %e, "the prompt outgrew the context window");
-                            id = match new_session(&cx, &launch, mcp.clone()).await {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    let methods = methods.lock().expect("auth methods");
-                                    let _ = reply.send(Err(harness_error(&launch, "session", &e, &methods)));
-                                    return Err(e);
-                                }
-                            };
-                            *current.lock().expect("session id") = id.clone();
-                            observed.lock().expect("observed").cost = None;
-                            (rebuild, retry) = (Some(Rebuild::Overflow), false);
-                        }
-                        Some(Err(e)) if cut.is_none() && overflowed(e) => {
-                            let harness = launch.harness.name.clone();
-                            let _ = reply.send(Err(ContextOverflow { harness, detail: e.to_string() }.into()));
-                            return Err(e.clone());
-                        }
-                        _ => break (done, cut, text, errors_only),
-                    }
-                };
-                match done {
-                    Some(Ok(done)) => {
-                        tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
-                        if let (Some(tx), Some(usage)) = (&spend, &done.usage) {
-                            let _ = tx.send(Spend::Tokens(usage.total_tokens));
-                        }
-                        // Copilot CLI and Antigravity end a prompt their provider turned away as a reply of error
-                        // lines, which is no answer.
-                        let limited = (errors_only && cut.is_none())
-                            .then(|| crate::ratelimit::classify(&launch.harness, &text))
-                            .flatten();
-                        let _ = reply.send(match limited {
-                            Some(limited) => Err(limited.into()),
-                            None => Ok(Reply { text, cut }),
-                        });
-                    }
-                    Some(Err(e)) if cut.is_none() => {
-                        let error = harness_error(&launch, "prompt", &e, &methods.lock().expect("auth methods"));
-                        let _ = reply.send(Err(error));
-                        return Err(e);
-                    }
-                    // Cancelled, but the harness failed or did not end the prompt: stop it, the prompt is over.
-                    _ => {
-                        tracing::warn!(session = %id, "{} did not end a cancelled prompt; stopping it", launch.harness);
-                        let _ = reply.send(Ok(Reply { text, cut }));
-                        return Ok(());
-                    }
+            let connected = Connected {
+                cx: &cx,
+                launch: &launch,
+                observed: &observed,
+                cancelled: &cancelled,
+                methods: &methods,
+                current: &current,
+                mcp: &mcp,
+            };
+            while let Some(turn) = turns.recv().await {
+                if connected.run(turn, &mut id, lost.take()).await?.is_break() {
+                    return Ok(());
                 }
             }
             Ok(())
@@ -1115,6 +1032,130 @@ async fn serve(
             }
             None => tracing::warn!(error = %e, "{} session ended", launch.harness),
         }
+    }
+}
+
+/// What [`serve`] runs prompts with once the harness is connected.
+struct Connected<'a> {
+    cx: &'a ConnectionTo<Agent>,
+    launch: &'a Launch,
+    observed: &'a Mutex<Observed>,
+    /// Bumped when a prompt is cancelled.
+    cancelled: &'a watch::Sender<u64>,
+    methods: &'a Mutex<Vec<AuthMethod>>,
+    /// The session's id, as the session's owner reads it.
+    current: &'a Mutex<SessionId>,
+    mcp: &'a Vec<McpServer>,
+}
+
+impl Connected<'_> {
+    /// Run `turn` in session `id`, or in a new one should the prompt outgrow the context window, and send its reply.
+    /// Breaks when the harness is to stop; fails with the error that ends the connection.
+    async fn run(
+        &self,
+        turn: Turn,
+        id: &mut SessionId,
+        mut rebuild: Option<Rebuild>,
+    ) -> Result<ControlFlow<()>, agent_client_protocol::Error> {
+        let Turn { prompt, reply } = turn;
+        let Prompt { text, limits, spend, mut stop, progress, mut history } = prompt;
+        // Once in a new session when the prompt outgrows the context window, unless it ran in one already.
+        let mut retry = rebuild.is_none();
+        let (done, cut, text, errors_only) = loop {
+            let too_many = Arc::new(Notify::new());
+            {
+                let mut observed = self.observed.lock().expect("observed");
+                // A cost reported after the last prompt ended counts now.
+                if let (Some(tx), Some(total)) = (&spend, observed.cost) {
+                    let _ = tx.send(Spend::Cost { session: id.clone(), total });
+                }
+                observed.current = Some(Current {
+                    text: String::new(),
+                    errors_only: true,
+                    tool_calls: HashMap::new(),
+                    max_tool_calls: limits.max_tool_calls,
+                    too_many: too_many.clone(),
+                    spend: spend.clone(),
+                    progress: progress.clone(),
+                });
+            }
+            let seed = match rebuild {
+                Some(why) => {
+                    let budget = self.launch.harness.history_budget(&self.launch.settings);
+                    crate::history::seed(why, history.take(), budget).await
+                }
+                None => String::new(),
+            };
+            let text = [self.launch.instructions.as_str(), &seed, &text]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let request = self
+                .cx
+                .send_request(PromptRequest::new(id.clone(), vec![ContentBlock::Text(TextContent::new(text))]))
+                .block_task();
+            let (done, cut) = bounded(self.cx, id, request, limits, &too_many, &mut stop, self.cancelled).await;
+            let (text, errors_only) = self
+                .observed
+                .lock()
+                .expect("observed")
+                .current
+                .take()
+                .map_or_else(Default::default, |c| (c.text, c.errors_only));
+            let overflowed = |e: &agent_client_protocol::Error| overflows(&self.launch.harness, &e.to_string());
+            match &done {
+                Some(Err(e)) if cut.is_none() && retry && overflowed(e) => {
+                    tracing::warn!(session = %id, error = %e, "the prompt outgrew the context window");
+                    *id = match new_session(self.cx, self.launch, self.mcp.clone()).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let methods = self.methods.lock().expect("auth methods");
+                            let _ = reply.send(Err(harness_error(self.launch, "session", &e, &methods)));
+                            return Err(e);
+                        }
+                    };
+                    *self.current.lock().expect("session id") = id.clone();
+                    self.observed.lock().expect("observed").cost = None;
+                    (rebuild, retry) = (Some(Rebuild::Overflow), false);
+                }
+                Some(Err(e)) if cut.is_none() && overflowed(e) => {
+                    let harness = self.launch.harness.name.clone();
+                    let _ = reply.send(Err(ContextOverflow { harness, detail: e.to_string() }.into()));
+                    return Err(e.clone());
+                }
+                _ => break (done, cut, text, errors_only),
+            }
+        };
+        match done {
+            Some(Ok(done)) => {
+                tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
+                if let (Some(tx), Some(usage)) = (&spend, &done.usage) {
+                    let _ = tx.send(Spend::Tokens(usage.total_tokens));
+                }
+                // Copilot CLI and Antigravity end a prompt their provider turned away as a reply of error
+                // lines, which is no answer.
+                let limited = (errors_only && cut.is_none())
+                    .then(|| crate::ratelimit::classify(&self.launch.harness, &text))
+                    .flatten();
+                let _ = reply.send(match limited {
+                    Some(limited) => Err(limited.into()),
+                    None => Ok(Reply { text, cut }),
+                });
+            }
+            Some(Err(e)) if cut.is_none() => {
+                let error = harness_error(self.launch, "prompt", &e, &self.methods.lock().expect("auth methods"));
+                let _ = reply.send(Err(error));
+                return Err(e);
+            }
+            // Cancelled, but the harness failed or did not end the prompt: stop it, the prompt is over.
+            _ => {
+                tracing::warn!(session = %id, "{} did not end a cancelled prompt; stopping it", self.launch.harness);
+                let _ = reply.send(Ok(Reply { text, cut }));
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 }
 
