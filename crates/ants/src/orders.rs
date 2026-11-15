@@ -17,6 +17,7 @@ use ants_proto::{
     subject,
 };
 use anyhow::{Context as _, Result, bail};
+use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, consumer::DeliverPolicy};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -126,17 +127,32 @@ fn reason(outcome: &AdminOutcome) -> &str {
     outcome.reason.as_deref().unwrap_or("no reason given")
 }
 
-/// Publish `order` to the hub's stream, as message id its id, and wait until the stream stored it.
+/// Publish `order` to the hub's stream, as message id its id, and wait until the stream stored it. No outbox keeps an
+/// order: while the hub is out of reach, as when the uplink of the machine's leaf node is down, sending it fails.
 async fn publish(js: &jetstream::Context, order: &AdminOrder) -> Result<()> {
     let subject = order.subject();
     let message = jetstream::message::PublishMessage::build()
         .payload(serde_json::to_vec(order)?.into())
         .message_id(order.id.to_string());
     let stored = async { js.send_publish(subject.clone(), message).await?.await };
-    match stored.await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(bus::explain(js, &subject, e).await).context("sending the admin order"),
-    }
+    let e = match stored.await {
+        Ok(_) => return Ok(()),
+        Err(e) => e,
+    };
+    let uncaptured = e.kind() == PublishErrorKind::StreamNotFound && bus::uncaptured(js).await;
+    let unsent = match e.kind() {
+        PublishErrorKind::StreamNotFound if !uncaptured => format!(
+            "the hub is out of reach, as when the uplink of this machine's leaf node is down: order {} was not stored, \
+             and no outbox keeps an admin order to send later; send it again once the hub is in reach",
+            order.id
+        ),
+        PublishErrorKind::TimedOut => format!(
+            "the hub's stream did not say in time whether it stored order {}: `ants ant orders {}` lists it if it did",
+            order.id, order.ant
+        ),
+        _ => "sending the admin order".to_owned(),
+    };
+    Err(bus::explained(e, &subject, uncaptured)).context(unsent)
 }
 
 /// The outcome the daemon of `order`'s machine recorded, if any yet.
@@ -437,6 +453,131 @@ pub(crate) mod tests {
         let (_, off) = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap();
         let off = off.expect("the daemon decides at once");
         assert_eq!((off.state, off.reason.as_deref()), (OrderState::Refused, Some(ants_daemon::admin::REMOTE_OFF)));
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// A real hub and leaf node m1, whose daemon and an admin both connect to the leaf: the admin's order crosses the
+    /// uplink to the hub's stream and back to m1's daemon, which decides it. While the uplink is down, sending one
+    /// from m1 fails at once, saying the hub is out of reach, and nothing sends it later; one sent from the hub
+    /// waits, pending, until the uplink is back.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_while_it_is_down() {
+        use std::process::Command;
+
+        use ants_proto::JsDomain;
+        use ants_test_support::NatsServer;
+
+        use crate::leaf;
+        use crate::members::EnrollApprover;
+        use crate::outbox::tests::{eventually, free_port, spawn_hub};
+
+        let (leaf_port, dead_port) = (free_port(), free_port());
+        let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else { return };
+        let team = hub.dir().join("auth");
+        let domain: JsDomain = "hub".parse().unwrap();
+        let m1: Machine = "m1".parse().unwrap();
+        let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+        let bob_creds = hub.dir().join("bob.creds");
+        auth::issue(&team, &bob, Role::Human, Some(&domain), &bob_creds).unwrap();
+        let (_h, h_js) = bus::connect(&hub.url, Some(&bob_creds), Some(&domain), &bob, "test").await.unwrap();
+        bus::ensure_stream(&h_js).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
+        h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let admin_creds = hub.dir().join("alice-admin.creds");
+        let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human).with_js_domain(Some(&domain));
+        issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+
+        let leaf_creds = hub.dir().join("leaf-m1.creds");
+        let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&alice));
+        auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
+        let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
+        let configure = |dir: &Path, port: u16| {
+            let uplinks = [format!("nats-leaf://127.0.0.1:{port}")];
+            let config = leaf::Leaf {
+                machine: &m1,
+                hub_domain: Some(&domain),
+                uplinks: &uplinks,
+                creds: &leaf_creds,
+                system_creds: None,
+                server_conf: &server_conf,
+                ca_file: None,
+                proxy: None,
+                listen: &listen,
+            };
+            leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        };
+        let leaf_node = NatsServer::spawn_with(|dir| {
+            configure(dir, leaf_port);
+            "include \"leaf.conf\"\n".to_owned()
+        })
+        .unwrap();
+        let reload = |port: u16| {
+            configure(leaf_node.dir(), port);
+            let status = Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap();
+            assert!(status.success());
+        };
+
+        let host_creds = hub.dir().join("host-m1.creds");
+        issue_host(&team, &m1, Some(&domain), &host_creds).unwrap();
+        let host = Host {
+            machine: None,
+            nats: leaf_node.url.clone(),
+            creds: Some(host_creds),
+            js_domain: Some(domain.clone()),
+            remote_admin: true,
+            config: None,
+            restarts: Restarts::default(),
+        };
+        let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);
+        let task = tokio::spawn(host::run(host, watched));
+        eventually("m1's daemon records its ants in the hub", async || {
+            !machines::machines_of(&h_js, &dev_a).await.unwrap_or_default().is_empty()
+        })
+        .await;
+
+        let on_leaf = crate::Nats::new(&leaf_node.url, Some(&admin_creds), Some(&domain)).unwrap();
+        let (_, js) = on_leaf.connect("test").await.unwrap();
+        let (pause, paused) = send(&on_leaf, &js, None, &dev_a, AdminOp::Pause, WAIT * 4).await.unwrap();
+        let paused = paused.expect("m1's daemon decides it");
+        assert_eq!(
+            (paused.state, paused.reason.as_deref()),
+            (OrderState::Refused, Some(ants_daemon::admin::NO_CONFIG))
+        );
+        let stored = orders_of(&h_js, &dev_a).await.unwrap();
+        assert_eq!(stored.iter().map(|o| o.id).collect::<Vec<_>>(), [pause.id], "the hub's stream stored it");
+
+        reload(dead_port);
+        eventually("the uplink is down", async || js.get_stream(ants_proto::STREAM).await.is_err()).await;
+        let started = std::time::Instant::now();
+        let down = send(&on_leaf, &js, Some(m1.clone()), &dev_a, AdminOp::Resume, WAIT).await.unwrap_err();
+        assert!(started.elapsed() < WAIT, "it fails at once");
+        let said = format!("{down:#}");
+        assert!(said.contains("the hub is out of reach") && said.contains("no outbox keeps"), "{said}");
+        let on_hub = crate::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
+        let (_, hub_js) = on_hub.connect("test").await.unwrap();
+        let (waiting, none) = send(&on_hub, &hub_js, None, &dev_a, AdminOp::Resume, Duration::ZERO).await.unwrap();
+        assert_eq!(none, None, "m1's daemon is out of reach");
+
+        reload(leaf_port);
+        let resumed = tokio::time::timeout(WAIT * 12, async {
+            loop {
+                if let Some(outcome) = outcome(&h_js, &waiting).await.unwrap() {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let resumed = resumed.await.expect("m1's daemon decides it once the uplink is back");
+        assert_eq!(resumed.state, OrderState::Refused);
+        let stored = orders_of(&h_js, &dev_a).await.unwrap();
+        assert_eq!(
+            stored.iter().map(|o| (o.id, o.state)).collect::<Vec<_>>(),
+            [(pause.id, OrderState::Refused), (waiting.id, OrderState::Refused)],
+            "nothing stored the order sent while the uplink was down"
+        );
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }
