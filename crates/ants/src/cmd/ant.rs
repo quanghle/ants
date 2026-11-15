@@ -1,13 +1,14 @@
 //! `ants ant`: one ant at a glance.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ants_proto::{Machine, UserId};
 use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{ant, completions, memories, orders, restart};
+use crate::{ant, completions, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -65,6 +66,31 @@ pub(crate) enum AntCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Pause ANT: an admin order has the daemon of its machine set `paused = true` in its config, after which it
+    /// takes no new prompt and the messages to it wait queued, prompts already running going on to their end. Needs
+    /// admin credentials, as every order does.
+    Pause {
+        #[command(flatten)]
+        order: Order,
+    },
+    /// Resume ANT paused by `ants ant pause` or its config: it takes the messages queued for it in turn.
+    Resume {
+        #[command(flatten)]
+        order: Order,
+    },
+}
+
+/// Where an order goes, and how long to wait for its outcome.
+#[derive(clap::Args, Debug)]
+pub(crate) struct Order {
+    #[arg(add = ArgValueCandidates::new(completions::ants))]
+    ant: UserId,
+    /// The machine whose daemon serves ANT (default: the one that last recorded serving it).
+    #[arg(long)]
+    machine: Option<Machine>,
+    /// How long to wait for the daemon to apply or refuse the order; a pending order stays until it does.
+    #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "10s")]
+    wait: Duration,
 }
 
 pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<()> {
@@ -80,5 +106,9 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         AntCommand::Orders { ant, json } => orders::show(nats, &ant, json).await,
         AntCommand::Memories { ant, json, machine } => memories::show(nats, &ant, machine, json).await,
         AntCommand::Restart { ant, now, machine, json } => restart::run(nats, &ant, now, machine, json).await,
+        AntCommand::Pause { order: Order { ant, machine, wait } } => pause::run(nats, &ant, machine, true, wait).await,
+        AntCommand::Resume { order: Order { ant, machine, wait } } => {
+            pause::run(nats, &ant, machine, false, wait).await
+        }
     }
 }

@@ -6,8 +6,9 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`restart`] has the daemon
-//! serving the ant restart its harnesses; [`memories`] reads the ant's memories, only while online.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`pause`] pauses or resumes
+//! the ant there; [`restart`] has the daemon serving the ant restart its harnesses; [`memories`] reads the ant's
+//! memories, only while online.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
 mod memories;
+mod pause;
 pub mod restart;
 mod set;
 
@@ -69,6 +71,14 @@ pub struct ConfigFile {
     pub path: PathBuf,
     /// Notified once per edit written.
     pub edited: Arc<Notify>,
+    /// The admins whose orders paused ants, for the reloaded config to credit ([`crate::pause::Pause::credit`]).
+    pub pausers: crate::pause::Pausers,
+}
+
+impl ConfigFile {
+    pub fn new(path: PathBuf, edited: Arc<Notify>) -> Self {
+        Self { path, edited, pausers: crate::pause::Pausers::default() }
+    }
 }
 
 impl PartialEq for ConfigFile {
@@ -257,8 +267,8 @@ async fn decide(
 async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
     match &order.op {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
-        AdminOp::Pause => refused(order, NOT_SUPPORTED),
-        AdminOp::Resume => refused(order, NOT_SUPPORTED),
+        AdminOp::Pause => pause::apply(orders, order, true),
+        AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
         AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
         AdminOp::Retire => refused(order, NOT_SUPPORTED),

@@ -13,7 +13,7 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
     let config = std::path::absolute(serve::config_file(args, &default_path)?)?;
     let dropins = ants_daemon::config::dropin_dir(&config);
     let triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
-    let edited = ConfigFile { path: config, edited: triggers.edits() };
+    let edited = ConfigFile::new(config, triggers.edits());
     let served = || {
         let listed = serve::ants(args, &default_path)?;
         let mut configs = serve::configs(
@@ -23,6 +23,9 @@ pub(crate) async fn run(args: &serve::DaemonArgs, conn: &Connection<'_>) -> Resu
             conn.creds.map(Path::to_path_buf),
             conn.js_domain.cloned(),
         )?;
+        for config in &configs {
+            config.pause.credit(edited.pausers.take(&config.ant));
+        }
         if let Some((managers, path)) = &listed.managers {
             for config in configs.iter_mut().filter(|c| managers.contains(&c.ant)) {
                 let (nats, creds, js_domain) =

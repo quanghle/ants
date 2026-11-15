@@ -17,10 +17,11 @@ use futures::{FutureExt as _, StreamExt as _};
 use super::attach;
 use crate::attachments::{self, File, Listed};
 use crate::cmd::{cancel, send};
+use crate::orders;
 use crate::sealed::{Keyring, Sealing};
 use crate::thread::{self, Entry, Kind};
 use crate::thread_meta::{self, Marking, Meta};
-use crate::{humans, quiet};
+use crate::{humans, pause, quiet};
 
 /// What a job needs: the UI's connection and its human.
 pub struct Ctx {
@@ -37,7 +38,7 @@ pub struct Ctx {
     /// What opens the attachments of sealed messages, if anything.
     pub keyring: Option<Arc<Keyring>>,
     /// The human's admin credentials, which sign admin orders, or why there are none.
-    pub admin: Result<crate::orders::Admin, String>,
+    pub admin: Result<orders::Admin, String>,
 }
 
 impl Ctx {
@@ -123,6 +124,11 @@ pub enum Job {
     Restart {
         ant: UserId,
         now: bool,
+    },
+    /// Pause `ant`, or resume it, as `ants ant pause|resume` does.
+    Pause {
+        ant: UserId,
+        paused: bool,
     },
     /// Send as `job`, an [`Job::Ask`], [`Job::Post`], [`Job::Reply`] or [`Job::Grant`], does, with `files` attached.
     Attached {
@@ -278,6 +284,10 @@ impl Job {
             Self::Open(listed) => Ok(Done::line(attach::open(&ctx.js, ctx.keyring.as_deref(), &listed).await?)),
             Self::Save(listed, to) => {
                 Ok(Done::line(attach::save(&ctx.js, ctx.keyring.as_deref(), &listed, to.as_deref()).await?))
+            }
+            Self::Pause { ant, paused } => {
+                let admin = ctx.admin.as_ref().map_err(|e| anyhow!("{e}"))?;
+                Ok(Done::line(pause::order(admin, &ctx.js, &ant, None, paused, pause::WAIT).await?))
             }
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
         }

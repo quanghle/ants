@@ -30,6 +30,7 @@ struct Bus {
     /// dev-a's escalation chain.
     chain: Chain,
     workload: roster::Workload,
+    pause: crate::pause::Pause,
     mcp: Option<Mcp>,
     channels: jetstream::kv::Store,
     threads: Threads,
@@ -81,6 +82,7 @@ impl Bus {
             ledger,
             chain: Chain::default(),
             workload,
+            pause: crate::pause::Pause::new(false),
             mcp: None,
             channels,
             threads,
@@ -131,6 +133,7 @@ impl Bus {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         };
         roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
@@ -171,9 +174,12 @@ impl Bus {
     }
 
     async fn serve_timed(&self, pool: &Pool, ctrl_c: &Arc<Semaphore>, progress_every: Duration, ack_wait: Duration) {
-        let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
-        let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await.unwrap();
-        let messages = futures::stream::select(messages, posts);
+        let open = async || {
+            let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
+            let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
+            anyhow::Ok(futures::stream::select(messages, posts))
+        };
+        let messages = Box::pin(pause::pausable(self.pause.subscribe(), None, open));
         let channels = Channels::watch(self.channels.clone()).await.unwrap();
         let escalator = self.escalator();
         let notes = crate::notes::JetStreamNotes::new(self.js.clone(), self.dev.clone());
@@ -192,6 +198,7 @@ impl Bus {
             publisher: self.publisher.as_ref(),
             redactor: &self.redactor,
             workload: &self.workload,
+            pause: &self.pause,
             metrics: crate::metrics::ant(&self.dev),
             limits: self.limits,
             ledger: &self.ledger,
@@ -353,6 +360,60 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "b".to_owned()));
         until("the inbox to go idle", || bus.workload.activity() == ants_proto::Activity::Idle).await;
         assert_eq!(bus.workload.harnesses(), 2, "a harness per thread stays live");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resumed() {
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    bus.pause = crate::pause::Pause::new(true);
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let resume = || bus.pause.replace(&crate::pause::Pause::new(false));
+    let pause = || bus.pause.replace(&crate::pause::Pause::new(true));
+    let check = async {
+        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().prompted, 0, "paused from the start");
+        let name = ants_proto::inbox_consumer(&bus.dev);
+        let consumer = bus.stream.get_consumer::<jetstream::consumer::pull::Config>(&name).await;
+        assert!(consumer.is_err(), "nothing pulled while paused");
+
+        resume();
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "a".to_owned()));
+        assert_eq!(bus.workload.paused(), None);
+        bus.send(&t1, "hold b").await;
+        until("b to start", || log.locked().prompted == 2).await;
+        bus.send(&t1, "c").await;
+        timeout(WAIT, async {
+            while bus.consumer().await.num_ack_pending < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("c never came in hand");
+        pause();
+        until("the roster to show the pause", || bus.workload.paused().is_some()).await;
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold b".to_owned()), "a running prompt finishes");
+        bus.send(&t2, "d").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().prompted, 2, "neither the message in hand nor a new one starts");
+        let consumer = bus.consumer().await;
+        assert_eq!((consumer.num_pending, consumer.num_ack_pending), (1, 1), "d queued, c in hand: {consumer:?}");
+
+        resume();
+        let mut rest = [next_reply(&mut replies).await, next_reply(&mut replies).await];
+        rest.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(rest, [(t1.clone(), "c".to_owned()), (t2.clone(), "d".to_owned())]);
+        assert_eq!(log.locked().starts, 2, "a harness per thread, none restarted");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -3380,6 +3441,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         fallback: None,
         memory_low: None,
         model: None,
+        paused: None,
     };
     roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

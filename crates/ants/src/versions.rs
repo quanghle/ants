@@ -305,6 +305,7 @@ mod tests {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         };
         let same = [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m2", Some(("copilot", "1.0.3")))];
         assert!(harness_drift(&same, now).is_empty());

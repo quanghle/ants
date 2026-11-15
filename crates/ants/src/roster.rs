@@ -52,10 +52,14 @@ fn chain(entry: &RosterEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// What the ant is doing: `fallback` while a fallback answers for its harness, `signed-out` while its harness is,
+/// What the ant is doing: `paused` while an admin or its config pauses it, `fallback` while a fallback answers for its
+/// harness, `signed-out` while its harness is,
 /// `failing` while its harness keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
 /// messages, else its activity.
 pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
+    if entry.paused.is_some() {
+        return "paused";
+    }
     if entry.fallback.is_some() {
         return "fallback";
     }
@@ -67,10 +71,25 @@ pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
     }
 }
 
-/// One line per ant whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
+/// One line per ant paused (since when, by whom, and how to resume it), whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
 /// when, with its last error) or is held back by a provider limit (until when), or a fallback answers for.
 pub fn held(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
-    entries.iter().filter_map(|e| held_line(e, now).or_else(|| fallback_line(e, now))).collect()
+    entries
+        .iter()
+        .filter_map(|e| paused_line(e, now).or_else(|| held_line(e, now)).or_else(|| fallback_line(e, now)))
+        .collect()
+}
+
+fn paused_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    let paused = e.paused.as_ref()?;
+    let by = paused.by.as_ref().map_or_else(|| " by its config".to_owned(), |by| format!(" by {by}"));
+    Some(format!(
+        "{}: paused for {}{by}; it takes no new prompt and messages to {} wait queued. Run `ants ant resume {}`.",
+        e.ant,
+        short(since(paused.since, now)),
+        e.ant,
+        e.ant
+    ))
 }
 
 fn held_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
@@ -167,8 +186,8 @@ pub fn memory_low(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
-/// kept for it either, the name may be wrong), a stale entry, or a harness signed out or held back by a provider
-/// limit with no fallback answering for it.
+/// kept for it either, the name may be wrong), a stale entry, a pause, or a harness signed out or held back by a
+/// provider limit with no fallback answering for it.
 pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
         let hint = if chain_kept { "" } else { " (`ants roster` lists the ants served: check the name)" };
@@ -180,6 +199,9 @@ pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now
             entry.machine,
             short(since(entry.heartbeat_at, now))
         ));
+    }
+    if let Some(paused) = paused_line(entry, now) {
+        return Some(paused);
     }
     if entry.fallback.is_some() {
         return None;
@@ -363,6 +385,7 @@ pub(crate) mod tests {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         }
     }
 
@@ -553,6 +576,13 @@ pub(crate) mod tests {
         );
         limited.fallback = Some(ants_proto::ServingFallback { name: "claude".to_owned(), since: now });
         assert_eq!(unserved(&dev_a, Some(&limited), true, now), None, "a fallback answers");
+        limited.paused = Some(ants_proto::Paused { since: now - chrono::Duration::minutes(5), by: None });
+        let paused = "dev-a: paused for 5m by its config; it takes no new prompt and messages to dev-a wait queued. \
+                      Run `ants ant resume dev-a`.";
+        assert_eq!(unserved(&dev_a, Some(&limited), true, now).unwrap(), paused, "a fallback answers no paused ant");
+        assert_eq!(activity(&limited), "paused");
+        limited.paused.as_mut().unwrap().by = Some("alice".parse().unwrap());
+        assert!(held(&[limited], now)[0].starts_with("dev-a: paused for 5m by alice;"));
     }
 
     /// Read with the human's credentials: an ant registered, one with only its escalation chain kept, one unknown.

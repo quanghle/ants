@@ -176,7 +176,7 @@ struct File {
 }
 
 /// The keys of an `[[ant]]` entry added from a template besides those of a [`Request`].
-const TEMPLATED_KEYS: [&str; 6] = ["name", "template", "added_by", "creds", "nats", "js_domain"];
+const TEMPLATED_KEYS: [&str; 7] = ["name", "template", "added_by", "creds", "nats", "js_domain", "paused"];
 
 /// One ant the daemon serves, as the config file (or the command line) describes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -279,6 +279,10 @@ pub struct Ant {
     /// What becomes of a thread's worktree branch holding new commits.
     #[serde(default)]
     pub publish: Publish,
+    /// Paused: the daemon takes no new message and starts no new prompt for the ant, its messages waiting queued,
+    /// until this is unset again (`ants ant resume`). Changing it alone restarts no harness.
+    #[serde(default)]
+    pub paused: bool,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -381,6 +385,7 @@ impl Ant {
             stand_in: None,
             worktree_base: Base::Head,
             publish: Publish::Off,
+            paused: false,
             builtin: false,
             pool: None,
             redact: true,
@@ -460,6 +465,7 @@ impl Ant {
             redact: self.redact,
             worktree_base: self.worktree_base,
             publish: self.publish,
+            pause: crate::pause::Pause::new(self.paused),
         })
     }
 
@@ -856,7 +862,7 @@ fn from_template(ant: Ant, table: &toml::Table, templates: &[AntTemplate], base:
     let mut request: Request = toml::Value::Table(chosen).try_into().with_context(|| format!("ant {name}"))?;
     request.workdir = request.workdir.map(|dir| resolve(&dir, base, home));
     let resolved = t.resolve(manager, name, &request).with_context(|| format!("ant {name}"))?;
-    Ok(Ant { creds: ant.creds, nats: ant.nats, js_domain: ant.js_domain, ..resolved })
+    Ok(Ant { creds: ant.creds, nats: ant.nats, js_domain: ant.js_domain, paused: ant.paused, ..resolved })
 }
 
 /// Check the ants added from templates against what the templates allow together: no more of a template's than its

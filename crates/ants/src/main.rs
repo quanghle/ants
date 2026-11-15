@@ -38,6 +38,7 @@ mod memories;
 mod notify;
 mod orders;
 mod outbox;
+mod pause;
 mod presence;
 mod progress;
 mod queue;

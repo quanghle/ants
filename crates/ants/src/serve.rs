@@ -666,6 +666,7 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             start.push(Running::insert(running, config));
             continue;
         };
+        config.pause.carry(&r.config.pause);
         if r.stopping {
             r.next = Some(config);
         } else if r.config != config {
@@ -676,9 +677,12 @@ fn reconcile(running: &mut HashMap<UserId, Running>, wanted: Vec<Config>) -> Vec
             tracing::info!(%ant, "restarting the ant: its credentials changed");
             r.next = Some(config);
             r.ask_to_stop();
-        } else if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
-            // Members are left out of the comparison: the running ant takes the new ones as it is.
-            serving.members.replace(&listed.members);
+        } else {
+            // Pool members and the pause are left out of the comparison: the running ant takes them as it is.
+            if let (Some(serving), Some(listed)) = (&r.config.pool, &config.pool) {
+                serving.members.replace(&listed.members);
+            }
+            r.config.pause.replace(&config.pause);
         }
     }
     start
@@ -841,6 +845,34 @@ mod tests {
         assert!(reconcile(&mut running, vec![config(&["lead-a", "lead-b"])]).is_empty());
         assert!(!running[&member("lead-a")].stopping, "only its pool's members changed");
         assert_eq!(served.pool.unwrap().members.get(), [member("lead-a"), member("lead-b")]);
+    }
+
+    #[test]
+    fn a_reload_pauses_and_resumes_a_running_ant_without_a_restart() {
+        let ant_named = |paused: bool, model: Option<&str>| {
+            let p = Ant { paused, model: model.map(str::to_owned), ..ant("dev-a") };
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+        };
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let mut running = HashMap::new();
+        let (served, _) = reconcile(&mut running, vec![ant_named(false, None)]).remove(0);
+        let paused = ant_named(true, None);
+        paused.pause.credit(Some("alice".parse().unwrap()));
+        assert!(reconcile(&mut running, vec![paused]).is_empty());
+        assert!(!running[&dev_a].stopping, "only paused changed");
+        let pause = served.pause.get().expect("the running ant is paused");
+        assert_eq!(pause.by.as_ref().map(UserId::as_str), Some("alice"));
+        assert!(reconcile(&mut running, vec![ant_named(true, None)]).is_empty());
+        assert_eq!(served.pause.get(), Some(pause.clone()), "a pause on keeps its start and admin");
+
+        assert!(reconcile(&mut running, vec![ant_named(true, Some("smart"))]).is_empty());
+        let next = running[&dev_a].next.as_ref().expect("restarted for its model");
+        assert_eq!(next.pause.get(), Some(pause), "carried over the restart");
+        running.get_mut(&dev_a).unwrap().stopping = false;
+        running.get_mut(&dev_a).unwrap().next = None;
+        assert!(reconcile(&mut running, vec![ant_named(false, None)]).is_empty());
+        assert!(!running[&dev_a].stopping, "only paused changed");
+        assert_eq!(served.pause.get(), None, "resumed");
     }
 
     #[test]
