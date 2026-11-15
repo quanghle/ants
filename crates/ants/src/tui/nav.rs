@@ -97,7 +97,7 @@ fn line(
 ) -> Line<'static> {
     let count = |n: usize| if n == 0 { String::new() } else { format!(" {n}") };
     match item {
-        Item::Home => Line::raw(format!("Home{}", count(super::home::waiting(data, now)))),
+        Item::Home => Line::raw(format!("Home{}", count(super::home::waiting(data, now).len()))),
         Item::Work(None) => Line::raw(format!("Work{}", count(data.live.order.len()))),
         Item::Work(Some(state)) => {
             let n = counts.get(state).copied().unwrap_or(0);
@@ -172,7 +172,7 @@ mod tests {
         let items = items(&m.data, at(0));
         assert_eq!(items[..2], [Item::Home, Item::Work(None)]);
         assert_eq!(
-            items[7..],
+            items[8..],
             [
                 Item::Channel("ops".parse().unwrap()),
                 Item::Ant(user("dev-a")),

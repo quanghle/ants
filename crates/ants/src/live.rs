@@ -46,16 +46,21 @@ pub async fn start(
     js: jetstream::Context,
     since: Duration,
 ) -> Result<(Feed, State)> {
+    let state = state(nats, &js, since).await?;
+    Ok((Feed::new(client, js, since).await?, state))
+}
+
+/// The state of a live view of the window `since`, with the threads the human archived or left idle to be left out.
+pub async fn state(nats: &crate::Nats<'_>, js: &jetstream::Context, since: Duration) -> Result<State> {
     let auto_archive = crate::defaults::auto_archive()?;
-    let marks = async { thread_meta::open(nats, &js).await?.marks().await };
+    let marks = async { thread_meta::open(nats, js).await?.marks().await };
     let marks = marks.await.unwrap_or_else(|e| {
         tracing::warn!("not leaving archived threads out: {e:#}");
         ThreadMarks::default()
     });
-    let feed = Feed::new(client, js, since).await?;
     let mut state = State::new(nats.me.id.clone(), since);
     (state.marks, state.auto_archive) = (marks, auto_archive);
-    Ok((feed, state))
+    Ok(state)
 }
 
 /// What the [`Feed`] read or heard.
@@ -79,13 +84,19 @@ pub enum Event {
     Decided(Result<String>),
 }
 
-type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
+pub(crate) type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
 /// the threads of the tool requests read for their decisions. Returns them and the sequence read up to. With
 /// `timelines`, the tool calls of the timeline records stored after `after` come as entries of kind tool too
 /// ([`thread::tool_entries`]); the first read, of the window, leaves them out.
-fn tail(js: jetstream::Context, mut parser: Parser, after: Option<u64>, since: Duration, timelines: bool) -> Tail {
+pub(crate) fn tail(
+    js: jetstream::Context,
+    mut parser: Parser,
+    after: Option<u64>,
+    since: Duration,
+    timelines: bool,
+) -> Tail {
     async move {
         let read = async {
             let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
@@ -313,7 +324,7 @@ impl Feed {
         let js = self.js.clone();
         self.history = Some(
             async move {
-                let read = thread::history(&js, &thread, None, tools).await;
+                let read = thread::history(&js, &thread, None, tools, None).await;
                 (thread, read)
             }
             .boxed_local(),

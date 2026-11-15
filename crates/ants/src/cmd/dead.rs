@@ -59,19 +59,23 @@ pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
     Ok(())
 }
 
-/// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text.
+/// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text, or
+/// the size of a sealed message's ciphertext.
 pub(crate) fn dead_row(seq: u64, letter: &DeadLetter) -> String {
     let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
     let (thread, from, text) = match &letter.envelope {
-        Some(e) => (e.thread_id.as_str(), e.from.as_str(), e.text.as_str()),
-        None => ("-", "-", letter.payload.as_deref().unwrap_or("")),
+        Some(e) => {
+            let text = e.sealed.as_deref().map_or_else(|| e.text.clone(), crate::sealed::size_note);
+            (e.thread_id.as_str(), e.from.as_str(), text)
+        }
+        None => ("-", "-", letter.payload.clone().unwrap_or_default()),
     };
     format!(
         "{seq}\t{}\t{thread}\t{from}\t{}x\t{time}\t{}\t{}",
         letter.ant,
         letter.deliveries,
         excerpt(&letter.error, 60),
-        excerpt(text, 60)
+        excerpt(&text, 60)
     )
 }
 

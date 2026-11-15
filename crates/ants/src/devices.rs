@@ -3,7 +3,6 @@
 //! `ants auth revoke` and `ants auth push` put a record of each revoked key of a human's credentials
 //! ([`record_revocations`]); and a sender finds there the keys of the devices it seals for ([`Directory`]), taking each
 //! only from a JWT it verifies itself ([`verify`]), so no human puts a key for another's device.
-#![cfg_attr(not(test), expect(dead_code, reason = "the sealing of human messages (ants-wk3mo.4) reads the directory"))]
 
 use std::collections::HashSet;
 use std::fmt;
@@ -211,6 +210,15 @@ impl Directory {
     /// The devices of `humans` whose keys the directory holds, reporting each entry of theirs it skips: one listing of
     /// the bucket's keys, and a get of each entry of those humans.
     pub async fn devices(&self, humans: &[UserId]) -> Result<Devices> {
+        self.devices_where(|h| humans.iter().any(|x| x.as_str() == h)).await
+    }
+
+    /// The devices of every human whose keys the directory holds, as [`Directory::devices`] reads them.
+    pub async fn all(&self) -> Result<Devices> {
+        self.devices_where(|h| h != REVOKED_DEVICES).await
+    }
+
+    async fn devices_where(&self, human: impl Fn(&str) -> bool) -> Result<Devices> {
         let Some(kv) = &self.kv else { return Ok(Devices::default()) };
         let keys: Vec<String> = kv
             .keys()
@@ -221,8 +229,7 @@ impl Directory {
             .with_context(|| format!("listing {DEVICES_BUCKET}"))?;
         let revoked: HashSet<&str> =
             keys.iter().filter_map(|k| k.strip_prefix(REVOKED_DEVICES)?.strip_prefix('.')).collect();
-        let theirs =
-            keys.iter().filter(|k| k.split('.').next().is_some_and(|h| humans.iter().any(|x| x.as_str() == h)));
+        let theirs = keys.iter().filter(|k| k.split('.').next().is_some_and(&human));
         let gets = theirs.map(|entry| async move {
             let jwt = kv.get(entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?;
             anyhow::Ok((entry, jwt))

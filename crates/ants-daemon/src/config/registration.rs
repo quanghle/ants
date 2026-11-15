@@ -125,6 +125,13 @@ pub struct GithubUser {
     pub teams: Vec<Team>,
 }
 
+impl GithubUser {
+    /// The account a name binds to: the user's id and login.
+    pub fn account(&self) -> GithubAccount {
+        GithubAccount { id: self.id, login: self.login.clone() }
+    }
+}
+
 /// The GitHub user a human's name is bound to, recorded with each of its devices' credentials in `issued.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubAccount {

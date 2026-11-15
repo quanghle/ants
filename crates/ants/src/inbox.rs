@@ -23,6 +23,7 @@ use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::attachments;
+use crate::sealed::{Keyring, State};
 
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
 const RESCAN: Duration = Duration::from_secs(30);
@@ -182,11 +183,13 @@ impl Inbox {
         Ok(found)
     }
 
-    /// Wait for new selected messages and hand each to `show`, until `stop` resolves or the limit is reached. Every
+    /// Wait for new selected messages and hand each to `show`, its sending device looked up by `keyring` if sealed
+    /// ([`Keyring::learn`]), until `stop` resolves or the limit is reached. Every
     /// device following the inbox shows each new message, even one another device already read.
     pub async fn follow(
         &mut self,
         select: &Select,
+        keyring: Option<&Keyring>,
         mut show: impl FnMut(&Envelope) -> Result<()>,
         stop: impl Future<Output = ()>,
     ) -> Result<()> {
@@ -208,6 +211,9 @@ impl Inbox {
                 match envelope {
                     Ok(e) if select.wants(&e) && self.left(select) > 0 => {
                         self.taken += 1;
+                        if let Some(keyring) = keyring {
+                            keyring.learn(&e).await;
+                        }
                         show(&e)?;
                         marks.push(seq);
                     }
@@ -266,12 +272,25 @@ pub struct Shown<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<attachments::Listed>,
     reactions: &'a [Reacted],
+    /// What the CLI made of a sealed message, whose text it opened or shows `[sealed]` or `[forged]` for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sealed: Option<State>,
 }
 
 impl<'a> Shown<'a> {
     pub fn new(envelope: &Envelope, reactions: &'a [Reacted]) -> Self {
         let attachments = attachments::listed(&envelope.attachments, |id| envelope.attachment_handle(id));
-        Self { envelope: Envelope { attachments: Vec::new(), ..envelope.clone() }, attachments, reactions }
+        Self {
+            envelope: Envelope { attachments: Vec::new(), ..envelope.clone() },
+            attachments,
+            reactions,
+            sealed: None,
+        }
+    }
+
+    /// With what the CLI made of the message if sealed ([`crate::sealed::read`]).
+    pub fn sealed(self, sealed: Option<State>) -> Self {
+        Self { sealed, ..self }
     }
 }
 
@@ -489,6 +508,7 @@ mod tests {
             let select = Select { limit: Some(1), ..Default::default() };
             let follow = inbox.follow(
                 &select,
+                None,
                 |e| {
                     shown.push(e.text.clone());
                     Ok(())

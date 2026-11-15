@@ -30,7 +30,7 @@ pub enum Why {
 }
 
 impl Why {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Approval => "approve",
             Self::Stuck => "stuck",
@@ -39,7 +39,7 @@ impl Why {
         }
     }
 
-    fn color(self) -> Color {
+    pub fn color(self) -> Color {
         match self {
             Self::Approval => Color::Yellow,
             Self::Stuck => Color::Red,
@@ -94,9 +94,9 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     items
 }
 
-/// How many things wait on the human at `now`: the items but the requests settled lately.
-pub fn waiting(data: &Data, now: DateTime<Utc>) -> usize {
-    items(data, now).iter().filter(|i| i.request.as_ref().is_none_or(|(_, settled)| settled.is_none())).count()
+/// What waits on the human at `now`: the items but the requests settled lately.
+pub fn waiting(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
+    items(data, now).into_iter().filter(|i| i.request.as_ref().is_none_or(|(_, settled)| settled.is_none())).collect()
 }
 
 #[derive(Debug, Default)]
@@ -218,7 +218,7 @@ mod tests {
                 (Why::Finished, done.clone())
             ]
         );
-        assert_eq!(waiting(&m.data, at(4)), 4);
+        assert_eq!(waiting(&m.data, at(4)).len(), 4);
 
         m.key(Key::Down, at(4));
         assert_eq!(m.key(Key::Char('r'), at(4)), None);
@@ -227,7 +227,7 @@ mod tests {
         assert!(m.asking.is_none(), "the decision stored ends the answering");
         m.take(Event::Approval(Update::Resolved(second, State::Expired)), at(5));
         assert_eq!(items(&m.data, at(5)).len(), 4, "the settled request keeps its card a while");
-        assert_eq!(waiting(&m.data, at(5)), 3);
+        assert_eq!(waiting(&m.data, at(5)).len(), 3);
         assert_eq!(items(&m.data, at(500)).len(), 3);
 
         m.key(Key::Home, at(5));

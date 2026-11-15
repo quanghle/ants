@@ -3,17 +3,31 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::{Envelope, STREAM, THREADS_BUCKET, done_key, marks_key, summary_key, title_key};
-use crate::{Error, MAX_TITLE, ThreadId, UserId};
+use crate::{Error, MAX_TITLE, Sealed, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
 /// any human sets, renames or clears. `by` is the human that last set it, as its CLI says, or the ant whose suggestion
 /// ([`Envelope::title`]) a human's CLI stored on a thread that never had a title.
+///
+/// On a thread between two humans whose messages are sealed, the title is sealed like a message for the devices of
+/// both: `title` is then empty and `sealed` holds a [`SealedTitle`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadTitle {
     pub thread_id: ThreadId,
     pub title: String,
     pub by: UserId,
     pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Box<Sealed>>,
+}
+
+/// What the [`Sealed::body`] of a sealed [`ThreadTitle`] holds: its title, with the thread and the human that set
+/// it, which a reader checks against the title it came in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedTitle {
+    pub thread_id: ThreadId,
+    pub by: UserId,
+    pub title: String,
 }
 
 impl ThreadTitle {
@@ -25,7 +39,7 @@ impl ThreadTitle {
         if count == 0 || count > MAX_TITLE || trimmed.chars().any(breaks_title) {
             return Err(Error::InvalidTitle(title.to_owned()));
         }
-        Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now() })
+        Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now(), sealed: None })
     }
 }
 

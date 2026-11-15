@@ -68,6 +68,18 @@ fn attachment() -> Attachment {
     }
 }
 
+fn sealed() -> Sealed {
+    Sealed {
+        v: SEALED_VERSION,
+        device: device(),
+        keys: vec![
+            SealedKey { device: device(), key: "eGt2MQ==".to_owned() },
+            SealedKey { device: "019a7d2a-0000-7000-8000-000000000002".parse().unwrap(), key: "eGt2MQ==".to_owned() },
+        ],
+        body: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+    }
+}
+
 fn escalation() -> Escalation {
     Escalation {
         stuck: user("dev-a"),
@@ -123,6 +135,7 @@ fn envelope() -> Envelope {
         answer: Some(Answer { question: id(4), option: Some(2) }),
         steer: true,
         attachments: vec![attachment()],
+        sealed: Some(Box::new(sealed())),
         sent_at: at(0),
     }
 }
@@ -145,6 +158,7 @@ fn plain_envelope() -> Envelope {
         answer: None,
         steer: false,
         attachments: Vec::new(),
+        sealed: None,
         ..envelope()
     }
 }
@@ -256,8 +270,25 @@ fn kv_entries() {
     snap("channel_read_markers", &ChannelReadMarkers { channels: BTreeMap::from([(channel(), marker)]) });
     snap(
         "thread_title",
-        &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },
+        &ThreadTitle {
+            thread_id: thread(),
+            title: "Release 0.2".to_owned(),
+            by: user("alice"),
+            at: at(0),
+            sealed: None,
+        },
     );
+    snap(
+        "thread_title_sealed",
+        &ThreadTitle {
+            thread_id: thread(),
+            title: String::new(),
+            by: user("alice"),
+            at: at(0),
+            sealed: Some(Box::new(sealed())),
+        },
+    );
+    snap("sealed_title", &SealedTitle { thread_id: thread(), by: user("alice"), title: "Lunch".to_owned() });
     snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
     snap(
         "thread_summary",
@@ -347,7 +378,30 @@ fn envelopes() {
             to: user("alice"),
             in_reply_to: Some(id(1)),
             summary: Some(SummaryRequest { tokens: Some(1834), ..digest }),
+            ..message.clone()
+        },
+    );
+    snap(
+        "envelope_sealed",
+        &Envelope {
+            from: user("alice"),
+            to: user("bob"),
+            text: String::new(),
+            owner: Some(user("alice")),
+            sealed: Some(Box::new(sealed())),
             ..message
+        },
+    );
+    snap(
+        "sealed_body",
+        &SealedBody {
+            from: user("alice"),
+            to: user("bob"),
+            thread_id: thread(),
+            id: id(1),
+            text: "lunch?".to_owned(),
+            title: Some("Lunch".to_owned()),
+            attachments: vec![attachment()],
         },
     );
     snap("mention", &mention());
@@ -563,13 +617,10 @@ fn enrollment() {
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );
+    snap("renew_reply", &RenewReply::signed("dev-a", "UDEF", "eyJ0eXAiOiJKV1QifQ.renewed".to_owned()));
     snap(
-        "renew_reply",
-        &RenewReply {
-            name: "dev-a".to_owned(),
-            public_key: "UDEF".to_owned(),
-            jwt: "eyJ0eXAiOiJKV1QifQ.renewed".to_owned(),
-        },
+        "renew_reply_refused",
+        &RenewReply::refused("alice", "UDEF", "GitHub user octocat is no member of acme any more".to_owned()),
     );
 }
 
