@@ -27,6 +27,7 @@ pub(crate) async fn run(
             Some(path) => path,
             None => auth::default_dir()?.with_file_name("leaf.conf"),
         },
+        hub_config: auth::default_dir()?.with_file_name("nats.conf"),
         harnesses: !no_harness,
         team: team_dir(team)?,
         webhooks: match webhook_config {

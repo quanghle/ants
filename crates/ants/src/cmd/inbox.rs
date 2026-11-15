@@ -3,8 +3,9 @@
 use ants_daemon::{dead, reactions};
 use ants_proto::{Envelope, Following, Uuid};
 use anyhow::{Result, bail};
+use futures::StreamExt as _;
 
-use crate::{Listing, Nats, inbox, presence, thread, tools};
+use crate::{Listing, Nats, inbox, presence, reacted, thread, tools};
 
 /// Why credentials of a human from before the read marker cannot mark replies read.
 pub(crate) const REISSUE_HUMAN: &str = "these credentials predate the read marker every device of a human shares: issue new ones \
@@ -36,14 +37,23 @@ pub(crate) async fn show(
         }
         Ok(())
     };
-    let show = |e: &Envelope| show_with(e, &[]);
+    // Watched before reading, so no reaction to a message shown is missed.
+    let changes = if follow { reacted::changes(nats, &js).await } else { futures::stream::pending().boxed() };
+    let shown = reacted::Shown::default();
+    let show = |e: &Envelope| {
+        shown.add(e.id, &e.from, &e.text);
+        show_with(e, &[])
+    };
     let unread = inbox.unread(select).await?;
     if unread.is_empty() && !follow && !json {
         println!("no unread replies");
     }
     let ids: Vec<Uuid> = unread.iter().map(|e| e.id).collect();
     let reactions = inbox::reactions_or_none(&js, &ids).await;
-    unread.iter().try_for_each(|e| show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice)))?;
+    for e in &unread {
+        shown.add(e.id, &e.from, &e.text);
+        show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice))?;
+    }
     if follow {
         // A dead letter stored here tells the human through the inbox, like one the daemon stores.
         let watch = async {
@@ -101,9 +111,12 @@ pub(crate) async fn show(
             Box::pin(presence::while_following(&js, nats.domain, me, device, Following::Approvals, shown)).await;
         };
         let followed = async { tokio::join!(followed, requests).0 };
+        // Ends only when printing fails.
+        let reactions = shown.show(changes, json);
         tokio::select! {
             followed = followed => followed?,
             () = watch => {}
+            printed = reactions => printed?,
         }
     }
     Ok(())

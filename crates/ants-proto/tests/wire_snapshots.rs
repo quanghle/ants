@@ -96,6 +96,7 @@ fn envelope() -> Envelope {
         webhook: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
+        title: Some("Fix the build".to_owned()),
         sent_at: at(0),
     }
 }
@@ -112,6 +113,7 @@ fn plain_envelope() -> Envelope {
         webhook: false,
         allow: None,
         mention: None,
+        title: None,
         ..envelope()
     }
 }
@@ -215,6 +217,13 @@ fn kv_entries() {
         },
     );
     snap("notify_prefs", &NotifyPrefs { snoozed_until: Some(at(30)), muted: BTreeMap::from([(thread(), at(45))]) });
+    snap(
+        "held_notices",
+        &HeldNotices {
+            since: at(0),
+            counts: BTreeMap::from([("approval".to_owned(), 2), ("completion".to_owned(), 1)]),
+        },
+    );
     snap("following_variants", &[Following::Inbox, Following::Approvals]);
     snap("presence", &Presence { human: user("alice"), device: device(), following: Following::Inbox, since: at(0) });
 }
@@ -511,6 +520,7 @@ fn ant_requests() {
 #[test]
 fn status() {
     snap("state_variants", &[State::Working, State::WaitingApproval, State::Idle, State::Failed, State::SignedOut]);
+    snap("decided_by_variants", &[DecidedBy::Human, DecidedBy::Chain, DecidedBy::Expiry]);
     snap("plan_step", &PlanStep { content: "write tests".to_owned(), status: "in_progress".to_owned() });
     let updates = [
         ("state", StatusUpdate::State { state: State::WaitingApproval }),
@@ -537,6 +547,15 @@ fn status() {
         ("queued", StatusUpdate::Queued { message: id(1), ahead: 2 }),
         ("approval", StatusUpdate::Approval { request_id: id(10) }),
         ("escalated", StatusUpdate::Escalated { to: user("lead"), escalation: escalation() }),
+        (
+            "decided",
+            StatusUpdate::Decided {
+                request_id: id(10),
+                verdict: Verdict::AllowOnce,
+                by: DecidedBy::Chain,
+                decider: Some(user("lead")),
+            },
+        ),
     ];
     for (kind, update) in updates {
         let event = StatusEvent { ant: user("dev-a"), thread_id: thread(), update, at: at(0) };
@@ -614,6 +633,13 @@ fn hooks_doc_examples_parse() {
     );
     let StatusUpdate::Escalated { to, escalation } = escalated.update else { panic!("not an escalated update") };
     assert_eq!((to, escalation.reason, escalation.request_id), (user("lead"), EscalationReason::TurnBudget, None));
+    let decided: StatusEvent = parse(
+        r#"{"ant": "dev-a", "thread_id": "019a7d2c-0000-7000-8000-000000000001", "type": "decided",
+            "request_id": "019a7d2e-0000-7000-8000-00000000000a", "verdict": "reject", "by": "human",
+            "at": "2025-01-01T12:00:00Z"}"#,
+    );
+    let StatusUpdate::Decided { verdict, by, decider, .. } = decided.update else { panic!("not a decided update") };
+    assert_eq!((verdict, by, decider), (Verdict::Reject, DecidedBy::Human, None));
 }
 
 /// Documents in the shape older versions wrote, before the fields they lack were added, still parse, the missing

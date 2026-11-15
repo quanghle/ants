@@ -211,7 +211,7 @@ async fn complete(
 }
 
 /// Tell where the credentials of the ant and the renewed `uplink` went, and reload the daemon listing the ant in the
-/// file at `path`, then restart the leaf node, to take them up.
+/// file at `path`, then have the leaf node connect its uplink again ([`leaf::use_renewed_uplink`]), to take them up.
 fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Path) {
     println!("credentials of {name} in {}", out.display());
     match uplink {
@@ -245,22 +245,9 @@ fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Pat
             crate::service::manual(Service::Daemon, Action::Reload)
         ),
     }
-    // Last, as the restart cuts the connections through the leaf node.
+    // Last, as a restart, the fallback before nats-server 2.14, cuts the connections through the leaf node.
     if let Some((true, _, conf)) = uplink {
-        match services.apply(Service::Nats, Action::Restart, conf) {
-            Outcome::Done(command) => {
-                println!("leaf node restarted to use the renewed uplink credentials ({command})");
-            }
-            Outcome::NotRunning => {
-                println!("the leaf node service is not running; it uses the renewed uplink credentials once started");
-            }
-            outcome => println!(
-                "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP does not read them \
-                 again",
-                failure(outcome),
-                crate::service::manual(Service::Nats, Action::Restart)
-            ),
-        }
+        println!("{}", leaf::use_renewed_uplink(conf, |action| services.apply(Service::Nats, action, conf)));
     }
 }
 

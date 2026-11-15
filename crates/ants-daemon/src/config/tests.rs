@@ -105,7 +105,7 @@ Review changes for correctness."""
     let escalate_to = vec!["lead".parse().unwrap(), "dev-b".parse().unwrap()];
     let chain = Chain { escalate_to, max_hops: 2, after: None, remind: None };
     assert_eq!(config.escalation, chain, "0 waits for the leader for good and never reminds");
-    assert!(config.worktrees);
+    assert_eq!(config.worktrees, Some(true));
 
     let b = ants[1].clone();
     assert_eq!(b.nats.as_deref(), Some("nats://127.0.0.1:4222"));
@@ -119,7 +119,7 @@ Review changes for correctness."""
     assert!(config.allow.is_empty(), "rejects every tool request unless the human allows it");
     assert_eq!(config.approval_timeout, crate::approvals::DEFAULT_TIMEOUT);
     assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-    assert!(!config.worktrees, "threads share the workdir by default");
+    assert_eq!(config.worktrees, None, "settled at start by crate::worktrees::per_thread");
     assert_eq!(config.limits, PromptLimits::default());
     assert_eq!(config.caps, Caps::default(), "no spend caps unless set");
     assert_eq!(config.spend_warn_percent, DEFAULT_SPEND_WARN_PERCENT);
@@ -598,7 +598,7 @@ fn entries_read_back_as_written() {
     full.capabilities = vec!["rust".to_owned(), "nats".to_owned()];
     full.escalate_to = vec!["lead".parse().unwrap()];
     full.max_harnesses = 1;
-    full.worktrees = true;
+    full.worktrees = Some(false);
     full.prompt_timeout = Duration::ZERO;
     full.idle_timeout = Duration::from_mins(90);
     full.max_thread_cost = Some(2.5);

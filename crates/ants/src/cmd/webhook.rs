@@ -39,8 +39,9 @@ pub(crate) enum WebhookCommand {
         config: Option<PathBuf>,
     },
     /// List a new webhook in the config file in one step: issue its credentials (or ask for them over NATS with
-    /// --enroll), write a new secret to <name>.secret beside the config file (mode 0600), add its [[webhook]] entry,
-    /// reload the webhook service, and print the URL and secret to give the sender.
+    /// --enroll), write a new secret (or the one given, such as GitLab's signing token) to <name>.secret beside the
+    /// config file (mode 0600), add its [[webhook]] entry, reload the webhook service, and print the URL and secret to
+    /// give the sender.
     Add(Box<webhook_add::AddArgs>),
 }
 

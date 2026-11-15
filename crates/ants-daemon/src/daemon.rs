@@ -101,8 +101,9 @@ pub struct Config {
     pub approval_timeout: Duration,
     /// Most harness processes alive at once; the least recently used idle one stops to make room.
     pub max_harnesses: usize,
-    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]).
-    pub worktrees: bool,
+    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]); unset,
+    /// [`crate::worktrees::per_thread`] decides at start.
+    pub worktrees: Option<bool>,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
     /// Capabilities the ant advertises in the roster.
@@ -152,7 +153,26 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
-    if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
+    let config = settle_worktrees(config).await;
+    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
+        tracing::info!("another daemon serves the ant; waiting for it to stop");
+    }
+    Ok(())
+}
+
+/// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
+/// running at once in one git work tree.
+async fn settle_worktrees(config: Config) -> Config {
+    let worktrees = crate::worktrees::per_thread(&config.workdir, config.max_harnesses, config.worktrees).await;
+    if config.worktrees.is_none() && worktrees {
+        tracing::info!(
+            ant = %config.ant,
+            workdir = %config.workdir.display(),
+            max_harnesses = config.max_harnesses,
+            "giving each thread its own git worktree, as threads may run at once in a git workdir; \
+             worktrees = false shares the workdir"
+        );
+    } else if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
         tracing::warn!(
             ant = %config.ant,
             workdir = %config.workdir.display(),
@@ -161,10 +181,7 @@ pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
              worktrees = true gives each thread its own"
         );
     }
-    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
-        tracing::info!("another daemon serves the ant; waiting for it to stop");
-    }
-    Ok(())
+    Config { worktrees: Some(worktrees), ..config }
 }
 
 /// How [`serve`] ended.
@@ -437,8 +454,11 @@ async fn harness_pool(
 ) -> Pool {
     let mut pool =
         Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
-    let isolating =
-        if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
+    let isolating = if config.worktrees == Some(true) {
+        Worktrees::find(&config.ant, &config.workdir, &config.home).await
+    } else {
+        None
+    };
     if let Some(worktrees) = isolating {
         pool = pool.with_worktrees(worktrees);
     } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
@@ -487,7 +507,7 @@ fn log_serving(config: &Config) {
         model_settings = ?config.model_settings,
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
-        worktrees = config.worktrees,
+        worktrees = config.worktrees == Some(true),
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,
         allow = ?config.allow,
@@ -1795,9 +1815,12 @@ impl Inbox<'_> {
         let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
+        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
+            message.title = mcp.take_title(thread);
+        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit

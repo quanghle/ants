@@ -11,6 +11,7 @@ fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
         js_domain: None,
         config: server.dir().join("no-config.toml"),
         leaf_config: server.dir().join("no-leaf.conf"),
+        hub_config: server.dir().join("no-nats.conf"),
         harnesses: false,
         team: server.dir().join("no-team"),
         webhooks: server.dir().join("no-webhooks.toml"),
@@ -206,6 +207,7 @@ async fn a_missing_harness_fails_with_its_fix() {
         js_domain: None,
         config: config.clone(),
         leaf_config: dir.join("leaf.conf"),
+        hub_config: dir.join("no-nats.conf"),
         harnesses: true,
         team: dir.join("no-team"),
         webhooks: dir.join("no-webhooks.toml"),
@@ -223,16 +225,17 @@ async fn a_missing_harness_fails_with_its_fix() {
 }
 
 #[test]
-fn ants_sharing_a_git_workdir_without_worktrees_are_warned() {
+fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     let dir = ants_test_support::scratch_dir("doctor-shared-workdir").canonicalize().unwrap();
     std::fs::create_dir(dir.join(".git")).unwrap();
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
         "messenger = false\n\
-             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworktrees = false\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
-             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\n",
+             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\nworktrees = false\n\
+             [[ant]]\nname = \"dev-d\"\nworkdir = \".\"\n",
     )
     .unwrap();
     let loaded = config::load(&config).unwrap();
@@ -289,6 +292,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
         js_domain: None,
         config,
         leaf_config: leaf_config.clone(),
+        hub_config: dir.join("no-nats.conf"),
         harnesses: false,
         team: dir.clone(),
         webhooks: dir.join("no-webhooks.toml"),
@@ -328,6 +332,7 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
             js_domain: None,
             config: hub.dir().join("no-config.toml"),
             leaf_config: hub.dir().join("no-leaf.conf"),
+            hub_config: hub.dir().join("no-nats.conf"),
             harnesses: false,
             team: hub.dir().join("auth"),
             webhooks: hub.dir().join("no-webhooks.toml"),
@@ -702,4 +707,62 @@ async fn the_programs_of_exec_sinks_must_be_there_to_run() {
     let ready = format!("human alice notify #1: {} is executable", program.display());
     assert_eq!(commands(&check_webhooks(&path).await), [(Status::Ok, ready), (Status::Warn, off_path)]);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hub_service_of_ants_setup_must_be_installed_and_running() {
+    let home = ants_test_support::scratch_dir("doctor-hub-service").canonicalize().unwrap();
+    let hub_config = home.join("nats.conf");
+    let setup = Setup {
+        nats: "nats://127.0.0.1:4222".to_owned(),
+        creds: None,
+        js_domain: None,
+        config: home.join("no-config.toml"),
+        leaf_config: home.join("leaf.conf"),
+        hub_config: hub_config.clone(),
+        harnesses: false,
+        team: home.join("no-team"),
+        webhooks: home.join("no-webhooks.toml"),
+        home: Some(home.clone()),
+    };
+    let stopped = || {
+        Services::answering(&home, |command| {
+            let (ok, stdout) = match command {
+                "id -u" => (true, "501\n"),
+                c if c.starts_with("launchctl print") => (true, "\tstate = not running\n"),
+                _ => (false, ""),
+            };
+            crate::service::Ran { ok, stdout: stdout.to_owned(), stderr: String::new() }
+        })
+    };
+    assert!(named(&check_services(&setup, &mut stopped()), "hub service").is_empty(), "nothing without nats.conf");
+
+    std::fs::write(&hub_config, "listen: 127.0.0.1:4222\n").unwrap();
+    let checks = check_services(&setup, &mut stopped());
+    let missing = one(&checks, "hub service");
+    assert_eq!(missing.status, Status::Warn, "{missing}");
+    assert_eq!(missing.fix, [format!("scripts/install-units.sh --nats-conf {}", hub_config.display())]);
+    assert_eq!(one(&checks, "leaf node service").status, Status::Skip, "{checks:#?}");
+
+    if !install_units(&home, &["--nats-conf", hub_config.to_str().unwrap()]) {
+        return;
+    }
+    let checks = check_services(&setup, &mut stopped());
+    let down = one(&checks, "hub service");
+    assert_eq!(down.status, Status::Fail, "{down}");
+    assert_eq!(down.detail, format!("installed for {}, not running", hub_config.display()));
+    let start = if cfg!(target_os = "macos") {
+        "launchctl kickstart gui/501/ants.nats"
+    } else {
+        "systemctl --user start ants-nats"
+    };
+    assert_eq!(down.fix, [start]);
+    assert_eq!(one(&check_services(&setup, &mut running(&home)), "hub service").status, Status::Ok);
+
+    std::fs::write(home.join("leaf.conf"), "").unwrap();
+    let checks = check_services(&setup, &mut running(&home));
+    assert!(named(&checks, "hub service").is_empty(), "the leaf node is the machine's nats-server: {checks:#?}");
+    assert_eq!(one(&checks, "leaf node service").status, Status::Warn, "{checks:#?}");
+    std::fs::remove_dir_all(&home).unwrap();
 }

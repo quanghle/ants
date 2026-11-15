@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, MAX_TITLE, ThreadId, UserId};
 #[cfg(doc)]
-use crate::{STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Envelope, STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Error, MAX_TITLE, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
-/// any human sets, renames or clears. `by` is the human that last set it, as its CLI says.
+/// any human sets, renames or clears. `by` is the human that last set it, as its CLI says, or the ant whose suggestion
+/// ([`Envelope::title`]) a human's CLI stored on a thread that never had a title.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadTitle {
     pub thread_id: ThreadId,
@@ -103,6 +104,22 @@ impl ThreadMarks {
         self.archived.remove(thread).is_some()
     }
 
+    /// Forget the marks placed before `before` on the threads `gone` says have no message left in [`STREAM`], and the
+    /// keeps ([`ThreadMarks::keep`]) of threads `active` says had a message stored at or after they were kept, which
+    /// then count as idle from that message on anyway. How many it forgot.
+    pub fn prune(
+        &mut self,
+        before: DateTime<Utc>,
+        gone: impl Fn(&ThreadId) -> bool,
+        active: impl Fn(&ThreadId, DateTime<Utc>) -> bool,
+    ) -> usize {
+        let had = self.pinned.len() + self.archived.len() + self.kept.len();
+        self.pinned.retain(|thread, at| *at >= before || !gone(thread));
+        self.archived.retain(|thread, archived| archived.at >= before || !gone(thread));
+        self.kept.retain(|thread, at| (*at >= before || !gone(thread)) && !active(thread, *at));
+        had - self.pinned.len() - self.archived.len() - self.kept.len()
+    }
+
     /// How `thread`, whose last message read has [`STREAM`] sequence `last`, is marked.
     pub fn mark(&self, thread: &ThreadId, last: u64) -> Option<Mark> {
         if self.pinned.contains_key(thread) {
@@ -189,6 +206,34 @@ mod tests {
         assert!(marks.keep(&thread) && marks.pin(&thread) && marks.kept.is_empty(), "pinning drops the keep");
         assert!(!marks.idle(&thread, old, cutoff) && !marks.keep(&thread), "a pinned thread is never idle");
         assert_eq!(marks.mark_at(&thread, 1, old, Some(cutoff)), Some(Mark::Pinned));
+    }
+
+    #[test]
+    fn only_old_marks_of_threads_gone_are_forgotten() {
+        let (gone, old_gone, kept) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut marks = ThreadMarks::default();
+        let before = Utc::now() - chrono::Duration::days(30);
+        let long_ago = before - chrono::Duration::seconds(1);
+        marks.pin(&gone);
+        marks.pinned.insert(old_gone.clone(), long_ago);
+        marks.archived.insert(kept.clone(), Archived { at: long_ago, after: 1 });
+        let mut pruned = marks.clone();
+        let inactive = |_: &ThreadId, _| false;
+        assert_eq!(pruned.prune(before, |t| *t != kept, inactive), 1, "only the old mark of a thread gone");
+        assert!(pruned.pinned.contains_key(&gone) && !pruned.pinned.contains_key(&old_gone));
+        assert!(pruned.archived.contains_key(&kept));
+        assert_eq!(marks.prune(before, |_| true, inactive), 2);
+        assert_eq!(marks.pinned.keys().collect::<Vec<_>>(), [&gone], "a recent mark stays");
+
+        let (old_keep, recent_keep, outdone, idle) =
+            (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let now = Utc::now();
+        marks.kept = [(&old_keep, long_ago), (&recent_keep, now), (&outdone, now), (&idle, now)]
+            .map(|(t, at)| (t.clone(), at))
+            .into();
+        let active = |t: &ThreadId, at| *t == outdone || (*t == idle && at > now);
+        assert_eq!(marks.prune(before, |t| *t != idle, active), 2, "the old keep of a thread gone, one outdone");
+        assert!(marks.kept.len() == 2 && marks.kept.contains_key(&recent_keep) && marks.kept.contains_key(&idle));
     }
 
     #[test]

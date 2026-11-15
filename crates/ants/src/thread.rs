@@ -26,6 +26,8 @@ use serde::Serialize;
 
 use crate::{thread_meta, tools};
 
+pub use message::{MessagePick, recent_messages};
+
 /// How long the opening message's line in `ants thread list` may be.
 const OPENING: usize = 72;
 /// How far back a start of a thread id looks for the threads of the CLI's user.
@@ -111,6 +113,9 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
+    /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_title: Option<String>,
 }
 
 impl Entry {
@@ -130,6 +135,7 @@ impl Entry {
             forged: false,
             reactions: Vec::new(),
             reason: None,
+            suggested_title: None,
         }
     }
 
@@ -186,6 +192,7 @@ impl Parser {
                 text,
                 forged,
                 reason: e.escalation.map(|x| x.reason),
+                suggested_title: e.title.filter(|_| !forged),
                 ..entry(kind, e.thread_id)
             });
         }
@@ -280,6 +287,9 @@ pub struct Summary {
     /// The thread's title, which any human sets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The first title an ant suggested for it, and that ant.
+    #[serde(skip)]
+    pub suggested: Option<(UserId, String)>,
     /// Pinned by the CLI's human.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -354,6 +364,7 @@ impl Threads {
             matched: None,
             escalated: None,
             title: None,
+            suggested: None,
             pinned: false,
             archived: false,
             new_activity: false,
@@ -368,6 +379,11 @@ impl Threads {
         summary.channels.extend(entry.channel.iter().cloned());
         if summary.owner.is_none() {
             summary.owner.clone_from(&entry.owner);
+        }
+        if summary.suggested.is_none()
+            && let (Some(from), Some(title)) = (&entry.from, &entry.suggested_title)
+        {
+            summary.suggested = Some((from.clone(), title.clone()));
         }
         if let (Some(grep), None) = (&self.grep, &summary.matched) {
             summary.matched = entry.text.lines().find(|line| line.to_lowercase().contains(grep.as_str())).map(|line| {
@@ -663,10 +679,25 @@ async fn recent(js: &jetstream::Context, user: &UserId, start: consumer::Deliver
 }
 
 /// The latest message of each thread with an id starting with `prefix` stored in the last [`RECENT`], whoever took
-/// part in it, most recent first. For a start of a time-ordered id, only the messages stored while such an id was
-/// made, give or take the clocks' skew ([`CLOCK_SLACK`]) and up to [`LATE`] after, are read: a thread's first message
-/// is.
+/// part in it, most recent first.
 async fn any_recent(js: &jetstream::Context, prefix: &str) -> Result<Vec<Entry>> {
+    let mut threads: HashMap<ThreadId, Entry> = HashMap::new();
+    scan_made(js, prefix, |entry| {
+        if entry.thread_id.as_str().starts_with(prefix) {
+            threads.insert(entry.thread_id.clone(), entry);
+        }
+    })
+    .await?;
+    let mut threads: Vec<Entry> = threads.into_values().collect();
+    threads.sort_by_key(|e| std::cmp::Reverse(e.seq));
+    Ok(threads)
+}
+
+/// Hand `take` the entry of every message, not forged, stored in the last [`RECENT`] when an id starting with `prefix`
+/// may have been made, oldest first. For a start of a time-ordered id, only the messages stored while such an id was
+/// made, give or take the clocks' skew ([`CLOCK_SLACK`]) and up to [`LATE`] after, are read: a thread's first message,
+/// or the message with such an id, is.
+async fn scan_made(js: &jetstream::Context, prefix: &str, mut take: impl FnMut(Entry)) -> Result<()> {
     let now = SystemTime::now();
     let floor = now.checked_sub(RECENT).unwrap_or(SystemTime::UNIX_EPOCH);
     let (from, to) = match made_within(prefix) {
@@ -674,25 +705,20 @@ async fn any_recent(js: &jetstream::Context, prefix: &str) -> Result<Vec<Entry>>
         None => (floor, now),
     };
     if from > to {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let mut threads: HashMap<ThreadId, Entry> = HashMap::new();
     let mut parser = Parser::default();
     let start = consumer::DeliverPolicy::ByStartTime { start_time: from.into() };
     reading::read_back(js, "", Reading::Gets, subject::ALL, start, |seq, stored, subject, payload| {
         if stored > to {
             return ControlFlow::Break(());
         }
-        let entry = parser.entry(seq, stored.into(), subject, payload);
-        if let Some(entry) = entry.filter(|e| !e.forged && e.thread_id.as_str().starts_with(prefix)) {
-            threads.insert(entry.thread_id.clone(), entry);
+        if let Some(entry) = parser.entry(seq, stored.into(), subject, payload).filter(|e| !e.forged) {
+            take(entry);
         }
         ControlFlow::Continue(())
     })
-    .await?;
-    let mut threads: Vec<Entry> = threads.into_values().collect();
-    threads.sort_by_key(|e| std::cmp::Reverse(e.seq));
-    Ok(threads)
+    .await
 }
 
 /// The span in which a time-ordered (version 7 UUID) thread id starting with `prefix` was made, from the time its
@@ -828,12 +854,15 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     if let Some(start) = start {
         scan(&js, start, |entry| threads.add(&entry)).await?;
     }
+    let present: HashMap<ThreadId, DateTime<Utc>> =
+        threads.summaries().map(|t| (t.thread_id.clone(), t.last_at)).collect();
     let (mut threads, omitted) = threads.finish(select, &marks);
     if let Some(meta) = &meta {
         let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
         for thread in &mut threads {
             thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
         }
+        adopt_suggested(meta, &mut threads).await;
     }
     if json {
         for thread in &threads {
@@ -847,7 +876,62 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     if omitted > 0 {
         eprintln!("{omitted} less recently active threads left out: raise --limit or narrow --since");
     }
+    if let (Some(meta), Some(start)) = (&meta, &start) {
+        prune(meta, &marks, start, &present).await;
+    }
     Ok(())
+}
+
+/// Forget the marks of the CLI's human and the titles of the threads a read from `start` found no message on though
+/// it read every message stored on them ([`covers`]), set more than [`thread_meta::KEPT`] ago, and the human's keeps
+/// of threads `present` (each with its last message's time) since active again; a failure is only warned of. Titles
+/// are looked through only when the read went back that far.
+pub async fn prune(
+    meta: &thread_meta::Meta,
+    marks: &ThreadMarks,
+    start: &consumer::DeliverPolicy,
+    present: &HashMap<ThreadId, DateTime<Utc>>,
+) {
+    let titles = match start {
+        consumer::DeliverPolicy::All => true,
+        consumer::DeliverPolicy::ByStartTime { start_time } => {
+            SystemTime::now().checked_sub(thread_meta::KEPT).is_some_and(|kept| SystemTime::from(*start_time) <= kept)
+        }
+        _ => false,
+    };
+    let gone = |thread: &ThreadId| !present.contains_key(thread) && covers(start, thread);
+    let active = |thread: &ThreadId, kept| present.get(thread).is_some_and(|last_at| *last_at >= kept);
+    match meta.prune(marks, titles, gone, active).await {
+        Ok((0, 0)) => {}
+        Ok((marks, titles)) => tracing::debug!(marks, titles, "forgot the marks and titles of threads with no message"),
+        Err(e) => {
+            tracing::warn!("not forgetting the titles, pins, archives and keeps of threads with no message: {e:#}")
+        }
+    }
+}
+
+/// Whether a read from `start` reads every message stored on `thread`: one from the thread's start on, when its id
+/// is time-ordered.
+fn covers(start: &consumer::DeliverPolicy, thread: &ThreadId) -> bool {
+    match start {
+        consumer::DeliverPolicy::All => true,
+        consumer::DeliverPolicy::ByStartTime { start_time } => {
+            ants_daemon::channel::thread_start(thread).is_some_and(|at| at >= SystemTime::from(*start_time))
+        }
+        _ => false,
+    }
+}
+
+/// Title each of `threads` without a title as an ant suggested, if it never had one
+/// ([`thread_meta::Meta::adopt_title`]).
+async fn adopt_suggested(meta: &thread_meta::Meta, threads: &mut [Summary]) {
+    for thread in threads.iter_mut().filter(|t| t.title.is_none()) {
+        let Some((by, text)) = &thread.suggested else { continue };
+        match meta.adopt_title(&thread.thread_id, text, by).await {
+            Ok(title) => thread.title = title.map(|t| t.title),
+            Err(e) => tracing::warn!(thread = %thread.thread_id, "not storing the title {by} suggested: {e:#}"),
+        }
+    }
 }
 
 /// Where to read threads marked so from: the earliest of their starts, or everything kept when an id is not
@@ -902,10 +986,11 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let entries = history(&js, thread, since).await?;
+    let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let (title, mark) = if json {
         (None, None)
     } else {
-        thread_meta::of_or_none(nats, &js, thread, entries.last(), auto_archive).await
+        thread_meta::of_or_none(nats, &js, thread, entries.last(), suggested, auto_archive).await
     };
     if json {
         for entry in &entries {
@@ -920,7 +1005,9 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
             None => println!("thread {thread}"),
         }
         if let Some(title) = title {
-            println!("title: {}", title.title);
+            let by_ant = entries.iter().any(|e| e.suggested_title.is_some() && e.from.as_ref() == Some(&title.by));
+            let suggested = if by_ant { format!(" (suggested by {})", title.by) } else { String::new() };
+            println!("title: {}{suggested}", title.title);
         }
         match mark {
             Some(Mark::Pinned) => println!("pinned"),
@@ -936,6 +1023,8 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
     }
     Ok(())
 }
+
+mod message;
 
 #[cfg(test)]
 mod tests;

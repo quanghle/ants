@@ -86,9 +86,13 @@ pub struct AntOptions {
     #[arg(long)]
     max_harnesses: Option<usize>,
     /// Give each thread its own git worktree of the workdir's repository, under the ant's home, so threads running
-    /// at once do not share a checkout. A workdir outside a git repository stays shared.
+    /// at once do not share a checkout. A workdir outside a git repository stays shared. Default: on for a git
+    /// workdir with max_harnesses above 1.
     #[arg(long)]
     worktrees: bool,
+    /// Have all threads share the workdir, also a git workdir with max_harnesses above 1.
+    #[arg(long, conflicts_with = "worktrees")]
+    no_worktrees: bool,
     /// How long a thread's harness stays without a message before it stops; its session resumes on the next message
     /// (a duration such as 90s, 10m or 1h; default: 10m).
     #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse)]
@@ -141,6 +145,7 @@ impl AntOptions {
             || self.approval_timeout.is_some()
             || self.max_harnesses.is_some()
             || self.worktrees
+            || self.no_worktrees
             || self.idle_timeout.is_some()
             || self.prompt_timeout.is_some()
             || self.max_tool_calls.is_some()
@@ -190,7 +195,9 @@ impl AntOptions {
         if let Some(n) = self.max_harnesses {
             p.max_harnesses = n;
         }
-        p.worktrees |= self.worktrees;
+        if self.worktrees || self.no_worktrees {
+            p.worktrees = Some(self.worktrees);
+        }
         if let Some(timeout) = self.idle_timeout {
             p.idle_timeout = timeout;
         }
@@ -638,6 +645,10 @@ mod tests {
         assert_eq!(picked[0].idle_timeout, config::DEFAULT_IDLE_TIMEOUT);
         assert_eq!((picked[0].max_tool_calls, picked[0].max_daily_cost), (20, Some(7.5)));
         assert_eq!(picked[0].prompt_timeout, config::DEFAULT_PROMPT_TIMEOUT);
+        assert_eq!(picked[0].worktrees, None, "unset unless a flag sets it");
+        let worktrees =
+            |flag: &str| pick(all.clone(), &args(&format!("--ant dev-a {flag}")), path).unwrap()[0].worktrees;
+        assert_eq!((worktrees("--worktrees"), worktrees("--no-worktrees")), (Some(true), Some(false)));
 
         assert_eq!(pick(all.clone(), &args(""), path).unwrap(), all);
         let err = pick(all.clone(), &args("--ant dev-c"), path).unwrap_err().to_string();

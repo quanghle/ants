@@ -139,8 +139,9 @@ pub const READ_BUCKET: &str = "ants_read";
 pub const PRESENCE_BUCKET: &str = "ants_presence";
 /// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
-/// webhook serve` before each notice. Each human reads and writes only its own key ([`Permissions::for_user`]); entries
-/// never expire, what they hold ends at the deadlines it carries.
+/// webhook serve` before each notice; and of what a snooze or quiet hours held back from it ([`HeldNotices`]), keyed by
+/// [`held_key`], for the digest `ants webhook serve` sends when they end. Each human reads and writes only its own keys
+/// ([`Permissions::for_user`]); entries never expire, what they hold ends at the deadlines it carries.
 pub const NOTIFY_BUCKET: &str = "ants_notify";
 /// KV bucket of the reactions to messages: one [`ReactionEntry`] per reactor, message and reaction, keyed by
 /// [`reaction_key`]. Each user writes, and deletes, only its own keys ([`Permissions::for_user`]), a human's devices sharing
@@ -151,7 +152,8 @@ pub const REACTIONS_BUCKET: &str = "ants_reactions";
 /// KV bucket of what humans make of threads: the title of each thread ([`ThreadTitle`], keyed by [`title_key`]), one
 /// for every human, which any human sets, renames or clears, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
-/// ([`Permissions::for_user`]). Ants read and write none of it. Entries never expire.
+/// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`]) gets
+/// there through a human's CLI. Entries never expire.
 pub const THREADS_BUCKET: &str = "ants_threads";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;
@@ -164,7 +166,7 @@ pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
 /// whose messages carry the narrowing on.
-pub const WEBHOOK_ALLOW: [&str; 12] = [
+pub const WEBHOOK_ALLOW: [&str; 13] = [
     "read:*",
     "search",
     "think",
@@ -177,6 +179,7 @@ pub const WEBHOOK_ALLOW: [&str; 12] = [
     "other:route",
     "other:escalate",
     "other:react",
+    "other:suggest_thread_title",
 ];
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
 pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;
