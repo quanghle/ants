@@ -1,10 +1,12 @@
 //! Live harness sessions, one per active thread: capped, stopped when idle, and resumed with session/load.
 //!
 //! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
-//! cap is reached and every live harness is busy, a new thread waits for one to finish.
+//! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
+//! ([`crate::pressure`]) idle harnesses stop at once and the cap is lowered.
 
 use std::collections::HashMap;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ use tokio::sync::Notify;
 
 use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
+use crate::pressure;
 use crate::roster::Workload;
 use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
@@ -94,8 +97,12 @@ pub struct Pool {
     worktrees: Option<Worktrees>,
     /// Each thread works in its worktree, instead of the shared workdir.
     isolate: bool,
-    /// Told the agent each harness starts with, for the roster.
+    /// Told the agent each harness starts with, and whether memory is low, for the roster.
     workload: Option<Arc<Workload>>,
+    /// Watches for low memory, with the cap while it is low.
+    pressure: Option<(Mutex<pressure::Gauge>, usize)>,
+    /// Whether memory was low at the latest check.
+    memory_low: AtomicBool,
 }
 
 impl Pool {
@@ -117,7 +124,20 @@ impl Pool {
             worktrees: None,
             isolate: false,
             workload: None,
+            pressure: None,
+            memory_low: AtomicBool::new(false),
         }
+    }
+
+    /// While `probe` tells of low memory by `settings`, stop idle harnesses at once and run at most
+    /// [`pressure::Settings::max_harnesses`], checking at each [`Pool::evict_idle`]. Nothing when `settings` are off.
+    #[must_use]
+    pub fn with_memory_pressure(self, settings: pressure::Settings, probe: pressure::Probe) -> Self {
+        if settings.is_off() {
+            return self;
+        }
+        let cap = settings.max_harnesses.clamp(1, self.max_live);
+        Self { pressure: Some((Mutex::new(pressure::Gauge::new(settings, probe)), cap)), ..self }
     }
 
     /// Tell `workload` the agent each harness starts with ([`Workload::set_agent`]).
@@ -209,21 +229,63 @@ impl Pool {
         reply
     }
 
-    /// Stop harnesses idle since before `now - idle_after`. Returns how many stopped.
+    /// Stop harnesses idle since before `now - idle_after`, or while memory is low every one with no prompt in flight,
+    /// least recently used first. Returns how many stopped.
     pub fn evict_idle(&self, now: Instant) -> usize {
+        let low = self.check_memory();
+        let idle_after = if low { Duration::ZERO } else { self.idle_after };
         let mut slots = self.slots();
-        let stopped = slots
-            .extract_if(|_, slot| match slot {
-                Slot::Ready(live) => live.busy == 0 && now.saturating_duration_since(live.last_used) >= self.idle_after,
-                Slot::Starting => false,
+        let mut idle: Vec<(ThreadId, Instant)> = slots
+            .iter()
+            .filter_map(|(thread, slot)| match slot {
+                Slot::Ready(live) if live.busy == 0 && now.saturating_duration_since(live.last_used) >= idle_after => {
+                    Some((thread.clone(), live.last_used))
+                }
+                _ => None,
             })
-            .inspect(|(thread, _)| tracing::info!(%thread, "stopping idle harness"))
-            .count();
+            .collect();
+        idle.sort_by_key(|(_, last_used)| *last_used);
+        for (thread, _) in &idle {
+            slots.remove(thread);
+            if low {
+                tracing::info!(%thread, "stopping idle harness: memory is low");
+            } else {
+                tracing::info!(%thread, "stopping idle harness");
+            }
+        }
         drop(slots);
-        if stopped > 0 {
+        if !idle.is_empty() {
             self.changed.notify_waiters();
         }
-        stopped
+        idle.len()
+    }
+
+    /// Read the memory, if watched: whether it is low, which the roster is told. Recovering wakes the threads waiting
+    /// for a harness under the lower cap.
+    fn check_memory(&self) -> bool {
+        let Some((gauge, cap)) = &self.pressure else { return false };
+        let low = gauge.locked().check(chrono::Utc::now(), *cap);
+        if let Some(workload) = &self.workload {
+            let max_harnesses = u32::try_from(*cap).unwrap_or(u32::MAX);
+            workload.set_memory_low(low.map(|low| ants_proto::MemoryLow {
+                since: low.since,
+                available: low.available,
+                max_harnesses,
+            }));
+        }
+        let was = self.memory_low.swap(low.is_some(), Ordering::Relaxed);
+        if was && low.is_none() {
+            self.changed.notify_waiters();
+        }
+        low.is_some()
+    }
+
+    /// The most harnesses alive at once now: fewer while memory is low.
+    fn cap(&self) -> usize {
+        match &self.pressure {
+            Some((_, low_cap)) if self.memory_low.load(Ordering::Relaxed) => *low_cap,
+            _ => self.max_live,
+        }
     }
 
     /// Stop every harness and wait for them to exit. Prompts still in flight end with an error.
@@ -271,8 +333,11 @@ impl Pool {
             }
             None => {}
         }
-        if slots.len() >= self.max_live && !evict_least_recently_used(&mut slots) {
-            return Claim::Wait;
+        let cap = self.cap();
+        while slots.len() >= cap {
+            if !evict_least_recently_used(&mut slots) {
+                return Claim::Wait;
+            }
         }
         slots.insert(thread.clone(), Slot::Starting);
         Claim::Start

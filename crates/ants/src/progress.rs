@@ -207,7 +207,10 @@ impl Status {
                     },
                 }
             }
-            StatusUpdate::Plan { .. } | StatusUpdate::Queued { .. } | StatusUpdate::Escalated { .. } => return,
+            StatusUpdate::Plan { .. }
+            | StatusUpdate::Queued { .. }
+            | StatusUpdate::Escalated { .. }
+            | StatusUpdate::Decided { .. } => return,
         };
         view.stand = stand;
     }

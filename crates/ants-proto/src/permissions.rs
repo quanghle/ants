@@ -11,8 +11,9 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, EnrollRequest, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate, channel_manager_serving_key,
-    daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    AntRequest, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, RenewRequest, StatusUpdate,
+    channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key,
+    thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -60,23 +61,28 @@ fn presence_rights(human: &UserId) -> [String; 3] {
 }
 
 /// What a human's credentials need to hold back its notifications ([`NOTIFY_BUCKET`]): creating the bucket and reading
-/// and writing its own [`NotifyPrefs`] only, by key, so no human snoozes or mutes another's; `ants webhook serve`
-/// reads them with the human's own credentials.
-fn notify_prefs_rights(human: &UserId) -> [String; 4] {
+/// and writing its own [`NotifyPrefs`] and [`HeldNotices`] only, by key, so no human snoozes or mutes another's;
+/// `ants webhook serve` reads them, and counts and claims the held notices, with the human's own credentials.
+fn notify_prefs_rights(human: &UserId) -> [String; 6] {
     let notify = kv_stream(NOTIFY_BUCKET);
     let prefs = subject::notify_prefs(human);
+    let held = subject::notify_held(human);
     [
         format!("$JS.API.STREAM.INFO.{notify}"),
         format!("$JS.API.STREAM.CREATE.{notify}"),
         format!("$JS.API.DIRECT.GET.{notify}.{prefs}"),
         prefs,
+        format!("$JS.API.DIRECT.GET.{notify}.{held}"),
+        held,
     ]
 }
 
 /// What a user's credentials need for reactions ([`REACTIONS_BUCKET`]): putting, deleting and reading back by direct
 /// gets its own keys only, so no one forges or removes another's reaction; and for a human, creating the bucket and
 /// reading every reaction, singly and through the ordered consumers behind listing and watching them. An ant reads no
-/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read.
+/// one else's: subjects cannot tie a message id to the threads and channels whose messages it may read. It asks for
+/// those to a message instead, only as itself ([`subject::reactions`]), and a human's `ants webhook serve` answers,
+/// on the ant's own [`subject::reactions_reply`], once it found the ant reads the message.
 fn reaction_rights(user: &UserId, role: Role) -> Vec<String> {
     let reactions = kv_stream(REACTIONS_BUCKET);
     let own = format!("$KV.{REACTIONS_BUCKET}.{user}.>");
@@ -169,8 +175,8 @@ impl Permissions {
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
     /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
     /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read
-    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications
-    /// ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
+    /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
+    /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which every user, ant or human,
     /// puts and removes only its own ([`reaction_rights`]); it sets every thread's title and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
@@ -341,6 +347,8 @@ impl Permissions {
             subject::ALL_APPROVAL_DECISIONS.to_owned(),
             subject::ALL_CANCELS.to_owned(),
             subject::ALL_QUEUE_REQUESTS.to_owned(),
+            // Answering an ant's request for the reactions to a message it reads.
+            subject::ALL_REACTIONS_REPLIES.to_owned(),
             // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
             format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
             format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
@@ -422,6 +430,8 @@ impl Permissions {
             subject::renew(user.as_str()),
             // Asking the signer for an ant added from a template, should it manage one.
             subject::antreq(user),
+            // Asking for the reactions to a message it reads.
+            subject::reactions(user),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.

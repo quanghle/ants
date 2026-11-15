@@ -5,11 +5,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ants_proto::{ApprovalRequest, RosterEntry, StatusEvent, ThreadId, UserId, Verdict};
+use ants_proto::{ApprovalRequest, Mark, RosterEntry, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::progress;
-use crate::thread::{Entry, Summary, Threads};
+use crate::thread::{self, Entry, Summary, Threads};
 use crate::tools::{self, State, Update};
 
 /// The list keys move in.
@@ -108,7 +108,11 @@ pub struct Model {
     /// How far back the threads are read.
     pub since: Duration,
     threads: Threads,
-    /// The threads, most recently active first.
+    /// How the human marked threads when the dashboard started: archived ones are left out of `order`.
+    pub marks: ThreadMarks,
+    /// How long a thread goes without a message before it counts as archived; None for never.
+    pub auto_archive: Option<Duration>,
+    /// The threads, most recently active first, but for the archived ones with no message since and the idle ones.
     pub order: Vec<ThreadId>,
     pub selected: Option<ThreadId>,
     pub history: Option<History>,
@@ -135,6 +139,8 @@ impl Model {
             me,
             since,
             threads: Threads::new(None),
+            marks: ThreadMarks::default(),
+            auto_archive: None,
             order: Vec::new(),
             selected: None,
             history: None,
@@ -176,7 +182,12 @@ impl Model {
         }
         self.stored_seq = Some(self.stored_seq.unwrap_or_default().max(last));
         self.stored_at = Some(now);
-        let mut order: Vec<&Summary> = self.threads.summaries().collect();
+        let idle_before = thread::idle_before(self.auto_archive, now);
+        let shown = |s: &&Summary| {
+            let mark = self.marks.mark_at(&s.thread_id, s.last_seq, s.last_at, idle_before);
+            !matches!(mark, Some(Mark::Archived { new_activity: false } | Mark::Idle))
+        };
+        let mut order: Vec<&Summary> = self.threads.summaries().filter(shown).collect();
         order.sort_by(|a, b| (b.last_at, &b.thread_id).cmp(&(a.last_at, &a.thread_id)));
         self.order = order.into_iter().map(|s| s.thread_id.clone()).collect();
         match (&self.selected, self.order.first()) {
@@ -437,6 +448,32 @@ pub(crate) mod tests {
         assert_eq!(m.order, [old, new.clone()]);
         assert_eq!(m.selected, Some(new));
         assert_eq!(m.key(Key::Char('q'), at(8)), Some(Action::Quit));
+    }
+
+    #[test]
+    fn archived_and_idle_threads_are_left_out_until_a_message_is_stored_on_them() {
+        let (archived, idle, kept, live) =
+            (ThreadId::generate(), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        m.marks.archive(&archived, 1);
+        m.marks.kept.insert(kept.clone(), at(15));
+        m.auto_archive = Some(Duration::from_secs(10));
+        let read = vec![
+            message(1, &archived, "alice", "dev-a", "done"),
+            message(2, &idle, "alice", "dev-a", "quiet"),
+            message(3, &kept, "alice", "dev-a", "kept"),
+            message(20, &live, "alice", "dev-a", "busy"),
+        ];
+        assert_eq!(m.stored(read, 20, at(20)), Some(Action::LoadHistory(live.clone())));
+        assert_eq!(m.order, [live.clone(), kept.clone()], "idle since 10s ago or archived");
+        m.stored(
+            vec![message(21, &idle, "dev-a", "alice", "back"), message(22, &archived, "dev-a", "alice", "news")],
+            22,
+            at(22),
+        );
+        assert_eq!(m.order, [archived.clone(), idle.clone(), live.clone(), kept]);
+        m.stored(Vec::new(), 22, at(26));
+        assert_eq!(m.order, [archived, idle, live], "kept until idle since being kept");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::sync::mpsc;
 
-use ants_proto::ChannelAdminReply;
+use ants_proto::{ChannelAdminReply, MAX_TITLE};
 
 use super::*;
 use crate::harness::Launch;
@@ -106,6 +106,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        memory_low: None,
     }
 }
 
@@ -140,7 +141,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 12, "{tools:?}");
+    assert_eq!(tools.len(), 14, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -202,6 +203,79 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let (ok, text) = call(&client, "react", remove).await;
     assert!(ok && text.starts_with("No reaction eyes"), "{text}");
     assert_eq!(*stored.locked(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
+}
+
+#[tokio::test]
+async fn list_reactions_shows_those_to_the_current_message_or_a_named_one() {
+    let (mcp, _sent) = start(&home("list-reactions")).await;
+    let current = from_human();
+    let (url, token) = http_server(&mcp, &current.thread_id);
+    let client = http_client(&url, &token).await;
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(!ok && text.contains("not available"), "{text}");
+
+    let (unread, silent) = (Uuid::now_v7(), Uuid::now_v7());
+    let quiet = current.id;
+    mcp.with_reaction_reader(Arc::new(move |message| {
+        let outcome = if message == unread {
+            Some(ants_proto::ReactionsOutcome::Unknown)
+        } else if message == silent {
+            None
+        } else if message == quiet {
+            Some(ants_proto::ReactionsOutcome::Listed { reactions: Vec::new() })
+        } else {
+            let reacted = |reaction: &str, by: &[&str]| ants_proto::Reacted {
+                reaction: reaction.parse().unwrap(),
+                by: by.iter().map(|b| b.parse().unwrap()).collect(),
+            };
+            let reactions = vec![reacted("check", &["dev-b"]), reacted("eyes", &["alice", "dev-b"])];
+            Some(ants_proto::ReactionsOutcome::Listed { reactions })
+        };
+        Box::pin(async move { Ok(outcome) })
+    }));
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(!ok && text.contains("name the message by message_id"), "{text}");
+
+    let _turn = mcp.begin(&current);
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({})).await;
+    assert!(ok && text == format!("No reactions to message {quiet}."), "{text}");
+    let named = |id: Uuid| serde_json::json!({"message_id": id.to_string()});
+    let other = Uuid::now_v7();
+    let (ok, text) = call(&client, "list_reactions", named(other)).await;
+    assert!(ok && text == format!("Reactions to message {other}: check by dev-b; eyes by alice, dev-b."), "{text}");
+    let (ok, text) = call(&client, "list_reactions", named(unread)).await;
+    assert!(ok && text.contains("none this ant reads"), "{text}");
+    let (ok, text) = call(&client, "list_reactions", named(silent)).await;
+    assert!(!ok && text.contains("ants webhook serve"), "{text}");
+    let (ok, text) = call(&client, "list_reactions", serde_json::json!({"message_id": "nope"})).await;
+    assert!(!ok && text.contains("message_id"), "{text}");
+}
+
+#[tokio::test]
+async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
+    let (mcp, _sent) = start(&home("title")).await;
+    let current = from_human();
+    let thread = &current.thread_id;
+    let (url, token) = http_server(&mcp, thread);
+    let client = http_client(&url, &token).await;
+    let suggest = |title: &str| call(&client, "suggest_thread_title", serde_json::json!({ "title": title }));
+    let (ok, text) = suggest("Fix the build").await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+
+    let turn = mcp.begin(&current);
+    for bad in ["  ", "two\nlines", &"x".repeat(MAX_TITLE + 1)] {
+        let (ok, text) = suggest(bad).await;
+        assert!(!ok && text.contains("invalid thread title"), "{text}");
+    }
+    assert!(suggest("First idea").await.0);
+    let (ok, text) = suggest("  Fix the build ").await;
+    assert!(ok && text.contains("\"Fix the build\""), "{text}");
+    assert_eq!(mcp.take_title(thread).as_deref(), Some("Fix the build"), "the latest, trimmed");
+    assert_eq!(mcp.take_title(thread), None, "taken once");
+    assert!(suggest("Unsent").await.0);
+    drop(turn);
+    let _turn = mcp.begin(&current);
+    assert_eq!(mcp.take_title(thread), None, "a suggestion ends with its turn");
 }
 
 /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,
@@ -403,6 +477,7 @@ async fn requests_are_routed_by_roster_capabilities() {
     let mut limited = listed("dev-q", &[]);
     let until = "2026-01-01T00:10:00Z".parse().unwrap();
     limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
+    limited.memory_low = Some(ants_proto::MemoryLow { since, available: 512 << 20, max_harnesses: 1 });
     let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
     let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
     let current = from_human();
@@ -427,7 +502,8 @@ async fn requests_are_routed_by_roster_capabilities() {
     assert!(
         text.contains(
             "dev-q: no capabilities (copilot on m1, out-of-quota)\n  harness held back by a provider limit \
-                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z"
+                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z\n  memory low on m1 since \
+                 2026-01-01T00:00:00Z: at most 1 harness runs at once, so messages may wait longer"
         ),
         "{text}"
     );

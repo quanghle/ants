@@ -1,7 +1,8 @@
 //! `ants webhook add`: list a webhook in the config file of `ants webhook serve` in one step: its credentials, issued
-//! here or asked for over NATS, a new secret in a 0600 file beside the config file, and its `[[webhook]]` entry, set
-//! up for the sender a [`Preset`] names.
+//! here or asked for over NATS, a new secret (or one given, such as GitLab's signing token) in a 0600 file beside the
+//! config file, and its `[[webhook]]` entry, set up for the sender a [`Preset`] names.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::toml_string;
@@ -19,7 +20,8 @@ use crate::{auth, enroll, revoke};
 pub enum Preset {
     /// GitHub: `X-Hub-Signature-256` (HMAC-SHA256), one event per `X-GitHub-Delivery`.
     Github,
-    /// GitLab: the secret token in `X-Gitlab-Token`, one event per `Idempotency-Key`.
+    /// GitLab: the secret token in `X-Gitlab-Token`, one event per `Idempotency-Key`; with `--signing-token`, the
+    /// signing token's Standard Webhooks signatures, one event per `webhook-id`.
     Gitlab,
     /// Grafana alerting: `X-Grafana-Alerting-Signature` (HMAC-SHA256), the alert's title and message.
     Grafana,
@@ -35,8 +37,14 @@ struct Settings {
 }
 
 impl Settings {
-    fn of(preset: Option<Preset>) -> Self {
+    fn of(preset: Option<Preset>, signing_token: bool) -> Self {
         match preset {
+            Some(Preset::Gitlab) if signing_token => Settings {
+                auth: "standard-webhooks",
+                header: None,
+                id: Some("header:webhook-id"),
+                text: Some("GitLab {header:X-Gitlab-Event} on {json:/project/path_with_namespace}\n\n{body}"),
+            },
             None => Settings { auth: "bearer", header: None, id: None, text: None },
             Some(Preset::Github) => Settings {
                 auth: "hmac-sha256",
@@ -76,6 +84,19 @@ pub struct AddArgs {
     /// carry `Authorization: Bearer <secret>`.
     #[arg(long, value_enum)]
     pub preset: Option<Preset>,
+    /// With --preset gitlab: check the Standard Webhooks signatures of GitLab's signing token (webhook-signature)
+    /// rather than a secret token in X-Gitlab-Token. GitLab generates the token: give it with --secret-file or
+    /// --secret-env, or paste it when asked.
+    #[arg(long)]
+    pub signing_token: bool,
+    /// Take the webhook's secret, such as GitLab's signing token, from the first line of FILE ('-' for standard
+    /// input) rather than making a new one; it is copied to <name>.secret.
+    #[arg(long, value_name = "FILE", conflicts_with = "secret_env")]
+    pub secret_file: Option<PathBuf>,
+    /// Take the webhook's secret, such as GitLab's signing token, from the environment variable VAR rather than
+    /// making a new one; it is copied to <name>.secret.
+    #[arg(long, value_name = "VAR")]
+    pub secret_env: Option<String>,
     /// The webhooks' config file (default: ~/.ants/webhooks.toml).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -120,6 +141,11 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     if listing.webhooks.contains(name) {
         bail!("webhook {name} is already listed in {}", path.display());
     }
+    if args.signing_token && args.preset != Some(Preset::Gitlab) {
+        bail!("--signing-token goes with --preset gitlab");
+    }
+    let url = url(&listing, name);
+    let given = given_secret(&args, &url)?;
     let dir = path.parent().context("the config file has no directory")?;
     let team = match &args.dir {
         Some(dir) => dir.clone(),
@@ -129,9 +155,10 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
 
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let secret_file = dir.join(format!("{name}.secret"));
-    let secret = new_secret();
+    let secret = given.clone().unwrap_or_else(new_secret);
     auth::write_secret(&secret_file, &format!("{secret}\n"))?;
-    let entry = entry(name, &out, &format!("{name}.secret"), &destination, args.preset)?;
+    let settings = Settings::of(args.preset, args.signing_token);
+    let entry = entry(name, &out, &format!("{name}.secret"), &destination, &settings)?;
     let text = appended(&old, &entry);
     check(&text, &entry, &path)?;
 
@@ -176,20 +203,60 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
         ),
     }
     println!();
-    let url = match &listing.public_url {
-        Some(base) => format!("{}/{name}", base.trim_end_matches('/')),
-        None => {
-            let listen = listing.listen.as_deref().unwrap_or(webhook::DEFAULT_LISTEN);
-            println!(
-                "the ingress listens on http://{listen}{}/{name}; give the sender the address the reverse proxy \
-                 maps to it",
-                listing.path
-            );
-            format!("https://<reverse proxy>{}/{name}", listing.path)
-        }
-    };
-    println!("{}", sender(args.preset, &url, &secret));
+    if listing.public_url.is_none() {
+        let listen = listing.listen.as_deref().unwrap_or(webhook::DEFAULT_LISTEN);
+        println!(
+            "the ingress listens on http://{listen}{}/{name}; give the sender the address the reverse proxy maps to it",
+            listing.path
+        );
+    }
+    let shown = if given.is_some() { "<the secret given>" } else { &secret };
+    println!("{}", sender(args.preset, args.signing_token, &url, shown));
     Ok(())
+}
+
+/// The URL the sender posts the events of webhook `name` to: under `public_url`, else behind the reverse proxy.
+fn url(listing: &Listing, name: &UserId) -> String {
+    match &listing.public_url {
+        Some(base) => format!("{}/{name}", base.trim_end_matches('/')),
+        None => format!("https://<reverse proxy>{}/{name}", listing.path),
+    }
+}
+
+/// The secret given for the webhook, trimmed: from `--secret-file`, `--secret-env`, or, for a signing token, the
+/// terminal, after saying where to get it for the webhook at `url`; None to make a new one.
+fn given_secret(args: &AddArgs, url: &str) -> Result<Option<String>> {
+    let given = match (&args.secret_file, &args.secret_env) {
+        (Some(file), _) => {
+            let mut text = String::new();
+            if file == Path::new("-") {
+                std::io::stdin().read_to_string(&mut text).context("reading the secret from standard input")?;
+            } else {
+                text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            }
+            text.lines().next().unwrap_or_default().to_owned()
+        }
+        (None, Some(var)) => std::env::var(var).with_context(|| format!("environment variable {var} is not set"))?,
+        (None, None) if args.signing_token => {
+            eprintln!(
+                "in GitLab (Settings > Webhooks > Add new webhook), set URL {url} and select Generate signing token"
+            );
+            crate::backup::read_hidden(
+                "GitLab's signing token",
+                "signing token",
+                "give --secret-file FILE ('-' for standard input) or --secret-env VAR",
+            )?
+        }
+        (None, None) => return Ok(None),
+    };
+    let given = given.trim();
+    if given.is_empty() {
+        bail!("the secret given is empty");
+    }
+    if args.signing_token {
+        webhook::signing_key(given).context("the signing token given")?;
+    }
+    Ok(Some(given.to_owned()))
 }
 
 /// A new secret: 32 random bytes in hex.
@@ -205,9 +272,8 @@ fn entry(
     creds: &Path,
     secret_file: &str,
     destination: &Destination,
-    preset: Option<Preset>,
+    settings: &Settings,
 ) -> Result<String> {
-    let settings = Settings::of(preset);
     let creds = creds.to_str().with_context(|| format!("{} is no UTF-8", creds.display()))?;
     let mut lines = vec![
         "[[webhook]]".to_owned(),
@@ -261,9 +327,13 @@ fn destination_flag(destination: &Destination) -> String {
     }
 }
 
-/// What to set at the sender of `preset` for the webhook at `url` with `secret`.
-fn sender(preset: Option<Preset>, url: &str, secret: &str) -> String {
+/// What to set at the sender of `preset` (GitLab with its `signing_token`) for the webhook at `url` with `secret`.
+fn sender(preset: Option<Preset>, signing_token: bool, url: &str, secret: &str) -> String {
     match preset {
+        Some(Preset::Gitlab) if signing_token => format!(
+            "GitLab (Settings > Webhooks > Add new webhook):\n  URL: {url}\n  Signing token: the one given (Generate \
+             signing token), with no secret token"
+        ),
         None => format!("send: POST {url}\n  header: Authorization: Bearer {secret}"),
         Some(Preset::Github) => format!(
             "GitHub (Settings > Webhooks > Add webhook):\n  Payload URL: {url}\n  Content type: application/json\n  \
@@ -314,7 +384,10 @@ mod tests {
             map
         };
 
-        let github = parsed(&entry(&name, &creds, "hook.secret", &ant, Some(Preset::Github)).unwrap(), &dir);
+        let github = parsed(
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Github), false)).unwrap(),
+            &dir,
+        );
         let hook = &github.webhooks[0];
         let signed = headers(&[
             ("x-hub-signature-256", format!("sha256={signature}")),
@@ -327,7 +400,10 @@ mod tests {
         assert_eq!(text, format!("GitHub push on o/r\n\n{}", std::str::from_utf8(body).unwrap()));
         assert_eq!(hook.event_of(&signed, b"{}").0, id, "the delivery identifies the event");
 
-        let gitlab = parsed(&entry(&name, &creds, "hook.secret", &ant, Some(Preset::Gitlab)).unwrap(), &dir);
+        let gitlab = parsed(
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Gitlab), false)).unwrap(),
+            &dir,
+        );
         let hook = &gitlab.webhooks[0];
         let sent = headers(&[
             ("x-gitlab-token", "s3cret".into()),
@@ -340,7 +416,32 @@ mod tests {
         assert_eq!(hook.event_of(&sent, b"{}").0, hook.event_of(&sent, body).0, "the key identifies the event");
         assert!(hook.event_of(&sent, body).1.starts_with("GitLab Push Hook on g/p\n\n"));
 
-        let grafana = parsed(&entry(&name, &creds, "hook.secret", &ant, Some(Preset::Grafana)).unwrap(), &dir);
+        auth::write_secret(&dir.join("hook.secret"), "whsec_c2lnbmluZy1rZXk=\n").unwrap();
+        let settings = Settings::of(Some(Preset::Gitlab), true);
+        let signed = entry(&name, &creds, "hook.secret", &ant, &settings).unwrap();
+        let signed = Config::parse(&signed, &dir.join("webhooks.toml"), &dir, |_| None).unwrap();
+        let hook = &signed.webhooks[0];
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+        let signed_with_token = {
+            let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"signing-key");
+            let signed = [b"m-1.", now.as_bytes(), b".", body].concat();
+            data_encoding::BASE64.encode(ring::hmac::sign(&key, &signed).as_ref())
+        };
+        let sent = headers(&[
+            ("webhook-id", "m-1".into()),
+            ("webhook-timestamp", now),
+            ("webhook-signature", format!("v1,{signed_with_token}")),
+            ("x-gitlab-event", "Push Hook".into()),
+        ]);
+        assert!(hook.accepts(&sent, body));
+        assert!(!hook.accepts(&headers(&[("x-gitlab-token", "whsec_c2lnbmluZy1rZXk=".into())]), body));
+        assert_eq!(hook.event_of(&sent, b"{}").0, hook.event_of(&sent, body).0, "the webhook-id identifies the event");
+        assert!(hook.event_of(&sent, body).1.starts_with("GitLab Push Hook on g/p\n\n"));
+
+        let grafana = parsed(
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Grafana), false)).unwrap(),
+            &dir,
+        );
         let hook = &grafana.webhooks[0];
         let sent = headers(&[("x-grafana-alerting-signature", signature)]);
         assert!(hook.accepts(&sent, body));
@@ -348,7 +449,7 @@ mod tests {
         assert_eq!(hook.event_of(&sent, body).1, "Grafana: T\n\nM");
 
         let channel = Destination::Channel("ops".parse().unwrap());
-        let bearer = parsed(&entry(&name, &creds, "hook.secret", &channel, None).unwrap(), &dir);
+        let bearer = parsed(&entry(&name, &creds, "hook.secret", &channel, &Settings::of(None, false)).unwrap(), &dir);
         let hook = &bearer.webhooks[0];
         assert_eq!(hook.destination, channel);
         assert!(hook.accepts(&headers(&[("authorization", "Bearer s3cret".into())]), body));
@@ -361,6 +462,9 @@ mod tests {
             to: Some("dev-a".parse().unwrap()),
             channel: None,
             preset: Some(Preset::Github),
+            signing_token: false,
+            secret_file: None,
+            secret_env: None,
             config: Some(config.to_owned()),
             dir: Some(team.to_owned()),
             out: None,
@@ -395,6 +499,35 @@ mod tests {
         let err = add(args("github", &config, &team), "nats://127.0.0.1:4222", None).await.unwrap_err();
         assert!(err.to_string().contains("already listed"), "{err:#}");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_signing_token_given_is_kept_and_checked_and_goes_with_gitlab_only() {
+        let dir = scratch_dir("webhook-add-signing-token");
+        let team = dir.join("auth");
+        auth::init(&team).unwrap();
+        let config = dir.join("webhooks.toml");
+        let token = dir.join("token");
+        std::fs::write(&token, "whsec_c2lnbmluZy1rZXk=\n").unwrap();
+        let mut github = args("github", &config, &team);
+        (github.signing_token, github.secret_file) = (true, Some(token.clone()));
+        let err = add(github, "nats://127.0.0.1:4222", None).await.unwrap_err();
+        assert!(err.to_string().contains("--signing-token goes with --preset gitlab"), "{err:#}");
+
+        let mut gitlab = args("gitlab", &config, &team);
+        (gitlab.preset, gitlab.signing_token, gitlab.secret_file) = (Some(Preset::Gitlab), true, Some(dir.join("bad")));
+        std::fs::write(dir.join("bad"), "not base64!\n").unwrap();
+        let err = add(gitlab, "nats://127.0.0.1:4222", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("no Standard Webhooks signing secret"), "{err:#}");
+        assert!(!config.exists() && !dir.join("gitlab.secret").exists(), "nothing written");
+
+        let mut gitlab = args("gitlab", &config, &team);
+        (gitlab.preset, gitlab.signing_token, gitlab.secret_file) = (Some(Preset::Gitlab), true, Some(token));
+        add(gitlab, "nats://127.0.0.1:4222", None).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("gitlab.secret")).unwrap(), "whsec_c2lnbmluZy1rZXk=\n");
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.contains("auth = \"standard-webhooks\"\n") && text.contains("id = \"header:webhook-id\"\n"));
+        Config::load(&config).unwrap();
     }
 
     #[test]

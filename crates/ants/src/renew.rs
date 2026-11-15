@@ -232,7 +232,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Reload what uses the credentials at `path`, which a NATS connection reads only when it connects: the daemon of the
 /// config file at `config` (or the default one) when one of its ants does, the leaf node of `leaf_config` (or the
-/// default one) when they are its uplink's.
+/// default one) when they are its uplink's, connecting the uplink again ([`leaf::use_renewed_uplink`]).
 fn reload(path: &Path, config: Option<&Path>, leaf_config: Option<&Path>) -> Result<()> {
     let config = match config {
         Some(config) => config.to_owned(),
@@ -256,15 +256,7 @@ fn reload(path: &Path, config: Option<&Path>, leaf_config: Option<&Path>) -> Res
         }
     }
     if let Some((conf, _)) = &uplink {
-        match services.apply(Service::Nats, Action::Restart, conf) {
-            Outcome::Done(command) => println!("leaf node restarted to use them ({command})"),
-            Outcome::NotRunning => println!("the leaf node service is not running; it uses them once started"),
-            outcome => println!(
-                "{}restart the leaf node to use them ({}); SIGHUP does not read them again",
-                failure(outcome),
-                crate::service::manual(Service::Nats, Action::Restart)
-            ),
-        }
+        println!("{}", leaf::use_renewed_uplink(conf, |action| services.apply(Service::Nats, action, conf)));
     }
     if ants.is_empty() && uplink.is_none() {
         println!(

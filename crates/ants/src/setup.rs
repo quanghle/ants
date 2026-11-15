@@ -144,6 +144,7 @@ pub async fn run(args: &SetupArgs, connection: &Connection<'_>) -> Result<()> {
         js_domain: connection.js_domain.cloned(),
         config: config_path,
         leaf_config: leaf_conf,
+        hub_config: nats_conf,
         harnesses: false,
         team: auth::default_dir()?,
         webhooks,

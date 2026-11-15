@@ -392,10 +392,33 @@ impl Worktrees {
     }
 }
 
+/// Whether each thread of an ant gets its own git worktree: as the config key `worktrees` says, and where it is unset
+/// when threads may run at once (more than one harness) in a workdir inside a git work tree that git does not ignore
+/// (such as a build output directory).
+pub async fn per_thread(workdir: &Path, max_harnesses: usize, worktrees: Option<bool>) -> bool {
+    match worktrees {
+        Some(on) => on,
+        None => max_harnesses > 1 && in_git_work_tree(workdir) && !ignored_by_git(workdir).await,
+    }
+}
+
 /// Whether threads of an ant run at once in one git work tree, where they may clobber each other's edits: more than one
-/// harness, no worktree per thread, and the workdir inside a git work tree.
-pub fn shares_git_workdir(workdir: &Path, max_harnesses: usize, worktrees: bool) -> bool {
-    max_harnesses > 1 && !worktrees && in_git_work_tree(workdir)
+/// harness, worktrees turned off, and the workdir inside a git work tree.
+pub fn shares_git_workdir(workdir: &Path, max_harnesses: usize, worktrees: Option<bool>) -> bool {
+    worktrees == Some(false) && max_harnesses > 1 && in_git_work_tree(workdir)
+}
+
+/// Whether git ignores `dir`, or cannot tell: only `git check-ignore` finding no rule for it says it does not.
+async fn ignored_by_git(dir: &Path) -> bool {
+    let status = tokio::process::Command::new("git")
+        .args(["check-ignore", "--quiet", "."])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    !status.is_ok_and(|status| status.code() == Some(1))
 }
 
 /// Whether `dir` is inside a git work tree, judged by a `.git` directory or file in it or above it without running
@@ -630,18 +653,38 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn worktrees_default_on_for_concurrent_threads_in_a_git_workdir() {
+        let Some(repo) = repo("worktrees-default") else { return };
+        let sub = repo.join("sub");
+        let outside = std::env::temp_dir();
+        assert!(per_thread(&sub, 2, None).await, "unset, concurrent threads in a git workdir");
+        assert!(!per_thread(&sub, 1, None).await, "unset, one thread at a time");
+        assert!(!per_thread(Path::new("/"), 4, None).await, "unset, no git work tree");
+        assert!(!per_thread(&sub, 2, Some(false)).await, "turned off");
+        assert!(per_thread(&sub, 1, Some(true)).await && per_thread(&outside, 1, Some(true)).await, "turned on");
+        std::fs::create_dir(repo.join("build")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/build\n").unwrap();
+        assert!(!per_thread(&repo.join("build"), 2, None).await, "unset, a workdir git ignores");
+        let scratch = ants_test_support::scratch_dir("worktrees-default-scratch");
+        assert!(!per_thread(&scratch, 4, None).await, "unset, the scratch dirs of tests in ants' ignored target/");
+        std::fs::remove_dir_all(scratch).unwrap();
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
     #[test]
-    fn concurrent_threads_share_a_git_workdir_only_without_worktrees() {
+    fn concurrent_threads_share_a_git_workdir_only_with_worktrees_turned_off() {
         let dir = ants_test_support::scratch_dir("worktrees-shared");
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        assert!(shares_git_workdir(&dir.join("sub"), 2, false));
-        assert!(!shares_git_workdir(&dir.join("sub"), 2, true));
-        assert!(!shares_git_workdir(&dir.join("sub"), 1, false));
+        assert!(shares_git_workdir(&dir.join("sub"), 2, Some(false)));
+        assert!(!shares_git_workdir(&dir.join("sub"), 2, None));
+        assert!(!shares_git_workdir(&dir.join("sub"), 2, Some(true)));
+        assert!(!shares_git_workdir(&dir.join("sub"), 1, Some(false)));
         std::fs::remove_dir(dir.join(".git")).unwrap();
         std::fs::write(dir.join(".git"), "gitdir: elsewhere").unwrap();
-        assert!(shares_git_workdir(&dir, 4, false), "a worktree's .git is a file");
-        assert!(!shares_git_workdir(Path::new("/"), 4, false));
+        assert!(shares_git_workdir(&dir, 4, Some(false)), "a worktree's .git is a file");
+        assert!(!shares_git_workdir(Path::new("/"), 4, Some(false)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

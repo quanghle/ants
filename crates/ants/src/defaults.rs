@@ -26,6 +26,12 @@ pub(crate) fn path() -> Result<PathBuf> {
     }
 }
 
+/// How long a thread goes without a message before it counts as archived for the CLI's human: `auto_archive` of the
+/// config file's `[cli]`; None for never.
+pub fn auto_archive() -> Result<Option<std::time::Duration>> {
+    Ok(CliDefaults::load(&path()?)?.auto_archive)
+}
+
 /// Set the global connection flags that neither the command line nor the environment set from the file at `path`,
 /// if it exists, except for `ants daemon` and `ants add`: their flags describe ants, and they read the file's
 /// top-level keys themselves.

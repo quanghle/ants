@@ -306,9 +306,10 @@ fn passphrase(file: Option<&Path>, confirm: Confirm) -> Result<String> {
     } else if let Some(passphrase) = std::env::var_os(PASSPHRASE_ENV) {
         passphrase.into_string().map_err(|_| anyhow!("{PASSPHRASE_ENV} is not valid UTF-8"))?
     } else {
-        let passphrase = prompt("passphrase")?;
+        let otherwise = format!("give --passphrase-file FILE or set {PASSPHRASE_ENV}");
+        let passphrase = read_hidden("passphrase", "passphrase", &otherwise)?;
         check_passphrase(&passphrase)?;
-        if confirm == Confirm::Twice && prompt("passphrase again")? != passphrase {
+        if confirm == Confirm::Twice && read_hidden("passphrase again", "passphrase", &otherwise)? != passphrase {
             bail!("the passphrases differ");
         }
         passphrase
@@ -317,17 +318,18 @@ fn passphrase(file: Option<&Path>, confirm: Confirm) -> Result<String> {
     Ok(passphrase)
 }
 
-/// A line read from the terminal without echo, after `label` on stderr.
-fn prompt(label: &str) -> Result<String> {
+/// A line read from the terminal without echo, after `label` on stderr: the `what` asked for, or, without a
+/// terminal, an error saying to do `otherwise`.
+pub(crate) fn read_hidden(label: &str, what: &str, otherwise: &str) -> Result<String> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal;
 
     if !std::io::stdin().is_terminal() {
-        bail!("no terminal to read the passphrase from: give --passphrase-file FILE or set {PASSPHRASE_ENV}");
+        bail!("no terminal to read the {what} from: {otherwise}");
     }
     eprint!("{label}: ");
     std::io::stderr().flush()?;
-    terminal::enable_raw_mode().context("reading the passphrase from the terminal")?;
+    terminal::enable_raw_mode().with_context(|| format!("reading the {what} from the terminal"))?;
     let read = (|| -> std::io::Result<Option<String>> {
         let mut line = String::new();
         loop {
@@ -351,8 +353,8 @@ fn prompt(label: &str) -> Result<String> {
     eprintln!();
     match read {
         Ok(Some(line)) => Ok(line),
-        Ok(None) => bail!("no passphrase given"),
-        Err(e) => Err(anyhow::Error::from(e).context("reading the passphrase from the terminal")),
+        Ok(None) => bail!("no {what} given"),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("reading the {what} from the terminal"))),
     }
 }
 

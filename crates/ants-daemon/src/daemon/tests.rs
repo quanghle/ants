@@ -126,6 +126,7 @@ impl Bus {
             signed_out: None,
             limited: None,
             failing: None,
+            memory_low: None,
         };
         roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
@@ -2201,6 +2202,57 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
 }
 
 #[tokio::test]
+async fn the_reply_carries_the_title_suggested_during_its_turn() {
+    use agent_client_protocol::v1::schema::McpServer;
+    use rmcp::ServiceExt as _;
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/title");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, roster) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_roster(bus.js.clone()));
+    let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let (titled, plain) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&titled, "hold on").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let servers = bus.mcp.as_ref().unwrap().servers()(&titled, true);
+        let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
+        let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
+        let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let args = serde_json::json!({"title": "  Fix the build "});
+        let serde_json::Value::Object(args) = args else { unreachable!() };
+        let call = CallToolRequestParams::new("suggest_thread_title").with_arguments(args);
+        let result = client.call_tool(call).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        gate.add_permits(1);
+        let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
+        let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!((&reply.thread_id, reply.title.as_deref()), (&titled, Some("Fix the build")));
+
+        bus.send(&titled, "again").await;
+        bus.send(&plain, "plain").await;
+        for _ in 0..2 {
+            let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
+            let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+            assert_eq!(reply.title, None, "the suggestion went with its turn's reply");
+        }
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
+#[tokio::test]
 async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let Some((mut bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
@@ -2775,6 +2827,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         signed_out: None,
         limited: None,
         failing: None,
+        memory_low: None,
     };
     roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

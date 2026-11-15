@@ -102,8 +102,9 @@ pub struct Config {
     pub approval_timeout: Duration,
     /// Most harness processes alive at once; the least recently used idle one stops to make room.
     pub max_harnesses: usize,
-    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]).
-    pub worktrees: bool,
+    /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]); unset,
+    /// [`crate::worktrees::per_thread`] decides at start.
+    pub worktrees: Option<bool>,
     /// Where a thread's new worktree branch starts ([`Worktrees::with_base`]).
     pub worktree_base: crate::worktrees::Base,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
@@ -118,6 +119,8 @@ pub struct Config {
     pub spend_warn_percent: u8,
     /// When to warn a human of JetStream storage filling up.
     pub storage: crate::storage::Settings,
+    /// When memory is low, and the harnesses run at most while it is ([`crate::pressure`]).
+    pub memory_pressure: crate::pressure::Settings,
     /// The daily caps the ant shares with the other ants added from its template, if any.
     pub pool: Option<crate::caps::Pool>,
     /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
@@ -157,7 +160,26 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
-    if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
+    let config = settle_worktrees(config).await;
+    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
+        tracing::info!("another daemon serves the ant; waiting for it to stop");
+    }
+    Ok(())
+}
+
+/// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
+/// running at once in one git work tree.
+async fn settle_worktrees(config: Config) -> Config {
+    let worktrees = crate::worktrees::per_thread(&config.workdir, config.max_harnesses, config.worktrees).await;
+    if config.worktrees.is_none() && worktrees {
+        tracing::info!(
+            ant = %config.ant,
+            workdir = %config.workdir.display(),
+            max_harnesses = config.max_harnesses,
+            "giving each thread its own git worktree, as threads may run at once in a git workdir; \
+             worktrees = false shares the workdir"
+        );
+    } else if crate::worktrees::shares_git_workdir(&config.workdir, config.max_harnesses, config.worktrees) {
         tracing::warn!(
             ant = %config.ant,
             workdir = %config.workdir.display(),
@@ -166,10 +188,7 @@ pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
              worktrees = true gives each thread its own"
         );
     }
-    while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
-        tracing::info!("another daemon serves the ant; waiting for it to stop");
-    }
-    Ok(())
+    Config { worktrees: Some(worktrees), ..config }
 }
 
 /// How [`serve`] ended.
@@ -390,6 +409,7 @@ async fn connect_mcp(
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
     mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
+    mcp.with_reaction_reader(crate::mcp::nats_reaction_reader(client.clone(), config.ant.clone()));
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
     }
@@ -442,10 +462,14 @@ async fn harness_pool(
     sessions: SessionStore,
     workload: &std::sync::Arc<roster::Workload>,
 ) -> Pool {
-    let mut pool =
-        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
-    let isolating =
-        if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
+    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout)
+        .reporting_to(workload.clone())
+        .with_memory_pressure(config.memory_pressure, crate::pressure::system_probe());
+    let isolating = if config.worktrees == Some(true) {
+        Worktrees::find(&config.ant, &config.workdir, &config.home).await
+    } else {
+        None
+    };
     if let Some(worktrees) = isolating {
         pool = pool.with_worktrees(worktrees.with_base(config.worktree_base));
     } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
@@ -519,7 +543,7 @@ fn log_serving(config: &Config) {
         model_settings = ?config.model_settings,
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
-        worktrees = config.worktrees,
+        worktrees = config.worktrees == Some(true),
         worktree_base = config.worktree_base.as_str(),
         publish = config.publish.as_str(),
         idle_timeout = ?config.idle_timeout,
@@ -1743,6 +1767,33 @@ impl Inbox<'_> {
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
     /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
     /// recorded is not prompted again.
+    /// The `[ants]` lines for the thread's branch holding new commits, and for publishing it.
+    async fn branch_notices(
+        &self,
+        envelope: &Envelope,
+        msg: &jetstream::Message,
+        cancelled: bool,
+    ) -> [Option<String>; 2] {
+        let thread = &envelope.thread_id;
+        let publishing = self.publisher.zip(self.pool.worktrees());
+        if let Some((publisher, worktrees)) = publishing {
+            publisher.note_opening(worktrees, thread, &envelope.text).await;
+        }
+        let branch = self.pool.branch_ahead(thread).await;
+        let branch_notice = branch.as_ref().map(|branch| {
+            format!("[ants] Branch {} holds {} not in {}.", branch.name, branch.commits_text(), branch.outside())
+        });
+        // What a human cancelled is not published.
+        let publish_notice = match (publishing, &branch) {
+            (Some((publisher, worktrees)), Some(branch)) if !cancelled => {
+                let policy = self.pool.launch().policy();
+                self.acking(msg, publisher.publish(worktrees, branch, policy)).await
+            }
+            _ => None,
+        };
+        [branch_notice, publish_notice]
+    }
+
     async fn answer(
         &self,
         incoming: &Incoming,
@@ -1826,29 +1877,17 @@ impl Inbox<'_> {
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
         let cancelled = cancelled_by.is_some();
         let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
-        let publishing = self.publisher.zip(self.pool.worktrees());
-        if let Some((publisher, worktrees)) = publishing {
-            publisher.note_opening(worktrees, thread, &envelope.text).await;
-        }
-        let branch = self.pool.branch_ahead(thread).await;
-        let branch_notice = branch.as_ref().map(|branch| {
-            format!("[ants] Branch {} holds {} not in {}.", branch.name, branch.commits_text(), branch.outside())
-        });
-        // What a human cancelled is not published.
-        let publish_notice = match (publishing, &branch) {
-            (Some((publisher, worktrees)), Some(branch)) if !cancelled => {
-                let policy = self.pool.launch().policy();
-                self.acking(msg, publisher.publish(worktrees, branch, policy)).await
-            }
-            _ => None,
-        };
+        let [branch_notice, publish_notice] = self.branch_notices(envelope, msg, cancelled).await;
         let notice = [limit_notice, cancel_notice, branch_notice, publish_notice];
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
+        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
+            message.title = mcp.take_title(thread);
+        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit

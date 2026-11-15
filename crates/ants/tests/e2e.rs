@@ -634,6 +634,7 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     let out = run(ants(&["--nats", &server.url, "ask", "@dev", "hello", "there"]));
     let asked = String::from_utf8_lossy(&out.stdout);
     let thread = asked.lines().next().and_then(|t| t.strip_prefix("thread ")).expect(&asked).to_owned();
+    let message = asked.lines().nth(1).and_then(|m| m.strip_prefix("message ")).expect(&asked).to_owned();
 
     let complete = |words: &[&str]| {
         let mut command = ants(&["--"]);
@@ -648,6 +649,10 @@ fn setup_brings_a_machine_up_once_and_completions_name_its_ants_channels_and_thr
     assert_eq!(complete(&["ants", "thread", "show", &thread[..8]]), [thread.as_str()]);
     assert_eq!(complete(&["ants", "thread", "show", "la"]), ["last"]);
     assert_eq!(complete(&["ants", "react", &thread, "e"]), ["eyes"]);
+    assert_eq!(complete(&["ants", "react", &message[..8]]), [message.as_str()]);
+    let out = run(ants(&["--nats", &server.url, "react", &message[..13], "eyes"]));
+    let (reacted, error) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(reacted.trim(), format!("reacted eyes to message {message}"), "{error}");
     drop(server);
     assert!(complete(&["ants", "post", "o"]).is_empty(), "no server, no candidates");
     let _ = std::fs::remove_dir_all(&home);

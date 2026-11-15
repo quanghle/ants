@@ -8,8 +8,9 @@
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
-//! `react` adds or removes the ant's reaction to a message, by default the one being handled (see
-//! [`crate::reactions`]).
+//! `react` adds or removes the ant's reaction to a message, by default the one being handled, and `list_reactions`
+//! lists the reactions to a message the ant reads (see [`crate::reactions`]).
+//! `suggest_thread_title` has the ant's next message on the thread suggest a title for it ([`Envelope::title`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -28,8 +29,8 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
     ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
-    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, ROSTER_BUCKET, Reaction, Role,
-    RosterEntry, ThreadId, UserId, Uuid, Verdict,
+    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, ROSTER_BUCKET, Reaction, ReactionsOutcome,
+    Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -146,6 +147,17 @@ pub fn jetstream_reactor(js: async_nats::jetstream::Context, js_domain: Option<J
                 reactions::add(&js, js_domain.as_ref(), &ant, &message, &reaction).await
             }
         })
+    })
+}
+
+/// The reactions to a message as the ant may know them ([`reactions::ask`]); None when nothing answered.
+pub type ReactionReader = Arc<dyn Fn(Uuid) -> BoxFuture<'static, Result<Option<ReactionsOutcome>>> + Send + Sync>;
+
+/// Asks for the reactions as `ant` over `client`, the ant's own connection.
+pub fn nats_reaction_reader(client: async_nats::Client, ant: UserId) -> ReactionReader {
+    Arc::new(move |message| {
+        let (client, ant) = (client.clone(), ant.clone());
+        Box::pin(async move { reactions::ask(&client, &ant, message).await })
     })
 }
 
@@ -280,6 +292,7 @@ impl Mcp {
             admin: OnceLock::new(),
             requester: OnceLock::new(),
             reactor: OnceLock::new(),
+            reaction_reader: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -324,6 +337,11 @@ impl Mcp {
     /// Serve `react` through `reactor`; without it reactions are refused.
     pub fn with_reactor(&self, reactor: Reactor) {
         let _ = self.hub.reactor.set(reactor);
+    }
+
+    /// Serve `list_reactions` through `reader`; without it listing reactions is refused.
+    pub fn with_reaction_reader(&self, reader: ReactionReader) {
+        let _ = self.hub.reaction_reader.set(reader);
     }
 
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
@@ -378,6 +396,12 @@ impl Mcp {
         self.hub.asks.lock().await.stored.late.iter().filter(|e| &e.thread_id == thread).count()
     }
 
+    /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry, unless a
+    /// message it sent on the thread already carried it.
+    pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
+        self.hub.sessions.locked().titles.remove(thread)
+    }
+
     /// Mark `envelope` as the message its thread is handling until the guard drops. Messages the thread's session
     /// sends meanwhile follow on from it, and spend its turn budget.
     pub fn begin(&self, envelope: &Envelope) -> Turn {
@@ -394,7 +418,9 @@ pub struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.hub.sessions.locked().current.remove(&self.thread);
+        let mut sessions = self.hub.sessions.locked();
+        sessions.current.remove(&self.thread);
+        sessions.titles.remove(&self.thread);
     }
 }
 
@@ -431,6 +457,8 @@ struct Sessions {
     by_thread: HashMap<ThreadId, String>,
     /// The message each thread is handling.
     current: HashMap<ThreadId, Envelope>,
+    /// The title each thread's session suggested during its turn, until a message on the thread carries it.
+    titles: HashMap<ThreadId, String>,
 }
 
 /// What `<home>/mcp.json` keeps.
@@ -473,6 +501,7 @@ struct Hub {
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
     reactor: OnceLock<Reactor>,
+    reaction_reader: OnceLock<ReactionReader>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -600,19 +629,54 @@ impl Hub {
     async fn react(&self, thread: &ThreadId, args: React) -> Result<String, String> {
         let reactor = self.reactor.get().ok_or("reactions are not available here")?;
         let reaction: Reaction = args.reaction.trim().parse().map_err(|e| format!("{e}"))?;
-        let message = match args.message_id.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-            Some(id) => id.parse().map_err(|e| format!("message_id {id:?}: {e}"))?,
-            None => {
-                let current = self.sessions.locked().current.get(thread).map(|e| e.id);
-                current.ok_or("no message is being handled on this thread; name the message by message_id")?
-            }
-        };
+        let message = self.message(thread, args.message_id.as_deref())?;
         let changed = reactor(message, reaction.clone(), args.remove).await.map_err(|e| format!("{e:#}"))?;
         Ok(match (args.remove, changed) {
             (false, true) => format!("Reacted {reaction} to message {message}."),
             (false, false) => format!("Already reacted {reaction} to message {message}."),
             (true, true) => format!("Removed the reaction {reaction} to message {message}."),
             (true, false) => format!("No reaction {reaction} to message {message} to remove."),
+        })
+    }
+
+    /// The message `id` names, else the one `thread` is handling.
+    fn message(&self, thread: &ThreadId, id: Option<&str>) -> Result<Uuid, String> {
+        match id.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(id) => id.parse().map_err(|e| format!("message_id {id:?}: {e}")),
+            None => {
+                let current = self.sessions.locked().current.get(thread).map(|e| e.id);
+                current.ok_or_else(|| {
+                    "no message is being handled on this thread; name the message by message_id".to_owned()
+                })
+            }
+        }
+    }
+
+    /// The reactions to the message `args` names, by default the one `thread` is handling, if the ant reads it.
+    async fn list_reactions(&self, thread: &ThreadId, args: ListReactions) -> Result<String, String> {
+        let reader = self.reaction_reader.get().ok_or("reactions are not available here")?;
+        let message = self.message(thread, args.message_id.as_deref())?;
+        let outcome = reader(message).await.map_err(|e| format!("{e:#}"))?.ok_or(
+            "no answer about the reactions: an `ants webhook serve` with a [[human]] entry answers such requests, \
+             and none did",
+        )?;
+        Ok(match outcome {
+            ReactionsOutcome::Unknown => {
+                format!("Message {message} is none this ant reads, or the stream no longer keeps it.")
+            }
+            ReactionsOutcome::Listed { reactions } if reactions.is_empty() => {
+                format!("No reactions to message {message}.")
+            }
+            ReactionsOutcome::Listed { reactions } => {
+                let shown: Vec<String> = reactions
+                    .iter()
+                    .map(|r| {
+                        let by: Vec<&str> = r.by.iter().map(UserId::as_str).collect();
+                        format!("{} by {}", r.reaction, by.join(", "))
+                    })
+                    .collect();
+                format!("Reactions to message {message}: {}.", shown.join("; "))
+            }
         })
     }
 
@@ -708,6 +772,22 @@ impl Hub {
         Ok(format!(
             "Posted to #{channel}, starting thread {} that {} created ({left} turns left); {wakes}.",
             post.thread_id, self.ant
+        ))
+    }
+
+    /// Have the reply to the message `thread` is handling suggest `title` for the thread, in place of any title
+    /// suggested earlier in the turn.
+    fn suggest_title(&self, thread: &ThreadId, title: &str) -> Result<String, String> {
+        let title = ThreadTitle::new(thread.clone(), title, self.ant.clone()).map_err(|e| e.to_string())?;
+        let mut sessions = self.sessions.locked();
+        if !sessions.current.contains_key(thread) {
+            return Err("no message is being handled on this thread; a title is suggested only while one is".to_owned());
+        }
+        sessions.titles.insert(thread.clone(), title.title.clone());
+        Ok(format!(
+            "The reply on thread {thread} suggests the title {:?}. It becomes the thread's title when a human lists or \
+             shows the thread, unless the thread has or had another title.",
+            title.title
         ))
     }
 
@@ -1124,6 +1204,19 @@ struct React {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct ListReactions {
+    /// The id of the message whose reactions to list; omitted for the message being handled on this thread.
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SuggestThreadTitle {
+    /// The title: one line of 1-120 characters, such as `Fix the flaky login test`.
+    title: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct DecideApproval {
     /// `allow_once`, `allow_always` or `reject`.
     verdict: String,
@@ -1348,6 +1441,16 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     limited.kind.as_str(),
                     e.ant,
                     limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                );
+            }
+            if let Some(low) = &e.memory_low {
+                let _ = write!(
+                    text,
+                    "\n  memory low on {} since {}: at most {} {} at once, so messages may wait longer",
+                    e.machine,
+                    low.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    low.max_harnesses,
+                    if low.max_harnesses == 1 { "harness runs" } else { "harnesses run" }
                 );
             }
             if let Some(whoami) = &e.whoami
@@ -1596,6 +1699,32 @@ impl Tools {
         Ok(text(self.hub.react(&thread, args).await))
     }
 
+    #[tool(description = "List the reactions to a message, such as `eyes` or `check`, and who reacted: of the \
+        message being handled unless `message_id` names another this ant reads (one sent to it or by it, a notes post \
+        or a channel post). Reactions are no messages, so they never arrive otherwise.")]
+    async fn list_reactions(
+        &self,
+        Parameters(args): Parameters<ListReactions>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.list_reactions(&thread, args).await))
+    }
+
+    #[tool(description = "Suggest a short title for the current thread, one line of 1-120 characters naming what \
+        it is about, such as `Fix the flaky login test`. The reply to the message being handled carries it, when that \
+        reply is a message rather than a channel or notes post; calling again in the same turn replaces it. It \
+        becomes the thread's title, shown to humans in their thread lists, only if the thread has never had one: a \
+        title a human set, renamed or cleared always stays.")]
+    async fn suggest_thread_title(
+        &self,
+        Parameters(args): Parameters<SuggestThreadTitle>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(text(self.hub.suggest_title(&thread, &args.title)))
+    }
+
     #[tool(description = "Decide the approval request that the message being handled brings up the chain: another \
         ant asks to run a tool outside its allowlist, shown in the message. `verdict` is allow_once, allow_always \
         or reject, and goes to that ant; the first decision wins, a human's included, and none before the \
@@ -1797,7 +1926,9 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          escalate sends the thread up its origin chain when stuck on it. manage_channel lists the \
          channels a human made this ant the owner of, and changes their members and messenger. react marks a \
          message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
-         humans see beneath it: it wakes nobody, so it acknowledges without a reply. Memory and task \
+         humans see beneath it: it wakes nobody, so it acknowledges without a reply. list_reactions shows the \
+         reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \
+         title for the thread, which the reply carries and which becomes its title unless it ever had one. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {
@@ -1811,7 +1942,8 @@ fn instructions(ant: &UserId, manager: bool) -> String {
         text.push_str(
             " As the messenger, answer each request by routing it: pick the capability it needs from list_ants, \
              route it there and reply with the answer. Split a request that needs several capabilities into one \
-             route per capability. When no ant has what it needs, say so instead of answering it yourself.",
+             route per capability. When no ant has what it needs, say so instead of answering it yourself. When a \
+             human's request starts a thread, suggest a short title for it with suggest_thread_title.",
         );
     }
     text

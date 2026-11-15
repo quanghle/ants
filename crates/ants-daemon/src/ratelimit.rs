@@ -137,6 +137,17 @@ pub fn is_error_chunk(chunk: &str) -> bool {
     ERROR_MARKERS.iter().any(|marker| chunk.starts_with(marker)) && chunk.chars().nth(ERROR_CHARS).is_none()
 }
 
+/// The answer of `reply`, a reply whose first `notices` bytes are pieces read as the harness's errors or notices
+/// ([`is_error_chunk`]) and whose rest holds prose: the prose alone when the last of those pieces ends a line, or ends a
+/// sentence the prose does not go on with on the same line, as the retry notices Copilot CLI and Antigravity stream
+/// before an attempt that succeeds do; else the whole reply, an answer that opens with an error line of its own.
+pub fn strip_notices(reply: &str, notices: usize) -> &str {
+    let Some((lead, rest)) = reply.split_at_checked(notices) else { return reply };
+    let ends_line = lead.ends_with('\n');
+    let ends_sentence = lead.ends_with(['.', '!', '?']) && !rest.starts_with([' ', '\t']);
+    if !lead.is_empty() && !rest.trim().is_empty() && (ends_line || ends_sentence) { rest.trim_start() } else { reply }
+}
+
 /// Whether `text` holds a rate-limit status as a whole number after a word such as `error` or `status`.
 fn has_status(text: &str) -> bool {
     STATUSES.iter().any(|status| {
@@ -547,6 +558,29 @@ mod tests {
             assert!(!is_error_chunk(chunk), "{chunk}");
         }
         assert!(!is_error_chunk(&format!("Error: {}", "rate limit ".repeat(ERROR_CHARS))), "too long for an error");
+    }
+
+    /// Retry notices before an answer are dropped from it, as `copilot` 1.0.112 and `agy` 1.5.8 stream them when a
+    /// later attempt succeeds; an answer that opens with an error line of its own is left whole.
+    #[test]
+    fn retry_notices_are_dropped_from_answers() {
+        let strip = |pieces: &[&str]| {
+            let notices = pieces[..pieces.len() - 1].concat().len();
+            strip_notices(&pieces.concat(), notices).to_owned()
+        };
+        let retrying = "Info: Request failed due to a transient API error. Retrying...";
+        let gemini = gemini_429(1, "1.0s", "PerMinute", "1s");
+        assert_eq!(strip(&[retrying, "Hello there."]), "Hello there.");
+        assert_eq!(strip(&[retrying, retrying, "\n\nHello there."]), "Hello there.");
+        assert_eq!(strip(&[&gemini, &gemini_429(2, "1.0s", "PerMinute", "1s"), "Hello there."]), "Hello there.");
+        for answer in [
+            ["Error:", " handling in Rust uses Result."],
+            ["Error: handl", "ing in Rust uses Result."],
+            ["Error: the build failed.", " The linker is missing."],
+            ["Error: the build failed", "\nThe linker is missing."],
+        ] {
+            assert_eq!(strip(&answer), answer.concat(), "{answer:?}");
+        }
     }
 
     #[test]
