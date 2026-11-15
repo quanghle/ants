@@ -139,7 +139,7 @@ leafnodes {
 With `jetstream { domain: hub }` on the hub, every `ants` process sets `--js-domain hub` (`ANTS_JS_DOMAIN=hub` or `js_domain = "hub"` in `~/.ants/config.toml`), sending JetStream API and KV requests to `$JS.hub.API.>`.
 
 - Each leaf runs local JetStream in domain `<machine>` (never `hub`) solely for `ANTS_OUT`. Plain `$JS.API.>` resolves to the leaf, so local clients reach the hub stream and KV buckets only via `$JS.hub.API.>`. The leaf blocks local `$JS.<machine>.API.>` traffic from crossing up while allowing the hub to query `$JS.<machine>.API.>` for outbox sourcing.
-- Issue all user, leaf, and channel-manager credentials with `--js-domain hub`. Because the hub checks publish permissions before and after mapping `$JS.hub.API.>` to `$JS.API.>` (and `$JS.hub.API.$KV.>` to `$KV.>`), domain credentials allow both forms and work on the hub and on leaves.
+- Issue all user, leaf, and channel-manager credentials with `--js-domain hub`. Because the hub checks publish permissions before and after mapping `$JS.hub.API.>` to `$JS.API.>` (and `$JS.hub.API.$KV.>` to `$KV.>`), domain credentials allow both forms and work on the hub and on leaves. Leaf uplink credentials allow the domain form only: between a hub and a leaf of different domains, `nats-server` denies `$JS.API.>`, `$KV.>` and `$OBJ.>` on the leaf connection both ways and checks what the leaf sends before mapping, so the plain forms never cross the uplink.
 
 ### Leaf uplink credentials
 
@@ -159,7 +159,7 @@ ants auth leaf macbook --js-domain hub                   # the same members agai
 - Never carries registration requests (`ants.login.*`) or their answers, even with `--enroll-approver`: `ants login` and the `ants signer` answering it connect to the hub (see [auth.md](auth.md#registering-humans)).
 - With `--enroll-approver`, for the machine holding the account key, also carries what `ants enroll` and `ants signer` need: every request down, answers up, tool requests to humans up and their decisions down, the admission of a new ant into `ANTS`, `ants_links` and `OBJ_ants_files` (stream info and update, replies under `_INBOX._enroll`), and ants' reactions requests down with the reads of `ANTS` and `ants_reactions`, the reaction writes and the answers up.
 - Excludes `ants.out.>`. Local clients authenticate individually against `server.conf`; the leaf filters traffic to uplink bounds so unauthorized local clients cannot drop the uplink. Each run records members in `issued.jsonl` so a bare `ants auth leaf <machine>` reissues the previous set (`--add-*`/`--remove-*` adjust it; see [auth.md](auth.md#credentials-across-upgrades)).
-- **Size ceiling:** each ant adds ~4.7 KB (~8.7 KB with `--js-domain`). `nats-server` caps a leaf's `CONNECT` at `16 × max_control_line` (256 KiB), so `ants auth leaf`, `ants enroll approve` and `ants signer` refuse uplink JWTs over `252 KiB` (~29 ants with a domain, ~54 without); run extra ants behind a second leaf under another machine name.
+- **Size ceiling:** each ant adds ~4.7 KB (~5 KB with `--js-domain`, which allows the JetStream API and KV in their domain form only). `nats-server` caps a leaf's `CONNECT` at `16 × max_control_line` (256 KiB), so `ants auth leaf`, `ants enroll approve` and `ants signer` refuse uplink JWTs over `252 KiB` (~50 ants with a domain, ~54 without); run extra ants behind a second leaf under another machine name.
 
 ### Enrollment behind a leaf node
 
