@@ -909,7 +909,7 @@ async fn a_reply_names_the_thread_branch_holding_new_commits() {
 fn a_kept_branch_is_told_to_the_thread_owner_else_the_default_human() {
     let humans = Registry::new("alice".parse().unwrap());
     let (ant, thread): (UserId, ThreadId) = ("dev-a".parse().unwrap(), "t1".parse().unwrap());
-    let branch = Branch { thread: thread.clone(), name: "ants/dev-a/t1".to_owned(), commits: 2 };
+    let branch = Branch { thread: thread.clone(), name: "ants/dev-a/t1".to_owned(), commits: 2, upstream: None };
     let notice = kept_branch_notice(&ant, &branch, None, &humans);
     assert_eq!((notice.to.as_str(), notice.owner.as_ref(), &notice.thread_id), ("alice", None, &thread));
     assert_eq!(

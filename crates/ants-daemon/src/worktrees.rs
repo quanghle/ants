@@ -1,28 +1,60 @@
 //! A git worktree per thread, so the threads of one ant running at once do not edit and build in the same checkout.
 //!
 //! Each thread works in `<home>/worktrees/<thread>`, a worktree of the repository the ant's workdir is in, on its own
-//! branch `ants/<ant>/<thread>` started from the repository's `HEAD`. A branch rather than a detached `HEAD` keeps
+//! branch `ants/<ant>/<thread>` started from the repository's `HEAD`, or with [`Base::Upstream`] from the default
+//! branch of its default remote, fetched first ([`Worktrees::with_base`]). A branch rather than a detached `HEAD` keeps
 //! what the thread committed reachable after its worktree is removed, and two worktrees never need the same branch.
 //! The worktree is created on the thread's first prompt, reused whenever its harness starts again (so session/load
 //! sees the same directory) and removed once the thread's session expired from the session store, along with its
-//! branch unless that holds commits not merged into the repository's `HEAD`. Worktrees left behind once the option is
-//! turned off are removed the same way ([`Worktrees::left_behind`]), no new one being created. A branch holding such
-//! commits is reported ([`Worktrees::ahead`], [`Pruned::kept`]), so its work is not forgotten.
+//! branch unless that holds commits not merged into the repository's `HEAD` (nor, with [`Base::Upstream`], into the
+//! remote's default branch). Worktrees left behind once the option is turned off are removed the same way
+//! ([`Worktrees::left_behind`]), no new one being created. A branch holding such commits is reported
+//! ([`Worktrees::ahead`], [`Pruned::kept`]), so its work is not forgotten.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use std::time::Duration;
+
 use ants_proto::{ThreadId, UserId};
 use anyhow::{Context as _, Result, bail};
+use serde::Deserialize;
 use tokio::sync::Mutex;
 
-/// A thread's branch holding commits not in the repository's `HEAD`.
+/// Longest a git fetch for a thread's new branch may take.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Where a thread's new branch starts: the ant config key `worktree_base`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Base {
+    /// The repository's `HEAD`.
+    #[default]
+    Head,
+    /// The default branch of the repository's default remote, fetched first: the remote's `HEAD`, else the upstream of
+    /// the current branch. `HEAD`, with a warning, when there is no remote, the fetch fails or neither is known.
+    Upstream,
+}
+
+impl Base {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+/// A thread's branch holding commits not in the repository's `HEAD`, nor in the remote's default branch with
+/// [`Base::Upstream`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Branch {
     pub thread: ThreadId,
     pub name: String,
     pub commits: usize,
+    /// The remote's default branch the commits are not in either, with [`Base::Upstream`], such as `origin/main`.
+    pub upstream: Option<String>,
 }
 
 impl Branch {
@@ -31,6 +63,14 @@ impl Branch {
         match self.commits {
             1 => "1 commit".to_owned(),
             n => format!("{n} commits"),
+        }
+    }
+
+    /// What the commits are not in, in words.
+    pub fn outside(&self) -> String {
+        match &self.upstream {
+            Some(upstream) => format!("the repository's HEAD or {upstream}"),
+            None => "the repository's HEAD".to_owned(),
         }
     }
 }
@@ -55,6 +95,8 @@ pub struct Worktrees {
     dir: PathBuf,
     /// One change to the worktrees at a time, so a thread's worktree is never removed while it is being set up.
     changing: Mutex<()>,
+    /// Where a thread's new branch starts.
+    base: Base,
 }
 
 impl Worktrees {
@@ -68,7 +110,7 @@ impl Worktrees {
                 let within = Path::new(lines.next().unwrap_or_default()).components().collect();
                 tracing::info!(repo = %repo.display(), "giving each thread its own git worktree");
                 let dir = home.join("worktrees");
-                Some(Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()) })
+                Some(Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), base: Base::Head })
             }
             Err(e) => {
                 tracing::warn!(
@@ -102,11 +144,19 @@ impl Worktrees {
                     worktrees = %dir.display(),
                     "removing the git worktrees left by threads once their sessions expire"
                 );
-                return Some(Self { ant: ant.clone(), repo, within: PathBuf::new(), dir, changing: Mutex::new(()) });
+                let within = PathBuf::new();
+                return Some(Self { ant: ant.clone(), repo, within, dir, changing: Mutex::new(()), base: Base::Head });
             }
         }
         tracing::warn!(worktrees = %dir.display(), "keeping the thread worktrees left in no git repository");
         None
+    }
+
+    /// The same, starting a thread's new branch from `base`, which also tells what the commits of a branch are compared
+    /// with ([`Worktrees::ahead`]).
+    #[must_use]
+    pub fn with_base(self, base: Base) -> Self {
+        Self { base, ..self }
     }
 
     /// The directory the thread works in, in its worktree, which is created when missing.
@@ -145,25 +195,89 @@ impl Worktrees {
         pruned
     }
 
-    /// The thread's branch, when it holds commits not in the repository's `HEAD`. None too when git fails, as when the
-    /// branch does not exist.
+    /// The thread's branch, when it holds commits not in the repository's `HEAD`, nor with [`Base::Upstream`] in the
+    /// remote's default branch as last fetched. None too when git fails, as when the branch does not exist.
     pub async fn ahead(&self, thread: &ThreadId) -> Option<Branch> {
-        let name = self.branch(thread);
-        let range = format!("HEAD..refs/heads/{name}");
-        match git(&self.repo, ["rev-list", "--count", &range]).await {
-            Ok(out) => match out.trim().parse() {
-                Ok(0) => None,
-                Ok(commits) => Some(Branch { thread: thread.clone(), name, commits }),
-                Err(e) => {
-                    tracing::debug!(%thread, %name, error = %e, "counting the commits of the thread's branch");
-                    None
-                }
-            },
+        match self.count(thread).await {
+            Ok(branch) => Some(branch).filter(|b| b.commits > 0),
             Err(e) => {
-                tracing::debug!(%thread, %name, error = format!("{e:#}"), "counting the commits of the thread's branch");
+                tracing::debug!(%thread, error = format!("{e:#}"), "counting the commits of the thread's branch");
                 None
             }
         }
+    }
+
+    /// The thread's branch, with how many commits it holds that are not in the repository's `HEAD`, nor with
+    /// [`Base::Upstream`] in the remote's default branch as last fetched.
+    async fn count(&self, thread: &ThreadId) -> Result<Branch> {
+        let name = self.branch(thread);
+        let upstream = match self.base {
+            Base::Head => None,
+            Base::Upstream => match self.remote().await {
+                Some(remote) => self.upstream(&remote).await,
+                None => None,
+            },
+        };
+        let tip = format!("refs/heads/{name}");
+        let args = ["rev-list", "--count", &tip, "--not", "HEAD"].into_iter().chain(upstream.as_deref());
+        let commits = git(&self.repo, args).await?.trim().parse().context("counting commits")?;
+        let upstream = upstream.map(|u| shorten(&u).to_owned());
+        Ok(Branch { thread: thread.clone(), name, commits, upstream })
+    }
+
+    /// The repository's default remote: the remote of the current branch's upstream, else `origin` when there is one.
+    pub async fn remote(&self) -> Option<String> {
+        if let Ok(current) = git(&self.repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).await
+            && let Ok(remote) = git(&self.repo, ["config", "--get", &format!("branch.{}.remote", current.trim())]).await
+            && !matches!(remote.trim(), "" | ".")
+        {
+            return Some(remote.trim().to_owned());
+        }
+        let remotes = git(&self.repo, ["remote"]).await.ok()?;
+        remotes.lines().any(|r| r == "origin").then(|| "origin".to_owned())
+    }
+
+    /// The default branch of `remote` as last fetched, its `HEAD`, else the upstream of the current branch, as a full
+    /// ref name such as `refs/remotes/origin/main`.
+    async fn upstream(&self, remote: &str) -> Option<String> {
+        for name in [format!("refs/remotes/{remote}/HEAD"), "@{upstream}".to_owned()] {
+            if let Ok(full) = git(&self.repo, ["rev-parse", "--verify", "--quiet", "--symbolic-full-name", &name]).await
+                && !full.trim().is_empty()
+            {
+                return Some(full.trim().to_owned());
+            }
+        }
+        None
+    }
+
+    /// Where a new branch starts: `HEAD`, or with [`Base::Upstream`] the default branch of the default remote once
+    /// fetched, else `HEAD` with a warning.
+    async fn start(&self, thread: &ThreadId) -> String {
+        if self.base == Base::Head {
+            return "HEAD".to_owned();
+        }
+        match self.fetched_upstream().await {
+            Ok(upstream) => {
+                tracing::info!(%thread, %upstream, "starting the thread's branch from the remote's default branch");
+                upstream
+            }
+            Err(e) => {
+                tracing::warn!(%thread, error = format!("{e:#}"), "starting the thread's branch from HEAD instead");
+                "HEAD".to_owned()
+            }
+        }
+    }
+
+    /// The default branch of the default remote, once fetched.
+    async fn fetched_upstream(&self) -> Result<String> {
+        let remote = self.remote().await.context("the repository has no default remote")?;
+        let fetch = ["fetch", "--quiet", "--no-tags", &remote];
+        remote_git(&self.repo, fetch, FETCH_TIMEOUT).await?;
+        self.upstream(&remote).await.with_context(|| {
+            format!(
+                "remote {remote} has no HEAD (git remote set-head {remote} --auto) and the current branch no upstream"
+            )
+        })
     }
 
     /// The threads with a worktree.
@@ -195,8 +309,10 @@ impl Worktrees {
             git(&self.repo, [OsStr::new("worktree"), "add".as_ref(), "--quiet".as_ref(), path, branch.as_ref()])
                 .await?;
         } else {
-            let args = ["worktree", "add", "--quiet", "-b", &branch].map(OsStr::new);
-            git(&self.repo, args.into_iter().chain([path, OsStr::new("HEAD")])).await?;
+            let start = self.start(thread).await;
+            // No upstream for the branch, which starting from a remote branch would otherwise set.
+            let args = ["worktree", "add", "--quiet", "--no-track", "-b", &branch].map(OsStr::new);
+            git(&self.repo, args.into_iter().chain([path, OsStr::new(&start)])).await?;
         }
         Ok(())
     }
@@ -214,15 +330,22 @@ impl Worktrees {
             std::fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
         }
         git(&self.repo, ["worktree", "prune"]).await?;
-        let kept = self.ahead(thread).await;
+        let counted = self.count(thread).await;
+        let kept = counted.as_ref().ok().filter(|b| b.commits > 0).cloned();
         match &kept {
             Some(branch) => {
                 tracing::info!(%thread, branch = branch.name, commits = branch.commits, "keeping the thread's branch");
             }
-            // Should counting them have failed, git still refuses to delete a branch with commits not merged.
             None => {
                 let branch = self.branch(thread);
-                if let Err(e) = git(&self.repo, ["branch", "--delete", "--quiet", &branch]).await {
+                let mut args = vec!["branch", "--delete", "--quiet"];
+                // Known to hold nothing new, the branch goes even when started from a remote branch HEAD lacks; should
+                // counting have failed, git still refuses to delete a branch with commits not merged into HEAD.
+                if counted.is_ok() {
+                    args.push("--force");
+                }
+                args.push(&branch);
+                if let Err(e) = git(&self.repo, args).await {
                     tracing::info!(%thread, %branch, error = format!("{e:#}"), "keeping the thread's branch");
                 }
             }
@@ -253,26 +376,68 @@ fn threads_in(dir: &Path) -> Vec<ThreadId> {
     threads
 }
 
+/// `ref_name` without its `refs/remotes/` or `refs/heads/` prefix, as git shows it.
+fn shorten(ref_name: &str) -> &str {
+    ref_name.strip_prefix("refs/remotes/").or_else(|| ref_name.strip_prefix("refs/heads/")).unwrap_or(ref_name)
+}
+
 /// Run git in `dir` and return what it printed, or fail with what it printed on stderr.
 async fn git<I, S>(dir: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run("git", dir, args, &[], None).await
+}
+
+/// Run git in `dir` to reach a remote, as [`git`] does, prompting for no credentials and failing after `timeout`.
+pub(crate) async fn remote_git<I, S>(dir: &Path, args: I, timeout: Duration) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run("git", dir, args, &[("GIT_TERMINAL_PROMPT", "0")], Some(timeout)).await
+}
+
+/// Run `program` in `dir` with `env` added, and return what it printed, or fail with what it printed on stderr, or
+/// after `timeout`, killing it.
+pub(crate) async fn run<P, I, S>(
+    program: P,
+    dir: &Path,
+    args: I,
+    env: &[(&str, &str)],
+    timeout: Option<Duration>,
+) -> Result<String>
+where
+    P: AsRef<OsStr>,
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let program = program.as_ref();
     let args: Vec<S> = args.into_iter().collect();
-    let shown = || args.iter().map(|a| a.as_ref().to_string_lossy()).collect::<Vec<_>>().join(" ");
-    let output = tokio::process::Command::new("git")
+    let shown = || {
+        let words = std::iter::once(program).chain(args.iter().map(AsRef::as_ref));
+        words.map(OsStr::to_string_lossy).collect::<Vec<_>>().join(" ")
+    };
+    let output = tokio::process::Command::new(program)
         .args(&args)
+        .envs(env.iter().copied())
         .current_dir(dir)
         .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("running git {}", shown()))?;
+        .kill_on_drop(true)
+        .output();
+    let output = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, output)
+            .await
+            .map_err(|_| anyhow::anyhow!("{}: no answer within {}", shown(), ants_proto::duration::format(timeout)))?,
+        None => output.await,
+    }
+    .with_context(|| format!("running {}", shown()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {}: {}", shown(), stderr.trim());
+        bail!("{}: {}", shown(), stderr.trim());
     }
-    String::from_utf8(output.stdout).with_context(|| format!("git {}: output is no UTF-8", shown()))
+    String::from_utf8(output.stdout).with_context(|| format!("{}: output is no UTF-8", shown()))
 }
 
 #[cfg(test)]
@@ -344,7 +509,7 @@ pub(crate) mod tests {
         }
         std::fs::write(home.join("worktrees/a/sub/file"), "uncommitted").unwrap();
         commit(&home.join("worktrees/b"), "work of b");
-        let ahead = Branch { thread: b.clone(), name: "ants/dev-a/b".to_owned(), commits: 1 };
+        let ahead = Branch { thread: b.clone(), name: "ants/dev-a/b".to_owned(), commits: 1, upstream: None };
         assert_eq!(worktrees.ahead(&b).await, Some(ahead.clone()));
         assert_eq!(worktrees.ahead(&a).await, None, "uncommitted work is no commit");
         assert_eq!(worktrees.ahead(&thread("d")).await, None, "no branch");
@@ -437,5 +602,83 @@ pub(crate) mod tests {
         assert!(shares_git_workdir(&dir, 4, false), "a worktree's .git is a file");
         assert!(!shares_git_workdir(Path::new("/"), 4, false));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A bare repository `remote.git` beside `repo`, its `origin` with `main` pushed, the remote's `HEAD` set unless
+    /// `head` is false, and a clone `other` of it.
+    fn with_remote(repo: &Path, head: bool) -> (PathBuf, PathBuf) {
+        let dir = repo.parent().unwrap();
+        let remote = dir.join("remote.git");
+        run(dir, &["init", "--quiet", "--bare", "--initial-branch=main", remote.to_str().unwrap()]);
+        run(repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        if head {
+            run(repo, &["push", "--quiet", "origin", "main"]);
+            run(repo, &["remote", "set-head", "origin", "main"]);
+        } else {
+            // Since git 2.48 a fetch otherwise sets the remote's HEAD.
+            run(repo, &["config", "remote.origin.followRemoteHEAD", "never"]);
+            run(repo, &["push", "--quiet", "origin", "main"]);
+        }
+        run(dir, &["clone", "--quiet", remote.to_str().unwrap(), dir.join("other").to_str().unwrap()]);
+        (remote, dir.join("other"))
+    }
+
+    #[tokio::test]
+    async fn an_upstream_base_starts_the_branch_from_the_fetched_remote_default_branch() {
+        let Some(repo) = repo("worktrees-upstream") else { return };
+        let home = repo.parent().unwrap().join("home");
+        let (_, other) = with_remote(&repo, true);
+        commit(&other, "upstream work");
+        run(&other, &["push", "--quiet", "origin", "main"]);
+        let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap().with_base(Base::Upstream);
+        assert_eq!(worktrees.remote().await.as_deref(), Some("origin"));
+        let (a, b) = (thread("a"), thread("b"));
+        let path = worktrees.checkout(&a).await.unwrap();
+        assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "upstream work");
+        assert_eq!(run(&repo, &["log", "-1", "--format=%s"]).trim(), "first", "the workdir's checkout is untouched");
+        assert!(
+            Command::new("git")
+                .args(["config", "branch.ants/dev-a/a.remote"])
+                .current_dir(&repo)
+                .status()
+                .is_ok_and(|s| !s.success())
+        );
+        assert_eq!(worktrees.ahead(&a).await, None, "the upstream commit is no commit of the thread");
+        commit(&path, "work of a");
+        let ahead = worktrees.ahead(&a).await.unwrap();
+        assert_eq!((ahead.commits, ahead.upstream.as_deref()), (1, Some("origin/main")));
+        assert_eq!(ahead.outside(), "the repository's HEAD or origin/main");
+        worktrees.checkout(&b).await.unwrap();
+        let pruned = worktrees.prune(async |_: &ThreadId| true).await;
+        assert_eq!(pruned, Pruned { removed: 2, kept: vec![ahead] });
+        let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
+        assert_eq!(branches.trim(), "ants/dev-a/a", "a branch with only upstream commits is deleted");
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_upstream_base_falls_back_to_head() {
+        let Some(repo) = repo("worktrees-upstream-fallback") else { return };
+        let home = repo.parent().unwrap().join("home");
+        commit(&repo, "local work");
+        let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap().with_base(Base::Upstream);
+        let path = worktrees.checkout(&thread("a")).await.unwrap();
+        assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "local work", "no remote");
+
+        let (remote, other) = with_remote(&repo, false);
+        commit(&other, "upstream work");
+        run(&other, &["push", "--quiet", "origin", "main"]);
+        let path = worktrees.checkout(&thread("b")).await.unwrap();
+        let shown = "the remote has no HEAD and main no upstream";
+        assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "local work", "{shown}");
+
+        run(&repo, &["branch", "--quiet", "--set-upstream-to=origin/main"]);
+        let path = worktrees.checkout(&thread("c")).await.unwrap();
+        assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "upstream work", "main's upstream instead");
+
+        std::fs::remove_dir_all(&remote).unwrap();
+        let path = worktrees.checkout(&thread("d")).await.unwrap();
+        assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "local work", "the fetch fails");
+        std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
     }
 }

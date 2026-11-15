@@ -27,6 +27,7 @@
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
 //! worktrees = true                  # a git worktree per thread, under the ant's home
+//! worktree_base = "upstream"        # start its branch from the fetched remote default branch, not HEAD
 //! harness = "my-agent"
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
@@ -81,6 +82,7 @@ use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, P
 use crate::schedule::{self, Schedule};
 use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
+use crate::worktrees::Base;
 
 /// Environment variable naming the config file.
 pub const ENV: &str = "ANTS_CONFIG";
@@ -227,6 +229,9 @@ pub struct Ant {
     /// daily after that; 0 never reminds.
     #[serde(default = "default_escalation_reminder", deserialize_with = "ants_proto::duration::deserialize")]
     pub escalation_reminder: Duration,
+    /// Where a thread's new worktree branch starts.
+    #[serde(default)]
+    pub worktree_base: Base,
     /// The built-in messenger, served only while no other daemon lists a messenger in the roster.
     #[serde(skip)]
     pub builtin: bool,
@@ -322,6 +327,7 @@ impl Ant {
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
+            worktree_base: Base::Head,
             builtin: false,
             pool: None,
             redact: true,
@@ -395,6 +401,7 @@ impl Ant {
             defer_to_others: self.builtin,
             requester: crate::mcp::Requester::default(),
             redact: self.redact,
+            worktree_base: self.worktree_base,
         })
     }
 
@@ -1214,6 +1221,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
         if let Some(value) = value {
             set(key, toml_float(value));
         }
+    }
+    if ant.worktree_base != default.worktree_base {
+        set("worktree_base", toml_string(ant.worktree_base.as_str()));
     }
     Ok(out)
 }

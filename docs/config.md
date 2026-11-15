@@ -42,6 +42,7 @@ approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
 worktrees = false                          # default; true gives each thread a git worktree
+worktree_base = "head"                     # default; "upstream" starts its branch from the fetched remote default branch
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -115,8 +116,8 @@ allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named
 pool_daily_cost = 25.0                     # optional shared UTC daily cap across template ants; also pool_daily_tokens
 whoami = "Implement what the manager assigns." # overridable defaults: whoami, memory, tasks, capabilities
 capabilities = ["rust"]
-env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, idle_timeout,
-worktrees = true                           # approval_timeout, spend_warn_percent
+env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, worktree_base,
+worktrees = true                           # idle_timeout, approval_timeout, spend_warn_percent
 ```
 
 Allowed per-ant overrides within template bounds:

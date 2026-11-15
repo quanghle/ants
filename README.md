@@ -177,6 +177,8 @@ Each ant runs up to `max_harnesses` (default 4) ACP processes, concurrent across
 
 With `worktrees = true` (`--worktrees`), each thread gets its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>` from `HEAD`, pruned once `<ant>.<thread>` expires from `ants_sessions` (preserving branches with unmerged commits and appending an `[ants]` notice). `ants daemon` and `ants doctor` warn when `max_harnesses > 1` shares a git workdir with `worktrees = false`.
 
+With `worktree_base = "upstream"` (default `"head"`), a thread's new branch starts from the default branch of the repository's default remote (the current branch's upstream remote, else `origin`): `git fetch` runs first (60 s timeout, no credential prompt), then the branch starts from `refs/remotes/<remote>/HEAD`, else from the current branch's upstream. Without a remote, or when the fetch fails or neither ref is known, the branch starts from `HEAD` with a logged warning. Branch commits already in that remote branch count as merged when pruning and in the `[ants]` notice.
+
 In-hand messages send 20 s progress acks against a 60 s `ack_wait`, acking only after storing the reply:
 
 1. Claims `<ant>.msg.<id>` = `started` in `ants_attempts` (unless already `withdrawn`), then writes `<ant>.<seq>` before prompting so redeliveries after a crash prepend a prior-tool-call warning.

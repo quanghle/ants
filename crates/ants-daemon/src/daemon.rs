@@ -103,6 +103,8 @@ pub struct Config {
     pub max_harnesses: usize,
     /// Each thread works in its own git worktree of the workdir's repository, under the home ([`Worktrees`]).
     pub worktrees: bool,
+    /// Where a thread's new worktree branch starts ([`Worktrees::with_base`]).
+    pub worktree_base: crate::worktrees::Base,
     /// A thread's harness stops after this long without a message, and resumes its session on the next one.
     pub idle_timeout: Duration,
     /// Capabilities the ant advertises in the roster.
@@ -440,9 +442,9 @@ async fn harness_pool(
     let isolating =
         if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
     if let Some(worktrees) = isolating {
-        pool = pool.with_worktrees(worktrees);
+        pool = pool.with_worktrees(worktrees.with_base(config.worktree_base));
     } else if let Some(worktrees) = Worktrees::left_behind(&config.ant, &config.home).await {
-        pool = pool.with_worktrees_left_behind(worktrees);
+        pool = pool.with_worktrees_left_behind(worktrees.with_base(config.worktree_base));
     }
     pool
 }
@@ -488,6 +490,7 @@ fn log_serving(config: &Config) {
         workdir = %config.workdir.display(),
         max_harnesses = config.max_harnesses,
         worktrees = config.worktrees,
+        worktree_base = config.worktree_base.as_str(),
         idle_timeout = ?config.idle_timeout,
         capabilities = ?config.capabilities,
         allow = ?config.allow,
@@ -1790,7 +1793,7 @@ impl Inbox<'_> {
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
         let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
         let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
-            format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
+            format!("[ants] Branch {} holds {} not in {}.", branch.name, branch.commits_text(), branch.outside())
         });
         let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
@@ -2357,8 +2360,9 @@ fn kept_branch_notice(ant: &UserId, branch: &Branch, owner: Option<UserId>, huma
     let Branch { thread, name, .. } = branch;
     let text = format!(
         "[ants] The session of thread {thread} expired and its git worktree was removed; branch {name} is kept, \
-         holding {} not in the repository's HEAD.",
-        branch.commits_text()
+         holding {} not in {}.",
+        branch.commits_text(),
+        branch.outside()
     );
     let to = owner.clone().unwrap_or_else(|| humans.default_human().clone());
     Envelope::on_thread(thread.clone(), ant.clone(), to, text).with_owner(owner)
