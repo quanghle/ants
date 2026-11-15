@@ -23,21 +23,13 @@ pub enum Binder {
 /// binding.
 pub fn check(issued: &[Issued], name: &UserId, github: &GithubAccount, binder: Binder) -> Result<bool> {
     let login = &github.login;
-    if name.is_human() {
-        bail!("{name} is the default human, which no one registers");
-    }
-    if *name == UserId::channel_manager() || name.as_str() == ants_proto::BOOTSTRAP_USER {
-        bail!("{name} is a reserved name");
-    }
+    check_name(issued, name)?;
     if let Some(other) =
         issued.iter().find(|i| i.github.as_ref().is_some_and(|g| g.id == github.id) && i.name != name.as_str())
     {
         bail!("GitHub user {login} is bound to {}, not {name}", other.name);
     }
     let mine: Vec<&Issued> = issued.iter().filter(|i| i.name == name.as_str()).collect();
-    if let Some(other) = mine.iter().find(|i| i.kind != Kind::Human) {
-        bail!("{name} is taken: {} credentials were issued to it", kind(other.kind));
-    }
     let bound = mine.iter().filter_map(|i| i.github.as_ref());
     if let Some(other) = bound.clone().find(|g| g.id != github.id) {
         bail!("{name} is bound to another GitHub user ({})", other.login);
@@ -52,6 +44,21 @@ pub fn check(issued: &[Issued], name: &UserId, github: &GithubAccount, binder: B
         );
     }
     Ok(false)
+}
+
+/// The part of [`check`] no GitHub user changes: fails for `human`, a reserved name, and a name any key other than a
+/// human's was issued to.
+pub fn check_name(issued: &[Issued], name: &UserId) -> Result<()> {
+    if name.is_human() {
+        bail!("{name} is the default human, which no one registers");
+    }
+    if *name == UserId::channel_manager() || name.as_str() == ants_proto::BOOTSTRAP_USER {
+        bail!("{name} is a reserved name");
+    }
+    if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.kind != Kind::Human) {
+        bail!("{name} is taken: {} credentials were issued to it", kind(other.kind));
+    }
+    Ok(())
 }
 
 fn kind(kind: Kind) -> &'static str {

@@ -234,13 +234,13 @@ pub const ALL_RENEW_REQUESTS: &str = "ants.renew.*";
 pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
 
 /// Where `ants login` asks for the credentials of a new device of the human `name`
-/// (`LoginRequest`; core NATS, not stored). Anyone holding the team's public bootstrap
+/// ([`LoginRequest`](super::LoginRequest); core NATS, not stored). Anyone holding the team's public bootstrap
 /// credentials publishes here.
 pub fn login(name: &UserId) -> String {
     format!("ants.login.{name}")
 }
 
-/// Where the answers to a registration request of `name` go (`LoginReply`; core NATS), each
+/// Where the answers to a registration request of `name` go ([`LoginReply`](super::LoginReply); core NATS), each
 /// naming the request's key in the clear and sealed to it.
 pub fn login_reply(name: &UserId) -> String {
     format!("ants.login.{name}.reply")

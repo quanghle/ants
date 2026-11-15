@@ -205,7 +205,7 @@ token_file = "~/.config/ants/github-token"    # the signer's GitHub token, mode 
 # api_url = "https://api.github.com"          # ... and its REST API, such as https://ghe.example/api/v3
 ```
 
-- **Policy:** a user who is a member of a listed organization, then of a listed team, then has a verified email address in a listed domain (exact domain, no subdomains; names compared without case) is signed at once, and the grant (`org`, `team` or `email-domain`) is recorded with the device in `issued.jsonl`. Anyone else is asked about by humans.
+- **Policy:** a user who is a member of a listed organization, then of a listed team, then has a verified email address in a listed domain (exact domain, no subdomains; names compared without case) is signed at once, and the grant (`org`, `team` or `email-domain`) is recorded with the device in `issued.jsonl`. Anyone else is refused.
 - **Signer token:** optional; a classic token with `read:org` (or a fine-grained token with organization members read access) checks memberships and looks GitHub users up (`ants auth user NAME --human --github LOGIN`). `token_file` must be readable by its owner only; `token_file` and `token_store` exclude each other.
 - **GitHub only:** no other identity provider signs users in.
 

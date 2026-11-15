@@ -34,6 +34,7 @@ mod progress;
 mod queue;
 mod quiet;
 mod reacted;
+mod registrar;
 mod reload;
 mod renew;
 mod retire;
