@@ -190,7 +190,7 @@ JetStream sources move buffered messages to the hub automatically across outages
 
 | Operation | While leaf uplink is down |
 |---|---|
-| Inbox messages and replies (`ants ask`, daemon replies, agent messages) | Buffered in `ANTS_OUT`; daemons record unacked requests in `<home>/answered` and ack redeliveries on reconnect (ignoring `"no responders"`) without re-prompting. |
+| Inbox messages and replies (`ants ask`, daemon replies, ant messages) | Buffered in `ANTS_OUT`; daemons record unacked requests in `<home>/answered` and ack redeliveries on reconnect (ignoring `"no responders"`) without re-prompting. |
 | Unsequenced notes (`ants notes <thread> TEXT`), channel posts (`ants post`, daemon replies), passed links (`ants_links`) | Buffered in `ANTS_OUT` and sourced into `ANTS` or `ants_links` on reconnect. |
 | Daemon dead letters (`ants.dead.<ant>`) | Buffered in `ANTS_OUT` and noted in `<home>/buried`; notice and `+TERM` run on redelivery (or within 30 s of reconnect on the 6th extra delivery) after checking `deadread-<ant>` against duplicates landing past the 24 h window. |
 | Pull consumers, acks, stream reads (`ants inbox`, `ants channel read`, `ants notes`, `ants dead list`/`replay`) | Fail immediately; require the hub stream. |
@@ -208,7 +208,7 @@ Sourced messages enter `ANTS` without a core NATS publish on `ants.inbox.*`. `an
 Because core NATS republishes do not cross a down uplink, waiters also poll `ANTS` across outages:
 
 - **`ants ask --wait` / `--follow`**: polls `ANTS` every 5 s (up to 100 messages/round from the starting sequence): humans via batched direct gets (`$JS.API.DIRECT.GET.ANTS`, `next_by_subj`) updating `ants_read`; ants via short-lived no-ack spare consumers `inbox-<ant>_1..3` (`inactive_threshold` 30 s).
-- **Daemon `ask_agent` and escalation waiters**: listen on live subscriptions while connected and receive outage replies via durable consumer `inbox-<ant>` on reconnect.
+- **Daemon `ask_ant` and escalation waiters**: listen on live subscriptions while connected and receive outage replies via durable consumer `inbox-<ant>` on reconnect.
 - **`ants post --wait` / `--follow`**: subscribes to `ants.chan.<channel>.*` and polls stored channel posts every 5 s (humans via batched direct gets; ants via `chanread-<ant>_1..3`), starting from the publish ack sequence or 5 m before send time if buffered in `ANTS_OUT`, deduplicating the last 1,024 post IDs.
 
 ## HTTPS fallback bridge

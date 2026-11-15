@@ -550,7 +550,7 @@ struct Inbox<'a> {
     /// Messages whose dead letter waits in the machine's outbox, to bury again on their redelivery.
     buried: &'a Buried,
     mcp: Option<&'a Mcp>,
-    /// Takes the decisions agents of the ant's chain send on its tool requests.
+    /// Takes the decisions ants of the ant's chain send on its tool requests.
     approvals: Option<&'a NatsApprover>,
     /// Hides secrets in what the harness streams and answers.
     redactor: &'a Redactor,
@@ -797,7 +797,7 @@ impl Inbox<'_> {
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
-    /// `ask_agent` call is handed over, and so is an approval decision, which is acked and never prompted with
+    /// `ask_ant` call is handed over, and so is an approval decision, which is acked and never prompted with
     /// ([`NatsApprover::offer`]). An owner that is no human is dropped ([`Registry::human_owner`]), so neither the
     /// escalations nor the messages that follow on from this one name it, and so is a creator that is a human.
     async fn admit(&self, msg: &jetstream::Message) -> Option<Incoming> {
@@ -1099,7 +1099,7 @@ impl Claims<'_> {
 }
 
 impl Inbox<'_> {
-    /// Whether `envelope` is a reply to an `ask_agent` call, now handed over and acked. It must not wait in its
+    /// Whether `envelope` is a reply to an `ask_ant` call, now handed over and acked. It must not wait in its
     /// thread's queue: the prompt that asked is in flight on that thread.
     async fn claim(&self, envelope: &Envelope, msg: &jetstream::Message) -> bool {
         let Some(mcp) = self.mcp else { return false };
@@ -1109,12 +1109,12 @@ impl Inbox<'_> {
                 match bus::double_ack(self.client, msg).await {
                     // Finished, not left waiting to the watcher of its sender ([`unserved`]).
                     Ok(()) => self.attempts.finish(envelope).await,
-                    Err(e) => tracing::warn!(error = %e, "acking a reply to ask_agent"),
+                    Err(e) => tracing::warn!(error = %e, "acking a reply to ask_ant"),
                 }
                 true
             }
             Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_agent");
+                tracing::warn!(error = format!("{e:#}"), "keeping a reply to ask_ant");
                 nak(msg, Some(self.retry_delay)).await;
                 true
             }
@@ -1513,7 +1513,7 @@ impl Inbox<'_> {
         }
         let renewed = self.escalator.arrived(&mut incoming.envelope, human).await?;
         self.narrow(incoming, human).await?;
-        // Not a message from ask_agent or send_message: an ask_agent call waits for the answer in the leader's inbox.
+        // Not a message from ask_ant or send_message: an ask_ant call waits for the answer in the leader's inbox.
         if renewed && incoming.post.is_none() && incoming.envelope.in_reply_to.is_some() {
             let pending = self.escalator.ledger().pending(&incoming.envelope.thread_id).await?;
             incoming.resume = pending.and_then(|p| p.channel);
@@ -2066,15 +2066,13 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
 }
 
 /// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to
-/// `ask_agent` that wait on its thread for `check_inbox`.
+/// `ask_ant` that wait on its thread for `check_inbox`.
 fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
     let late = match late {
         0 => None,
-        1 => {
-            Some("[ants] 1 late reply to ask_agent is waiting on this thread; call check_inbox to read it.".to_owned())
-        }
+        1 => Some("[ants] 1 late reply to ask_ant is waiting on this thread; call check_inbox to read it.".to_owned()),
         n => Some(format!(
-            "[ants] {n} late replies to ask_agent are waiting on this thread; call check_inbox to read them."
+            "[ants] {n} late replies to ask_ant are waiting on this thread; call check_inbox to read them."
         )),
     };
     let cut_off = cut_off.then(|| CUT_OFF.to_owned());
@@ -4382,7 +4380,7 @@ mod tests {
         let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
         let dev_b: UserId = "dev-b".parse().unwrap();
         let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
-        // Two ask_agent calls on t1 that gave up, remembered across a restart.
+        // Two ask_ant calls on t1 that gave up, remembered across a restart.
         let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
         let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/late");
         let _ = std::fs::remove_dir_all(&home);
@@ -4405,7 +4403,7 @@ mod tests {
         let check = async {
             let mut got = [next_reply(&mut replies).await, next_reply(&mut replies).await];
             got.sort_by_key(|(thread, _)| thread != &t1);
-            let note = "[ants] 2 late replies to ask_agent are waiting on this thread; call check_inbox to read them.";
+            let note = "[ants] 2 late replies to ask_ant are waiting on this thread; call check_inbox to read them.";
             assert_eq!(got, [(t1.clone(), format!("{note}\n\na")), (t2.clone(), "b".to_owned())]);
             ctrl_c.add_permits(1);
         };
@@ -5048,7 +5046,7 @@ mod tests {
             let mut spent =
                 answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &bus.humans.humans()).unwrap();
             spent.turn_budget = 0;
-            assert_eq!(spent.owner.as_ref(), Some(&alice), "agents' posts keep the owner");
+            assert_eq!(spent.owner.as_ref(), Some(&alice), "ants' posts keep the owner");
             let seq = bus.post(&spent).await;
             let escalation = next_envelope(&mut alice_inbox).await;
             assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&root.thread_id, Some(spent.id)));

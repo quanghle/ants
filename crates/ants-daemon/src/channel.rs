@@ -873,7 +873,7 @@ mod tests {
     fn only_a_post_mentioning_a_member_wakes_it() {
         let (entry, a) = (ops(), p("dev-a"));
         assert_eq!(wakes(&a, Some(&entry), &post("human", "@dev-a deploy")), Wake::Mentioned);
-        assert_eq!(wakes(&a, Some(&entry), &post("dev-b", "@dev-b @dev-a check")), Wake::Mentioned, "agents too");
+        assert_eq!(wakes(&a, Some(&entry), &post("dev-b", "@dev-b @dev-a check")), Wake::Mentioned, "ants too");
         assert_eq!(wakes(&a, Some(&entry), &post("human", "@dev-b deploy")), Wake::Skip, "another member");
         assert_eq!(wakes(&a, Some(&entry), &post("human", "deploy")), Wake::Skip, "nobody mentioned");
         assert_eq!(wakes(&a, Some(&entry), &post("dev-a", "@dev-a note to self")), Wake::Skip, "its own post");
@@ -889,7 +889,7 @@ mod tests {
         let untagged = post("human", "the build is red");
         assert_eq!(wakes(&messenger, Some(&entry), &untagged), Wake::Triage, "the default messenger, no member");
         assert_eq!(wakes(&p("dev-a"), Some(&entry), &untagged), Wake::Skip, "members wait for its mentions");
-        assert_eq!(wakes(&messenger, Some(&entry), &post("dev-a", "the build is red")), Wake::Skip, "agents' posts");
+        assert_eq!(wakes(&messenger, Some(&entry), &post("dev-a", "the build is red")), Wake::Skip, "ants' posts");
         assert_eq!(wakes(&messenger, Some(&entry), &post("human", "@dev-a the build")), Wake::Skip, "mentions");
         assert_eq!(wakes(&messenger, Some(&entry), &post("human", "@human the build")), Wake::Skip, "mentions");
         entry.messenger = Some(p("dev-b"));

@@ -489,7 +489,7 @@ pub(crate) mod tests {
         m.key(Key::Enter, at(0));
         m.key(Key::Char('a'), at(0));
         let decision = ApprovalDecision::new(push.id, push.ant.clone(), Verdict::Reject);
-        let state = State::DecidedByAgent(user("lead"), decision);
+        let state = State::DecidedByAnt(user("lead"), decision);
         m.approval(Update::Resolved(push, state.clone()));
         assert!(m.approvals.is_empty());
         let detail = m.detail.as_ref().unwrap();

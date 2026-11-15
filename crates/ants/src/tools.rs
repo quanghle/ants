@@ -10,9 +10,9 @@
 //! ([`answer_request`]), so of two humans answering at once, the second is told the request was already answered.
 //! The ant acts on the stored decision, not on the first it hears, since a refused publish still reaches subscribers.
 //!
-//! An agent of the ant's escalate_to may decide too: its decision travels as an envelope to the ant's inbox,
-//! `ants.inbox.<ant>.<agent>`, where humans read it back. A request such a decision came to first, as the stream
-//! ordered them and before the request expired, is decided too ([`State::DecidedByAgent`]), and a human's later answer
+//! An ant of the requester's escalate_to may decide too: its decision travels as an envelope to the requester's inbox,
+//! `ants.inbox.<requester>.<decider>`, where humans read it back. A request such a decision came to first, as the stream
+//! ordered them and before the request expired, is decided too ([`State::DecidedByAnt`]), and a human's later answer
 //! is refused. The chain is the ant's roster entry's, else the one kept in `ants_chains`, as the ant takes a
 //! decision only from its own chain.
 //!
@@ -78,8 +78,8 @@ pub enum State {
     Pending,
     /// A human's decision.
     Decided(ApprovalDecision),
-    /// The decision of an agent of the ant's escalate_to, the one named.
-    DecidedByAgent(UserId, ApprovalDecision),
+    /// The decision of an ant of the requester's escalate_to, the one named.
+    DecidedByAnt(UserId, ApprovalDecision),
     /// No decision in time; the ant rejected it.
     Expired,
 }
@@ -105,7 +105,7 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
     }
 }
 
-/// The escalate_to of `ant`, whose agents may decide its requests: its roster entry's, else the chain kept in
+/// The escalate_to of `ant`, whose ants may decide its requests: its roster entry's, else the chain kept in
 /// `ants_chains`, else none.
 async fn chain_of(js: &jetstream::Context, ant: &UserId) -> Result<Vec<UserId>> {
     if let Ok(kv) = js.get_key_value(ROSTER_BUCKET).await
@@ -125,15 +125,15 @@ async fn chain_of(js: &jetstream::Context, ant: &UserId) -> Result<Vec<UserId>> 
     }
 }
 
-/// A decision an agent of the requester's escalate_to sent to its inbox.
+/// A decision an ant of the requester's escalate_to sent to its inbox.
 #[derive(Debug, Clone)]
-struct AgentDecision {
+struct AntDecision {
     by: UserId,
     decision: ApprovalDecision,
     sent_at: DateTime<Utc>,
 }
 
-impl AgentDecision {
+impl AntDecision {
     /// The decision as `request`'s ant takes it, if it came in time: a verdict not offered counts as a rejection.
     fn on(&self, request: &ApprovalRequest) -> Option<(UserId, ApprovalDecision)> {
         if self.sent_at >= request.expires_at {
@@ -145,15 +145,15 @@ impl AgentDecision {
     }
 }
 
-/// The first decision on each request of `ant` that an agent of `chain` sent to its inbox, by request id, from
+/// The first decision on each request of `ant` that an ant of `chain` sent to its inbox, by request id, from
 /// stream sequence `from` up to `until` (excluded), as far as the stream holds messages.
-async fn agent_decisions(
+async fn ant_decisions(
     stream: &Stream,
     ant: &UserId,
     chain: &[UserId],
     from: u64,
     until: Option<u64>,
-) -> Result<HashMap<Uuid, AgentDecision>> {
+) -> Result<HashMap<Uuid, AntDecision>> {
     let mut found = HashMap::new();
     if chain.is_empty() {
         return Ok(found);
@@ -175,7 +175,7 @@ async fn agent_decisions(
         // The subject pins the sender; the ant takes decisions on its own requests from its own chain only.
         let ours = &envelope.to == ant && &decision.ant == ant;
         if ours && envelope.check_subject(&msg.subject).is_ok() && envelope.is_from_chain(chain) {
-            found.entry(decision.request_id).or_insert_with(|| AgentDecision {
+            found.entry(decision.request_id).or_insert_with(|| AntDecision {
                 by: envelope.from.clone(),
                 decision: (**decision).clone(),
                 sent_at: envelope.sent_at,
@@ -229,12 +229,12 @@ async fn state_at(
     now: DateTime<Utc>,
 ) -> Result<(State, u64)> {
     let (decision, last) = decisions(stream, request).await?;
-    // An agent's decision counts only before a human's: the ant takes the first.
+    // A chain ant's decision counts only before a human's: the ant takes the first.
     let until = decision.is_some().then_some(last);
     let chain = chain_of(js, &request.ant).await?;
-    let agent = agent_decisions(stream, &request.ant, &chain, seq + 1, until).await?;
-    let state = match (agent.get(&request.id).and_then(|d| d.on(request)), decision) {
-        (Some((by, decision)), _) => State::DecidedByAgent(by, decision),
+    let by_chain = ant_decisions(stream, &request.ant, &chain, seq + 1, until).await?;
+    let state = match (by_chain.get(&request.id).and_then(|d| d.on(request)), decision) {
+        (Some((by, decision)), _) => State::DecidedByAnt(by, decision),
         (None, Some(decision)) => State::Decided(decision),
         (None, None) if request.is_expired(now) => State::Expired,
         (None, None) => State::Pending,
@@ -242,7 +242,7 @@ async fn state_at(
     Ok((state, last))
 }
 
-/// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human or an agent
+/// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human or an ant
 /// of the ant's escalate_to.
 pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
     Ok(pending_at(js, stream, now).await?.into_iter().map(|(_, request)| request).collect())
@@ -262,13 +262,13 @@ async fn pending_at(
         }
     }
     // One read of each ant's inbox, from its oldest undecided request on.
-    let mut decided: HashMap<UserId, HashMap<Uuid, AgentDecision>> = HashMap::new();
+    let mut decided: HashMap<UserId, HashMap<Uuid, AntDecision>> = HashMap::new();
     for (seq, request) in &undecided {
         if decided.contains_key(&request.ant) {
             continue;
         }
         let chain = chain_of(js, &request.ant).await?;
-        let found = agent_decisions(stream, &request.ant, &chain, seq + 1, None).await?;
+        let found = ant_decisions(stream, &request.ant, &chain, seq + 1, None).await?;
         decided.insert(request.ant.clone(), found);
     }
     Ok(undecided
@@ -391,7 +391,7 @@ async fn check(
     let last = match state_at(js, stream, seq, request, now).await? {
         (State::Pending, last) => last,
         (State::Decided(d), _) => return Err(answered(request, &d)),
-        (State::DecidedByAgent(by, d), _) => {
+        (State::DecidedByAnt(by, d), _) => {
             bail!("request {} was already answered by {by}: {}", qualified(request), spelling(d.verdict))
         }
         (State::Expired, _) => {
@@ -520,7 +520,7 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
         State::Decided(d) => {
             write!(out, "answered {} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
         }
-        State::DecidedByAgent(by, d) => {
+        State::DecidedByAnt(by, d) => {
             write!(out, "answered {} by {by} at {}", spelling(d.verdict), d.decided_at.format("%Y-%m-%d %H:%M:%S"))
         }
         State::Expired => write!(out, "expired  at {}, rejected", request.expires_at.format("%Y-%m-%d %H:%M:%S")),
@@ -552,7 +552,7 @@ const RECHECK: TimeDelta = TimeDelta::seconds(1);
 
 /// Report the pending requests, then each new one and how each reported one ends, until the connection closes. Word
 /// of a decision comes on the decision subjects (a human's) and in the inbox of each ant with a request reported (an
-/// agent's of its escalate_to); a request is looked at again when one names it, and when it expires.
+/// ant's of its escalate_to); a request is looked at again when one names it, and when it expires.
 pub async fn follow(
     client: &async_nats::Client,
     js: &jetstream::Context,
@@ -577,7 +577,7 @@ pub async fn follow(
             }
             if heard.insert(request.ant.clone()) {
                 let inbox = subject::inbox_of(&request.ant);
-                inboxes.push(client.subscribe(inbox).await.context("following decisions of agents")?);
+                inboxes.push(client.subscribe(inbox).await.context("following decisions of chain ants")?);
             }
             report(&Update::Pending(request.clone()))?;
             open.push(Open { seq, request, recheck: None });
@@ -711,9 +711,7 @@ pub fn render(update: &Update, now: DateTime<Utc>) -> String {
             let (at, how) = match state {
                 State::Pending => (now, "is pending".to_owned()),
                 State::Decided(d) => (d.decided_at, format!("was answered: {}", spelling(d.verdict))),
-                State::DecidedByAgent(by, d) => {
-                    (d.decided_at, format!("was answered by {by}: {}", spelling(d.verdict)))
-                }
+                State::DecidedByAnt(by, d) => (d.decided_at, format!("was answered by {by}: {}", spelling(d.verdict))),
                 State::Expired => (r.expires_at, format!("expired unanswered: {} rejected it", r.ant)),
             };
             format!("{}  request {} of {} {how}\n", local(at), qualified(r), r.ant)
@@ -877,13 +875,13 @@ mod tests {
         let dev_a: UserId = "dev-a".parse().unwrap();
         let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
         let minute = Duration::from_secs(60);
         let push = request(&dev_a, "git push", vec![Verdict::AllowOnce, Verdict::AllowAlways], minute);
         let rm = request(&dev_a, "rm -rf build", vec![Verdict::AllowOnce], minute);
         let late = request(&dev_a, "curl example.com", vec![Verdict::AllowOnce], Duration::ZERO);
         for r in [&push, &rm, &late] {
-            bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+            bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
         }
         // dev-b publishes only on its own subject, so a request there naming dev-a is forged.
         let dev_b: UserId = "dev-b".parse().unwrap();
@@ -934,8 +932,8 @@ mod tests {
         let mut copy = request(&dev_b, "rm -rf /", vec![Verdict::AllowOnce], minute);
         copy.id = real.id;
         for (ant, r) in [(&dev_a, &real), (&dev_b, &copy)] {
-            let (_, agent) = server.connect(ant).await;
-            bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+            let (_, ant_js) = server.connect(ant).await;
+            bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
         }
 
         let id = real.id.to_string();
@@ -962,11 +960,11 @@ mod tests {
         let (_, b_js) = server.connect_as(&bob, Role::Human).await;
         let a_stream = bus::ensure_stream(&a_js).await.unwrap();
         let b_stream = bus::ensure_stream(&b_js).await.unwrap();
-        let (agent_client, agent) = server.connect(&dev_a).await;
+        let (ant_client, ant_js) = server.connect(&dev_a).await;
         let push = request(&dev_a, "git push", vec![Verdict::AllowOnce, Verdict::Reject], Duration::from_secs(60));
-        let mut heard = agent_client.subscribe(push.decision_subject()).await.unwrap();
-        agent_client.flush().await.unwrap();
-        bus::publish_json(&agent, push.subject(), &push, None).await.unwrap();
+        let mut heard = ant_client.subscribe(push.decision_subject()).await.unwrap();
+        ant_client.flush().await.unwrap();
+        bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
         for (js, stream) in [(&a_js, &a_stream), (&b_js, &b_stream)] {
             assert_eq!(titles(&pending(js, stream, Utc::now()).await.unwrap()), ["git push"]);
         }
@@ -986,28 +984,28 @@ mod tests {
         // The ant hears alice's decision, and acts on the one stored, which is alice's too.
         let msg = tokio::time::timeout(Duration::from_secs(5), heard.next()).await.unwrap().unwrap();
         assert_eq!(serde_json::from_slice::<ApprovalDecision>(&msg.payload).unwrap(), first);
-        let agent_stream = agent.get_stream_no_info(STREAM).await.unwrap();
-        let stored = agent_stream.direct_get_last_for_subject(push.decision_subject()).await.unwrap();
+        let ant_stream = ant_js.get_stream_no_info(STREAM).await.unwrap();
+        let stored = ant_stream.direct_get_last_for_subject(push.decision_subject()).await.unwrap();
         assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), first);
     }
 
     /// lead is in dev-a's escalate_to, kept in `ants_chains` as dev-a's roster entry expired; dev-c is not. Each sends
     /// decisions with its own credentials to dev-a's inbox.
     #[tokio::test]
-    async fn a_request_an_agent_of_the_chain_decided_is_no_longer_pending() {
+    async fn a_request_an_ant_of_the_chain_decided_is_no_longer_pending() {
         let Some(server) = Server::start() else { return };
         let [dev_a, lead, dev_c]: [UserId; 3] = ["dev-a", "lead", "dev-c"].map(|p| p.parse().unwrap());
         let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         bus::ensure_chains(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
-        ants_daemon::chains::publish(&agent, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
+        let (_, ant_js) = server.connect(&dev_a).await;
+        ants_daemon::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
         let minute = Duration::from_secs(60);
         let offered = || vec![Verdict::AllowOnce, Verdict::Reject];
         let [push, rm, cat] =
             ["git push", "rm -rf build", "cat secrets"].map(|t| request(&dev_a, t, offered(), minute));
         for r in [&push, &rm, &cat] {
-            bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+            bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
         }
         let decide_as = async |js: &jetstream::Context, from: &UserId, r: &ApprovalRequest, verdict| {
             let envelope = Envelope::decision(
@@ -1032,7 +1030,7 @@ mod tests {
             let (seq, _) = find(&stream, &qualified(r)).await.unwrap();
             state(&human, &stream, seq, r, Utc::now()).await.unwrap()
         };
-        let State::DecidedByAgent(by, decision) = state_of(&push).await else { panic!("decided by lead") };
+        let State::DecidedByAnt(by, decision) = state_of(&push).await else { panic!("decided by lead") };
         assert_eq!((by, decision.request_id, decision.verdict), (lead.clone(), push.id, Verdict::AllowOnce));
         let State::Decided(first) = state_of(&cat).await else { panic!("the human's came first") };
         assert_eq!(first.verdict, Verdict::Reject);
@@ -1047,7 +1045,7 @@ mod tests {
         let dev_a: UserId = "dev-a".parse().unwrap();
         let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
         let mut stored = Vec::new();
         for (command, verdict) in [
             ("cargo test", Some(Verdict::AllowOnce)),
@@ -1060,7 +1058,7 @@ mod tests {
             let mut r =
                 request(&dev_a, command, vec![Verdict::AllowOnce, Verdict::AllowAlways], Duration::from_secs(60));
             r.tool.input = Some(serde_json::json!({ "command": command }).to_string());
-            bus::publish_json(&agent, r.subject(), &r, None).await.unwrap();
+            bus::publish_json(&ant_js, r.subject(), &r, None).await.unwrap();
             let (seq, _) = find(&stream, &qualified(&r)).await.unwrap();
             if let Some(verdict) = verdict {
                 answer_request(&human, &stream, seq, &r, verdict, Utc::now()).await.unwrap();
@@ -1085,13 +1083,13 @@ mod tests {
         let (client, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         bus::ensure_chains(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
-        ants_daemon::chains::publish(&agent, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
+        let (_, ant_js) = server.connect(&dev_a).await;
+        ants_daemon::chains::publish(&ant_js, &dev_a, std::slice::from_ref(&lead)).await.unwrap();
         let (_, lead_js) = server.connect(&lead).await;
         let offered = || vec![Verdict::AllowOnce, Verdict::Reject];
         let minute = Duration::from_secs(60);
         let push = request(&dev_a, "git push", offered(), minute);
-        bus::publish_json(&agent, push.subject(), &push, None).await.unwrap();
+        bus::publish_json(&ant_js, push.subject(), &push, None).await.unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let following = follow(&client, &human, |update| {
@@ -1104,7 +1102,7 @@ mod tests {
             let [rm, cat] = [("rm -rf build", minute), ("cat secrets", Duration::from_secs(3))]
                 .map(|(title, timeout)| request(&dev_a, title, offered(), timeout));
             for r in [&rm, &cat] {
-                bus::publish_json(&agent, r.subject(), r, None).await.unwrap();
+                bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
                 assert_eq!(next().await, Update::Pending(r.clone()));
             }
             let shown = render(&Update::Pending(rm.clone()), Utc::now());
@@ -1119,7 +1117,7 @@ mod tests {
             let decision = ApprovalDecision::new(rm.id, dev_a.clone(), Verdict::Reject);
             let envelope = Envelope::decision(rm.thread_id.clone(), lead.clone(), decision);
             bus::publish_json(&lead_js, envelope.subject(), &envelope, None).await.unwrap();
-            let Update::Resolved(r, State::DecidedByAgent(by, d)) = next().await else { panic!("decided by lead") };
+            let Update::Resolved(r, State::DecidedByAnt(by, d)) = next().await else { panic!("decided by lead") };
             assert_eq!((r, by, d.verdict), (rm, lead.clone(), Verdict::Reject));
             assert_eq!(next().await, Update::Resolved(cat.clone(), State::Expired));
         };
