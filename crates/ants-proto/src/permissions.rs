@@ -181,8 +181,11 @@ impl Permissions {
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
     ///
-    /// Each inbox, notes and channel subject an ant may publish, and its own dead letter subject, it may also publish
-    /// in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
+    /// An ant stores the tool-call timeline of its own work ([`subject::timeline_from`]) and reads none back; a human
+    /// reads every timeline by message gets.
+    ///
+    /// Each inbox, notes and channel subject an ant may publish, and its own dead letter and timeline subjects, it may
+    /// also publish in its outbox form ([`subject::outbox`]), which only a leaf node's outbox keeps, and so the links it passes on
     /// ([`link_outbox`]). Only a human sets up leaf outboxes, the hub's intake and the buckets' sources from it: a
     /// stream's configuration can copy, transform and republish any subject of the account, so no ant may create or
     /// change one.
@@ -406,6 +409,9 @@ impl Permissions {
             format!("$JS.API.DIRECT.GET.{STREAM}.{}.*", subject::approvals(user)),
             subject::dead(user),
             subject::outbox(&subject::dead(user)).expect("an outbox subject"),
+            // Storing the timeline of its own work, which no ant reads back.
+            subject::timeline_from(user),
+            subject::outbox(&subject::timeline_from(user)).expect("an outbox subject"),
             // Reading its own dead letters back, through its own consumer filtering only those.
             format!("$JS.API.CONSUMER.CREATE.{STREAM}.{dead_read}.{}", subject::dead(user)),
             format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{dead_read}"),
@@ -516,8 +522,9 @@ impl Permissions {
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
-            let chanadm = (!role.is_human()).then(|| subject::chanadm_from(user));
-            let found = subject::sendable(user, role).into_iter().chain(chanadm).map(|s| s.replace('*', user.as_str()));
+            let own = (!role.is_human()).then(|| [subject::chanadm_from(user), subject::timeline_from(user)]);
+            let found = subject::sendable(user, role).into_iter().chain(own.into_iter().flatten());
+            let found = found.map(|s| s.replace('*', user.as_str()));
             for (all, new) in
                 [(&mut leaf.publish, publish.into_iter().chain(found).collect()), (&mut leaf.subscribe, subscribe)]
             {
@@ -724,7 +731,7 @@ impl Permissions {
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
 /// [`Permissions::for_enroll_approver`] or [`Permissions::with_js_domain`], or the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(1);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

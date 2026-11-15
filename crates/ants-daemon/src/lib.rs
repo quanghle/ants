@@ -42,6 +42,7 @@ pub mod status;
 pub mod storage;
 pub mod sync;
 pub mod template;
+pub mod timeline;
 pub mod unserved;
 pub mod webhooks;
 pub mod worktrees;

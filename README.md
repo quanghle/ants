@@ -31,7 +31,7 @@ Headless agent teams across machines, communicating with each other and with hum
 
 | Store / subject | Storage / TTL | Purpose |
 |---|---|---|
-| Stream `ANTS` | File, 30d | Captures `ants.inbox.>`, `ants.notes.>`, `ants.approvals.>`, `ants.dead.>`, `ants.chan.>`; direct gets enabled; republishes `ants.inbox.*.*` to `_INBOX.<to>.stored.<from>`; `max_consumers` 10000. |
+| Stream `ANTS` | File, 30d | Captures `ants.inbox.>`, `ants.notes.>`, `ants.approvals.>`, `ants.dead.>`, `ants.chan.>`, `ants.timeline.>`; direct gets enabled; republishes `ants.inbox.*.*` to `_INBOX.<to>.stored.<from>`; `max_consumers` 10000. |
 | KV `ants_roster` | Memory, 30s | Live `RosterEntry` per ant (`<ant>`), refreshed every 10s; expiry markers enabled; `max_consumers` 10000. |
 | KV `ants_sessions` | File, 30d | Thread ACP session IDs with the harness each ran in (`<ant>.<thread>`), spend/escalation/narrowing state, channel seen cursors, mention markers, `_storage.*.*.warned` notes. |
 | KV `ants_attempts` | File, 30d | Started delivery markers and saved replies (`<ant>.<seq>`), message marks (`<ant>.msg.<id>`), unserved-ant markers (`<sender>.unserved.<id>`). |
@@ -99,7 +99,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants channel read CHANNEL [--thread THREAD \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
 | `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--escalated] [--pinned \| --archived] [--since DUR] [--limit N] [--json]` | List active threads within `--since` (default `24h`, `0` all; limit 50), pinned last, archived and `auto-archived` hidden unless `archived+new`. |
-| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions. |
+| `ants thread show THREAD [--since DUR] [--json] [--no-tools]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions, and the tool calls its ants made as entries of kind `tool` (time, ant, tool kind, title, status, duration; `--no-tools` leaves them out). |
 | `ants thread search [--grep TEXT] [--from USER] [--to USER] [--channel NAME] [--type KIND,...] [--since TIME] [--until TIME] [--limit N] [--json]` | Search stored messages across threads matching all filters (latest `--limit`, default 50, oldest first). |
 | `ants thread title THREAD [TEXT...] [--clear]` | Print, set (1–120 chars, shared across humans) or clear a thread title. |
 | `ants thread pin \| unpin \| archive \| unarchive THREAD` | Pin or archive a thread for the CLI human across devices (mutually exclusive; archiving cancels nothing; unarchiving an `auto-archived` thread keeps it another `auto_archive` period). |
@@ -112,7 +112,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
-| `ants init` | Create whichever of stream `ANTS` and the 14 KV buckets is missing, leaving existing ones as they are (human creds; also runs automatically on first human CLI connect). |
+| `ants init` | Create whichever of stream `ANTS` and the 14 KV buckets is missing, leaving existing ones as they are except for adding the subjects `ANTS` lacks (human creds; also runs automatically on first human CLI connect). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)). |
 | `ants retire NAME [--config FILE] [--dir DIR] [--no-push]` | Unlist, drain, revoke and delete credentials of a templated ant while keeping `~/.ants/<name>` ([docs/config.md](docs/config.md#retiring-an-added-ant)). |
@@ -186,6 +186,7 @@ In-hand messages send 20 s progress acks against a 60 s `ack_wait`, acking only 
 1. Claims `<ant>.msg.<id>` = `started` in `ants_attempts` (unless already `withdrawn`), then writes `<ant>.<seq>` before prompting so redeliveries after a crash prepend a prior-tool-call warning.
 2. Saves the finished reply in `<ant>.<seq>` and `<home>/answered` before publishing with 24 h dedup ID `reply-<ant>-<envelope_id>`, preventing re-prompts across post-generation disconnects or offline leaf outboxes, then marks `<ant>.msg.<id>` = `finished`.
 3. Streams unpersisted `StatusEvent` JSON on `ants.status.<ant>.<thread>` (`state`, 250 ms batched `message`/`thought`, `tool`, `plan`, `queued`, `approval`, `escalated`, `decided`).
+4. Stores the prompt's tool calls and plan as compact `Timeline` records on `ants.timeline.<thread>.<ant>` (at most one every 30 s while calls changed, the rest when the prompt ends; ≤ 50 entries each, ≤ 200 calls per prompt with the rest counted; titles and paths redacted as status is, never inputs, outputs, text or thoughts). A failed store is logged and dropped; credentials older than permissions version 2 store none, with one warning ([docs/hooks.md](docs/hooks.md#timeline-on-antstimelinethreadant)).
 
 ### Queue and withdrawal
 

@@ -231,7 +231,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
     let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
-    let mut lines: Vec<String> = fixed.iter().map(|finding| format!("created {}", finding.object)).collect();
+    let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
         "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
@@ -265,24 +265,24 @@ async fn serve_metrics(
     }
 }
 
-/// Create the hub's stream and buckets that are missing, as `ants init` does ([`hub::check`]), saying what was
-/// created; one already there stays as it is. Those the credentials may not create are reported as needing
-/// `ants init`; those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach),
-/// are left alone. Returns what was created.
+/// Create the hub's stream and buckets that are missing, and add the subjects the stream lacks, as `ants init` does
+/// ([`hub::check`]), saying what was fixed; an object otherwise stays as it is. Those the credentials may not fix are
+/// reported as needing `ants init`; those whose stream info the credentials do not get, or that cannot be checked (the
+/// hub out of reach), are left alone. Returns what was fixed.
 async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut created = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
         if let hub::Problem::Unchecked(_) = finding.problem {
             tracing::debug!("{finding}");
         } else if !finding.rights().iter().all(|subject| rights.may_publish(subject)) {
-            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) creates it");
+            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) fixes it");
         } else {
             match hub::apply(js, &finding).await {
                 Ok(()) => {
-                    tracing::info!("created {}", finding.object);
+                    tracing::info!("{}", finding.fixed());
                     created.push(finding);
                 }
-                Err(e) => tracing::warn!("{finding}; `ants init` as a human creates it: {e:#}"),
+                Err(e) => tracing::warn!("{finding}; `ants init` as a human fixes it: {e:#}"),
             }
         }
     }

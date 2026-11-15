@@ -29,6 +29,7 @@ mod roster;
 mod status;
 pub mod subject;
 mod threads;
+mod timeline;
 
 pub use ant_request::*;
 pub use approvals::*;
@@ -50,12 +51,13 @@ pub use reactions::*;
 pub use roster::*;
 pub use status::*;
 pub use threads::*;
+pub use timeline::*;
 
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
-pub const STREAM_SUBJECTS: [&str; 5] =
-    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
+pub const STREAM_SUBJECTS: [&str; 6] =
+    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>", subject::ALL_TIMELINE];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
 pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";

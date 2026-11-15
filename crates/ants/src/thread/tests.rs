@@ -496,3 +496,57 @@ async fn a_human_reads_threads_back_without_consuming_them() {
     let stream = js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().clone();
     assert_eq!((stream.state.messages, stream.state.consumer_count), (4, 0));
 }
+
+#[tokio::test]
+async fn a_thread_shows_its_ants_tool_calls_once_each_as_last_stored() {
+    let Some(server) = crate::auth::tests::Server::start() else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let (_, js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let (_, ant_js) = server.connect_as(&dev_a, ants_proto::Role::Ant).await;
+    ants_daemon::bus::ensure_stream(&js).await.unwrap();
+    let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
+    js.publish(ask.subject(), json(&ask).into()).await.unwrap().await.unwrap();
+    let started = Utc::now();
+    let call = |id: &str, status: &str, duration_ms| {
+        ants_proto::TimelineEntry::Tool(ants_proto::TimelineCall {
+            id: id.to_owned(),
+            tool_kind: Some("execute".to_owned()),
+            title: format!("cargo {id}"),
+            status: Some(status.to_owned()),
+            started,
+            duration_ms,
+            paths: Vec::new(),
+        })
+    };
+    let record = |entries| Timeline::new(dev_a.clone(), ask.thread_id.clone(), ask.id, entries, 0);
+    for record in [
+        record(vec![call("build", "in_progress", None)]),
+        record(vec![call("build", "completed", Some(2100)), call("test", "failed", Some(840))]),
+    ] {
+        ant_js.publish(record.subject(), json(&record).into()).await.unwrap().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let reply = ask.reply(dev_a.clone(), "built", ants_proto::Role::Human).unwrap();
+    js.publish(reply.subject(), json(&reply).into()).await.unwrap().await.unwrap();
+
+    let shown = history(&js, &ask.thread_id, None, true).await.unwrap();
+    let kinds: Vec<_> = shown.iter().map(|e| (e.kind, e.text.as_str())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (Kind::Message, "build it"),
+            (Kind::Tool, "cargo build"),
+            (Kind::Tool, "cargo test"),
+            (Kind::Message, "built")
+        ]
+    );
+    let rendered = render(&shown[1..2]);
+    assert!(rendered.contains("tool        dev-a [execute, completed, 2.1s]: cargo build"), "{rendered}");
+    let line = serde_json::to_value(&shown[2]).unwrap();
+    assert_eq!(line["tool"]["status"], "failed");
+    assert_eq!(line["tool"]["duration_ms"], 840);
+    assert_eq!(line["tool"]["message"], ask.id.to_string());
+    let without = history(&js, &ask.thread_id, None, false).await.unwrap();
+    assert!(without.iter().all(|e| e.kind == Kind::Message), "{without:?}");
+    assert!(!<Kind as clap::ValueEnum>::value_variants().contains(&Kind::Tool), "tool calls are not searched");
+}

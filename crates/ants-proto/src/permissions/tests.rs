@@ -125,12 +125,13 @@ fn leaf_permissions_cover_each_user_once() {
     assert_eq!(
         extra,
         [
-            // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a`, `ants.chan.*.dev-a` and
-            // `ants.chanadm.*.dev-a`.
+            // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a`, `ants.chan.*.dev-a`,
+            // `ants.chanadm.*.dev-a` and `ants.timeline.*.dev-a`.
             "ants.inbox.dev-a.dev-a",
             "ants.notes.dev-a.dev-a",
             "ants.chan.dev-a.dev-a",
             "ants.chanadm.dev-a.dev-a",
+            "ants.timeline.dev-a.dev-a",
             "$JS.S.m1.>",
             "$JSC.R.m1.*.ANTS_OUT.>",
             "_INBOX.human.leaf.m1.>",
@@ -152,7 +153,7 @@ fn leaf_permissions_cover_each_user_once() {
 }
 
 #[test]
-fn outboxes_take_inbox_notes_channel_and_dead_letter_subjects_only() {
+fn outboxes_take_inbox_notes_channel_dead_letter_and_timeline_subjects_only() {
     let t: ThreadId = "t1".parse().unwrap();
     let c: ChannelId = "ops".parse().unwrap();
     assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
@@ -163,7 +164,9 @@ fn outboxes_take_inbox_notes_channel_and_dead_letter_subjects_only() {
         assert_eq!(subject::outbox(&other), None, "{other}");
     }
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
-    for s in ["ants.out.inbox.*.dev-a", "ants.out.notes.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"] {
+    assert_eq!(subject::outbox(&subject::timeline(&t, &p("dev-a"))).unwrap(), "ants.out.timeline.t1.dev-a");
+    let own = ["ants.out.inbox.*.dev-a", "ants.out.notes.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"];
+    for s in own.into_iter().chain(["ants.out.timeline.*.dev-a"]) {
         assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
     }
     assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.approvals")));
@@ -183,15 +186,22 @@ fn the_hub_admits_from_a_machine_what_its_users_may_send() {
             ("ants.in.m1.ants.out.notes.*.dev-a".to_owned(), "ants.notes.{{wildcard(1)}}.dev-a".to_owned()),
             ("ants.in.m1.ants.out.chan.*.dev-a".to_owned(), "ants.chan.{{wildcard(1)}}.dev-a".to_owned()),
             ("ants.in.m1.ants.out.dead.dev-a".to_owned(), "ants.dead.dev-a".to_owned()),
+            ("ants.in.m1.ants.out.timeline.*.dev-a".to_owned(), "ants.timeline.{{wildcard(1)}}.dev-a".to_owned()),
         ]
     );
     let human = m1.admitted(&UserId::human(), Role::Human, true);
     assert_eq!(human[0], ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned()));
     assert!(human.iter().all(|(filter, _)| !filter.contains(".dead.")), "no dead letters of a human");
+    assert!(human.iter().all(|(filter, _)| !filter.contains(".timeline.")), "no timeline of a human");
     let rest: Vec<_> = m1.admitted(&p("dev-a"), Role::Ant, false).into_iter().map(|(filter, _)| filter).collect();
     assert_eq!(
         rest,
-        ["ants.in.m1.ants.out.notes.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
+        [
+            "ants.in.m1.ants.out.notes.*.dev-a",
+            "ants.in.m1.ants.out.chan.*.dev-a",
+            "ants.in.m1.ants.out.dead.dev-a",
+            "ants.in.m1.ants.out.timeline.*.dev-a",
+        ],
         "no inbox subjects"
     );
     assert_eq!(
@@ -609,6 +619,21 @@ fn ants_write_only_their_own_chain_and_read_every_one() {
     assert!(!serde_json::to_string(&none).unwrap().contains("escalate_to"));
     assert!(entry.check_key("dev-a").is_ok());
     assert!(entry.check_key("dev-b").is_err(), "credentials vouch for the key only");
+}
+
+#[test]
+fn ants_store_only_their_own_timeline_and_read_none() {
+    let timeline =
+        |list: &[String]| -> Vec<String> { list.iter().filter(|s| s.contains("timeline")).cloned().collect() };
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert_eq!(timeline(&ant.publish), ["ants.timeline.*.dev-a", "ants.out.timeline.*.dev-a"]);
+    assert!(timeline(&ant.subscribe).is_empty());
+    assert!(!ant.subscribe.iter().any(|s| s == subject::ALL || s == ">"));
+    // A human stores none, and reads them all as it reads every stored message.
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert!(timeline(&human.publish).is_empty());
+    assert!(human.subscribe.iter().any(|s| s == subject::ALL));
+    assert!(human.publish.iter().any(|s| s == &format!("$JS.API.STREAM.MSG.GET.{STREAM}")));
 }
 
 #[test]
