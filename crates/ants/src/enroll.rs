@@ -14,7 +14,7 @@
 //! ([`outbox::admit_ant`]).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_daemon::{bus, roster};
@@ -239,6 +239,8 @@ pub struct Approver {
     /// User keys revoked in the team directory (`ants auth revoke`), whose credentials prove nothing.
     pub(crate) revoked: HashSet<String>,
     pub(crate) listen: Duration,
+    /// The team directory, whose registry tells which credentials a registration granted.
+    pub(crate) dir: PathBuf,
 }
 
 /// What [`Approver::approve`] did.
@@ -291,7 +293,7 @@ impl Approver {
         };
         let account = auth::account_key(dir)?;
         let revoked = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
-        Ok(Self { client, hub, js_domain: js_domain.cloned(), account, revoked, listen })
+        Ok(Self { client, hub, js_domain: js_domain.cloned(), account, revoked, listen, dir: dir.to_owned() })
     }
 
     /// The hub's JetStream.

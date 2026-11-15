@@ -87,6 +87,12 @@ impl UserId {
         Self("channel-manager".to_owned())
     }
 
+    /// `ants signer`, whose approval requests ask the humans about registrations outside the team's policy. A
+    /// reserved name: no ant or human may take it.
+    pub fn signer() -> Self {
+        Self("signer".to_owned())
+    }
+
     /// Whether this is the default human, [`UserId::human`]. Other humans are known only from [`HUMANS_BUCKET`]
     /// ([`Humans`]).
     pub fn is_human(&self) -> bool {
