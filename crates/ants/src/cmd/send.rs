@@ -155,7 +155,7 @@ async fn sealing(
     if attached {
         bail!("files are not attached to a sealed message yet: `--plaintext` sends the message in the clear");
     }
-    let sealer = sealed::Sealer::new(nats, js, &envelope.to).await?;
+    let sealer = sealed::Sealer::new(nats, js, &envelope.to, sealed::PLAINTEXT).await?;
     sealer.seal(envelope)?;
     Ok(Some(sealer))
 }

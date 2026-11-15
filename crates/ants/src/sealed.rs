@@ -1,14 +1,17 @@
 //! Messages between two humans sealed so only their devices read them ([`Sealed`]): `ants ask @HUMAN` seals one for
 //! every device of both humans whose encryption key the directory holds verified ([`Sealer`]), and a human's CLI opens
-//! one through the entry of its own device, checked against the verified key of the sending device ([`Keyring`]).
+//! one through the entry of its own device, checked against the verified key of the sending device ([`Keyring`]). The
+//! title of a thread between them is sealed the same way ([`SealedTitle`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use ants_daemon::{creds, keystore};
+use ants_daemon::creds;
+use ants_daemon::keystore::{self, Store};
 use ants_proto::{
-    DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, UserId,
+    DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, SealedTitle,
+    ThreadTitle, UserId,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
@@ -20,6 +23,8 @@ use serde::Serialize;
 
 use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 
+/// What `ants ask` may do instead of sealing.
+pub const PLAINTEXT: &str = "`--plaintext` sends it in the clear";
 /// The size of a content key.
 const KEY_LEN: usize = 32;
 /// The size of the nonce a sealed body starts with.
@@ -48,21 +53,30 @@ impl State {
     }
 }
 
-/// What opening one sealed message gives.
+/// What opening one sealed message, or title, gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Opening {
-    Opened(SealedBody),
+pub enum Opening<B = SealedBody> {
+    Opened(B),
     Unreadable,
     /// Why.
     Forged(String),
 }
 
-impl Opening {
+impl<B> Opening<B> {
     pub fn state(&self) -> State {
         match self {
             Self::Opened(_) => State::Opened,
             Self::Unreadable => State::Unreadable,
             Self::Forged(_) => State::Forged,
+        }
+    }
+
+    /// What `check` makes of what opened: forged when it says why not.
+    fn then<C>(self, check: impl FnOnce(B) -> Result<C, String>) -> Opening<C> {
+        match self {
+            Self::Opened(b) => check(b).map_or_else(Opening::Forged, Opening::Opened),
+            Self::Unreadable => Opening::Unreadable,
+            Self::Forged(why) => Opening::Forged(why),
         }
     }
 }
@@ -89,23 +103,41 @@ pub fn seal(
         title: envelope.title.take(),
         attachments: std::mem::take(&mut envelope.attachments),
     };
-    let plain = serde_json::to_vec(&body)?;
+    envelope.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, device, xkey, recipients)?));
+    Ok(())
+}
+
+/// Seal `plain` for `recipients` from the sending device `device` whose key is `xkey`.
+fn seal_plain(plain: &[u8], device: DeviceId, xkey: &XKey, recipients: &[(DeviceId, &DeviceKey)]) -> Result<Sealed> {
     let key = XSalsa20Poly1305::generate_key(&mut OsRng);
     let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext =
-        XSalsa20Poly1305::new(&key).encrypt(&nonce, plain.as_slice()).map_err(|_| anyhow!("sealing the message"))?;
+    let ciphertext = XSalsa20Poly1305::new(&key).encrypt(&nonce, plain).map_err(|_| anyhow!("sealing"))?;
     let keys = recipients
         .iter()
         .map(|(to, public)| {
             let recipient = XKey::from_public_key(public.as_str())
                 .map_err(|e| anyhow!("the encryption key {public} of device {to}: {e}"))?;
-            let sealed =
-                xkey.seal(&key, &recipient).map_err(|e| anyhow!("sealing the message's key for device {to}: {e}"))?;
+            let sealed = xkey.seal(&key, &recipient).map_err(|e| anyhow!("sealing the key for device {to}: {e}"))?;
             Ok(SealedKey { device: *to, key: BASE64.encode(&sealed) })
         })
         .collect::<Result<_>>()?;
     let body = BASE64.encode(&[nonce.as_slice(), &ciphertext].concat());
-    envelope.sealed = Some(Box::new(Sealed { v: SEALED_VERSION, device, keys, body }));
+    Ok(Sealed { v: SEALED_VERSION, device, keys, body })
+}
+
+/// Seal the title of `title` for `recipients` like a message ([`seal`]), leaving it empty.
+pub fn seal_title(
+    title: &mut ThreadTitle,
+    device: DeviceId,
+    xkey: &XKey,
+    recipients: &[(DeviceId, &DeviceKey)],
+) -> Result<()> {
+    let body = SealedTitle {
+        thread_id: title.thread_id.clone(),
+        by: title.by.clone(),
+        title: std::mem::take(&mut title.title),
+    };
+    title.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, device, xkey, recipients)?));
     Ok(())
 }
 
@@ -113,28 +145,53 @@ pub fn seal(
 /// sending device it names, if any.
 pub fn open(envelope: &Envelope, device: &DeviceId, xkey: &XKey, sender: Option<&DeviceKey>) -> Opening {
     let Some(sealed) = &envelope.sealed else { return Opening::Unreadable };
+    open_plain(sealed, &envelope.from, device, xkey, sender).then(|plain| {
+        let body: SealedBody = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
+        if (&body.from, &body.to, &body.thread_id, body.id)
+            != (&envelope.from, &envelope.to, &envelope.thread_id, envelope.id)
+        {
+            return Err("its body names another message".to_owned());
+        }
+        Ok(body)
+    })
+}
+
+/// Open the sealed part of `title` as [`open`] does a message's, giving its title.
+pub fn open_title(title: &ThreadTitle, device: &DeviceId, xkey: &XKey, sender: Option<&DeviceKey>) -> Opening<String> {
+    let Some(sealed) = &title.sealed else { return Opening::Unreadable };
+    open_plain(sealed, &title.by, device, xkey, sender).then(|plain| {
+        let body: SealedTitle = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
+        if (&body.thread_id, &body.by) != (&title.thread_id, &title.by) {
+            return Err("its body names another title".to_owned());
+        }
+        Ok(body.title)
+    })
+}
+
+/// The plaintext of `sealed`, sent by `from`, as device `device` opens it.
+fn open_plain(
+    sealed: &Sealed,
+    from: &UserId,
+    device: &DeviceId,
+    xkey: &XKey,
+    sender: Option<&DeviceKey>,
+) -> Opening<Vec<u8>> {
     if sealed.v != SEALED_VERSION {
         return Opening::Unreadable;
     }
     let Some(entry) = sealed.key_for(device) else { return Opening::Unreadable };
-    match open_body(envelope, sealed, &entry.key, xkey, sender) {
-        Ok(body) => Opening::Opened(body),
-        Err(why) => Opening::Forged(why),
-    }
+    open_body(sealed, from, &entry.key, xkey, sender).map_or_else(Opening::Forged, Opening::Opened)
 }
 
 fn open_body(
-    envelope: &Envelope,
     sealed: &Sealed,
+    from: &UserId,
     key: &str,
     xkey: &XKey,
     sender: Option<&DeviceKey>,
-) -> Result<SealedBody, String> {
+) -> Result<Vec<u8>, String> {
     let Some(sender) = sender else {
-        return Err(format!(
-            "the sending device {} of {} has no verified encryption key",
-            sealed.device, envelope.from
-        ));
+        return Err(format!("the sending device {} of {from} has no verified encryption key", sealed.device));
     };
     let sender = XKey::from_public_key(sender.as_str()).map_err(|e| e.to_string())?;
     let key = BASE64.decode(key.as_bytes()).map_err(|_| "its key is not base64".to_owned())?;
@@ -148,29 +205,26 @@ fn open_body(
     }
     let (nonce, ciphertext) = body.split_at(NONCE_LEN);
     let cipher = XSalsa20Poly1305::new_from_slice(&key).map_err(|_| "its key does not open".to_owned())?;
-    let plain =
-        cipher.decrypt(Nonce::from_slice(nonce), ciphertext).map_err(|_| "its body does not open".to_owned())?;
-    let body: SealedBody = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
-    if (&body.from, &body.to, &body.thread_id, body.id)
-        != (&envelope.from, &envelope.to, &envelope.thread_id, envelope.id)
-    {
-        return Err("its body names another message".to_owned());
-    }
-    Ok(body)
+    cipher.decrypt(Nonce::from_slice(nonce), ciphertext).map_err(|_| "its body does not open".to_owned())
 }
 
-/// What a human's device opens sealed messages with: its own key, and the verified keys of the sending devices.
+/// What a human's device opens sealed messages and titles with: its own key, and the verified keys of the sending
+/// devices.
 pub struct Keyring {
     device: DeviceId,
     /// The device's key, read once a sealed message needs it; none when it cannot be read.
     xkey: OnceLock<Option<XKey>>,
-    /// The credentials whose seed [`Keyring::xkey`] reads.
+    /// The credentials whose seed [`Keyring::xkey`] reads, from the file or `store`.
     creds: Option<PathBuf>,
+    store: &'static dyn Store,
     /// What the directory says of a device of a human: its verified key, or none.
     keys: Mutex<HashMap<(UserId, DeviceId), Option<DeviceKey>>>,
     /// Whether [`Keyring::keys`] holds every device the directory verified, so any other has no verified key.
     complete: bool,
-    directory: Option<Directory>,
+    /// The directory, opened when first needed through `opener` (the JetStream context and the account whose keys it
+    /// takes) unless given; none when it cannot be.
+    directory: tokio::sync::OnceCell<Option<Directory>>,
+    opener: Option<(jetstream::Context, String)>,
 }
 
 impl Keyring {
@@ -178,13 +232,7 @@ impl Keyring {
     /// credentials binding an encryption key. A directory that cannot be read is warned of, and leaves every
     /// message sealed unreadable.
     pub async fn load(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Option<Self> {
-        let own = match devices::Own::from_creds(nats.creds) {
-            Ok(own) => own?,
-            Err(e) => {
-                tracing::warn!("not opening sealed messages: {e:#}");
-                return None;
-            }
-        };
+        let own = own(nats.creds)?;
         let read = async {
             let account = nats.account.as_deref().context("credentials without an account")?;
             let directory = Directory::open(js, account).await?;
@@ -202,6 +250,24 @@ impl Keyring {
         Some(Self::new(own.device, OnceLock::new(), creds, &devices.verified, complete, directory))
     }
 
+    /// The keyring of the human's device of the credentials `creds`, which reads the directory on `js` only once a
+    /// sealed title needs a key, and the device's seed from the file or `store`: none for others than a human's
+    /// credentials binding an encryption key.
+    pub fn lazy(creds: Option<&Path>, store: &'static dyn Store, js: &jetstream::Context) -> Option<Self> {
+        let own = own(creds)?;
+        let account = devices::account_of(creds).ok().flatten()?;
+        Some(Self {
+            device: own.device,
+            xkey: OnceLock::new(),
+            creds: creds.map(Path::to_path_buf),
+            store,
+            keys: Mutex::default(),
+            complete: false,
+            directory: tokio::sync::OnceCell::new(),
+            opener: Some((js.clone(), account)),
+        })
+    }
+
     fn new(
         device: DeviceId,
         xkey: OnceLock<Option<XKey>>,
@@ -211,14 +277,23 @@ impl Keyring {
         directory: Option<Directory>,
     ) -> Self {
         let keys = verified.iter().map(|d| ((d.human.clone(), d.device), Some(d.key.clone()))).collect();
-        Self { device, xkey, creds, keys: Mutex::new(keys), complete, directory }
+        Self {
+            device,
+            xkey,
+            creds,
+            store: keystore::os(),
+            keys: Mutex::new(keys),
+            complete,
+            directory: tokio::sync::OnceCell::new_with(Some(directory)),
+            opener: None,
+        }
     }
 
     fn xkey(&self) -> Option<&XKey> {
         self.xkey
             .get_or_init(|| {
                 let path = self.creds.as_deref()?;
-                match creds::load_xkey(path, keystore::os()) {
+                match creds::load_xkey(path, self.store) {
                     Ok(xkey) => xkey,
                     Err(e) => {
                         tracing::warn!("not opening sealed messages: {e:#}");
@@ -229,40 +304,100 @@ impl Keyring {
             .as_ref()
     }
 
+    async fn directory(&self) -> Option<&Directory> {
+        let open = async {
+            let (js, account) = self.opener.as_ref()?;
+            Directory::open(js, account)
+                .await
+                .inspect_err(|e| {
+                    tracing::warn!("not opening sealed titles, the directory {DEVICES_BUCKET} unread: {e:#}");
+                })
+                .ok()
+        };
+        self.directory.get_or_init(|| open).await.as_ref()
+    }
+
     /// Look the sending device of a sealed `envelope` up in the directory unless known, as one sent after the
     /// keyring was loaded may name a device added since.
     pub async fn learn(&self, envelope: &Envelope) {
-        let (Some(sealed), Some(directory)) = (&envelope.sealed, &self.directory) else { return };
-        let known = (envelope.from.clone(), sealed.device);
+        if let Some(sealed) = &envelope.sealed {
+            self.learn_device(&envelope.from, sealed.device).await;
+        }
+    }
+
+    async fn learn_device(&self, human: &UserId, device: DeviceId) {
+        let known = (human.clone(), device);
         if self.keys.lock().expect("keyring lock").contains_key(&known) {
             return;
         }
-        let key = match directory.device(&envelope.from, &sealed.device).await {
+        let Some(directory) = self.directory().await else { return };
+        let key = match directory.device(human, &device).await {
             Ok(Lookup::Verified(device)) => Some(device.key),
             Ok(Lookup::Missing | Lookup::Skipped(_)) => None,
-            Err(e) => return tracing::warn!("not reading the key of device {}: {e:#}", sealed.device),
+            Err(e) => return tracing::warn!("not reading the key of device {device}: {e:#}"),
         };
         self.keys.lock().expect("keyring lock").insert(known, key);
+    }
+
+    /// The device's key and the verified key of the sending device `sealed` names, a device of `from`: none when the
+    /// device cannot open it, as it holds no entry there, or no key, or the keyring does not know the sending device.
+    fn keys_for(&self, from: &UserId, sealed: &Sealed) -> Option<(&XKey, Option<DeviceKey>)> {
+        sealed.key_for(&self.device)?;
+        let sender = match self.keys.lock().expect("keyring lock").get(&(from.clone(), sealed.device)) {
+            Some(key) => key.clone(),
+            None if self.complete => None,
+            None => return None,
+        };
+        Some((self.xkey()?, sender))
     }
 
     /// Open the sealed part of `envelope`, if any.
     pub fn open(&self, envelope: &Envelope) -> Option<Opening> {
         let sealed = envelope.sealed.as_ref()?;
-        if sealed.key_for(&self.device).is_none() {
-            return Some(Opening::Unreadable);
-        }
-        let sender = match self.keys.lock().expect("keyring lock").get(&(envelope.from.clone(), sealed.device)) {
-            Some(key) => key.clone(),
-            None if self.complete => None,
-            None => return Some(Opening::Unreadable),
-        };
-        let Some(xkey) = self.xkey() else { return Some(Opening::Unreadable) };
+        let Some((xkey, sender)) = self.keys_for(&envelope.from, sealed) else { return Some(Opening::Unreadable) };
         let opening = open(envelope, &self.device, xkey, sender.as_ref());
         if let Opening::Forged(why) = &opening {
             tracing::warn!(message = %envelope.id, from = %envelope.from, "a forged sealed message: {why}");
         }
         Some(opening)
     }
+
+    /// Open the sealed part of `title`, if any, looking its sending device up first.
+    pub async fn open_title(&self, title: &ThreadTitle) -> Option<Opening<String>> {
+        let sealed = title.sealed.as_ref()?;
+        self.learn_device(&title.by, sealed.device).await;
+        let Some((xkey, sender)) = self.keys_for(&title.by, sealed) else { return Some(Opening::Unreadable) };
+        let opening = open_title(title, &self.device, xkey, sender.as_ref());
+        if let Opening::Forged(why) = &opening {
+            tracing::warn!(thread = %title.thread_id, by = %title.by, "a forged sealed title: {why}");
+        }
+        Some(opening)
+    }
+}
+
+/// The device of the human's credentials `creds` if they bind an encryption key; an error reading them is warned of.
+fn own(creds: Option<&Path>) -> Option<devices::Own> {
+    devices::Own::from_creds(creds).unwrap_or_else(|e| {
+        tracing::warn!("not opening sealed messages: {e:#}");
+        None
+    })
+}
+
+/// `title` as `keyring` reads it: if sealed, its title the opened one, else `[sealed]`, and no longer sealed.
+pub async fn read_title(mut title: ThreadTitle, keyring: Option<&Keyring>) -> ThreadTitle {
+    if title.sealed.is_none() {
+        return title;
+    }
+    let opened = match keyring {
+        Some(keyring) => keyring.open_title(&title).await,
+        None => None,
+    };
+    title.title = match opened {
+        Some(Opening::Opened(text)) => text,
+        _ => State::Unreadable.placeholder().to_owned(),
+    };
+    title.sealed = None;
+    title
 }
 
 /// `envelope` as `keyring` reads it, with what it made of it if sealed: opened, its text, suggested title and
@@ -288,8 +423,8 @@ pub fn read(mut envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Opt
     (envelope, Some(state))
 }
 
-/// What `ants ask` seals a message to another human with: the sending device and its key, the devices to seal for,
-/// and a keyring opening the replies.
+/// What `ants ask` seals a message to another human with, and `ants thread title` the title of a thread between them:
+/// the sending device and its key, the devices to seal for, and a keyring opening the replies.
 pub struct Sealer {
     device: DeviceId,
     xkey: XKey,
@@ -298,40 +433,39 @@ pub struct Sealer {
 }
 
 impl Sealer {
-    /// What seals a message from the human of `nats` to the human `to`, reading the directory on `js`: refused, with
-    /// the fix, when the credentials bind no encryption key, the directory holds no verified key of the sending device
-    /// or of any device of `to`.
-    pub async fn new(nats: &crate::Nats<'_>, js: &jetstream::Context, to: &UserId) -> Result<Self> {
-        const CLEAR: &str = "`--plaintext` sends it in the clear";
+    /// What seals from the human of `nats` for itself and the human `to`, reading the directory on `js`: refused,
+    /// with the fix and then `otherwise`, what else may be done, when the credentials bind no encryption key, the
+    /// directory holds no verified key of the sending device or of any device of `to`.
+    pub async fn new(nats: &crate::Nats<'_>, js: &jetstream::Context, to: &UserId, otherwise: &str) -> Result<Self> {
         let me = &nats.me.id;
         let Some(own) = devices::Own::from_creds(nats.creds)? else {
             bail!(
-                "a message to the human {to} is sealed, but the credentials of {me} bind no encryption key: `ants \
-                 renew` binds one; {CLEAR}"
+                "sealing for {me} and {to} takes an encryption key, which the credentials of {me} bind none of: \
+                 `ants renew` binds one; {otherwise}"
             );
         };
         let path = nats.creds.context("no credentials")?;
         let xkey = creds::load_xkey(path, keystore::os())?
-            .with_context(|| format!("no encryption key in {}: `ants renew` binds one; {CLEAR}", path.display()))?;
+            .with_context(|| format!("no encryption key in {}: `ants renew` binds one; {otherwise}", path.display()))?;
         let account = nats.account.as_deref().context("credentials without an account")?;
         let directory = Directory::open(js, account).await?;
         let humans = [me.clone(), to.clone()];
         let devices = directory
             .devices(&humans)
             .await
-            .with_context(|| format!("reading the encryption keys of {me} and {to}; {CLEAR}"))?;
+            .with_context(|| format!("reading the encryption keys of {me} and {to}; {otherwise}"))?;
         let own_key = crate::auth::device_key(&xkey)?;
         if !devices.of(me).any(|d| d.device == own.device && d.key == own_key) {
             bail!(
                 "the encryption key of this device ({}) is not verified in {DEVICES_BUCKET}, so nothing is sealed: \
-                 connecting with credentials that may put it there does (`ants renew` issues them); {CLEAR}",
+                 connecting with credentials that may put it there does (`ants renew` issues them); {otherwise}",
                 own.device
             );
         }
         if devices.of(to).next().is_none() {
             bail!(
                 "{to} has no device whose encryption key is verified in {DEVICES_BUCKET}, so nothing is sealed: a \
-                 device of {to} puts one there on connecting with credentials binding one (`ants renew`); {CLEAR}"
+                 device of {to} puts one there on connecting with credentials binding one (`ants renew`); {otherwise}"
             );
         }
         let mut recipients: Vec<VerifiedDevice> = Vec::new();
@@ -351,10 +485,18 @@ impl Sealer {
         Ok(Self { device: own.device, xkey, recipients, keyring })
     }
 
+    fn recipients(&self) -> Vec<(DeviceId, &DeviceKey)> {
+        self.recipients.iter().map(|d| (d.device, &d.key)).collect()
+    }
+
     /// Seal `envelope` ([`seal`]).
     pub fn seal(&self, envelope: &mut Envelope) -> Result<()> {
-        let recipients: Vec<(DeviceId, &DeviceKey)> = self.recipients.iter().map(|d| (d.device, &d.key)).collect();
-        seal(envelope, self.device, &self.xkey, &recipients)
+        seal(envelope, self.device, &self.xkey, &self.recipients())
+    }
+
+    /// Seal `title` ([`seal_title`]).
+    pub fn seal_title(&self, title: &mut ThreadTitle) -> Result<()> {
+        seal_title(title, self.device, &self.xkey, &self.recipients())
     }
 }
 
@@ -482,6 +624,24 @@ mod tests {
         assert_eq!(read(e, Some(&reader)).1, Some(State::Unreadable));
     }
 
+    #[tokio::test]
+    async fn a_sealed_title_opens_only_for_its_devices_and_as_set() {
+        let (alice, bob, carol) = (Device::new("alice"), Device::new("bob"), Device::new("carol"));
+        let mut title = ThreadTitle::new(ants_proto::ThreadId::generate(), "Team lunch", alice.human.clone()).unwrap();
+        let keys = [alice.key(), bob.key()];
+        seal_title(&mut title, alice.id, &alice.xkey, &[(alice.id, &keys[0]), (bob.id, &keys[1])]).unwrap();
+        assert!(title.title.is_empty() && !serde_json::to_string(&title).unwrap().contains("lunch"));
+        let shown = async |title: &ThreadTitle, reader: Option<&Keyring>| read_title(title.clone(), reader).await.title;
+        assert_eq!(shown(&title, Some(&bob.keyring(&[&alice, &bob]))).await, "Team lunch");
+        assert_eq!(shown(&title, Some(&carol.keyring(&[&alice, &bob, &carol]))).await, "[sealed]");
+        assert_eq!(shown(&title, None).await, "[sealed]");
+        let moved = ThreadTitle { thread_id: ants_proto::ThreadId::generate(), ..title.clone() };
+        let reader = bob.keyring(&[&alice, &bob]);
+        assert!(matches!(reader.open_title(&moved).await, Some(Opening::Forged(_))), "names another thread");
+        let claimed = ThreadTitle { by: bob.human.clone(), ..title };
+        assert!(matches!(reader.open_title(&claimed).await, Some(Opening::Forged(_))), "set by another human");
+    }
+
     /// Alice seals for both humans' devices in the directory; Bob opens it from his inbox and from the thread, a
     /// third human's device reads `[sealed]`, and a human with no verified key gets nothing sealed to it.
     #[tokio::test]
@@ -500,7 +660,7 @@ mod tests {
             js.push(n.connect("test").await.unwrap().1);
         }
 
-        let sealer = Sealer::new(&nats[0], &js[0], &bob).await.unwrap();
+        let sealer = Sealer::new(&nats[0], &js[0], &bob, PLAINTEXT).await.unwrap();
         let mut e = Envelope::new(alice.clone(), bob.clone(), "the launch slips a week".to_owned());
         sealer.seal(&mut e).unwrap();
         let sealing = e.sealed.as_ref().unwrap();
@@ -532,7 +692,9 @@ mod tests {
         assert_eq!(shown(Keyring::load(&nats[2], &js[2]).await, &js[2]).await, std::slice::from_ref(&unreadable));
         assert_eq!(shown(None, &js[1]).await, [unreadable]);
 
-        let Err(refused) = Sealer::new(&nats[0], &js[0], &dave).await else { panic!("sealed for no device") };
+        let Err(refused) = Sealer::new(&nats[0], &js[0], &dave, PLAINTEXT).await else {
+            panic!("sealed for no device")
+        };
         let refused = refused.to_string();
         assert!(refused.contains("dave has no device") && refused.contains("--plaintext"), "{refused}");
     }

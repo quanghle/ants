@@ -434,6 +434,9 @@ pub struct Summary {
     /// The first title an ant suggested for it, and that ant.
     #[serde(skip)]
     pub suggested: Option<(UserId, String)>,
+    /// Whether a sealed message between two humans is on it, so no ant's suggested title is stored for it.
+    #[serde(skip)]
+    pub sealed: bool,
     /// Pinned by the CLI's human.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -525,6 +528,7 @@ impl Threads {
             escalated: None,
             title: None,
             suggested: None,
+            sealed: false,
             pinned: false,
             archived: false,
             new_activity: false,
@@ -535,6 +539,7 @@ impl Threads {
             last_reopening: 0,
         });
         summary.catch_up |= entry.summary.is_some();
+        summary.sealed |= entry.sealed.is_some();
         summary.messages += 1;
         summary.last_seq = summary.last_seq.max(entry.seq);
         if entry.kind.reopens() {
@@ -1152,9 +1157,9 @@ fn covers(start: &consumer::DeliverPolicy, thread: &ThreadId) -> bool {
 }
 
 /// Title each of `threads` without a title as an ant suggested, if it never had one
-/// ([`thread_meta::Meta::adopt_title`]).
+/// ([`thread_meta::Meta::adopt_title`]) and no sealed message is on it.
 async fn adopt_suggested(meta: &thread_meta::Meta, threads: &mut [Summary]) {
-    for thread in threads.iter_mut().filter(|t| t.title.is_none()) {
+    for thread in threads.iter_mut().filter(|t| t.title.is_none() && !t.sealed) {
         let Some((by, text)) = &thread.suggested else { continue };
         match meta.adopt_title(&thread.thread_id, text, by).await {
             Ok(title) => thread.title = title.map(|t| t.title),
@@ -1277,7 +1282,9 @@ pub async fn show(
     let thread = &pick.resolve(&js, &nats.me).await?;
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
     let entries = history(&js, thread, since, !no_tools, keyring).await?;
+    let sealed = entries.iter().any(|e| e.sealed.is_some());
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
+    let suggested = suggested.filter(|_| !sealed);
     let thread_meta::About { title, mark, done } = if json {
         thread_meta::About::default()
     } else {

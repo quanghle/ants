@@ -268,8 +268,25 @@ fn kv_entries() {
     snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
     snap(
         "thread_title",
-        &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },
+        &ThreadTitle {
+            thread_id: thread(),
+            title: "Release 0.2".to_owned(),
+            by: user("alice"),
+            at: at(0),
+            sealed: None,
+        },
     );
+    snap(
+        "thread_title_sealed",
+        &ThreadTitle {
+            thread_id: thread(),
+            title: String::new(),
+            by: user("alice"),
+            at: at(0),
+            sealed: Some(Box::new(sealed())),
+        },
+    );
+    snap("sealed_title", &SealedTitle { thread_id: thread(), by: user("alice"), title: "Lunch".to_owned() });
     snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
     snap(
         "thread_summary",
