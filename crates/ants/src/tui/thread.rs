@@ -617,9 +617,7 @@ mod tests {
             .status(&ants_proto::StatusEvent::new(crate::live::tests::user("dev-a"), thread.clone(), busy), at(6));
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
-        let mut about = About::default();
-        about.spend = Some(Vec::new());
-        page.about = Some(about);
+        page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
 
         let shown = screen(&page, &m.data, 110, at(47));
         assert!(shown.contains("alice → dev-a"), "{shown}");
