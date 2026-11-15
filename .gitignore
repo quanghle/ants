@@ -1,2 +1,5 @@
 # Rust build output
 /target
+
+# macOS Finder metadata
+.DS_Store
