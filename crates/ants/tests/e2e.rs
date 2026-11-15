@@ -19,6 +19,7 @@ use agent_client_protocol::v1::schema::{
     SetSessionConfigOptionResponse, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio as AcpStdio};
+use ants_daemon::sync::MutexExt as _;
 use ants_test_support::{NatsServer, free_port, scratch_dir};
 
 const ANTS: &str = env!("CARGO_BIN_EXE_ants");
@@ -730,13 +731,13 @@ fn stub_harness() {
             )
             .on_receive_request(
                 async move |_: NewSessionRequest, responder, _cx| {
-                    responder.respond(NewSessionResponse::new("stub").config_options(on_new.lock().unwrap().clone()))
+                    responder.respond(NewSessionResponse::new("stub").config_options(on_new.locked().clone()))
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
                 async move |request: SetSessionConfigOptionRequest, responder, _cx| {
-                    let mut options = on_set.lock().unwrap();
+                    let mut options = on_set.locked();
                     let option = options.iter_mut().find(|option| option.id == request.config_id).unwrap();
                     let SessionConfigKind::Select(select) = &mut option.kind else { unreachable!() };
                     select.current_value = request.value.as_value_id().unwrap().clone();
@@ -765,7 +766,7 @@ fn stub_harness() {
                             std::env::var("BD_DB").unwrap(),
                             std::env::var("BD_REMOTE").unwrap()
                         );
-                        let options = options.lock().unwrap();
+                        let options = options.locked();
                         let selected: Vec<_> = options
                             .iter()
                             .map(|option| {

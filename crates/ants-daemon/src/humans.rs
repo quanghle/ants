@@ -5,7 +5,7 @@
 //! current by a watch ([`Registry::watch`]). Until the bucket exists only the humans without an entry are known; the
 //! daemon looks for the bucket again every little while, since an ant may read it but not create it.
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use ants_proto::{Envelope, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId};
@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
 use tokio::task::JoinHandle;
+
+use crate::sync::RwLockExt as _;
 
 /// How long the daemon waits to look for the bucket again, when it is missing or its watch ended.
 pub const RETRY: Duration = Duration::from_secs(30);
@@ -119,7 +121,7 @@ impl Registry {
         while let Some(entry) = updates.next().await {
             let entry = entry.context("watching the humans")?;
             let value = (entry.operation == kv::Operation::Put).then_some(&entry.value[..]);
-            let mut humans = self.humans.write().unwrap_or_else(PoisonError::into_inner);
+            let mut humans = self.humans.write_locked();
             self.set(&mut humans, &entry.key, value);
         }
         Ok(())
@@ -161,11 +163,11 @@ impl Registry {
     }
 
     fn replace(&self, humans: Humans) {
-        *self.humans.write().unwrap_or_else(PoisonError::into_inner) = humans;
+        *self.humans.write_locked() = humans;
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Humans> {
-        self.humans.read().unwrap_or_else(PoisonError::into_inner)
+        self.humans.read_locked()
     }
 
     /// A registry of `default` and `humans`, as if the bucket listed them.

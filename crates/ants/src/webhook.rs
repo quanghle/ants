@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::metrics::{self, Exposition, Kind};
 use ants_daemon::schedule::Mentions;
+use ants_daemon::sync::{MutexExt as _, RwLockExt as _};
 use ants_daemon::{bus, owners};
 use ants_proto::{
     CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Destination, Envelope, JsDomain, SERVING_EVERY, ThreadId,
@@ -735,7 +736,7 @@ struct Routes {
 
 impl Server {
     fn routes(&self) -> Arc<Routes> {
-        self.routes.read().unwrap().clone()
+        self.routes.read_locked().clone()
     }
 }
 
@@ -779,7 +780,7 @@ pub async fn serve<L: FnMut() -> Result<Config>>(
                 match (reload.load)() {
                     Ok(config) => {
                         let routes = running.apply(config, &mut tasks, &failed_tx);
-                        *server.routes.write().unwrap() = Arc::new(routes);
+                        *server.routes.write_locked() = Arc::new(routes);
                         tracing::info!(on = trigger.describe(), "reloaded the webhook config");
                     }
                     Err(e) => tracing::error!(
@@ -994,7 +995,7 @@ impl Bus {
         let keeping = (seen.clone(), webhook_marker_key(name), marker.clone(), marked.clone());
         let keeper = tokio::spawn(async move {
             let (seen, key, marker, marked) = keeping;
-            let put = move || *marked.lock().unwrap() = Some(Instant::now());
+            let put = move || *marked.locked() = Some(Instant::now());
             crate::versions::keep_putting(seen, key, marker, put).await;
         });
         Ok(Self { client, js, js_domain: js_domain.cloned(), seen, marker, marked, keeper })
@@ -1057,11 +1058,11 @@ impl Bus {
     /// Put the marker of `name` ([`webhook_marker_key`]), unless put in the last [`SERVING_EVERY`]: without it, daemons
     /// take its messages for an ant's, and answer it in its own inbox.
     async fn mark(&self, name: &UserId) -> Result<()> {
-        if self.marked.lock().unwrap().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
+        if self.marked.locked().is_some_and(|at| at.elapsed() < SERVING_EVERY) {
             return Ok(());
         }
         self.seen.put(webhook_marker_key(name), self.marker.clone()).await.context("putting the marker")?;
-        *self.marked.lock().unwrap() = Some(Instant::now());
+        *self.marked.locked() = Some(Instant::now());
         Ok(())
     }
 
@@ -1249,7 +1250,7 @@ impl Hook {
     }
 
     fn warn_rejected(&self) {
-        let mut last = self.last_warned.lock().unwrap();
+        let mut last = self.last_warned.locked();
         if last.is_none_or(|at| at.elapsed() >= WARN_EVERY) {
             *last = Some(Instant::now());
             tracing::warn!(webhook = %self.config.name, "rejected a request that failed authentication");

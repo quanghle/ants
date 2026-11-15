@@ -38,6 +38,7 @@ use crate::ratelimit::{self, Backoffs, Limited, Throttle};
 use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
+use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
 use crate::{bus, roster, unserved};
@@ -669,14 +670,14 @@ impl Cancels {
     /// Make the prompt about to run on `thread` cancellable until the guard drops; the cancels arrive on the receiver.
     fn register<'a>(&'a self, thread: &ThreadId) -> (Cancellable<'a>, tokio::sync::mpsc::Receiver<UserId>) {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        self.0.lock().unwrap().insert(thread.clone(), tx);
+        self.0.locked().insert(thread.clone(), tx);
         (Cancellable { cancels: self, thread: thread.clone() }, rx)
     }
 
     /// Cancel the prompt running on `thread` for `by`, if one is; one cancelled already stays so.
     fn cancel(&self, thread: &ThreadId, by: UserId) -> bool {
         use tokio::sync::mpsc::error::TrySendError;
-        let cancels = self.0.lock().unwrap();
+        let cancels = self.0.locked();
         cancels.get(thread).is_some_and(|tx| !matches!(tx.try_send(by), Err(TrySendError::Closed(_))))
     }
 }
@@ -688,7 +689,7 @@ struct Cancellable<'a> {
 
 impl Drop for Cancellable<'_> {
     fn drop(&mut self) {
-        self.cancels.0.lock().unwrap().remove(&self.thread);
+        self.cancels.0.locked().remove(&self.thread);
     }
 }
 

@@ -35,6 +35,7 @@ use ants_daemon::bus;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_daemon::humans::Registry;
 use ants_daemon::redact::Redactor;
+use ants_daemon::sync::MutexExt as _;
 use ants_daemon::unserved::{self, Unserved, Watch};
 use ants_proto::{
     ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, NOTIFY_BUCKET, NotifyPrefs,
@@ -1193,7 +1194,7 @@ impl Notified {
 
     /// Whether the message at `seq` was notified, recording it if not.
     fn first_time(&self, seq: u64) -> bool {
-        let mut recent = self.recent.lock().unwrap();
+        let mut recent = self.recent.locked();
         if recent.contains(&seq) {
             return false;
         }

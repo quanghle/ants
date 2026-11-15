@@ -37,13 +37,13 @@ async fn each_thread_works_in_its_own_worktree_until_its_session_expires() {
     pool.evict_idle(Instant::now() + IDLE * 2);
     pool.prompt(&thread(1), "c").await.unwrap();
     let (t1, t2) = (home.join("worktrees/t1"), home.join("worktrees/t2"));
-    assert_eq!(log.lock().unwrap().cwds, [t1.clone(), t2.clone(), t1.clone()], "session/load in the same worktree");
+    assert_eq!(log.locked().cwds, [t1.clone(), t2.clone(), t1.clone()], "session/load in the same worktree");
     crate::worktrees::tests::commit(&t2, "work of t2");
     assert_eq!(pool.branch_ahead(&thread(1)).await, None);
     assert_eq!(pool.branch_ahead(&thread(2)).await.map(|b| (b.name, b.commits)), Some(("ants/dev-a/t2".to_owned(), 1)));
     assert_eq!(pool.prune_worktrees().await.removed, 0, "sessions still stored");
     let SessionStore::Memory(sessions) = &store else { unreachable!() };
-    sessions.lock().unwrap().clear();
+    sessions.locked().clear();
     let pruned = pool.prune_worktrees().await;
     assert_eq!(pruned.removed, 1, "only the thread without a live harness");
     assert_eq!(pruned.kept.iter().map(|b| &b.thread).collect::<Vec<_>>(), [&thread(2)], "its branch holds a commit");
@@ -64,12 +64,12 @@ async fn worktrees_left_behind_are_pruned_while_threads_share_the_workdir() {
     let pool = Pool::new(launch.in_dir(repo.clone()), store.clone(), 4, IDLE).with_worktrees_left_behind(left);
     pool.prompt(&thread(1), "a").await.unwrap();
     pool.prompt(&thread(3), "b").await.unwrap();
-    assert_eq!(log.lock().unwrap().cwds, [repo.clone(), repo.clone()], "threads share the workdir");
+    assert_eq!(log.locked().cwds, [repo.clone(), repo.clone()], "threads share the workdir");
     crate::worktrees::tests::commit(&home.join("worktrees/t1"), "work of t1");
     assert_eq!(pool.branch_ahead(&thread(1)).await, None, "the thread works in the workdir");
     assert_eq!(pool.prune_worktrees().await.removed, 1, "only the thread with no session and no live harness");
     let SessionStore::Memory(sessions) = &store else { unreachable!() };
-    sessions.lock().unwrap().clear();
+    sessions.locked().clear();
     pool.evict_idle(Instant::now() + IDLE * 2);
     assert_eq!(pool.prune_worktrees().await.removed, 1);
     assert!(!home.join("worktrees/t1").exists() && !home.join("worktrees/t3").exists());
@@ -86,7 +86,7 @@ async fn a_thread_whose_worktree_fails_shares_the_workdir() {
     crate::worktrees::tests::run(&repo, &["switch", "--quiet", "ants/dev-a/t1"]);
     let pool = Pool::new(launch.in_dir(repo.clone()), SessionStore::memory(), 4, IDLE).with_worktrees(worktrees);
     assert_eq!(pool.prompt(&thread(1), "a").await.unwrap(), "s1: a", "its branch is checked out elsewhere");
-    assert_eq!(log.lock().unwrap().cwds, std::slice::from_ref(&repo));
+    assert_eq!(log.locked().cwds, std::slice::from_ref(&repo));
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }
 
@@ -96,7 +96,7 @@ async fn a_thread_keeps_its_harness_between_messages() {
     assert_eq!(pool.prompt(&thread(1), "one").await.unwrap(), "s1: one");
     assert_eq!(pool.prompt(&thread(1), "two").await.unwrap(), "s1: two");
     assert_eq!(pool.prompt(&thread(2), "three").await.unwrap(), "s2: three");
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.starts, log.new_sessions), (2, 2));
 }
 
@@ -118,7 +118,7 @@ async fn the_cap_stops_the_least_recently_used_and_it_resumes() {
     pool.prompt(&thread(2), "b").await.unwrap();
     assert_eq!(pool.live(), 1);
     assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), "s1: c", "no replayed history in the reply");
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.starts, log.new_sessions, log.loaded.as_slice()), (3, 2, &["s1".to_owned()][..]));
 }
 
@@ -129,7 +129,7 @@ async fn idle_harnesses_stop_and_resume_on_the_next_message() {
     assert_eq!(pool.evict_idle(Instant::now()), 0);
     assert_eq!(pool.evict_idle(Instant::now() + IDLE + Duration::from_secs(1)), 1);
     assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
-    assert_eq!(log.lock().unwrap().loaded, ["s1"]);
+    assert_eq!(log.locked().loaded, ["s1"]);
 }
 
 #[tokio::test]
@@ -140,7 +140,7 @@ async fn a_harness_without_session_load_starts_over() {
     let told = "[ants] The earlier session of this thread could not be resumed, so this one starts over, without \
                     the context of the thread.\n\nc";
     assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), format!("s3: {told}"));
-    assert!(log.lock().unwrap().loaded.is_empty());
+    assert!(log.locked().loaded.is_empty());
 }
 
 #[tokio::test]
@@ -150,7 +150,7 @@ async fn threads_run_concurrently_up_to_the_cap() {
     let (a, b) = (pool.prompt(&t1, "hold a"), pool.prompt(&t2, "hold b"));
     let release = async {
         settle().await;
-        assert_eq!(log.lock().unwrap().starts, 2, "both threads started before either finished");
+        assert_eq!(log.locked().starts, 2, "both threads started before either finished");
         gate.add_permits(2);
     };
     let (a, b, ()) = tokio::join!(a, b, release);
@@ -168,7 +168,7 @@ async fn a_busy_harness_is_never_stopped() {
         let waiting = pool.prompt(&t2, "b");
         let release = async {
             settle().await;
-            assert_eq!(log.lock().unwrap().starts, 1, "a new thread waits instead of stopping a busy harness");
+            assert_eq!(log.locked().starts, 1, "a new thread waits instead of stopping a busy harness");
             gate.add_permits(1);
         };
         let (reply, ()) = tokio::join!(waiting, release);
@@ -189,7 +189,7 @@ async fn a_restarted_pool_resumes_the_stored_session() {
 
     let pool = Pool::new(launch, store, 4, IDLE);
     assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.new_sessions, log.loaded.as_slice()), (1, &["s1".to_owned()][..]));
 }
 
@@ -205,7 +205,7 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
     let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
     pool.run(&thread(1), with_history("a")).await.unwrap();
     pool.shutdown().await;
-    log.lock().unwrap().lose_sessions = true;
+    log.locked().lose_sessions = true;
 
     let pool = Pool::new(launch, store.clone(), 4, IDLE);
     let seeded = "[ants] The earlier session of this thread could not be resumed, so this one starts over, its \
@@ -213,7 +213,7 @@ async fn a_session_that_cannot_be_resumed_starts_over_from_the_thread_history() 
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, format!("s2: {seeded}"));
     assert_eq!(pool.run(&thread(1), with_history("c")).await.unwrap().text, "s2: c", "only the first prompt");
     assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")));
-    assert_eq!(log.lock().unwrap().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
+    assert_eq!(log.locked().prompts, ["a", seeded, "c"], "a session started anew is not seeded");
 }
 
 #[tokio::test]
@@ -228,14 +228,14 @@ async fn a_prompt_that_outgrows_the_context_window_runs_again_in_a_new_session_o
     assert_eq!(reply, Reply { text: format!("s2: {seeded}"), cut: None });
     assert_eq!(store.get(&thread(1)).await.unwrap(), Some(SessionId::new("s2")), "resumed from now on");
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s2: b");
-    assert_eq!(log.lock().unwrap().starts, 1, "the same harness");
+    assert_eq!(log.locked().starts, 1, "the same harness");
 
     // A prompt that outgrows even a new session fails for good, without a third try.
     let err = pool.run(&thread(1), with_history("overflows")).await.unwrap_err();
     let overflow = err.downcast_ref::<ContextOverflow>().expect("a context overflow");
     assert_eq!(overflow.harness, "test");
     assert!(overflow.detail.contains("Prompt is too long"), "{}", overflow.detail);
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.prompted, log.new_sessions), (6, 3));
     assert!(log.prompts[5].contains("outgrew the model's context window"), "{}", log.prompts[5]);
 }
@@ -257,7 +257,7 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
             format!("{session}: {instructions}\n\n{text}")
         );
     }
-    assert_eq!(log.lock().unwrap().loaded, ["s1"]);
+    assert_eq!(log.locked().loaded, ["s1"]);
     pool.shutdown().await;
 }
 
@@ -269,7 +269,7 @@ async fn a_prompt_past_its_time_limit_is_cancelled_and_the_session_goes_on() {
     let cut = "Prompt time limit reached (50ms)".to_owned();
     assert_eq!(reply, Reply { text: "partial".to_owned(), cut: Some(cut) });
     assert_eq!(pool.prompt(&thread(1), "b").await.unwrap(), "s1: b");
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.starts, log.cancelled), (1, 1));
 }
 
@@ -281,7 +281,7 @@ async fn a_prompt_past_its_tool_call_limit_is_cancelled() {
     assert_eq!(reply.cut, None, "up to the limit is fine");
     let reply = pool.run(&thread(1), Prompt { limits, ..Prompt::new("tools 3 stall") }).await.unwrap();
     assert_eq!(reply.cut.as_deref(), Some("Tool call limit reached (2 tool calls in one prompt)"));
-    assert_eq!(log.lock().unwrap().cancelled, 1);
+    assert_eq!(log.locked().cancelled, 1);
 }
 
 #[tokio::test]
@@ -297,7 +297,7 @@ async fn spend_is_reported_and_a_stop_cancels_the_prompt() {
     let t1 = thread(1);
     let (reply, ()) = tokio::join!(pool.run(&t1, prompt), watch);
     assert_eq!(reply.unwrap().cut.as_deref(), Some("Enough"));
-    assert_eq!(log.lock().unwrap().cancelled, 1);
+    assert_eq!(log.locked().cancelled, 1);
 
     let (spend, mut spent) = mpsc::unbounded_channel();
     pool.run(&thread(1), Prompt { spend: Some(spend), ..Prompt::new("tokens 42") }).await.unwrap();

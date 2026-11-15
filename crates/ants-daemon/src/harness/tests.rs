@@ -38,7 +38,7 @@ fn launch(modes: &'static [&'static str]) -> (Launch, Arc<Mutex<Vec<String>>>) {
                 )
                 .on_receive_request(
                     async move |req: SetSessionModeRequest, responder, _cx| {
-                        log.lock().unwrap().push(req.mode_id.0.to_string());
+                        log.locked().push(req.mode_id.0.to_string());
                         responder.respond(SetSessionModeResponse::new())
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -63,7 +63,7 @@ fn builtin(name: &str) -> Arc<Harness> {
 async fn sessions_are_switched_to_the_harness_mode() {
     let (launch, set) = launch(&["auto", "default"]);
     Session::start(&launch, None).await.unwrap().close().await;
-    assert_eq!(*set.lock().unwrap(), ["default"]);
+    assert_eq!(*set.locked(), ["default"]);
 }
 
 #[tokio::test]
@@ -71,7 +71,7 @@ async fn a_harness_without_the_mode_fails_the_session() {
     let (launch, set) = launch(&["auto"]);
     let err = Session::start(&launch, None).await.err().expect("session should fail").to_string();
     assert!(err.contains("does not offer session mode default"), "{err}");
-    assert!(set.lock().unwrap().is_empty());
+    assert!(set.locked().is_empty());
 }
 
 /// A fake harness offering to sign in on a terminal with `--login`, whose session/new fails with `refusal` when
@@ -448,8 +448,8 @@ fn configurable(harness: &str, settings: ModelSettings, behavior: ConfigBehavior
                     async move |request: SetSessionConfigOptionRequest, responder, _cx| {
                         let value = request.value.as_value_id().unwrap().0.to_string();
                         let config_id = request.config_id.0.as_ref();
-                        log.lock().unwrap().push((config_id.to_owned(), value.clone()));
-                        let mut options = state.lock().unwrap();
+                        log.locked().push((config_id.to_owned(), value.clone()));
+                        let mut options = state.locked();
                         if !matches!(behavior, ConfigBehavior::Ignore) {
                             if config_id == "model" {
                                 *options = model_options(&value, "medium");
@@ -487,7 +487,7 @@ async fn model_then_effort_are_applied_to_new_and_resumed_sessions() {
         let (launch, calls) = configurable(harness, settings.clone(), ConfigBehavior::Apply);
         Session::start(&launch, None).await.unwrap().close().await;
         Session::start(&launch, Some("s1".into())).await.unwrap().close().await;
-        let calls = calls.lock().unwrap();
+        let calls = calls.locked();
         assert_eq!(
             calls.as_slice(),
             [
@@ -531,11 +531,11 @@ async fn claude_context_selects_only_an_advertised_model_variant() {
         let session = Session::start(&launch, None).await;
         if let Some(expected) = expected {
             session.unwrap().close().await;
-            assert_eq!(calls.lock().unwrap()[0], ("model".to_owned(), expected.to_owned()));
+            assert_eq!(calls.locked()[0], ("model".to_owned(), expected.to_owned()));
         } else {
             let err = session.err().expect("unavailable context variant must fail").to_string();
             assert!(err.contains("unsupported model") && err.contains("base[1m]"), "{err}");
-            assert!(calls.lock().unwrap().is_empty());
+            assert!(calls.locked().is_empty());
         }
     }
 }

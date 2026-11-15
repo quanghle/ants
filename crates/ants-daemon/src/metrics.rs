@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::roster::Workload;
+use crate::sync::MutexExt as _;
 
 /// Content type of the Prometheus text exposition format.
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -218,7 +219,7 @@ static ANTS: Mutex<BTreeMap<UserId, Arc<Ant>>> = Mutex::new(BTreeMap::new());
 
 /// The counters of `name` in this process, kept from its first use on.
 pub fn ant(name: &UserId) -> Arc<Ant> {
-    ANTS.lock().unwrap().entry(name.clone()).or_default().clone()
+    ANTS.locked().entry(name.clone()).or_default().clone()
 }
 
 /// JetStream storage usage by domain (empty for none) and store, with the limit when known.
@@ -227,7 +228,7 @@ static STORAGE: Mutex<Stored> = Mutex::new(BTreeMap::new());
 
 /// Note that JetStream store `store` (`file` or `memory`) of `domain` holds `used` bytes of at most `limit`.
 pub fn stored(domain: Option<&str>, store: &'static str, used: u64, limit: Option<u64>) {
-    STORAGE.lock().unwrap().insert((domain.unwrap_or_default().to_owned(), store), (used, limit));
+    STORAGE.locked().insert((domain.unwrap_or_default().to_owned(), store), (used, limit));
 }
 
 /// What one ant's daemon did and is doing.
@@ -264,7 +265,7 @@ pub struct Connected(Arc<Ant>);
 
 impl Drop for Connected {
     fn drop(&mut self) {
-        *self.0.live.lock().unwrap() = None;
+        *self.0.live.locked() = None;
     }
 }
 
@@ -286,7 +287,7 @@ impl Ant {
 
     /// Report `client`'s connection state and `workload` until the guard drops.
     pub fn connected(self: &Arc<Self>, client: async_nats::Client, workload: Arc<Workload>) -> Connected {
-        *self.live.lock().unwrap() = Some(Live { client, workload });
+        *self.live.locked() = Some(Live { client, workload });
         Connected(self.clone())
     }
 
@@ -311,12 +312,12 @@ impl Ant {
     pub fn spent(&self, tokens: u64, cost: f64) {
         self.tokens.fetch_add(tokens, Ordering::Relaxed);
         if cost > 0.0 {
-            *self.cost.lock().unwrap() += cost;
+            *self.cost.locked() += cost;
         }
     }
 
     fn is_connected(&self) -> bool {
-        self.live.lock().unwrap().as_ref().is_some_and(|live| connected(&live.client))
+        self.live.locked().as_ref().is_some_and(|live| connected(&live.client))
     }
 }
 
@@ -325,7 +326,7 @@ pub struct Daemon;
 
 impl Daemon {
     fn serving() -> Vec<(UserId, Arc<Ant>)> {
-        let ants = ANTS.lock().unwrap();
+        let ants = ANTS.locked();
         ants.iter()
             .filter(|(_, ant)| ant.serving.load(Ordering::Relaxed) > 0)
             .map(|(n, a)| (n.clone(), a.clone()))
@@ -344,7 +345,7 @@ impl Source for Daemon {
             n.load(Ordering::Relaxed) as f64
         }
         fn workload(ant: &Ant, of: fn(&Workload) -> usize) -> f64 {
-            ant.live.lock().unwrap().as_ref().map_or(0.0, |live| of(&live.workload) as f64)
+            ant.live.locked().as_ref().map_or(0.0, |live| of(&live.workload) as f64)
         }
         type Family = (&'static str, Kind, &'static str, fn(&Ant) -> f64);
         let families: [Family; 9] = [
@@ -367,7 +368,7 @@ impl Source for Daemon {
                 "ants_spend_cost_total",
                 Kind::Counter,
                 "Cost the harnesses reported, in their currency (usually USD).",
-                |a| *a.cost.lock().unwrap(),
+                |a| *a.cost.locked(),
             ),
         ];
         let serving = Self::serving();
@@ -377,7 +378,7 @@ impl Source for Daemon {
                 out.sample(name, &[("ant", ant.as_str())], read(counters));
             }
         }
-        let storage = STORAGE.lock().unwrap();
+        let storage = STORAGE.locked();
         let (bytes, limit) = ("ants_jetstream_bytes", "ants_jetstream_limit_bytes");
         out.family(bytes, Kind::Gauge, "Bytes the account stores in JetStream, by domain and store (file or memory).");
         for ((domain, store), (used, _)) in storage.iter() {

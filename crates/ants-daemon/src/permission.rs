@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::{
     PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
@@ -35,6 +35,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::redact::Redactor;
+use crate::sync::MutexExt as _;
 
 const KINDS: [&str; 10] =
     ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"];
@@ -187,7 +188,7 @@ pub struct Narrowing {
 impl Drop for Narrowing {
     fn drop(&mut self) {
         let Some(thread) = self.thread.take() else { return };
-        let mut narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut narrowed = self.narrowed.locked();
         if let Some((_, held)) = narrowed.get_mut(&thread) {
             *held -= 1;
             if *held == 0 {
@@ -210,7 +211,7 @@ impl PermissionPolicy {
             tracing::warn!(%thread, error = %e, "the thread's tool rules do not parse, narrowing it to none");
             Allowlist::default()
         });
-        let mut narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut narrowed = self.narrowed.locked();
         let held = narrowed.get(thread).map_or(0, |(_, held)| *held);
         narrowed.insert(thread.clone(), (rules, held + 1));
         Narrowing { narrowed: self.narrowed.clone(), thread: Some(thread.clone()) }
@@ -218,7 +219,7 @@ impl PermissionPolicy {
 
     /// Whether `tool` on `thread` falls outside the thread's narrowed tool rules.
     fn narrowed_out(&self, tool: &Tool<'_>, thread: Option<&ThreadId>, workdir: &Path) -> bool {
-        let narrowed = self.narrowed.lock().unwrap_or_else(PoisonError::into_inner);
+        let narrowed = self.narrowed.locked();
         thread.and_then(|t| narrowed.get(t)).is_some_and(|(rules, _)| !rules.allows(tool, workdir))
     }
 
@@ -586,7 +587,7 @@ mod tests {
 
     impl Approver for Fake {
         fn decide(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> BoxFuture<'static, Verdict> {
-            self.1.lock().unwrap().push((thread, tool, options));
+            self.1.locked().push((thread, tool, options));
             let verdict = self.0;
             Box::pin(async move { verdict })
         }
@@ -601,11 +602,11 @@ mod tests {
 
         let read = request(ToolKind::Read, "View", json!({ "path": "a" }), &[]);
         assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("yes"));
-        assert!(fake.1.lock().unwrap().is_empty(), "allowed without asking");
+        assert!(fake.1.locked().is_empty(), "allowed without asking");
 
         let push = shell("git push");
         assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("always"));
-        let asked = fake.1.lock().unwrap().pop().unwrap();
+        let asked = fake.1.locked().pop().unwrap();
         assert_eq!(asked.0, thread);
         assert_eq!((asked.1.kind.as_str(), asked.1.title.as_str()), ("execute", "Run shell command"));
         assert_eq!(asked.1.input.as_deref(), Some(r#"{"command":"git push"}"#));
@@ -630,7 +631,7 @@ mod tests {
         let again = policy.clone().narrow(&thread, Some(&["read:*".to_owned()]));
         assert_eq!(chosen(&policy.answer(&read, Some(&thread), workdir).await), Some("yes"));
         assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"));
-        assert_eq!(fake.1.lock().unwrap().len(), 1, "the approver decides what the narrowing leaves out");
+        assert_eq!(fake.1.locked().len(), 1, "the approver decides what the narrowing leaves out");
         assert_eq!(chosen(&policy.answer(&push, Some(&other), workdir).await), Some("yes"), "only the thread");
         drop(narrowed);
         assert_eq!(chosen(&policy.answer(&push, Some(&thread), workdir).await), Some("no"), "still held");
@@ -652,7 +653,7 @@ mod tests {
         let thread: ThreadId = "t1".parse().unwrap();
         let deploy = request(ToolKind::Execute, "deploy --key d3pl0y-s3cret", json!({ "command": command }), &[]);
         policy.answer(&deploy, Some(&thread), Path::new(WORKDIR)).await;
-        let (_, tool, _) = fake.1.lock().unwrap().pop().unwrap();
+        let (_, tool, _) = fake.1.locked().pop().unwrap();
         assert_eq!(tool.title, "deploy --key [redacted]");
         let input = tool.input.unwrap();
         assert!(input.ends_with("deploy --key [redacted]\"}") && !input.contains("d3pl0y"), "{input}");

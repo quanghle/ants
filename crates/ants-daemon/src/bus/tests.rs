@@ -207,7 +207,7 @@ async fn through_a_leaf_a_publish_the_hubs_stream_does_not_capture_names_ants_in
     assert!(uncaptured(&js).await);
     let post = post();
     assert_eq!(store(&js, post.subject(), &post, &post.id.to_string()).await.unwrap(), Stored::Outbox);
-    assert!(WARNED_UNCAPTURED.lock().unwrap().contains("ants.chan"), "no warning naming `ants init`");
+    assert!(WARNED_UNCAPTURED.locked().contains("ants.chan"), "no warning naming `ants init`");
 
     drop(hub);
     let start = std::time::Instant::now();

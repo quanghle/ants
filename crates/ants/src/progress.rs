@@ -3,8 +3,9 @@
 //! is printed stays clean; off a terminal nothing is shown.
 
 use std::io::{IsTerminal as _, Write as _};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
+use ants_daemon::sync::MutexExt as _;
 use ants_proto::{State, StatusEvent, StatusUpdate, UserId, Uuid};
 use futures::StreamExt as _;
 
@@ -20,7 +21,7 @@ pub fn wanted(human: bool) -> bool {
 }
 
 fn show(text: String) {
-    let mut line = LINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut line = LINE.locked();
     if text.is_empty() {
         drop(line);
         return clear();
@@ -33,7 +34,7 @@ fn show(text: String) {
 
 /// Take the status line off the screen until the next update, before printing something else.
 pub fn clear() {
-    let mut line = LINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut line = LINE.locked();
     if line.1 {
         let mut stderr = std::io::stderr().lock();
         _ = write!(stderr, "{CLEAR}");
@@ -49,17 +50,17 @@ const HELD_MAX: usize = 100;
 
 /// Keep log lines instead of writing them to stderr, until [`release_logs`].
 pub fn hold_logs() {
-    *HELD.lock().unwrap_or_else(PoisonError::into_inner) = Some(Vec::new());
+    *HELD.locked() = Some(Vec::new());
 }
 
 /// Write log lines to stderr again; returns those kept meanwhile.
 pub fn release_logs() -> Vec<String> {
-    HELD.lock().unwrap_or_else(PoisonError::into_inner).take().unwrap_or_default()
+    HELD.locked().take().unwrap_or_default()
 }
 
 /// The latest log line kept, if any.
 pub fn last_held_log() -> Option<String> {
-    HELD.lock().unwrap_or_else(PoisonError::into_inner).as_ref().and_then(|held| held.last().cloned())
+    HELD.locked().as_ref().and_then(|held| held.last().cloned())
 }
 
 /// Stderr for log lines: the status line goes off the screen before one and comes back after it.
@@ -73,7 +74,7 @@ pub struct LogWriter {
 
 impl std::io::Write for LogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Some(held) = HELD.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+        if let Some(held) = HELD.locked().as_mut() {
             held.extend(String::from_utf8_lossy(buf).lines().map(str::to_owned));
             let over = held.len().saturating_sub(HELD_MAX);
             held.drain(..over);
@@ -81,7 +82,7 @@ impl std::io::Write for LogWriter {
         }
         if !self.hid {
             self.hid = true;
-            let mut line = LINE.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut line = LINE.locked();
             if line.1 {
                 _ = write!(std::io::stderr(), "{CLEAR}");
                 line.1 = false;
@@ -97,7 +98,7 @@ impl std::io::Write for LogWriter {
 
 impl Drop for LogWriter {
     fn drop(&mut self) {
-        let mut line = LINE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut line = LINE.locked();
         if let (Some(text), false) = &*line {
             let mut stderr = std::io::stderr().lock();
             _ = write!(stderr, "{CLEAR}{text}");

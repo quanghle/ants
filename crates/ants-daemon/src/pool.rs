@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::SessionId;
@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 use crate::direct_kv::DirectKv;
 use crate::harness::{Launch, Prompt, Reply, Session};
 use crate::roster::Workload;
+use crate::sync::MutexExt as _;
 use crate::worktrees::{Branch, Pruned, Worktrees};
 
 /// Where the session of every thread is kept, so a stopped harness or a restarted daemon resumes it.
@@ -43,7 +44,7 @@ impl SessionStore {
                 let value = kv.get(session_key(ant, thread)).await.context("reading the session of the thread")?;
                 Ok(value.and_then(|v| String::from_utf8(v).ok()).map(SessionId::new))
             }
-            Self::Memory(map) => Ok(map.lock().expect("session store").get(thread).cloned()),
+            Self::Memory(map) => Ok(map.locked().get(thread).cloned()),
         }
     }
 
@@ -55,7 +56,7 @@ impl SessionStore {
                     .context("storing the session of the thread")?;
             }
             Self::Memory(map) => {
-                map.lock().expect("session store").insert(thread.clone(), session.clone());
+                map.locked().insert(thread.clone(), session.clone());
             }
         }
         Ok(())
@@ -219,7 +220,7 @@ impl Pool {
 
     /// Stop every harness and wait for them to exit. Prompts still in flight end with an error.
     pub async fn shutdown(self) {
-        let slots = self.slots.into_inner().expect("pool");
+        let slots = self.slots.into_inner().unwrap_or_else(PoisonError::into_inner);
         let sessions = slots.into_values().filter_map(|slot| match slot {
             Slot::Ready(live) => Arc::into_inner(live.session),
             Slot::Starting => None,
@@ -232,7 +233,7 @@ impl Pool {
     }
 
     fn slots(&self) -> MutexGuard<'_, HashMap<ThreadId, Slot>> {
-        self.slots.lock().expect("pool")
+        self.slots.locked()
     }
 
     /// The thread's live session, marked busy until the lease drops.
@@ -369,6 +370,8 @@ pub(crate) mod fake {
     use agent_client_protocol::{Agent, DynConnectTo};
     use tokio::sync::Semaphore;
 
+    use crate::sync::MutexExt as _;
+
     use crate::harness::Launch;
 
     /// What the fake harnesses were asked to do, across all their "processes".
@@ -420,7 +423,7 @@ pub(crate) mod fake {
         let (shared, held) = (log.clone(), gate.clone());
         let connect = Arc::new(move || {
             let log = shared.clone();
-            log.lock().unwrap().starts += 1;
+            log.locked().starts += 1;
             let (on_init, on_new, on_load, on_prompt, gate) =
                 (log.clone(), log.clone(), log.clone(), log, held.clone());
             let cancels = Arc::new(Semaphore::new(0));
@@ -438,7 +441,7 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |init: InitializeRequest, responder, _cx| {
-                            if on_init.lock().unwrap().broken {
+                            if on_init.locked().broken {
                                 return responder.respond_with_internal_error("broken install");
                             }
                             responder.respond(
@@ -451,7 +454,7 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |new: NewSessionRequest, responder, _cx| {
-                            let mut log = on_new.lock().unwrap();
+                            let mut log = on_new.locked();
                             if log.signed_out {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
@@ -463,7 +466,7 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |load: LoadSessionRequest, responder, cx| {
-                            let mut log = on_load.lock().unwrap();
+                            let mut log = on_load.locked();
                             if log.signed_out {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
@@ -481,7 +484,7 @@ pub(crate) mod fake {
                     )
                     .on_receive_request(
                         async move |prompt: PromptRequest, responder, cx| {
-                            let mut log = on_prompt.lock().unwrap();
+                            let mut log = on_prompt.locked();
                             if log.signed_out {
                                 return responder.respond_with_error(agent_client_protocol::Error::auth_required());
                             }
@@ -505,13 +508,13 @@ pub(crate) mod fake {
                                     gate.acquire().await.unwrap().forget();
                                 }
                                 if text.split_whitespace().any(|w| w == "doomed") {
-                                    log.lock().unwrap().doomed += 1;
+                                    log.locked().doomed += 1;
                                     gate.acquire().await.unwrap().forget();
-                                    log.lock().unwrap().doomed_failed += 1;
+                                    log.locked().doomed_failed += 1;
                                     return responder.respond_with_internal_error("doomed");
                                 }
                                 if text.starts_with("flaky") {
-                                    let mut log = log.lock().unwrap();
+                                    let mut log = log.locked();
                                     if !log.flaky_failed.contains(&text) {
                                         log.flaky_failed.push(text);
                                         return responder.respond_with_internal_error("flaky");
@@ -540,10 +543,10 @@ pub(crate) mod fake {
                                 if words.contains(&"stall") {
                                     sender.send_notification(chunk(session, "partial"))?;
                                     cancels.acquire().await.unwrap().forget();
-                                    log.lock().unwrap().cancelled += 1;
+                                    log.locked().cancelled += 1;
                                     return responder.respond(PromptResponse::new(StopReason::Cancelled));
                                 }
-                                log.lock().unwrap().answered.push(text.clone());
+                                log.locked().answered.push(text.clone());
                                 // In two chunks, as harnesses stream a reply.
                                 sender.send_notification(chunk(session, &format!("{session}: ")))?;
                                 sender.send_notification(chunk(session, &text))?;

@@ -406,6 +406,7 @@ mod tests {
 
     use super::*;
     use crate::bus;
+    use crate::sync::MutexExt as _;
 
     fn p(name: &str) -> UserId {
         name.parse().unwrap()
@@ -518,7 +519,7 @@ mod tests {
             let gone = gone.clone();
             Arc::new(move || {
                 let mut entries = vec![entry("dev-c", &[], later(60)), entry("dev-d", &["rust"], later(60))];
-                if !*gone.lock().unwrap() {
+                if !*gone.locked() {
                     entries.push(entry("dev-b", &["rust"], t0));
                 }
                 Box::pin(async move { Ok(entries) })
@@ -539,7 +540,7 @@ mod tests {
         let mut watch = new_watch().await;
         assert_eq!(watch.check(&is_human, t0).await.unwrap(), []);
         assert_eq!(watch.sent.len(), 3, "the message to a human is not kept");
-        *gone.lock().unwrap() = true;
+        *gone.locked() = true;
         assert_eq!(watch.check(&is_human, later(1)).await.unwrap(), [], "absent for no time yet");
         assert_eq!(watch.check(&is_human, later(15)).await.unwrap(), [], "absent for 14 minutes");
         let found = watch.check(&is_human, later(16)).await.unwrap();

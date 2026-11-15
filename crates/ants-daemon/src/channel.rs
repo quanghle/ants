@@ -28,6 +28,7 @@ use crate::direct_kv::DirectKv;
 use crate::links;
 use crate::owners::Owners;
 pub use crate::reading::Reading;
+use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 
 /// What ants tells a channel's messenger about triaging a post; the messenger's own instructions add to it.
@@ -621,14 +622,14 @@ impl Threads {
         if !part.entry.is_member(sender) && part.entry.messenger() != *sender {
             return Ok(false);
         }
-        if self.parts.lock().expect("parts").contains(&(thread.clone(), sender.clone())) {
+        if self.parts.locked().contains(&(thread.clone(), sender.clone())) {
             return Ok(true);
         }
         self.scan(&subject::chan_room(channel), from_start(thread), &mut part)
             .await
             .with_context(|| format!("reading thread {thread} of #{channel} for posts of {sender}"))?;
         if part.found {
-            let mut parts = self.parts.lock().expect("parts");
+            let mut parts = self.parts.locked();
             if parts.len() >= MAX_ORIGINS {
                 parts.clear();
             }
@@ -669,7 +670,7 @@ impl Threads {
     /// channel whose id is the thread's, among those stored within [`CLOCK_SLACK`] of the time in it.
     async fn root(&self, thread: &ThreadId, seq: u64) -> Result<Option<ChannelId>> {
         let Some(start) = thread_start(thread) else { return Ok(None) };
-        if let Some(channel) = self.roots.lock().expect("roots").get(thread).cloned() {
+        if let Some(channel) = self.roots.locked().get(thread).cloned() {
             return Ok(channel);
         }
         let mut root = Root { thread, upto: seq, until: start + 2 * CLOCK_SLACK, channel: None };
@@ -677,7 +678,7 @@ impl Threads {
         self.scan(subject::ALL_CHANNELS, from, &mut root)
             .await
             .with_context(|| format!("looking for the top-level post of thread {thread}"))?;
-        let mut roots = self.roots.lock().expect("roots");
+        let mut roots = self.roots.locked();
         if roots.len() >= MAX_ORIGINS {
             roots.clear();
         }
@@ -695,7 +696,7 @@ impl Threads {
             return Ok(ThreadOrigin::of_root(post, humans));
         }
         let key = (post.channel.clone(), post.thread_id.clone());
-        let cached = self.origins.lock().expect("origins").get(&key).cloned();
+        let cached = self.origins.locked().get(&key).cloned();
         let (origin, start) = match cached {
             Some((origin, read)) if origin.settled() || read >= seq => return Ok(origin),
             Some((origin, read)) => (origin, consumer::DeliverPolicy::ByStartSequence { start_sequence: read + 1 }),
@@ -706,7 +707,7 @@ impl Threads {
             .await
             .with_context(|| format!("reading the origin of thread {} of #{}", post.thread_id, post.channel))?;
         let origin = fold.fold.resolve(&post.thread_id, &self.webhooks).await;
-        let mut origins = self.origins.lock().expect("origins");
+        let mut origins = self.origins.locked();
         if origins.len() >= MAX_ORIGINS {
             origins.clear();
         }

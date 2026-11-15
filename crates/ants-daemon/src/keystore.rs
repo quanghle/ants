@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 
+use crate::sync::MutexExt as _;
+
 /// The service under which seeds are stored.
 pub const SERVICE: &str = "ants";
 
@@ -658,7 +660,7 @@ impl Memory {
 
     /// The public keys of the seeds stored.
     pub fn keys(&self) -> Vec<String> {
-        self.seeds.lock().unwrap().keys().cloned().collect()
+        self.seeds.locked().keys().cloned().collect()
     }
 
     fn check(&self) -> Result<()> {
@@ -672,7 +674,7 @@ impl Memory {
 impl Store for Memory {
     fn get(&self, key: &str) -> Result<Option<String>> {
         self.check()?;
-        Ok(self.seeds.lock().unwrap().get(key).cloned())
+        Ok(self.seeds.locked().get(key).cloned())
     }
 
     fn set(&self, key: &str, seed: &str) -> Result<()> {
@@ -680,13 +682,13 @@ impl Store for Memory {
         if self.read_only.load(Ordering::SeqCst) {
             bail!("the credential store denied access");
         }
-        self.seeds.lock().unwrap().insert(key.to_owned(), seed.to_owned());
+        self.seeds.locked().insert(key.to_owned(), seed.to_owned());
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
         self.check()?;
-        self.seeds.lock().unwrap().remove(key);
+        self.seeds.locked().remove(key);
         Ok(())
     }
 }

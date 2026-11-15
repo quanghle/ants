@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use crate::harness::Harness;
 use crate::humans::Registry;
+use crate::sync::MutexExt as _;
 
 /// Phrases of a harness's error or stderr, lowercase, that mean a rate limit or an overloaded provider, whatever the
 /// harness; a definition adds its own ([`Harness::rate_limited`]).
@@ -311,7 +312,7 @@ impl Throttle {
     }
 
     fn period(&self) -> std::sync::MutexGuard<'_, Period> {
-        self.0.lock().expect("throttle")
+        self.0.locked()
     }
 }
 
@@ -596,7 +597,7 @@ mod tests {
         assert!(!throttle.lift(), "not yet");
 
         let lifted = |throttle: &Throttle| {
-            throttle.0.lock().unwrap().until = Some((Instant::now(), Utc::now()));
+            throttle.0.locked().until = Some((Instant::now(), Utc::now()));
             assert!(throttle.lift() && !throttle.is_held());
         };
         lifted(&throttle);

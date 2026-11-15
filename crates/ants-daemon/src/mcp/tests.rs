@@ -50,12 +50,12 @@ struct MemoryNotes(StdMutex<HashMap<ThreadId, Vec<NotesPost>>>);
 
 impl NotesStore for MemoryNotes {
     fn read<'a>(&'a self, thread: &'a ThreadId) -> BoxFuture<'a, Result<crate::notes::Notes>> {
-        let posts = self.0.lock().unwrap().get(thread).cloned().unwrap_or_default();
+        let posts = self.0.locked().get(thread).cloned().unwrap_or_default();
         Box::pin(async move { Ok(crate::notes::Notes { last_seq: posts.len() as u64, posts }) })
     }
 
     fn post<'a>(&'a self, post: &'a NotesPost, last_seq: u64) -> BoxFuture<'a, Result<bool>> {
-        let mut all = self.0.lock().unwrap();
+        let mut all = self.0.locked();
         let notes = all.entry(post.thread_id.clone()).or_default();
         let stored = notes.len() as u64 == last_seq;
         if stored {
@@ -175,7 +175,7 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let stored: Arc<StdMutex<std::collections::BTreeSet<(Uuid, String)>>> = Arc::default();
     let kept = stored.clone();
     mcp.with_reactor(Arc::new(move |message, reaction: Reaction, remove| {
-        let mut stored = kept.lock().unwrap();
+        let mut stored = kept.locked();
         let entry = (message, reaction.as_str().to_owned());
         let changed = if remove { stored.remove(&entry) } else { stored.insert(entry) };
         Box::pin(async move { Ok(changed) })
@@ -194,14 +194,14 @@ async fn react_takes_the_current_message_or_a_named_one_and_removes() {
     let (ok, text) = call(&client, "react", serde_json::json!({"reaction": "Eyes!"})).await;
     assert!(!ok, "{text}");
     let expected = std::collections::BTreeSet::from([(current.id, "eyes".to_owned()), (other, "check".to_owned())]);
-    assert_eq!(*stored.lock().unwrap(), expected);
+    assert_eq!(*stored.locked(), expected);
 
     let remove = serde_json::json!({"reaction": "eyes", "remove": true});
     let (ok, text) = call(&client, "react", remove.clone()).await;
     assert!(ok && text.starts_with("Removed the reaction eyes"), "{text}");
     let (ok, text) = call(&client, "react", remove).await;
     assert!(ok && text.starts_with("No reaction eyes"), "{text}");
-    assert_eq!(*stored.lock().unwrap(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
+    assert_eq!(*stored.locked(), std::collections::BTreeSet::from([(other, "check".to_owned())]));
 }
 
 /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,
@@ -214,14 +214,14 @@ struct MemoryAdmin {
 
 impl Admin for MemoryAdmin {
     fn channels(&self) -> BoxFuture<'_, Result<Vec<ChannelEntry>>> {
-        let channels = self.channels.lock().unwrap().clone();
+        let channels = self.channels.locked().clone();
         Box::pin(async move { Ok(channels) })
     }
 
     fn request(&self, request: ChannelAdminRequest) -> BoxFuture<'_, Result<Option<ChannelAdminReply>>> {
-        self.requests.lock().unwrap().push(request.clone());
+        self.requests.locked().push(request.clone());
         let reply = (!self.silent).then(|| {
-            let mut channels = self.channels.lock().unwrap();
+            let mut channels = self.channels.locked();
             let outcome = match channels.iter_mut().find(|e| e.channel == request.channel) {
                 None => ChannelAdminOutcome::Refused { refusal: ants_proto::Refusal::NoSuchChannel },
                 Some(entry) => match entry.apply(&request.ant, &request.ops, &ants_proto::Humans::default()) {
@@ -255,12 +255,12 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
     assert!(ok && text.contains("#ops") && !text.contains("#dev"), "{text}");
     let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "#dev"})).await;
     assert_eq!((ok, text.as_str()), (true, "#dev: members none; messenger messenger (default); owner lead."));
-    assert!(admin.requests.lock().unwrap().is_empty(), "showing asks nothing");
+    assert!(admin.requests.locked().is_empty(), "showing asks nothing");
 
     let args = serde_json::json!({"channel": "#ops", "add": ["@dev-b", "dev-c"], "messenger": "dev-b"});
     let (ok, text) = call(&client, "manage_channel", args).await;
     assert!(ok && text.starts_with("Changed #ops: added dev-b; added dev-c; messenger dev-b."), "{text}");
-    let request = admin.requests.lock().unwrap()[0].clone();
+    let request = admin.requests.locked()[0].clone();
     assert_eq!((&request.ant, &request.thread_id), (&user("dev-a"), &current.thread_id));
     let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "ops", "add": ["dev-b"]})).await;
     assert!(ok && text.starts_with("Nothing to change."), "{text}");
@@ -485,11 +485,11 @@ async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once
         let ask = match ask {
             ManagerAsk::Add(ask) => *ask,
             ManagerAsk::Retire(ask) => {
-                seen_retired.lock().unwrap().push(ask);
+                seen_retired.locked().push(ask);
                 return Box::pin(async { Ok("Retired dev-a-docs.".to_owned()) });
             }
         };
-        seen.lock().unwrap().push(ask.clone());
+        seen.locked().push(ask.clone());
         Box::pin(async move {
             match ask.name.as_str() {
                 "dev-a-docs" => Ok("Added dev-a-docs.".to_owned()),
@@ -508,7 +508,7 @@ async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once
     });
     let (ok, text) = call(&client, "request_ant", args).await;
     assert!(ok && text.starts_with("Added dev-a-docs.") && text.contains("is in the roster"), "{text}");
-    let ask = asked.lock().unwrap()[0].clone();
+    let ask = asked.locked()[0].clone();
     assert_eq!(
         (ask.manager, ask.thread, ask.template, ask.wait),
         (user("dev-a"), thread.clone(), "worker".to_owned(), DEFAULT_REQUEST_WAIT)
@@ -519,15 +519,15 @@ async fn request_and_retire_ant_are_offered_to_managers_and_request_returns_once
     let args = serde_json::json!({"name": "dev-a-x", "template": "worker", "reason": "x", "timeout": "1m"});
     let (ok, text) = call(&client, "request_ant", args).await;
     assert!(!ok && text.contains("the signer refused it"), "{text}");
-    assert_eq!(asked.lock().unwrap()[1].wait, Duration::from_mins(1));
+    assert_eq!(asked.locked()[1].wait, Duration::from_mins(1));
     let args = serde_json::json!({"name": "dev-a-y", "template": "worker", "reason": "y", "overrides": {"x": 1}});
     let (ok, text) = call(&client, "request_ant", args).await;
     assert!(!ok && text.contains("overrides"), "{text}");
-    assert_eq!(asked.lock().unwrap().len(), 2, "a malformed request goes nowhere");
+    assert_eq!(asked.locked().len(), 2, "a malformed request goes nowhere");
 
     let (ok, text) = call(&client, "retire_ant", serde_json::json!({"name": " dev-a-docs "})).await;
     assert!(ok && text == "Retired dev-a-docs.", "{text}");
-    let ask = retired.lock().unwrap()[0].clone();
+    let ask = retired.locked()[0].clone();
     assert_eq!((ask.manager, ask.thread, ask.name), (user("dev-a"), thread, user("dev-a-docs")));
 }
 
@@ -639,7 +639,7 @@ async fn notes_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
     assert!(ok && text.ends_with("has no notes yet."), "{text}");
     // dev-b posted already and left two turns, fewer than the message has.
     let theirs = NotesPost::spend(thread.clone(), user("dev-b"), "I take the docs", 3, None).unwrap();
-    notes.0.lock().unwrap().insert(thread.clone(), vec![theirs]);
+    notes.0.locked().insert(thread.clone(), vec![theirs]);
     let (ok, text) = call(&client, "post_notes", serde_json::json!({"text": "I take the code"})).await;
     assert!(ok && text.contains("(1 turns left)"), "{text}");
     let (ok, text) = call(&client, "post_notes", serde_json::json!({"text": "ship friday?"})).await;
@@ -662,7 +662,7 @@ async fn notes_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
     assert!(text.contains("dev-b at ") && text.ends_with("ship friday?"), "{text}");
 
     // The human's post gives the notes a fresh budget, within the message's.
-    notes.0.lock().unwrap().get_mut(&thread).unwrap().push(NotesPost::new(thread.clone(), UserId::human(), "go"));
+    notes.0.locked().get_mut(&thread).unwrap().push(NotesPost::new(thread.clone(), UserId::human(), "go"));
     let (ok, text) = call(&client, "post_notes", serde_json::json!({"text": "back to it"})).await;
     assert!(ok && text.contains("(4 turns left)"), "{text}");
 }
@@ -798,7 +798,7 @@ fn channels(entries: Vec<ChannelEntry>, posted: Arc<StdMutex<Vec<ChannelPost>>>)
             Box::pin(async move { Ok(entry) })
         }),
         post: Arc::new(move |post| {
-            posted.lock().unwrap().push(post);
+            posted.locked().push(post);
             Box::pin(async { Ok(()) })
         }),
     }
@@ -832,7 +832,7 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
 
     let (ok, text) = call(&client, "post_channel", post("#ops", "@dev-b @human check the build")).await;
     assert!(ok && text.contains("that dev-a created (8 turns left); it wakes dev-b and notifies human."), "{text}");
-    let got = posted.lock().unwrap().pop().unwrap();
+    let got = posted.locked().pop().unwrap();
     assert_eq!((got.channel.as_str(), &got.from, got.in_reply_to), ("ops", &user("dev-a"), None));
     assert_eq!((&got.creator, &got.owner), (&Some(user("dev-a")), &None));
     assert_eq!(got.turn_budget, ants_proto::DEFAULT_TURN_BUDGET, "a human's message spends no turn");
@@ -857,7 +857,7 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     let _turn = mcp.begin(&asked);
     let (ok, text) = call(&client, "post_channel", post("ops", "@dev-b go")).await;
     assert!(!ok && text.contains("has no turns left"), "{text}");
-    assert_eq!(posted.lock().unwrap().len(), 2);
+    assert_eq!(posted.locked().len(), 2);
 }
 
 #[tokio::test]
@@ -1021,7 +1021,7 @@ fn fake_pool(mcp: &Mcp, http: bool, seen: Arc<StdMutex<Vec<Vec<McpServer>>>>) ->
                 )
                 .on_receive_request(
                     async move |new: NewSessionRequest, responder, _cx| {
-                        let mut seen = on_new.lock().unwrap();
+                        let mut seen = on_new.locked();
                         seen.push(new.mcp_servers);
                         responder.respond(NewSessionResponse::new(format!("s{}", seen.len())))
                     },
@@ -1029,7 +1029,7 @@ fn fake_pool(mcp: &Mcp, http: bool, seen: Arc<StdMutex<Vec<Vec<McpServer>>>>) ->
                 )
                 .on_receive_request(
                     async move |load: LoadSessionRequest, responder, _cx| {
-                        on_load.lock().unwrap().push(load.mcp_servers);
+                        on_load.locked().push(load.mcp_servers);
                         responder.respond(LoadSessionResponse::new())
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -1037,7 +1037,7 @@ fn fake_pool(mcp: &Mcp, http: bool, seen: Arc<StdMutex<Vec<Vec<McpServer>>>>) ->
                 .on_receive_request(
                     async move |prompt: PromptRequest, responder, cx| {
                         let AcpContent::Text(t) = &prompt.prompt[0] else { unreachable!() };
-                        let server = on_prompt.lock().unwrap().last().cloned().unwrap_or_default();
+                        let server = on_prompt.locked().last().cloned().unwrap_or_default();
                         let answer = match server.first() {
                             Some(McpServer::Http(server)) => {
                                 let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
@@ -1076,7 +1076,7 @@ async fn sessions_get_the_tools_of_their_thread() {
         assert!(answer.starts_with("Sent to dev-b"), "{answer}");
         assert_eq!(sent.recv().await.unwrap().thread_id, envelope.thread_id);
     }
-    let seen = seen.lock().unwrap();
+    let seen = seen.locked();
     assert_eq!(seen.len(), 3, "new, new, then load with the cap of one");
     let token = |servers: &[McpServer]| match servers {
         [McpServer::Http(http)] => http.headers[0].value.clone(),
@@ -1093,7 +1093,7 @@ async fn harnesses_without_http_get_the_stdio_bridge() {
     let pool = fake_pool(&mcp, false, seen.clone());
     let current = from_human();
     assert_eq!(pool.prompt(&current.thread_id, "x").await.unwrap(), "no tools");
-    let seen = seen.lock().unwrap();
+    let seen = seen.locked();
     let [McpServer::Stdio(stdio)] = &seen[0][..] else { panic!("{:?}", seen[0]) };
     assert_eq!(stdio.command, std::env::current_exe().unwrap());
 }

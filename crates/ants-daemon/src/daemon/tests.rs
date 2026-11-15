@@ -330,7 +330,7 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         assert_eq!(next_reply(&mut replies).await, (t2.clone(), "c".to_owned()), "t2 does not wait for t1");
-        assert_eq!(log.lock().unwrap().answered, ["c"], "b waits for the message before it on t1");
+        assert_eq!(log.locked().answered, ["c"], "b waits for the message before it on t1");
         until("c to be done", || bus.workload.handling() == 1).await;
         assert_eq!(bus.workload.activity(), ants_proto::Activity::Working);
         gate.add_permits(1);
@@ -457,7 +457,7 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, [warned("flaky a"), "b".to_owned()]);
+    assert_eq!(log.locked().answered, [warned("flaky a"), "b".to_owned()]);
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -484,7 +484,7 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     let history = "[ants] The thread's history, read back from ants, oldest first:\n\nhuman to dev-a:\nhello\n\n\
                        dev-a to human:\ns1: hello\n\n[ants] End of the thread's history.\n\noverflows";
-    let prompts = log.lock().unwrap().prompts.clone();
+    let prompts = log.locked().prompts.clone();
     assert_eq!(prompts.len(), 3, "{prompts:?}");
     assert!(prompts[2].ends_with(history), "{}", prompts[2]);
     assert_eq!(bus.unacked().await, 0);
@@ -495,7 +495,7 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
 async fn messages_wait_unspent_while_the_harness_is_signed_out() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch(true);
-    log.lock().unwrap().signed_out = true;
+    log.locked().signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let mut statuses = bus.client.subscribe(subject::status_of(&bus.dev)).await.unwrap();
@@ -524,14 +524,14 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
         let shown = bus.workload.signed_out().expect("the roster shows the harness signed out");
         assert_eq!(shown.sign_in, None, "the test harness names no sign-in command");
         // Several checks of the harness pass, telling nobody again and spending no attempt.
-        let starts = log.lock().unwrap().starts;
-        until("checks of the harness", || log.lock().unwrap().starts >= starts + 3).await;
+        let starts = log.locked().starts;
+        until("checks of the harness", || log.locked().starts >= starts + 3).await;
         assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
-        assert_eq!(log.lock().unwrap().prompted, 0);
+        assert_eq!(log.locked().prompted, 0);
 
-        log.lock().unwrap().signed_out = false;
+        log.locked().signed_out = false;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.push(next_reply(&mut replies).await);
         answered.sort_by_key(|(_, text)| text.clone());
@@ -540,16 +540,16 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
         assert_eq!(bus.workload.signed_out(), None, "signed in again: the roster no longer shows it");
 
         // Signed out again once it worked: a live harness turns the prompt away, and a human is told again.
-        log.lock().unwrap().signed_out = true;
+        log.locked().signed_out = true;
         bus.send(&t1, "d").await;
         signed_out(&next_envelope(&mut replies).await);
         assert!(bus.workload.signed_out().is_some_and(|s| s.since > shown.since), "a new signed-out period");
-        log.lock().unwrap().signed_out = false;
+        log.locked().signed_out = false;
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "d".to_owned()));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let mut answered = log.lock().unwrap().answered.clone();
+    let mut answered = log.locked().answered.clone();
     answered.sort();
     assert_eq!(answered, ["a", "b", "c", "d"]);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
@@ -560,7 +560,7 @@ async fn messages_wait_unspent_while_the_harness_is_signed_out() {
 async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch(true);
-    log.lock().unwrap().broken = true;
+    log.locked().broken = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (_, seq) = bus.send(&t1, "a").await;
@@ -579,32 +579,32 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
         let redelivered = bus.consumer().await.num_redelivered;
         assert!(redelivered < 3, "{redelivered}");
         // Several checks of the harness fail, telling nobody again and spending no attempt.
-        let starts = log.lock().unwrap().starts;
-        until("checks of the harness", || log.lock().unwrap().starts >= starts + 3).await;
+        let starts = log.locked().starts;
+        until("checks of the harness", || log.locked().starts >= starts + 3).await;
         assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, redelivered);
         assert!(bus.workload.failing().is_some_and(|f| f.since == shown.since), "the same failing period");
 
-        log.lock().unwrap().broken = false;
+        log.locked().broken = false;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.sort_by_key(|(_, text)| text.clone());
         assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
         assert_eq!(bus.workload.failing(), None, "started again: the roster no longer shows it");
 
         // Once messages get through, a lone failure is tried again as before, holding nothing.
-        log.lock().unwrap().broken = true;
+        log.locked().broken = true;
         let t3 = ThreadId::generate();
-        let starts = log.lock().unwrap().starts;
+        let starts = log.locked().starts;
         bus.send(&t3, "d").await;
-        until("a failed start", || log.lock().unwrap().starts > starts).await;
-        log.lock().unwrap().broken = false;
+        until("a failed start", || log.locked().starts > starts).await;
+        log.locked().broken = false;
         assert_eq!(next_reply(&mut replies).await, (t3.clone(), "d".to_owned()));
         assert_eq!(bus.workload.failing(), None);
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let mut answered = log.lock().unwrap().answered.clone();
+    let mut answered = log.locked().answered.clone();
     answered.sort();
     assert_eq!(answered, ["a", "c", "d"]);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
@@ -615,7 +615,7 @@ async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
 async fn messages_wait_unspent_through_a_provider_rate_limit() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch(true);
-    log.lock().unwrap().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
+    log.locked().limited = Some("API Error: 429 Too Many Requests, retry after 0.2s".to_owned());
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
     let (_, seq) = bus.send(&t1, "a").await;
@@ -624,7 +624,7 @@ async fn messages_wait_unspent_through_a_provider_rate_limit() {
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        until("prompts tried again", || log.lock().unwrap().prompted >= 4).await;
+        until("prompts tried again", || log.locked().prompted >= 4).await;
         // Each backoff clears the limit until the next try meets it again.
         let shown = timeout(WAIT, async {
             loop {
@@ -642,7 +642,7 @@ async fn messages_wait_unspent_through_a_provider_rate_limit() {
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
 
-        log.lock().unwrap().limited = None;
+        log.locked().limited = None;
         let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
         answered.push(next_reply(&mut replies).await);
         answered.sort_by_key(|(_, text)| text.clone());
@@ -665,7 +665,7 @@ async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
                      seconds) Last error: 429 You exceeded your current quota, please check your plan and billing \
                      details.";
     {
-        let mut faked = log.lock().unwrap();
+        let mut faked = log.locked();
         (faked.limited, faked.limited_reply) = (Some(error.to_owned()), true);
     }
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -679,18 +679,18 @@ async fn an_exhausted_quota_is_told_once_and_spends_no_attempt() {
         assert!(notice.text.contains("harness test on") && notice.text.contains("out of quota"), "{notice:?}");
         assert!(notice.text.contains("spending no attempts"), "{}", notice.text);
         assert_eq!(bus.workload.limited().map(|l| l.kind), Some(LimitKind::Quota));
-        until("prompts tried again", || log.lock().unwrap().prompted >= 3).await;
+        until("prompts tried again", || log.locked().prompted >= 3).await;
         assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
         assert!(!bus.marked(seq).await, "no attempt is recorded");
         assert_eq!(bus.consumer().await.num_redelivered, 0);
 
-        log.lock().unwrap().limited = None;
+        log.locked().limited = None;
         assert_eq!(next_reply(&mut replies).await, (thread.clone(), "a".to_owned()));
         until("the limit cleared", || bus.workload.limited().is_none()).await;
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, ["a"]);
+    assert_eq!(log.locked().answered, ["a"]);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
@@ -713,7 +713,7 @@ async fn a_forged_sender_is_dead_lettered_unanswered() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, ["genuine"]);
+    assert_eq!(log.locked().answered, ["genuine"]);
     let letters = dead::list(&bus.stream).await.unwrap();
     let [(_, letter)] = letters.as_slice() else { panic!("{letters:?}") };
     assert!(letter.error.contains("sender mismatch"), "{}", letter.error);
@@ -740,7 +740,7 @@ async fn an_approval_decision_is_acked_without_a_prompt() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, ["genuine"]);
+    assert_eq!(log.locked().answered, ["genuine"]);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
@@ -772,14 +772,14 @@ async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
     let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
     let ctrl_c = Arc::new(Semaphore::new(0));
     let stop_mid_prompt = async {
-        until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+        until("the prompt to start", || log.locked().starts == 1).await;
         ctrl_c.add_permits(1);
         gate.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), stop_mid_prompt);
     pool.shutdown().await;
     assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
-    assert_eq!(log.lock().unwrap().answered, ["hold a"], "b was handed back, not prompted");
+    assert_eq!(log.locked().answered, ["hold a"], "b was handed back, not prompted");
 
     let pool = Pool::new(launch, store, 2, IDLE);
     let check = async {
@@ -787,7 +787,7 @@ async fn ctrl_c_finishes_prompts_in_flight_and_a_restart_resumes() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().loaded, ["s1"], "the restarted daemon resumed the thread's session");
+    assert_eq!(log.locked().loaded, ["s1"], "the restarted daemon resumed the thread's session");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -805,7 +805,7 @@ async fn progress_acks_keep_messages_in_hand_past_the_ack_wait() {
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+        until("the prompt to start", || log.locked().starts == 1).await;
         assert_eq!(bus.consumer().await.config.ack_wait, ack_wait);
         tokio::time::sleep(ack_wait * 4).await;
         let consumer = bus.consumer().await;
@@ -832,7 +832,7 @@ async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
     let ack_wait = Duration::from_millis(300);
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+        until("the prompt to start", || log.locked().starts == 1).await;
         timeout(WAIT, async {
             while bus.consumer().await.num_redelivered < 2 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -847,7 +847,7 @@ async fn a_redelivery_of_a_message_in_hand_is_not_prompted_again() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, Duration::from_secs(3600), ack_wait), check);
-    assert_eq!(log.lock().unwrap().answered, ["hold a", "b"]);
+    assert_eq!(log.locked().answered, ["hold a", "b"]);
     assert_eq!(bus.unacked().await, 0, "acks of the first delivery count");
 }
 
@@ -870,7 +870,7 @@ async fn a_prompt_past_its_limit_is_cancelled_and_the_human_told() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().cancelled, 1);
+    assert_eq!(log.locked().cancelled, 1);
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -956,7 +956,7 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         assert!(!cancel(&bus, &ThreadId::generate()).await, "no prompt runs on another thread");
-        until("the prompt to run", || log.lock().unwrap().prompted == 1).await;
+        until("the prompt to run", || log.locked().prompted == 1).await;
         assert!(cancel(&bus, &t1).await);
         let reply = next_envelope(&mut to_dev_b).await;
         assert_eq!(reply.text, "partial\n\n[ants] The prompt was cancelled by human (ants cancel).");
@@ -966,8 +966,8 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().cancelled, 1);
-    assert_eq!(log.lock().unwrap().prompted, 2, "not retried");
+    assert_eq!(log.locked().cancelled, 1);
+    assert_eq!(log.locked().prompted, 2, "not retried");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -1016,7 +1016,7 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        until("the prompt to run", || log.lock().unwrap().prompted == 1).await;
+        until("the prompt to run", || log.locked().prompted == 1).await;
         let listed = timeout(WAIT, async {
             loop {
                 let answer = queue(&bus).await;
@@ -1056,7 +1056,7 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, ["hold a", "c"], "b never reached the harness");
+    assert_eq!(log.locked().answered, ["hold a", "c"], "b never reached the harness");
     assert_eq!(bus.unacked().await, 0);
     assert!(matches!(mark_of(&bus, &a).await, Some(MessageMark::Finished { .. })));
     assert!(matches!(withdraw(&bus, &c).await, Some(MessageMark::Finished { .. })), "c is answered already");
@@ -1085,7 +1085,7 @@ async fn a_message_withdrawn_before_its_delivery_is_never_prompted() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     bus.until_acked(a_seq).await;
-    assert_eq!(log.lock().unwrap().answered, ["b"]);
+    assert_eq!(log.locked().answered, ["b"]);
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -1103,7 +1103,7 @@ async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
     let pool = Pool::new(launch.clone(), store.clone(), 2, IDLE);
     let ctrl_c = Arc::new(Semaphore::new(0));
     let crash = async {
-        until("the prompt to reach the harness", || log.lock().unwrap().prompted == 1).await;
+        until("the prompt to reach the harness", || log.locked().prompted == 1).await;
         assert_eq!(withdraw(&bus, &b).await, None);
         ctrl_c.add_permits(2);
     };
@@ -1119,7 +1119,7 @@ async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
-    assert_eq!(log.lock().unwrap().answered, [warned("hold a")], "b never reached the harness");
+    assert_eq!(log.locked().answered, [warned("hold a")], "b never reached the harness");
     assert_eq!(bus.unacked().await, 0);
     assert!(timeout(Duration::from_millis(200), replies.next()).await.is_err(), "one notice");
 }
@@ -1128,7 +1128,7 @@ async fn a_withdrawn_message_redelivered_after_a_crash_is_acked_unprompted() {
 async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch(true);
-    log.lock().unwrap().signed_out = true;
+    log.locked().signed_out = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
     let (a, _) = bus.send(&t1, "a").await;
@@ -1138,12 +1138,12 @@ async fn a_message_held_for_a_sign_in_can_be_withdrawn() {
         let notice = next_envelope(&mut replies).await;
         assert!(notice.text.contains("is not signed in"), "{}", notice.text);
         assert_eq!(withdraw(&bus, &a).await, None, "turned away unprompted, a is not started");
-        log.lock().unwrap().signed_out = false;
+        log.locked().signed_out = false;
         assert_eq!(next_envelope(&mut replies).await.text, WITHDRAWN);
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert!(log.lock().unwrap().answered.is_empty());
+    assert!(log.locked().answered.is_empty());
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -1161,7 +1161,7 @@ async fn a_first_delivery_is_prompted_as_sent_and_leaves_no_marker() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered, ["a"]);
+    assert_eq!(log.locked().answered, ["a"]);
     assert!(!bus.marked(seq).await, "the marker is removed with the ack");
     assert_eq!(bus.unacked().await, 0);
 }
@@ -1194,7 +1194,7 @@ async fn a_spent_cap_hands_the_thread_to_the_human_until_the_human_answers() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
-    let log = log.lock().unwrap();
+    let log = log.locked();
     assert_eq!((log.cancelled, log.answered.as_slice()), (1, &["go on".to_owned()][..]));
 }
 
@@ -1275,7 +1275,7 @@ async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to human");
-    assert_eq!(log.lock().unwrap().answered, ["go on"]);
+    assert_eq!(log.locked().answered, ["go on"]);
 }
 
 fn ants<const N: usize>(names: [&str; N]) -> [UserId; N] {
@@ -1334,7 +1334,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
-    assert_eq!(log.lock().unwrap().answered, ["go on", "from boss"]);
+    assert_eq!(log.locked().answered, ["go on", "from boss"]);
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
     assert!(timeout(Duration::from_millis(50), to_dev_b.next()).await.is_err(), "dev-b got level 1 only");
     let pending = bus.ledger.pending(&t1).await.unwrap().expect("the escalation is kept");
@@ -1381,7 +1381,7 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
     assert!(timeout(Duration::from_millis(200), to_lead.next()).await.is_err(), "the leader gets no reply");
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 2, "{answered:?}");
     let note = format!("on that thread and spends one of its turns ({} left after it)", DEFAULT_TURN_BUDGET - 1);
     assert!(answered[0].starts_with("go on\n\n[ants] The escalation's leader answered"), "{}", answered[0]);
@@ -1424,7 +1424,7 @@ async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over(
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
-    assert_eq!(log.lock().unwrap().answered, ["go on", "carry on"]);
+    assert_eq!(log.locked().answered, ["go on", "carry on"]);
 }
 
 #[tokio::test]
@@ -1527,7 +1527,7 @@ async fn only_the_leader_answers_the_stuck_ant_and_members_answer_in_the_thread_
     assert_eq!(posts.len(), 1, "the member's answer");
     assert_eq!((&posts[0].from, posts[0].turn_budget), (&bus.dev, DEFAULT_TURN_BUDGET - 1));
     assert!(posts[0].text.ends_with("not to carol.\n\nhelp"), "{}", posts[0].text);
-    let prompt = log.lock().unwrap().answered.iter().find(|p| p.ends_with("\n\nhelp")).cloned().unwrap();
+    let prompt = log.locked().answered.iter().find(|p| p.ends_with("\n\nhelp")).cloned().unwrap();
     assert!(
         prompt.starts_with(&format!(
             "[ants] dev-a is part of an escalation group for carol's thread {t1}, level 1; members: lead, dev-a."
@@ -1591,7 +1591,7 @@ async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_i
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert!(timeout(Duration::from_millis(100), to_lead.next()).await.is_err(), "lead got level 1 only");
-    assert_eq!(log.lock().unwrap().answered, ["from boss"], "the notice is the daemon's alone");
+    assert_eq!(log.locked().answered, ["from boss"], "the notice is the daemon's alone");
 }
 
 #[tokio::test]
@@ -1624,7 +1624,7 @@ async fn an_owner_that_is_no_human_is_dropped_and_the_default_human_gets_the_thr
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
     assert!(timeout(Duration::from_millis(200), to_dev_b.next()).await.is_err(), "no escalation went to dev-b");
-    assert_eq!(log.lock().unwrap().answered, ["hi"]);
+    assert_eq!(log.locked().answered, ["hi"]);
 }
 
 #[tokio::test]
@@ -1641,14 +1641,14 @@ async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let crash = async {
         // Not just the harness's start: stopped before its session is stored, the thread would start afresh.
-        until("the prompt to reach the harness", || log.lock().unwrap().prompted == 1).await;
+        until("the prompt to reach the harness", || log.locked().prompted == 1).await;
         ctrl_c.add_permits(2);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), crash);
     // Its harness is still held mid-prompt, so it is dropped rather than shut down.
     drop(pool);
     assert!(bus.marked(seq).await, "the attempt is marked as started");
-    assert!(log.lock().unwrap().answered.is_empty());
+    assert!(log.locked().answered.is_empty());
 
     let pool = Pool::new(launch, store, 2, IDLE);
     let check = async {
@@ -1657,7 +1657,7 @@ async fn a_message_cut_off_mid_prompt_is_prompted_again_with_a_warning() {
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
     {
-        let log = log.lock().unwrap();
+        let log = log.locked();
         assert_eq!(log.answered, [warned("hold a")]);
         assert_eq!(log.loaded, ["s1"], "the session resumes, with the history of the cut-off attempt");
     }
@@ -1686,7 +1686,7 @@ async fn a_reply_recorded_before_a_crash_is_stored_once_without_a_prompt() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().starts, 0, "not prompted again");
+    assert_eq!(log.locked().starts, 0, "not prompted again");
     let state = bus.stream.get_info().await.unwrap().state;
     assert_eq!(state.messages, 2, "the message and one copy of its reply");
     assert!(!bus.marked(seq).await);
@@ -1796,10 +1796,10 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
     let ctrl_c = Arc::new(Semaphore::new(0));
     let down = async {
-        until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+        until("the prompt to start", || log.locked().starts == 1).await;
         uplinked.switch(false).await;
         gate.add_permits(1);
-        until("the answer", || log.lock().unwrap().answered.len() == 1).await;
+        until("the answer", || log.locked().answered.len() == 1).await;
         // Stopped, as for a restart, after the prompt in flight is handled.
         ctrl_c.add_permits(1);
     };
@@ -1814,7 +1814,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
-    assert_eq!(log.lock().unwrap().answered, ["hold a"], "answered once");
+    assert_eq!(log.locked().answered, ["hold a"], "answered once");
     assert_eq!(
         uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap().info().await.unwrap().state.messages,
         1,
@@ -1858,7 +1858,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     let attempts = MAX_ATTEMPTS as usize;
     gate.add_permits(attempts - 1);
     let down = async {
-        until("the last attempt", || log.lock().unwrap().doomed == attempts).await;
+        until("the last attempt", || log.locked().doomed == attempts).await;
         uplinked.switch(false).await;
         gate.add_permits(1);
         timeout(WAIT, async {
@@ -1890,7 +1890,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve_timed(&pool, &ctrl_c, progress_every, ack_wait), check);
-    assert_eq!(log.lock().unwrap().doomed, attempts, "not prompted again");
+    assert_eq!(log.locked().doomed, attempts, "not prompted again");
     let letters = dead::list(&stream).await.unwrap();
     assert_eq!(letters.len(), 1, "{letters:?}");
     assert_eq!(letters[0].1, kept, "the dead letter of the last attempt");
@@ -2012,7 +2012,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
     let ctrl_c = Arc::new(Semaphore::new(0));
     let down = async {
-        until("the prompt to start", || log.lock().unwrap().starts == 1).await;
+        until("the prompt to start", || log.locked().starts == 1).await;
         uplinked.switch(false).await;
         gate.add_permits(1);
         until_buried(true).await;
@@ -2089,7 +2089,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     }
     let (letters, notices) = (dead::list(&stream).await.unwrap(), notices().await);
     let prompted = {
-        let log = log.lock().unwrap();
+        let log = log.locked();
         (log.starts, log.doomed)
     };
     assert_eq!(prompted, (1, 0), "neither prompted again nor the doomed one at all");
@@ -2134,7 +2134,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert_eq!(log.lock().unwrap().answered.len(), 2, "the late replies are no prompts");
+    assert_eq!(log.locked().answered.len(), 2, "the late replies are no prompts");
     assert_eq!(bus.unacked().await, 0);
 }
 
@@ -2158,7 +2158,7 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let first = log.lock().unwrap().answered.clone();
+    let first = log.locked().answered.clone();
     assert_eq!(first.len(), 1, "the post that mentions nobody is not prompted: {first:?}");
     assert!(first[0].contains("human: deploy friday?\n") && first[0].ends_with("nobody."), "{}", first[0]);
     assert!(first[0].contains("Post from dev-b mentioning dev-a:\n@dev-a agree?"), "{}", first[0]);
@@ -2180,7 +2180,7 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let second = log.lock().unwrap().answered[1].clone();
+    let second = log.locked().answered[1].clone();
     let shown = "Earlier posts on the thread not shown before, oldest first:\nhuman: rollback plan is ready\n\n";
     assert!(second.contains(shown), "{second}");
     assert!(!second.contains("deploy friday") && !second.contains("dev-a: "), "{second}");
@@ -2243,7 +2243,7 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     // Different threads, so answered in either order.
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     let has = |text: &str| answered.iter().any(|prompt| prompt.contains(text));
     assert!(answered.len() == 2 && has("build red") && has("build green"), "{answered:?}");
     let quiet = Duration::from_millis(200);
@@ -2599,7 +2599,7 @@ async fn posts_that_do_not_wake_the_ant_are_acked_without_a_prompt() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 1, "{answered:?}");
     assert!(answered[0].contains("Post from human mentioning dev-a:\n@dev-a go"), "{}", answered[0]);
 }
@@ -2635,7 +2635,7 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 1, "no prompt once the thread is out of turns: {answered:?}");
     assert!(answered[0].contains("(0 left after it)"), "{}", answered[0]);
 }
@@ -2689,7 +2689,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let prompt = log.lock().unwrap().answered[0].clone();
+    let prompt = log.locked().answered[0].clone();
     assert!(prompt.contains(channel::TRIAGE_RULES), "{prompt}");
     let members = "- @dev-b [ci]: Keeps the build green.\n- @dev-c (offline: not in the roster)\n";
     assert!(prompt.contains(members), "{prompt}");
@@ -2732,7 +2732,7 @@ async fn an_ant_s_post_marked_as_a_webhook_s_counts_as_the_ant_s() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 2, "no triage of dev-b's post: {answered:?}");
     assert!(answered.iter().any(|p| p.contains("Post from github (a webhook) mentioning nobody")), "{answered:?}");
 }
@@ -2777,7 +2777,7 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 1, "alice's post only: {answered:?}");
     assert!(answered[0].contains(channel::TRIAGE_RULES), "{}", answered[0]);
     assert!(answered[0].contains("Post from alice mentioning nobody:\nthe build is red"), "{}", answered[0]);
@@ -2825,7 +2825,7 @@ async fn the_ant_s_own_post_notifies_the_human_members_it_mentions_and_wakes_no_
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let answered = log.lock().unwrap().answered.clone();
+    let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 1, "the mention of dev-a only: {answered:?}");
     assert!(answered[0].contains("Post from dev-b mentioning dev-a:\n@dev-a @alice check"), "{}", answered[0]);
     assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 2, "one notice per post, from dev-a's daemon");
@@ -2856,7 +2856,7 @@ async fn a_mention_notice_that_failed_is_sent_on_the_post_s_redelivery_and_only_
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert!(log.lock().unwrap().answered.is_empty());
+    assert!(log.locked().answered.is_empty());
     assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 1);
     let stored: Envelope = serde_json::from_slice(
         &bus.stream.get_last_raw_message_by_subject(&subject::inbox(&alice, &bus.dev)).await.unwrap().payload,
@@ -2904,7 +2904,7 @@ async fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post_once() {
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    assert!(log.lock().unwrap().answered.is_empty(), "a mention of a human wakes nobody");
+    assert!(log.locked().answered.is_empty(), "a mention of a human wakes nobody");
     assert_eq!(bus.stored(&subject::inbox_of(&alice)).await, 1);
     let notice: Envelope = serde_json::from_slice(
         &bus.stream.get_last_raw_message_by_subject(&subject::inbox(&alice, &bus.dev)).await.unwrap().payload,

@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 
 use crate::harness::SignedOut;
 use crate::humans::Registry;
+use crate::sync::MutexExt as _;
 
 /// How often a daemon whose harness is signed out checks it ([`crate::harness::handshake`]).
 pub const CHECK_EVERY: Duration = Duration::from_secs(60);
@@ -71,7 +72,7 @@ impl SignIn {
     }
 
     fn period(&self) -> std::sync::MutexGuard<'_, Period> {
-        self.0.lock().expect("sign-in")
+        self.0.locked()
     }
 }
 

@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
+use crate::sync::MutexExt as _;
 
 /// How often the usage is read.
 pub const CHECK_EVERY: Duration = Duration::from_mins(5);
@@ -284,7 +285,7 @@ static CHECKED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
 /// Whether this ant reads the usage of `server` now: none of the process's ants did in the last half `every`.
 fn claim(server: &str, every: Duration) -> bool {
     let now = Instant::now();
-    let mut checked = CHECKED.lock().unwrap();
+    let mut checked = CHECKED.locked();
     if checked.get(server).is_some_and(|at| now.duration_since(*at) < every / 2) {
         return false;
     }

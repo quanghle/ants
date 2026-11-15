@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::direct_kv::DirectKv;
 use crate::harness::Spend;
+use crate::sync::{MutexExt as _, RwLockExt as _};
 
 /// Spend caps; None is no cap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -118,13 +119,13 @@ impl Members {
     }
 
     pub fn get(&self) -> Vec<UserId> {
-        self.0.read().expect("pool members").clone()
+        self.0.read_locked().clone()
     }
 
     /// Take the list of `other`, for every clone of this one.
     pub fn replace(&self, other: &Self) {
         let new = other.get();
-        *self.0.write().expect("pool members") = new;
+        *self.0.write_locked() = new;
     }
 }
 
@@ -313,7 +314,7 @@ impl Store {
     async fn get<T: for<'de> Deserialize<'de> + Default>(&self, key: String) -> Result<T> {
         let bytes = match self {
             Self::Kv(kv) => kv.get(&key).await?,
-            Self::Memory(map) => map.lock().expect("spend store").get(&key).cloned(),
+            Self::Memory(map) => map.locked().get(&key).cloned(),
         };
         match bytes {
             Some(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parsing {key}")),
@@ -328,7 +329,7 @@ impl Store {
                 kv.put(&key, bytes).await?;
             }
             Self::Memory(map) => {
-                map.lock().expect("spend store").insert(key, bytes);
+                map.locked().insert(key, bytes);
             }
         }
         Ok(())
