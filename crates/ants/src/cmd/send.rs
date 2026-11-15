@@ -445,12 +445,20 @@ pub(crate) async fn answer(nats: &Nats<'_>, message: thread::MessagePick, words:
 }
 
 /// `human`'s answer `choice` to the question message `id`, read back from those to `human`, asks: a message `human`
-/// owns the thread of, as `ants ask` sends. Fails when no such message is kept, it asks no question, or `choice` is
-/// no answer to it.
+/// owns the thread of, as `ants ask` sends. Fails when no such message is kept, it asks no question, a human asked it,
+/// or `choice` is no answer to it. Only ants ask questions (`ask_human`), so an answer goes to an ant, in the clear
+/// like any message to one; a question from a human, which no CLI sends, is refused rather than answered unsealed.
 pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid, choice: Choice) -> Result<Envelope> {
     let question = questions::find(js, "", Reading::Gets, &subject::inbox_of(human), id)
         .await?
         .ok_or_else(|| anyhow!("no message {id} to {human} is kept"))?;
+    let me = humans::Me { id: human.clone(), role: Role::Human };
+    let asker = &question.from;
+    if humans::load(js, &me).await.contains(asker) {
+        bail!(
+            "message {id} is from {asker}, a human, and only an ant's question takes an answer: `ants ask @{asker}` replies"
+        );
+    }
     Ok(Envelope::answering(&question, human.clone(), choice)?.with_owner(Some(human.clone())))
 }
 
@@ -534,5 +542,16 @@ mod tests {
         assert!(none.contains("asks no question"), "{none}");
         let unknown = answering(&js, &alice, forged.id, Choice::Option(1)).await.unwrap_err().to_string();
         assert!(unknown.contains("is kept"), "a forged question is none: {unknown}");
+
+        // A question from a human, which only a hand-made message carries, is not answered in the clear.
+        let bob: UserId = "bob".parse().unwrap();
+        let (_, bob_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
+        humans::register(&bob_js, &humans::Me { id: bob.clone(), role: ants_proto::Role::Human }).await.unwrap();
+        let options = ["yes".to_owned(), "no".to_owned()];
+        let question = ants_proto::Question::new("Lunch?", &options, true).unwrap();
+        let by_bob = Envelope::asking(ThreadId::generate(), bob.clone(), alice.clone(), question);
+        bob_js.publish(by_bob.subject(), serde_json::to_vec(&by_bob).unwrap().into()).await.unwrap().await.unwrap();
+        let human = answering(&js, &alice, by_bob.id, Choice::Option(1)).await.unwrap_err().to_string();
+        assert!(human.contains("from bob, a human") && human.contains("`ants ask @bob`"), "{human}");
     }
 }
