@@ -33,6 +33,18 @@
 //!
 //! However a request is settled, by a human, an ant of the chain or its expiry, the ant tells it on the thread's status
 //! as a `decided` update before it goes on: observers, which read no inbox, learn of a member's decision that way.
+//!
+//! # An assistant's decision
+//!
+//! A human's assistant decides for it as a member does, with an envelope to the ant's inbox, but one claiming to act
+//! for the human (`on_behalf_of`). The inbox consumer verifies the claim before it offers the decision
+//! ([`NatsApprover::offer`]); the live inbox, which cannot, ignores it. The decision is held, not applied: it takes
+//! effect as the human's own only once the human's signed answers (`<human>.confirmed` in the humans bucket) confirm
+//! that act, its verdict included, or a pre-allow rule the human signed for the assistant (`<human>.preallow`) covers
+//! the tool call ([`crate::permission::covers`]), for any verdict but allow_always, which would widen the ant's
+//! allowlist beyond the rule. The ant looks again whenever the human's records change ([`Registry::consents`]); a
+//! denied act is dropped, and so is every held act of an assistant whose grant is withdrawn ([`Registry::withdrawals`]),
+//! or no longer names it when looked at. Meanwhile the request waits for anyone else's decision, or expires.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -41,8 +53,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, DecidedBy, Envelope, Escalation, Hop, STREAM, State, StatusUpdate, ThreadId,
-    ToolCall, UserId, Uuid, Verdict,
+    Act, ActAnswer, ApprovalDecision, ApprovalRequest, DecidedBy, Envelope, Escalation, Hop, STREAM, State,
+    StatusUpdate, ThreadId, ToolCall, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -53,7 +65,7 @@ use tokio::sync::mpsc;
 
 use crate::bus;
 use crate::escalation::Chain;
-use crate::humans::Registry;
+use crate::humans::{Registry, Withdrawal};
 use crate::permission::Approver;
 use crate::sync::MutexExt as _;
 
@@ -66,8 +78,27 @@ pub const RECHECK: Duration = Duration::from_millis(250);
 /// A decision on a waiting request from an ant of the ant's chain, and who sent it.
 type FromChain = (UserId, ApprovalDecision);
 
-/// The requests waiting for a decision, by id, with where a chain decision on each goes.
-type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<FromChain>)>>>;
+/// A decision on a waiting request an assistant made for its human, with the claim verified: held until the human
+/// consents to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Held {
+    human: UserId,
+    assistant: UserId,
+    verdict: Verdict,
+}
+
+/// A decision offered to a waiting request by the inbox consumer.
+enum Offered {
+    Chain(FromChain),
+    Held(Held),
+}
+
+/// The requests waiting for a decision, by id, with where a decision offered on each goes.
+type Waiting = Arc<Mutex<HashMap<Uuid, (ApprovalRequest, mpsc::UnboundedSender<Offered>)>>>;
+
+/// What settled a request: the verdict, who gave it, the ant of the chain or human that did, and the assistant
+/// that decided for that human.
+type Settled = (Verdict, DecidedBy, Option<UserId>, Option<UserId>);
 
 /// The message being answered on each thread, naming whom a request of its turn that expires is told of.
 type Answering = Arc<Mutex<HashMap<ThreadId, Envelope>>>;
@@ -93,9 +124,24 @@ enum Heard {
     Human(async_nats::Message),
     /// A decision from an ant of the ant's chain.
     Chain(FromChain),
+    /// A decision an assistant made for its human.
+    Held(Held),
+    /// A change of a human's consent, or a missed one.
+    Consent,
+    /// The withdrawal of an assistant, or of whichever when the withdrawal was missed.
+    Withdrawn(Option<Withdrawal>),
     /// The subscription to the decision subject ended.
     Closed,
     Nothing,
+}
+
+impl From<Offered> for Heard {
+    fn from(offered: Offered) -> Self {
+        match offered {
+            Offered::Chain(decided) => Self::Chain(decided),
+            Offered::Held(decided) => Self::Held(decided),
+        }
+    }
 }
 
 impl NatsApprover {
@@ -159,7 +205,8 @@ impl NatsApprover {
     /// Hand `envelope`, which carries an approval decision and arrived on its own subject
     /// ([`Envelope::check_subject`]), to the request it decides, if that one still waits and the sender is in the
     /// ant's escalate_to. Anything else is ignored: a late decision, or one from outside the chain. Never prompt
-    /// with it.
+    /// with it. A decision whose `on_behalf_of` the caller verified, which an assistant made for its human, is held
+    /// until the human consents to it.
     pub fn offer(&self, envelope: &Envelope) {
         let Some(decision) = envelope.approval.as_deref() else { return };
         let waiting = self.waiting.locked();
@@ -169,12 +216,18 @@ impl NatsApprover {
             return;
         };
         if let Some(human) = &envelope.on_behalf_of {
-            held(envelope, human);
+            if decision.ant != self.ant {
+                return;
+            }
+            let (from, request) = (&envelope.from, decision.request_id);
+            tracing::info!(%from, %human, %request, "holding an approval decision made for a human until the human consents");
+            let held = Held { human: human.clone(), assistant: from.clone(), verdict: decision.verdict };
+            let _ = chain_decided.send(Offered::Held(held));
             return;
         }
         match envelope.chain_decision(request, &self.chain.escalate_to) {
             Some(decided) => {
-                let _ = chain_decided.send((envelope.from.clone(), decided));
+                let _ = chain_decided.send(Offered::Chain((envelope.from.clone(), decided)));
             }
             None => tracing::warn!(
                 from = %envelope.from,
@@ -248,6 +301,7 @@ impl NatsApprover {
         } else {
             Some(bus::live_inbox(&self.client, &self.ant).await?)
         };
+        let (mut consents, mut withdrawals) = (self.humans.consents(), self.humans.withdrawals());
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
         self.waiting.locked().insert(request.id, (request.clone(), chain_decided));
         // Leaves the waiting map once decided, expired or given up.
@@ -259,13 +313,16 @@ impl NatsApprover {
         let waits = StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
-        // The verdict, who gave it, and the ant of the chain that did; None once nothing more can be heard.
+        // How the request was settled; None once nothing more can be heard.
         let wait = async {
             // Whether a decision was heard for the request, and a failure to read the stored one was warned of.
             let (mut heard, mut warned) = (false, false);
+            // The decisions assistants made for their humans, the latest of each, waiting for the humans' consent.
+            let mut held: Vec<Held> = Vec::new();
             loop {
                 // Until the stream holds a decision heard, it is asked again every RECHECK.
                 let recheck = heard;
+                let holding = !held.is_empty();
                 let next = tokio::select! {
                     msg = decisions.next() => msg.map_or(Heard::Closed, Heard::Human),
                     msg = next_message(&mut inbox) => match msg {
@@ -275,7 +332,9 @@ impl NatsApprover {
                             Heard::Nothing
                         }
                     },
-                    Some(decided) = from_chain.recv() => Heard::Chain(decided),
+                    Some(offered) = from_chain.recv() => offered.into(),
+                    _ = consents.recv(), if holding => Heard::Consent,
+                    withdrawn = withdrawals.recv(), if holding => Heard::Withdrawn(withdrawn.ok()),
                     () = tokio::time::sleep(RECHECK), if recheck => Heard::Nothing,
                 };
                 match next {
@@ -285,22 +344,19 @@ impl NatsApprover {
                             tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request");
                         }
                     },
-                    Heard::Chain((from, decision)) => {
-                        // A human's decision stored by now came first.
-                        let human = self.stored(&request).await.unwrap_or_else(|e| {
-                            tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
-                            None
-                        });
-                        if let Some(human) = human {
-                            self.tell_decided(&request, &human).await;
-                            return Some((request.decide(human.verdict).verdict, DecidedBy::Human, human.by));
-                        }
-                        let verdict = decision.verdict.as_str();
-                        tracing::info!(request = %request.id, %from, verdict, "decided by the ant's chain");
-                        return Some((decision.verdict, DecidedBy::Chain, Some(from)));
+                    Heard::Chain((from, decision)) => return Some(self.settle_chain(&request, from, decision).await),
+                    Heard::Held(decided) => {
+                        held.retain(|h| (&h.human, &h.assistant) != (&decided.human, &decided.assistant));
+                        held.push(decided);
                     }
+                    Heard::Withdrawn(Some(withdrawal)) => withdraw(&request, &mut held, &withdrawal),
+                    Heard::Consent | Heard::Withdrawn(None) | Heard::Nothing => {}
                     Heard::Closed => return None,
-                    Heard::Nothing => {}
+                }
+                if (holding || !held.is_empty())
+                    && let Some(settled) = self.settle_held(&request, &mut held).await
+                {
+                    return Some(settled);
                 }
                 if !heard {
                     continue;
@@ -317,24 +373,95 @@ impl NatsApprover {
                 };
                 self.tell_decided(&request, &decision).await;
                 // A verdict the harness did not offer counts as a rejection.
-                return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by));
+                return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by, None));
             }
         };
-        let decided = match tokio::time::timeout(self.timeout, wait).await {
+        let decided: Option<Settled> = match tokio::time::timeout(self.timeout, wait).await {
             Ok(decided) => decided,
             Err(_) => {
                 tracing::info!(request = %request.id, "approval request expired; rejecting");
                 self.tell_expired(&request, &asked).await;
-                Some((Verdict::Reject, DecidedBy::Expiry, None))
+                Some((Verdict::Reject, DecidedBy::Expiry, None, None))
             }
         };
         let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
-        if let Some((verdict, by, decider)) = decided {
-            let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider };
+        if let Some((verdict, by, decider, via)) = decided {
+            let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider, via };
             crate::status::publish(&self.client, &self.ant, &request.thread_id, decided);
         }
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
+    }
+
+    /// How `request` is settled by `decision` of `from` in its ant's chain, unless a decision of a human stored by now
+    /// came first.
+    async fn settle_chain(&self, request: &ApprovalRequest, from: UserId, decision: ApprovalDecision) -> Settled {
+        let human = self.stored(request).await.unwrap_or_else(|e| {
+            tracing::warn!(request = %request.id, error = format!("{e:#}"), "reading the stored decision");
+            None
+        });
+        if let Some(human) = human {
+            self.tell_decided(request, &human).await;
+            return (request.decide(human.verdict).verdict, DecidedBy::Human, human.by, None);
+        }
+        tracing::info!(request = %request.id, %from, verdict = decision.verdict.as_str(), "decided by the ant's chain");
+        (decision.verdict, DecidedBy::Chain, Some(from), None)
+    }
+
+    /// How `request` is settled by a decision of `held` its human consents to now ([`Self::consented`]), unless a
+    /// decision of a human stored by now came first.
+    async fn settle_held(&self, request: &ApprovalRequest, held: &mut Vec<Held>) -> Option<Settled> {
+        let consented = self.consented(request, held)?;
+        if let Ok(Some(human)) = self.stored(request).await {
+            self.tell_decided(request, &human).await;
+            return Some((request.decide(human.verdict).verdict, DecidedBy::Human, human.by, None));
+        }
+        let Held { human, assistant, verdict } = consented;
+        Some((request.decide(verdict).verdict, DecidedBy::Human, Some(human), Some(assistant)))
+    }
+
+    /// The decision of `held` that takes effect, as its human consents to it now: confirmed by the human's signed
+    /// answers, or covered by a pre-allow rule the human signed, unless it allows always. A decision the human denied,
+    /// or whose assistant the human's grant no longer names, is dropped from `held`.
+    fn consented(&self, request: &ApprovalRequest, held: &mut Vec<Held>) -> Option<Held> {
+        let mut consented = None;
+        held.retain(|h| {
+            if consented.is_some() {
+                return true;
+            }
+            let (human, assistant, id) = (&h.human, &h.assistant, request.id);
+            if self.humans.assistant(human).as_ref() != Some(assistant) {
+                tracing::info!(request = %id, %human, %assistant, "dropping the held decision of a withdrawn assistant");
+                return false;
+            }
+            let act = Act::Decision { ant: request.ant.clone(), request_id: id, verdict: h.verdict };
+            match self.humans.answer(human, assistant, &act) {
+                Some(ActAnswer::Confirm) => {
+                    tracing::info!(request = %id, %human, %assistant, "the human confirmed its assistant's decision");
+                    consented = Some(h.clone());
+                    false
+                }
+                Some(ActAnswer::Deny) => {
+                    tracing::info!(request = %id, %human, %assistant, "the human denied its assistant's decision");
+                    false
+                }
+                None => {
+                    let rules = self.humans.pre_allow(human, assistant);
+                    let rule = rules.as_ref().and_then(|rules| {
+                        rules.rules_for(&request.ant).find(|rule| crate::permission::covers(rule, &request.tool))
+                    });
+                    match rule {
+                        Some(rule) if h.verdict != Verdict::AllowAlways => {
+                            tracing::info!(request = %id, %human, %assistant, rule, "a pre-allow rule of the human covers its assistant's decision");
+                            consented = Some(h.clone());
+                            false
+                        }
+                        _ => true,
+                    }
+                }
+            }
+        });
+        consented
     }
 
     /// Tell the human `request` waited for that another human, its stand-in say, decided it ([`decided_notice`]).
@@ -378,12 +505,8 @@ impl NatsApprover {
             tracing::warn!(error = %e, "ignoring an approval decision with a forged sender");
             return None;
         }
-        if let Some(human) = envelope
-            .on_behalf_of
-            .as_ref()
-            .filter(|_| envelope.approval.as_ref().is_some_and(|d| d.request_id == request.id))
-        {
-            held(&envelope, human);
+        // Its claim to act for a human is not verified here: the inbox consumer offers it once it is.
+        if envelope.on_behalf_of.is_some() {
             return None;
         }
         let decided = envelope.chain_decision(request, &self.chain.escalate_to);
@@ -393,15 +516,6 @@ impl NatsApprover {
         }
         Some((envelope.from, decided?))
     }
-}
-
-/// Log that `envelope`'s decision, which its sender made for `human`, does not decide the request: the daemon tells
-/// the human when it admits the envelope, with the claim verified ([`crate::behalf::held_notice`]).
-// The integration point of the confirmation of such decisions (ants-y6zhm.4).
-fn held(envelope: &Envelope, human: &UserId) {
-    let Some(decision) = envelope.approval.as_deref() else { return };
-    let (from, request) = (&envelope.from, decision.request_id);
-    tracing::info!(%from, %human, %request, "holding an approval decision made for a human until the human confirms it");
 }
 
 /// See [`NatsApprover::begin`].
@@ -519,11 +633,22 @@ fn chain_text(request: &ApprovalRequest, to: &[UserId]) -> String {
     text
 }
 
-/// `payload` as a decision on `request`, if it is one.
+/// Drop from `held` the decisions of an assistant `withdrawal` withdrew, which never take effect now.
+fn withdraw(request: &ApprovalRequest, held: &mut Vec<Held>, withdrawal: &Withdrawal) {
+    let gone = |h: &Held| h.human == withdrawal.human && h.assistant == withdrawal.assistant;
+    if held.iter().any(gone) {
+        let (human, assistant) = (&withdrawal.human, &withdrawal.assistant);
+        tracing::info!(request = %request.id, %human, %assistant, "dropping the held decision of a withdrawn assistant");
+        held.retain(|h| !gone(h));
+    }
+}
+
+/// `payload` as a decision on `request`, if it is one. One made for a human by its assistant decides nothing: it
+/// takes effect only as [`NatsApprover::offer`] holds it.
 fn decided(request: &ApprovalRequest, payload: &[u8]) -> Option<ApprovalDecision> {
     serde_json::from_slice::<ApprovalDecision>(payload)
         .ok()
-        .filter(|d| d.request_id == request.id && d.ant == request.ant)
+        .filter(|d| d.request_id == request.id && d.ant == request.ant && d.on_behalf_of.is_none())
 }
 
 impl Approver for NatsApprover {
