@@ -421,7 +421,9 @@ The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files
 
 - `bus`: the public key of the account of the bus exported from.
 - `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
-- `settings`: of its `[[ant]]`, `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`.
+- `settings`: `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`, taken from the ant's
+  [shared settings](#shared-settings) where the bus holds them, as its daemon serves them, else from its `[[ant]]`
+  (`harness`, the machine's, always from its `[[ant]]`).
 - `files`: each file of its home (`home`, default `~/.ants/<name>`) as `{path, kind, data}`, `data` in base64, at
   most 64 MiB in all. `kind` is `harness` for the files of its harness's [memory files](#memory-files) globs, taken
   relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
@@ -454,7 +456,9 @@ the mark; `ants auth revoke ANT` ends the ant on the old bus once the import suc
    harness here (`--harness`, else the exported one, else the file's top-level `harness`).
 4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
    add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
-   them later.
+   them later. The first daemon serving it creates its shared settings on the new bus from that table; when the bus
+   holds shared settings of the name already, those serve instead, and the import warns which imported fields they
+   set otherwise.
 
 A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
 name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.

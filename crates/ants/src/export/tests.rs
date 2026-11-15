@@ -63,7 +63,7 @@ fn an_export_packs_the_home_s_memories_and_leaves_out_its_work() {
     assert!(core_files_of(&ant, &dir.join("none"), &[]).unwrap().is_empty(), "no home, no files");
 
     let identity = AntIdentity::new(p("dev-a"), "ab".repeat(16), Utc::now());
-    let export = pack_ant(&ant, Some(&claude), identity, None).unwrap();
+    let export = pack_ant(&ant, Some(&claude), None, identity, None).unwrap();
     let restored = dir.join("restored");
     assert_eq!(restore(&restored, &export.files, false).unwrap(), [".claude/CLAUDE.md", "CLAUDE.md"]);
     let files = tree(&restored);
@@ -123,6 +123,23 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
         ..AntIdentity::new(p("dev-a"), "cd".repeat(16), born)
     };
     assert!(kv.create("dev-a", serde_json::to_vec(&identity).unwrap()).await.unwrap());
+    let (m1, host_creds) = ("m1".parse().unwrap(), server.dir().join("host-m1.creds"));
+    crate::auth::issue_host(&server.dir().join("auth"), &m1, None, &host_creds).unwrap();
+    let host = async_nats::ConnectOptions::with_credentials_file(&host_creds)
+        .await
+        .unwrap()
+        .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m1))
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let host_kv = DirectKv::new(&async_nats::jetstream::new(host), None, IDENTITIES_BUCKET).await.unwrap();
+    let serde_json::Value::Object(fields) =
+        serde_json::json!({ "whoami": "Lead", "model": "opus", "fallback": ["codex"], "capabilities": ["review"] })
+    else {
+        unreachable!()
+    };
+    let shared = SharedSettings { ant: p("dev-a"), fields, machine: m1, by: None, updated_at: Utc::now() };
+    assert!(host_kv.create(&shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap());
 
     let file = dir.join("dev-a.ant");
     export(&nats, &p("dev-a"), Some(file.clone()), true, Some(config.clone())).await.unwrap();
@@ -134,13 +151,13 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let exported: Export = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!((exported.ants_ant, &exported.identity), (VERSION, &identity), "unmarked");
     let settings = Settings {
-        whoami: Some("Reviewer".to_owned()),
+        whoami: Some("Lead".to_owned()),
         harness: Some("claude".to_owned()),
         model: Some("opus".to_owned()),
         fallback: vec!["codex".to_owned()],
         ..Settings::default()
     };
-    assert_eq!(exported.settings, settings, "only what makes the ant: no capabilities");
+    assert_eq!(exported.settings, settings, "only what makes the ant, as shared: no capabilities");
     let paths: Vec<_> = exported.files.iter().map(|f| (f.path.as_str(), f.kind)).collect();
     assert_eq!(paths, [("notes.md", Kind::Core), ("CLAUDE.md", Kind::Harness)]);
 
@@ -180,7 +197,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     );
     let loaded = config::load(&config_b).unwrap();
     let dev_b = loaded.ants.iter().find(|a| a.name == p("dev-b")).unwrap();
-    assert_eq!(settings_of(dev_b), settings);
+    assert_eq!(settings_of(dev_b, None).unwrap(), settings, "the shared settings, which seed the new bus's");
     assert!(dev_b.capabilities.is_empty());
     let err = import(&["--as", "dev-b"]).await.unwrap_err().to_string();
     assert!(err.contains("lists dev-b already"), "{err}");
@@ -210,7 +227,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let loaded = config::load(&config_c).unwrap();
     let dev_a = &loaded.ants.iter().find(|a| a.name == p("dev-a")).unwrap();
     assert_eq!((dev_a.harness.as_deref(), dev_a.model.as_deref()), (Some("codex"), Some("gpt-5")), "the flags win");
-    assert_eq!(dev_a.whoami.as_deref(), Some("Reviewer"));
+    assert_eq!(dev_a.whoami.as_deref(), Some("Lead"));
 
     // Unseal clears the mark of a moved ant, and only that.
     let moved = AntIdentity { moved: Some(mark), ..identity.clone() };
