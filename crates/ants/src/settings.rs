@@ -330,7 +330,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         let path = server.dir().join("config.toml");
         std::fs::write(&path, FILE).unwrap();
         let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
-        let config = || Some(ConfigFile { path: path.clone(), edited: triggers.edits() });
+        let config = || Some(ConfigFile::new(path.clone(), triggers.edits()));
         let (ants, task) = host_of_m1(&server, &js, true, config()).await;
 
         let reading = read(&admin, &js, &dev_a, WAIT).await.unwrap();

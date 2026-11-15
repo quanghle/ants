@@ -172,7 +172,7 @@ async fn a_read_is_answered_from_the_config_only_while_fresh() {
     let text =
         "harness = \"claude\"\nmessenger = false\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ntasks = \"triage\"\n";
     write(&path, text);
-    let config = ConfigFile { path, edited: Arc::new(Notify::new()) };
+    let config = ConfigFile::new(path, Arc::new(Notify::new()));
     let orders = Orders {
         machine: "m1".parse().unwrap(),
         remote: true,

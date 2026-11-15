@@ -35,7 +35,8 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ scroll · u read again · ←→ pane · a ask · w work · r restart · Esc back";
+    pub const KEYS: &str =
+        "↑↓ scroll · u read again · ←→ pane · a ask · w work · r restart · p pause/resume · Esc back";
 
     pub fn new() -> Self {
         Self { state: State::Unasked, asked: 0, scroll: 0 }

@@ -1690,8 +1690,8 @@ fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
     Ok(wait)
 }
 
-/// Ant, capabilities, harness and the agent it runs, machine, activity or a signed-out harness, the fallback answering
-/// for it, and advertised role instructions.
+/// Ant, capabilities, harness and the agent it runs, machine, activity or a pause or signed-out harness, the fallback
+/// answering for it, and advertised role instructions.
 fn describe(entries: &[&RosterEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
@@ -1704,9 +1704,18 @@ fn describe(entries: &[&RosterEntry]) -> String {
                 (None, None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
                 (None, None, None, activity) => format!(", {}", activity.as_str()),
             };
+            let activity = if e.paused.is_some() { format!("{activity}, paused") } else { activity };
             let agent = e.agent.as_ref().map_or_default(|a| format!(" running {a}"));
             let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);
-            if let Some(fallback) = &e.fallback {
+            if let Some(paused) = &e.paused {
+                let _ = write!(
+                    text,
+                    "\n  paused since {}: {} takes no new prompt and messages to it wait queued until a human resumes \
+                     it",
+                    paused.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    e.ant
+                );
+            } else if let Some(fallback) = &e.fallback {
                 let _ = write!(
                     text,
                     "\n  fallback {} answers messages to {} since {}, until its own harness can again",
@@ -1788,7 +1797,7 @@ fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
-/// [`roster::is_live`]), a harness signed out or failing to start, or a provider limit holding its messages past `wait`
+/// [`roster::is_live`]), a pause, a harness signed out or failing to start, or a provider limit holding its messages past `wait`
 /// from `now`, with no fallback answering for it.
 fn why_unserved(
     ant: &UserId,
@@ -1805,6 +1814,12 @@ fn why_unserved(
             "{ant} is stale in the roster: the daemon on {} last beat {} ago and may not serve {ant} now",
             entry.machine,
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
+        ));
+    }
+    if let Some(paused) = &entry.paused {
+        return Some(format!(
+            "{ant} is paused since {}: messages to {ant} wait queued, unanswered until a human resumes it",
+            paused.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ));
     }
     if entry.fallback.is_some() {
@@ -1859,7 +1874,7 @@ fn alternatives(
     if let Some(entry) = entry {
         let sharing: Vec<&RosterEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && roster::is_live(e, now))
+            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.paused.is_none())
             .filter(|e| e.fallback.is_some() || e.signed_out.is_none() && e.failing.is_none() && e.limited.is_none())
             .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
             .take(SHOWN_NAMES)
@@ -2061,7 +2076,8 @@ impl Tools {
 
     #[tool(description = "List the other ants being served, from the roster, with each ant's advertised \
         whoami field, capabilities (such as `rust` or `billing`), harness, machine and whether it is idle or working, \
-        or signed out: messages to an ant whose harness is signed out wait unanswered until a human signs it in. \
+        or signed out or paused: messages to an ant whose harness is signed out wait unanswered until a human signs \
+        it in, and to a paused ant until a human resumes it. \
         `capability` keeps only those advertising it. Pick whom to send_message or ask_ant by these capabilities.")]
     async fn list_ants(&self, Parameters(args): Parameters<ListAnts>) -> Result<CallToolResult, ErrorData> {
         let result = async {
@@ -2080,7 +2096,8 @@ impl Tools {
     }
 
     #[tool(description = "Route a request to an ant whose roster capabilities include `capability`, other than \
-        this one: an ant whose harness is signed in before one signed out, then a live ant before a stale one, then \
+        this one: an ant not paused before a paused one, then an ant whose harness is signed in before one signed \
+        out, then a live ant before a stale one, then \
         an idle ant before a busy one, then the one with the fewest messages in hand, then the first by name. By \
         default it waits for the reply and returns it, like ask_ant; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \

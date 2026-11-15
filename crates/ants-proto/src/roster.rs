@@ -76,6 +76,21 @@ pub struct RosterEntry {
     /// none, so the harness's defaults hold, and from daemons before it was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AntModel>,
+    /// Set while the ant is paused (`paused = true` in its config): its daemon takes no new message and starts no new
+    /// prompt, the messages to it waiting queued, until it is resumed. Missing otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<Paused>,
+}
+
+/// An ant's pause, as its roster entry reports it ([`RosterEntry::paused`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Paused {
+    /// When the daemon serving the ant found it paused: the order's or the config's change, or the daemon's start.
+    pub since: DateTime<Utc>,
+    /// The admin whose order paused it; missing when its config was edited on its machine, or since the daemon
+    /// restarted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<UserId>,
 }
 
 /// The model settings of an ant's config, as its roster entry reports them ([`RosterEntry::model`]). A missing
@@ -271,6 +286,7 @@ mod tests {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""instance":"run-1""#), "{json}");
@@ -279,7 +295,7 @@ mod tests {
         assert!(!json.contains("workdir") && !json.contains("escalate_to"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent") && !json.contains("fallback") && !json.contains("memory_low"), "{json}");
-        assert!(!json.contains("model"), "{json}");
+        assert!(!json.contains("model") && !json.contains("paused"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -351,6 +367,13 @@ mod tests {
         let json = serde_json::to_string(&modelled).unwrap();
         assert!(json.contains(r#""model":{"model":"gpt-5","context":"1m"}"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), modelled);
+        let paused = RosterEntry { paused: Some(Paused { since, by: Some(p("alice")) }), ..entry.clone() };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z","by":"alice"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), paused);
+        let by_hand = RosterEntry { paused: Some(Paused { since, by: None }), ..entry.clone() };
+        let json = serde_json::to_string(&by_hand).unwrap();
+        assert!(json.contains(r#""paused":{"since":"2026-01-01T00:00:00Z"}"#), "{json}");
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -363,7 +386,7 @@ mod tests {
         assert!(entry.escalate_to.is_empty());
         assert_eq!((entry.agent, entry.whoami, entry.workdir), (None, None, None));
         assert_eq!((entry.signed_out, entry.limited, entry.failing), (None, None, None));
-        assert_eq!((entry.fallback, entry.memory_low, entry.model), (None, None, None));
+        assert_eq!((entry.fallback, entry.memory_low, entry.model, entry.paused), (None, None, None, None));
 
         let newer = r#"{"ant":"dev-b","machine":"m","instance":"run-2","harness":"copilot","capabilities":[],
             "activity":"draining","handling":0,"harnesses":3,"version":"9.0.0","perms":9,"queue":4,
