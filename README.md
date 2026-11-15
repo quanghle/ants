@@ -44,7 +44,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_presence` | Memory, 30s | Per-device follow presence (`<human>.<device>.<inbox\|approvals>`), refreshed every 10s. |
 | KV `ants_notify` | File, none | Per-human snooze deadline and muted threads (`<human>`). |
 | KV `ants_reactions` | File, 30d | Message reactions (`<reactor>.<message_id>.<reaction>`); self-scoped write/delete, human-wide read. |
-| KV `ants_threads` | File, none | Shared thread titles (`title.<thread>`) and per-human pin/archive marks (`marks.<human>`). |
+| KV `ants_threads` | File, none | Shared thread titles (`title.<thread>`) and per-human pin/archive marks (`marks.<human>`); `ants thread list` prunes those of expired threads. |
 | KV `ants_webhooks` | File, 7d | Webhook event hashes (`<webhook>.<hash>`), schedule firings (`<schedule>.<unix_time>`), and hourly `<webhook>.webhook` / `channel-manager.serve` version markers. |
 | Core NATS | Unstored | `ants.status.<ant>.<thread>`, `ants.cancel[led].<ant>.<thread>`, `ants.queue[d].<ant>`, `ants.chanadm.<channel>.<ant>`, `ants.enroll.<ant>[.reply]`, `ants.renew.<name>[.reply]`, `ants.antreq.<manager>[.reply]`. |
 
@@ -268,6 +268,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 - **Search (`ants thread search`):** combines `--from`, `--to`, `--channel`, `--type`, `--grep` (case-insensitive), `--since` (inclusive, default 24 h before `--until`), `--until` (exclusive, default now; accepts durations, RFC 3339, or UTC `YYYY-MM-DD[ HH:MM]`), and `--limit` (default 50). `--from`, `--to` and `--type` prune scanned subjects server-side.
 - **Titles (`ants thread title`):** 1–120 trimmed single-line chars stored at `title.<thread>` in `ants_threads`, shared across all humans and shown in `thread list`, `thread show` and tab completion.
 - **Pins & archives (`ants thread pin|unpin|archive|unarchive`):** per-human CAS state at `marks.<human>` in `ants_threads` (mutually exclusive). Pinned threads sort last (nearest the prompt) and survive `--limit` truncation; archived threads hide from `ants thread list` until new messages arrive (`archived+new`). Requires hub reachability.
+- **Pruning:** `ants_threads` never expires, so `ants thread list` forgets marks and titles of threads with no message left in `ANTS` (30 d retention). After reading back to a thread's start (UUIDv7 start minus 5 min clock slack; the whole stream for `--since 0` or non-time-ordered IDs) and finding none of its messages, the list drops the human's pin or archive placed more than 30 d ago (CAS, retrying on conflicting devices) and, when the read reached back 30 d or more, deletes titles set more than 30 d ago, conditioned on their revision so a concurrently re-set title survives. The 30 d grace covers messages still delayed in a leaf outbox. `--pinned`/`--archived` reads back to the earliest marked thread, so expired marks clear there; `--since 0` clears all expired titles.
 
 ## Dashboard and reactions
 

@@ -6,7 +6,7 @@
 //! in its time window: `--since` bounds it, and `ants thread show` of a thread with a time-ordered id starts at the
 //! thread's start.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
@@ -808,6 +808,7 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     if let Some(start) = start {
         scan(&js, start, |entry| threads.add(&entry)).await?;
     }
+    let present: HashSet<ThreadId> = threads.summaries().map(|t| t.thread_id.clone()).collect();
     let (mut threads, omitted) = threads.finish(select, &marks);
     if let Some(meta) = &meta {
         let mut titles = meta.titles(threads.iter().map(|t| &t.thread_id)).await?;
@@ -827,7 +828,46 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
     if omitted > 0 {
         eprintln!("{omitted} less recently active threads left out: raise --limit or narrow --since");
     }
+    if let (Some(meta), Some(start)) = (&meta, &start) {
+        prune(meta, &marks, start, &present).await;
+    }
     Ok(())
+}
+
+/// Forget the marks of the CLI's human and the titles of the threads a read from `start` found no message on though
+/// it read every message stored on them ([`covers`]), set more than [`thread_meta::KEPT`] ago; a failure is only
+/// warned of. Titles are looked through only when the read went back that far.
+pub async fn prune(
+    meta: &thread_meta::Meta,
+    marks: &ThreadMarks,
+    start: &consumer::DeliverPolicy,
+    present: &HashSet<ThreadId>,
+) {
+    let titles = match start {
+        consumer::DeliverPolicy::All => true,
+        consumer::DeliverPolicy::ByStartTime { start_time } => {
+            SystemTime::now().checked_sub(thread_meta::KEPT).is_some_and(|kept| SystemTime::from(*start_time) <= kept)
+        }
+        _ => false,
+    };
+    let gone = |thread: &ThreadId| !present.contains(thread) && covers(start, thread);
+    match meta.prune(marks, titles, gone).await {
+        Ok((0, 0)) => {}
+        Ok((marks, titles)) => tracing::debug!(marks, titles, "forgot the marks and titles of threads with no message"),
+        Err(e) => tracing::warn!("not forgetting the titles, pins and archives of threads with no message: {e:#}"),
+    }
+}
+
+/// Whether a read from `start` reads every message stored on `thread`: one from the thread's start on, when its id
+/// is time-ordered.
+fn covers(start: &consumer::DeliverPolicy, thread: &ThreadId) -> bool {
+    match start {
+        consumer::DeliverPolicy::All => true,
+        consumer::DeliverPolicy::ByStartTime { start_time } => {
+            ants_daemon::channel::thread_start(thread).is_some_and(|at| at >= SystemTime::from(*start_time))
+        }
+        _ => false,
+    }
 }
 
 /// Where to read threads marked so from: the earliest of their starts, or everything kept when an id is not

@@ -11,6 +11,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
 use async_nats::jetstream::stream::{DirectGetErrorKind, Stream};
 use async_nats::{HeaderMap, StatusCode};
+use futures::TryStreamExt as _;
 
 /// The header marking a KV delete or purge, and its values.
 const KV_OPERATION: &str = "KV-Operation";
@@ -145,6 +146,34 @@ impl DirectKv {
         let ack = self.js.publish_with_headers(self.put_subject(key), headers, Vec::new().into()).await;
         ack.with_context(|| format!("deleting {key}"))?.await.with_context(|| format!("deleting {key}"))?;
         Ok(())
+    }
+
+    /// Delete `key`, leaving a delete marker, if the key's last message is still the one at stream sequence `last`, as
+    /// [`DirectKv::lookup_last`] found it. Whether it deleted the key: false when the key changed meanwhile.
+    pub async fn delete_expecting(&self, key: impl AsRef<str>, last: u64) -> Result<bool> {
+        let key = key.as_ref();
+        let mut headers = HeaderMap::new();
+        headers.insert(KV_OPERATION, DELETED[0]);
+        headers.insert(EXPECTED_LAST_SUBJECT_SEQUENCE, last.to_string().as_str());
+        let deleted =
+            async { self.js.publish_with_headers(self.put_subject(key), headers, Vec::new().into()).await?.await };
+        match deleted.await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
+            Err(e) => Err(e).with_context(|| format!("deleting {key}")),
+        }
+    }
+
+    /// The keys matching `filter` that have a message, deleted ones included, from the stream's info: only for
+    /// credentials allowed it (`STREAM.INFO`).
+    pub async fn keys(&self, filter: &str) -> Result<Vec<String>> {
+        let prefix = self.subject("");
+        let mut subjects = self.stream.info_with_subjects(self.subject(filter)).await.context("listing keys")?;
+        let mut keys = Vec::new();
+        while let Some((subject, _)) = subjects.try_next().await.context("listing keys")? {
+            keys.extend(subject.strip_prefix(&prefix).map(str::to_owned));
+        }
+        Ok(keys)
     }
 
     fn subject(&self, key: &str) -> String {

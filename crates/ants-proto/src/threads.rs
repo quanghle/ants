@@ -95,6 +95,15 @@ impl ThreadMarks {
         self.archived.remove(thread).is_some()
     }
 
+    /// Forget the marks placed before `before` on the threads `gone` says have no message left in [`STREAM`]. How
+    /// many it forgot.
+    pub fn prune(&mut self, before: DateTime<Utc>, gone: impl Fn(&ThreadId) -> bool) -> usize {
+        let had = self.pinned.len() + self.archived.len();
+        self.pinned.retain(|thread, at| *at >= before || !gone(thread));
+        self.archived.retain(|thread, archived| archived.at >= before || !gone(thread));
+        had - self.pinned.len() - self.archived.len()
+    }
+
     /// How `thread`, whose last message read has [`STREAM`] sequence `last`, is marked.
     pub fn mark(&self, thread: &ThreadId, last: u64) -> Option<Mark> {
         if self.pinned.contains_key(thread) {
@@ -129,6 +138,23 @@ mod tests {
         let json = serde_json::to_string(&marks).unwrap();
         assert_eq!(json, "{}");
         assert_eq!(serde_json::from_str::<ThreadMarks>(&json).unwrap(), marks);
+    }
+
+    #[test]
+    fn only_old_marks_of_threads_gone_are_forgotten() {
+        let (gone, old_gone, kept) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut marks = ThreadMarks::default();
+        let before = Utc::now() - chrono::Duration::days(30);
+        let long_ago = before - chrono::Duration::seconds(1);
+        marks.pin(&gone);
+        marks.pinned.insert(old_gone.clone(), long_ago);
+        marks.archived.insert(kept.clone(), Archived { at: long_ago, after: 1 });
+        let mut pruned = marks.clone();
+        assert_eq!(pruned.prune(before, |t| *t != kept), 1, "only the old mark of a thread gone");
+        assert!(pruned.pinned.contains_key(&gone) && !pruned.pinned.contains_key(&old_gone));
+        assert!(pruned.archived.contains_key(&kept));
+        assert_eq!(marks.prune(before, |_| true), 2);
+        assert_eq!(marks.pinned.keys().collect::<Vec<_>>(), [&gone], "a recent mark stays");
     }
 
     #[test]
