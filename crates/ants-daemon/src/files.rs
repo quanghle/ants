@@ -2,7 +2,7 @@
 //! its handle before the message carrying it is sent, [`get`] reads them back by direct gets, which is all an ant's
 //! credentials allow, checking them against the reference.
 
-use ants_proto::{ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM};
+use ants_proto::{ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM, MAX_ATTACHMENTS};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 use async_nats::jetstream::context::PublishErrorKind;
@@ -98,6 +98,67 @@ pub async fn get(
         "attachment {handle} does not match its reference: it changed or is incomplete"
     );
     Ok((stored, bytes))
+}
+
+/// The media types of attachments a harness taking images is handed as images: those every model reading images
+/// reads.
+pub const PROMPT_IMAGES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// The files attached to the message a prompt hands the harness, each with the handle the subject of that message
+/// gives it. Their bytes are read only as the prompt runs, once it is known whether the harness takes images.
+pub struct Attached {
+    js: jetstream::Context,
+    files: Vec<(AttachmentHandle, Attachment)>,
+}
+
+/// What a prompt shows of the files attached to its message ([`Attached::show`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// A line for each attachment, naming it and how to read it, for the end of the prompt's text.
+    pub lines: String,
+    /// The images to hand the harness after the text, as media type and bytes.
+    pub images: Vec<(String, Vec<u8>)>,
+}
+
+impl Attached {
+    /// The `files` attached to a message, read from the store through `js`; None when there are none.
+    pub fn new(js: jetstream::Context, files: Vec<(AttachmentHandle, Attachment)>) -> Option<Self> {
+        (!files.is_empty()).then_some(Self { js, files })
+    }
+
+    /// What the prompt shows of the attachments: to a harness taking `images`, each image ([`PROMPT_IMAGES`]) that
+    /// reads back as its reference says; for every attachment, a line naming it, its type, size and handle, and the
+    /// read_attachment tool, or why it is unavailable.
+    pub async fn show(self, images: bool) -> Shown {
+        let mut shown = Shown::default();
+        let mut lines = Vec::new();
+        for (handle, attachment) in self.files.into_iter().take(MAX_ATTACHMENTS) {
+            let Attachment { name, mime, size, .. } = &attachment;
+            let what = format!("[ants] Attached: {name:?} ({mime}, {size} bytes), handle {handle}");
+            if let Err(e) = attachment.check() {
+                lines.push(format!("{what}: unavailable ({e})."));
+                continue;
+            }
+            if !images || !PROMPT_IMAGES.contains(&mime.as_str()) {
+                lines.push(format!("{what}; call read_attachment with the handle to read it."));
+                continue;
+            }
+            match get(&self.js, &handle, Some(&attachment)).await {
+                Ok((_, bytes)) => {
+                    lines.push(format!("{what}; shown as an image after this text."));
+                    shown.images.push((mime.clone(), bytes));
+                }
+                Err(e) => {
+                    tracing::warn!(%handle, error = format!("{e:#}"), "reading an attachment for a prompt");
+                    lines.push(format!(
+                        "{what}: unavailable now ({e:#}); call read_attachment with the handle to try again."
+                    ));
+                }
+            }
+        }
+        shown.lines = lines.join("\n");
+        shown
+    }
 }
 
 #[cfg(test)]

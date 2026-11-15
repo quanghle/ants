@@ -15,6 +15,9 @@
 //! nats = "wss://hub.example/nats"   # default: the top-level nats
 //! js_domain = "hub"                 # default: the top-level js_domain
 //! auto_archive = "14d"              # archive threads idle this long for the CLI's human (default 0: never)
+//! summaries = "on-demand"           # or "ahead": also ask for TL;DRs of the threads shown (needs the next key)
+//! summary_daily_tokens = 50000      # most tokens a human's summaries spend a UTC day ahead of time (default 0)
+//! summary_ant = "messenger"         # the ant asked for TL;DRs and digests (default: the messenger)
 //!
 //! [storage]                         # warnings of JetStream storage filling up (crate::storage)
 //! warn_percent = 80                 # warn a human past this share of a store's limit; 0 never
@@ -85,6 +88,8 @@ use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+pub mod registration;
+
 use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
@@ -152,6 +157,9 @@ struct File {
     ants: Vec<Ant>,
     #[serde(default, rename = "schedule")]
     schedules: Vec<schedule::Entry>,
+    /// Read by `ants signer` only ([`registration::signer_registration`]).
+    #[serde(default, rename = "registration")]
+    _registration: Option<serde::de::IgnoredAny>,
 }
 
 /// The keys of an `[[ant]]` entry added from a template besides those of a [`Request`].
@@ -581,6 +589,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
     if let Some(url) = &file.cli.nats {
         crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
     }
+    file.cli.summary().with_context(|| format!("config {}", path.display()))?;
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
     file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
     if file.ants.is_empty() && !file.messenger {
@@ -939,11 +948,56 @@ struct CliSection {
     js_domain: Option<JsDomain>,
     #[serde(default, deserialize_with = "ants_proto::duration::deserialize")]
     auto_archive: Duration,
+    #[serde(default)]
+    summaries: Summaries,
+    summary_ant: Option<UserId>,
+    #[serde(default)]
+    summary_daily_tokens: u64,
+}
+
+impl CliSection {
+    /// What the section says of catch-up summaries: refused for `ahead` with no daily tokens to spend.
+    fn summary(&self) -> Result<SummaryConfig> {
+        if self.summaries == Summaries::Ahead && self.summary_daily_tokens == 0 {
+            bail!("[cli] summaries = \"ahead\" needs summary_daily_tokens above 0");
+        }
+        Ok(SummaryConfig {
+            mode: self.summaries,
+            ant: self.summary_ant.clone().unwrap_or_else(UserId::messenger),
+            daily_tokens: self.summary_daily_tokens,
+        })
+    }
+}
+
+/// When the CLI asks for a thread's TL;DR: `[cli]` `summaries`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Summaries {
+    /// Only when a human asks for one.
+    #[default]
+    OnDemand,
+    /// Also ahead of time, for each thread shown with entries newer than its TL;DR, within the daily tokens.
+    Ahead,
+}
+
+/// What `[cli]` says of catch-up summaries: when to ask, which ant to ask, and how many tokens a human's summaries
+/// spend a UTC day at most when asked ahead of time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryConfig {
+    pub mode: Summaries,
+    pub ant: UserId,
+    pub daily_tokens: u64,
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        Self { mode: Summaries::OnDemand, ant: UserId::messenger(), daily_tokens: 0 }
+    }
 }
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
 /// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
-/// as does `auto_archive`.
+/// as do `auto_archive` and the summary keys.
 #[derive(Debug, Default, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
@@ -952,6 +1006,8 @@ pub struct CliDefaults {
     /// How long a thread goes without a message before `ants thread list` and `ants dash` take it as archived for
     /// the CLI's human; None (unset or 0) for never.
     pub auto_archive: Option<Duration>,
+    /// When and whom to ask for catch-up summaries.
+    pub summaries: SummaryConfig,
 }
 
 impl CliDefaults {
@@ -976,13 +1032,14 @@ impl CliDefaults {
         }
         let view: View = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
+        let summaries = view.cli.summary().with_context(|| format!("config {}", path.display()))?;
         let nats = view.cli.nats.or(view.nats);
         if let Some(url) = &nats {
             crate::bus::check_url(url).with_context(|| format!("config {}", path.display()))?;
         }
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
         let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
-        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain), auto_archive })
+        Ok(Self { nats, creds, js_domain: view.cli.js_domain.or(view.js_domain), auto_archive, summaries })
     }
 }
 

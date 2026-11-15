@@ -154,6 +154,25 @@ pub fn dead(ant: &UserId) -> String {
 /// Every ant's dead letters.
 pub const DEAD_ALL: &str = "ants.dead.>";
 
+/// The tool-call timeline `ant` stores of its work on `thread` ([`Timeline`](super::Timeline)).
+pub fn timeline(thread: &ThreadId, ant: &UserId) -> String {
+    format!("ants.timeline.{thread}.{ant}")
+}
+
+/// Every timeline subject `ant` may store on.
+pub fn timeline_from(ant: &UserId) -> String {
+    format!("ants.timeline.*.{ant}")
+}
+
+/// The thread and the ant a timeline subject names, or `None` when it is no timeline subject.
+pub fn parse_timeline(subject: &str) -> Option<(ThreadId, UserId)> {
+    let (thread, ant) = subject.strip_prefix("ants.timeline.")?.split_once('.')?;
+    Some((thread.parse().ok()?, ant.parse().ok()?))
+}
+
+/// The timelines of every thread.
+pub const ALL_TIMELINE: &str = "ants.timeline.>";
+
 /// JetStream's advisories that a consumer of the `ANTS` stream stopped delivering a message after its last allowed
 /// delivery went unacked (core NATS, not stored).
 pub fn max_deliveries_advisories() -> String {
@@ -167,12 +186,15 @@ pub fn sendable(user: &UserId, role: Role) -> [String; 3] {
     [inbox, notes_from(user), chan_from(user)]
 }
 
-/// Where a client on a leaf node puts an inbox, notes, channel or dead letter subject (or pattern) while the hub's
+/// Where a client on a leaf node puts an inbox, notes, channel, dead letter or timeline subject (or pattern) while the hub's
 /// stream is out of reach: `ants.out.` and the rest of it, kept by the leaf's outbox ([`super::OUTBOX_STREAM`]).
 /// `None` for other subjects, which are not buffered: approvals wait for a human's answer through the hub.
 pub fn outbox(subject: &str) -> Option<String> {
     let rest = subject.strip_prefix("ants.")?;
-    ["inbox.", "notes.", "chan.", "dead."].iter().any(|kind| rest.starts_with(kind)).then(|| format!("ants.out.{rest}"))
+    ["inbox.", "notes.", "chan.", "dead.", "timeline."]
+        .iter()
+        .any(|kind| rest.starts_with(kind))
+        .then(|| format!("ants.out.{rest}"))
 }
 
 /// Everything the hub's intake ([`super::INTAKE_STREAM`]) took from the outbox of `machine`: the leaf's subjects,
@@ -232,6 +254,24 @@ pub fn renewable_name(name: &str) -> bool {
 pub const ALL_RENEW_REQUESTS: &str = "ants.renew.*";
 /// Every answer to a renewal request.
 pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
+
+/// Where `ants login` asks for the credentials of a new device of the human `name`
+/// ([`LoginRequest`](super::LoginRequest); core NATS, not stored). Anyone holding the team's public bootstrap
+/// credentials publishes here.
+pub fn login(name: &UserId) -> String {
+    format!("ants.login.{name}")
+}
+
+/// Where the answers to a registration request of `name` go ([`LoginReply`](super::LoginReply); core NATS), each
+/// naming the request's key in the clear and sealed to it.
+pub fn login_reply(name: &UserId) -> String {
+    format!("ants.login.{name}.reply")
+}
+
+/// Every registration request.
+pub const ALL_LOGIN_REQUESTS: &str = "ants.login.*";
+/// Every answer to a registration request.
+pub const ALL_LOGIN_REPLIES: &str = "ants.login.*.reply";
 
 /// Where a manager ant asks for an ant added from a template (`request_ant`;
 /// [`AntRequest`](super::AntRequest); core NATS, not stored). Only the manager publishes here.
@@ -342,6 +382,18 @@ pub fn presence_of(human: &UserId) -> String {
     format!("$KV.{}.{human}.>", super::PRESENCE_BUCKET)
 }
 
+/// Every entry of a human's devices in [`super::DEVICES_BUCKET`]: the subjects only that human puts its device user
+/// JWTs on.
+pub fn devices_of(human: &UserId) -> String {
+    format!("$KV.{}.{human}.>", super::DEVICES_BUCKET)
+}
+
+/// Every [`super::DeviceRevocation`] in [`super::DEVICES_BUCKET`]: the subjects only the credentials `ants auth revoke`
+/// and `ants auth push` issue put records on.
+pub fn revoked_devices() -> String {
+    format!("$KV.{}.{}.*", super::DEVICES_BUCKET, super::REVOKED_DEVICES)
+}
+
 /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
 /// [`super::ChannelEntry`] on.
 pub fn channel_entry(channel: &ChannelId) -> String {
@@ -376,6 +428,11 @@ mod tests {
         assert_eq!(subject::status_on(&t), "ants.status.*.t1");
         assert_eq!(subject::dead(&p("dev-a")), "ants.dead.dev-a");
         assert!(STREAM_SUBJECTS.contains(&subject::DEAD_ALL), "dead letters are durable");
+        assert_eq!(subject::timeline(&t, &p("dev-a")), "ants.timeline.t1.dev-a");
+        assert_eq!(subject::timeline_from(&p("dev-a")), "ants.timeline.*.dev-a");
+        assert_eq!(subject::parse_timeline("ants.timeline.t1.dev-a"), Some((t.clone(), p("dev-a"))));
+        assert_eq!(subject::parse_timeline("ants.notes.t1.dev-a"), None);
+        assert!(STREAM_SUBJECTS.contains(&subject::ALL_TIMELINE), "timelines are durable");
         assert_eq!(inbox_consumer(&p("dev-a")), "inbox-dev-a");
         let id = Uuid::now_v7();
         assert_eq!(subject::approval_decision(&p("dev-a"), &id), format!("ants.approvals.dev-a.{id}"));

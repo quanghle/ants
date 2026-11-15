@@ -136,7 +136,7 @@ mod tests {
 
         let says = |text: &str| StatusUpdate::Message { text: text.to_owned() };
         let thinks = StatusUpdate::Thought { text: "hmm".to_owned() };
-        let tool = StatusUpdate::Tool { id: "c1".to_owned(), title: None, tool_kind: None, status: None };
+        let tool = StatusUpdate::Tool { id: "c1".to_owned(), title: None, tool_kind: None, status: None, paths: None };
         let redactor = Redactor::default();
         let mut status = Status::new(&client, &ant, &thread, &redactor);
         for update in [says("a"), says("b"), thinks.clone(), tool.clone(), says("c")] {
@@ -168,6 +168,7 @@ mod tests {
             title: Some(title.to_owned()),
             tool_kind: None,
             status: None,
+            paths: Some(vec![format!("/work/{title}")]),
         };
         let redactor = Redactor::default().with_env([("API_TOKEN", "tok-12345678")]);
         let mut status = Status::new(&client, &ant, &thread, &redactor);

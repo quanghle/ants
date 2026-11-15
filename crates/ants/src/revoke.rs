@@ -14,6 +14,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_proto::{DeviceId, DeviceKey, PERMISSIONS_VERSION, PermissionsVersion};
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt as _;
@@ -39,6 +40,8 @@ pub enum Kind {
     ChannelManager,
     Enrollment,
     Observer,
+    /// The team's public bootstrap credentials, with which `ants login` asks to register a human's device.
+    Bootstrap,
 }
 
 impl From<ants_proto::Role> for Kind {
@@ -90,6 +93,13 @@ pub struct Issued {
     /// The manager ant that added an ant from `template`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<ants_proto::UserId>,
+    /// The GitHub user a human's name is bound to ([`crate::binding`]), on the credentials of each of its devices
+    /// signed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubAccount>,
+    /// Why `ants signer` signed a registered device; none for credentials `ants auth` issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Grant>,
 }
 
 impl Issued {
@@ -110,6 +120,8 @@ impl Issued {
             members: None,
             template: None,
             added_by: None,
+            github: None,
+            grant: None,
         })
     }
 
@@ -143,6 +155,12 @@ pub struct Device {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     pub revoked: bool,
+    /// The login of the GitHub user the device was signed for, if bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    /// Why `ants signer` signed the device, if it registered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Grant>,
 }
 
 /// The devices of the human `name` in the registry of `dir`, oldest first: one per key issued to it as a human, but one
@@ -161,6 +179,8 @@ pub fn devices(dir: &Path, name: &str) -> Result<Vec<Device>> {
             xkey: one.xkey,
             issued_at: one.issued_at,
             expires_at: one.expires_at,
+            github: one.github.map(|g| g.login),
+            grant: one.grant,
         };
         let same = |d: &Device| d.key == device.key || d.device == device.device;
         match found.iter_mut().find(|d| same(d)) {
@@ -234,7 +254,12 @@ pub fn list_devices(dir: &Path, name: &str, json: bool) -> Result<()> {
         let label = d.label.as_deref().unwrap_or("-");
         let revoked = if d.revoked { "  revoked" } else { "" };
         let xkey = d.xkey.as_ref().map_or("-", DeviceKey::as_str);
-        println!("{id}  {label}  {}  {xkey}  issued {}{revoked}", d.key, time(d.issued_at));
+        let github = match (&d.github, &d.grant) {
+            (Some(login), Some(grant)) => format!("  github {login} ({grant})"),
+            (Some(login), None) => format!("  github {login}"),
+            (None, _) => String::new(),
+        };
+        println!("{id}  {label}  {}  {xkey}  issued {}{github}{revoked}", d.key, time(d.issued_at));
     }
     Ok(())
 }
@@ -454,6 +479,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
         Kind::ChannelManager => format!("ants auth channel-manager {domain}"),
         Kind::Observer => format!("ants auth user {name} --observer {domain}"),
         Kind::Enrollment => format!("ants auth enroll {}", name.trim_prefix("enroll-")),
+        Kind::Bootstrap => "ants auth bootstrap".to_owned(),
     }]
 }
 

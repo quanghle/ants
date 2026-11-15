@@ -55,18 +55,14 @@ use async_nats::jetstream::{self, consumer, kv, stream::Stream};
 use chrono::{DateTime, TimeDelta, Utc};
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use futures::StreamExt as _;
-use http_body_util::{BodyExt as _, Full, Limited};
+use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
-use hyper_util::rt::TokioIo;
+use hyper::http::{HeaderValue, Method, Response, StatusCode, Uri, header};
 use jiff::tz::TimeZone;
 use ring::hmac;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
 use tokio::sync::OnceCell;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::pki_types::ServerName;
 
 use crate::presence::Present;
 use crate::tools;
@@ -1090,12 +1086,14 @@ fn relayed(human: &Human, notice: &Notice, why: &str, is_human: impl Fn(&UserId)
 }
 
 /// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
-/// escalation, decision or mention and comes from no webhook.
+/// escalation, decision, mention or summary and comes from no webhook. The CLI that asked for a summary takes the
+/// reply itself.
 fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let reply = envelope.in_reply_to.is_some()
         && envelope.escalation.is_none()
         && envelope.approval.is_none()
         && envelope.mention.is_none()
+        && envelope.summary.is_none()
         && !envelope.webhook
         && envelope.from != envelope.to;
     if !reply {
@@ -1188,18 +1186,6 @@ fn digest_notice(human: &Human, held: HeldNotices, pending: &[ApprovalRequest], 
 
 // ---- sending ---------------------------------------------------------------------------------------------------
 
-fn tls() -> Result<TlsConnector> {
-    static TLS: OnceLock<TlsConnector> = OnceLock::new();
-    if let Some(tls) = TLS.get() {
-        return Ok(tls.clone());
-    }
-    let tls = crate::bridge::tls_connector()?;
-    Ok(TLS.get_or_init(|| tls).clone())
-}
-
-trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
-
 /// `method` on `url`, with `headers` and `body` as JSON if any: the status of the answer and the start of its body.
 /// Errors never name the URL, which may hold a secret.
 async fn fetch(
@@ -1208,39 +1194,8 @@ async fn fetch(
     headers: &[(&str, String)],
     body: Option<Vec<u8>>,
 ) -> Result<(StatusCode, String)> {
-    let uri: Uri = url.parse().map_err(|_| anyhow!("a malformed URL"))?;
-    let https = uri.scheme_str() == Some("https");
-    let host = uri.host().context("a URL without a host")?;
-    let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
-    let authority = uri.authority().context("a URL without a host")?.as_str().to_owned();
-    let tcp = TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port))
-        .await
-        .with_context(|| format!("connecting to {host}:{port}"))?;
-    let io: Box<dyn Io> = if https {
-        let name = ServerName::try_from(host.trim_start_matches('[').trim_end_matches(']').to_owned())
-            .context("the URL's host name")?;
-        Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
-    } else {
-        Box::new(tcp)
-    };
-    let (mut send, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    let path = uri.path_and_query().map_or("/", |p| p.as_str());
-    let mut request =
-        Request::builder().method(method).uri(path).header(header::HOST, authority).header(header::USER_AGENT, "ants");
-    if body.is_some() {
-        request = request.header(header::CONTENT_TYPE, "application/json");
-    }
-    for (name, value) in headers {
-        request = request.header(*name, value);
-    }
-    let response =
-        send.send_request(request.body(Full::new(Bytes::from(body.unwrap_or_default())))?).await.context("sending")?;
-    let status = response.status();
-    let answer = Limited::new(response.into_body(), MAX_ANSWER * 8).collect().await;
-    let answer = answer.map_or_default(http_body_util::Collected::to_bytes);
+    let body = body.map(|body| ("application/json", body));
+    let (status, answer) = crate::http::fetch(method, url, headers, body, MAX_ANSWER * 8).await?;
     Ok((status, String::from_utf8_lossy(&answer[..answer.len().min(MAX_ANSWER)]).into_owned()))
 }
 

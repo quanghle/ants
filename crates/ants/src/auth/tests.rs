@@ -391,14 +391,15 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
     assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
     let (jwt, _) = read_creds(&out).unwrap();
     assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
-    let more = Permissions::for_leaf(&m1, [(&p("dev-x"), Role::Ant)]).with_js_domain(Some(&domain));
+    // As long a name as that of the ant refused.
+    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_js_domain(Some(&domain));
     let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
     assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 4.6 KB for a six-character name, 8.6 KB with the hub's JetStream domain: no permission is shared between two
+/// 4.7 KB for a six-character name, 8.7 KB with the hub's JetStream domain: no permission is shared between two
 /// ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
@@ -421,7 +422,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 29 } else { 55 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 29 } else { 54 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1193,7 +1194,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 }
 
 #[tokio::test]
-async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
+async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_own_threads() {
     use crate::thread_meta::{MISSING, Meta};
 
     let Some(server) = Server::start() else { return };
@@ -1218,6 +1219,18 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
     assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
     assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+    let tldr = ants_proto::ThreadSummary {
+        thread_id: thread.clone(),
+        text: "Release 1.2.1 is out.".to_owned(),
+        by: dev_a.clone(),
+        asker: alice.clone(),
+        at: chrono::Utc::now(),
+        upto: 7,
+        tokens: 42,
+    };
+    assert!(alice_meta.put_summary(&tldr).await.unwrap());
+    assert_eq!(bob_meta.summary(&thread).await.unwrap(), Some(tldr), "every human reads the TL;DR");
+    assert!(ant.summary(&thread).await.is_err(), "an ant reads no TL;DR");
     assert!(alice_meta.set_done(&thread, 1).await.unwrap());
     assert!(bob_meta.clear_done(&thread).await.unwrap().is_some_and(|d| d.by == alice), "bob clears alice's done");
     assert!(ant.done(&thread).await.is_err(), "an ant reads no done state");
@@ -1241,6 +1254,9 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (raw, mut errors) = server.watched(&dev_a).await;
     raw.publish(title.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+    let tldr = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::summary_key(&thread));
+    raw.publish(tldr.clone(), "{}".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&tldr), "an ant's TL;DR is denied");
     let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
     raw.publish(done.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
@@ -2065,7 +2081,7 @@ async fn the_longest_uplink_credentials_connect() {
     bus::ensure_stream(&h_js).await.unwrap();
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     let (ants, _) = uplink_for_most_ants(&team, &m1, Some(&domain), &leaf_creds);
-    assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 8 * 1024);
+    assert!(read_creds(&leaf_creds).unwrap().0.len() > MAX_UPLINK_JWT - 9 * 1024);
     let account = load(&team.join(ACCOUNT_SEED)).unwrap().public_key();
     let leaf = NatsServer::spawn_with(|dir| {
         fs::copy(team.join(SERVER_CONF), dir.join(SERVER_CONF)).unwrap();
@@ -2244,4 +2260,51 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
 /// Stream sequence of the first copy of `envelope`.
 async fn ask_seq(stream: &jetstream::stream::Stream, envelope: &Envelope) -> u64 {
     stream.get_first_raw_message_by_subject(envelope.subject(), 1).await.unwrap().sequence
+}
+
+#[tokio::test]
+async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answers() {
+    let Some(server) = Server::start() else { return };
+    let (team, out, alice) = (server.dir().join("auth"), server.dir().join("bootstrap.creds"), p("alice"));
+    let (key, exp) = issue_bootstrap(&team, Duration::ZERO, &out).unwrap();
+    assert_eq!(exp, None);
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&out).unwrap().permissions()) & 0o777, 0o644);
+    let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!((finding.kind, finding.key.as_str(), finding.js_domain), (CredsKind::Bootstrap, key.as_str(), None));
+    let issued = revoke::issued(&team).unwrap();
+    assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Bootstrap && i.name == "bootstrap"), "{issued:?}");
+
+    let signer_file = server.dir().join("signer.creds");
+    std::fs::write(&signer_file, signer_creds(&team, None).unwrap()).unwrap();
+    let signer = async_nats::ConnectOptions::with_credentials_file(&signer_file)
+        .await
+        .unwrap()
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let mut requests = signer.subscribe(subject::ALL_LOGIN_REQUESTS).await.unwrap();
+    signer.flush().await.unwrap();
+    let bootstrap = p(ants_proto::BOOTSTRAP_USER);
+    let (client, mut errors) = server.watched_with(&bootstrap, &out).await;
+    let mut answers = client.subscribe(subject::login_reply(&alice)).await.unwrap();
+    client.flush().await.unwrap();
+    client.publish(subject::login(&alice), "hello".into()).await.unwrap();
+    let request = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    assert_eq!((request.subject.as_str(), &request.payload[..]), (subject::login(&alice).as_str(), &b"hello"[..]));
+    signer.publish(subject::login_reply(&alice), "answer".into()).await.unwrap();
+    assert_eq!(&timeout(WAIT, answers.next()).await.unwrap().unwrap().payload[..], b"answer");
+
+    for denied in [subject::inbox(&alice, &bootstrap), format!("$JS.API.STREAM.INFO.{STREAM}")] {
+        client.publish(denied.clone(), "x".into()).await.unwrap();
+        let v = next_violation(&client, &mut errors).await;
+        assert!(v.contains(&format!("Publish to \"{denied}\"")), "{v}");
+    }
+    let _sub = client.subscribe(subject::login(&alice)).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.contains(&format!("Subscription to \"{}\"", subject::login(&alice))), "{v}");
+    let big = vec![b'x'; usize::try_from(ants_proto::BOOTSTRAP_MAX_PAYLOAD).unwrap() + 1];
+    client.publish(subject::login(&alice), big.into()).await.unwrap();
+    let v = next_violation(&client, &mut errors).await;
+    assert!(v.to_lowercase().contains("payload"), "{v}");
 }

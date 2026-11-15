@@ -6,6 +6,9 @@ use uuid::Uuid;
 use crate::ToolCall;
 use crate::{Error, Escalation, ThreadId, UserId, Verdict, subject};
 
+/// The most paths a tool call carries, in [`StatusUpdate::Tool`] and in timeline records.
+pub const MAX_TOOL_PATHS: usize = 8;
+
 /// Where an ant stands on a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +93,10 @@ pub enum StatusUpdate {
         /// ACP tool call status: pending, in_progress, completed or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// The paths of the call's ACP locations, at most [`MAX_TOOL_PATHS`]; absent when there are none or they did
+        /// not change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paths: Option<Vec<String>>,
     },
     /// The harness's whole plan, replacing the previous one.
     Plan {
@@ -178,10 +185,16 @@ mod tests {
         let tool = StatusEvent::new(
             p("dev-a"),
             t.clone(),
-            StatusUpdate::Tool { id: "c1".into(), title: None, tool_kind: None, status: Some("completed".into()) },
+            StatusUpdate::Tool {
+                id: "c1".into(),
+                title: None,
+                tool_kind: None,
+                status: Some("completed".into()),
+                paths: None,
+            },
         );
         let json = serde_json::to_string(&tool).unwrap();
-        assert!(json.contains(r#""type":"tool""#) && !json.contains("title"), "{json}");
+        assert!(json.contains(r#""type":"tool""#) && !json.contains("title") && !json.contains("paths"), "{json}");
         let queued = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Queued { message: Uuid::nil(), ahead: 2 });
         let json = serde_json::to_value(&queued).unwrap();
         assert_eq!((json["type"].as_str(), json["ahead"].as_u64()), (Some("queued"), Some(2)));

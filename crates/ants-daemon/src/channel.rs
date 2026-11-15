@@ -230,6 +230,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         allow: post.allow.clone(),
         mention: None,
         title: None,
+        summary: None,
         question: None,
         answer: None,
         steer: false,

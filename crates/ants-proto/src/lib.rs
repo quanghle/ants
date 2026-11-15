@@ -22,6 +22,7 @@ mod humans;
 mod ids;
 mod inbox;
 mod keys;
+mod login;
 mod permissions;
 mod presence;
 mod questions;
@@ -31,6 +32,7 @@ mod roster;
 mod status;
 pub mod subject;
 mod threads;
+mod timeline;
 
 pub use ant_request::*;
 pub use approvals::*;
@@ -46,6 +48,7 @@ pub use humans::*;
 pub use ids::*;
 pub use inbox::*;
 pub use keys::*;
+pub use login::*;
 pub use permissions::*;
 pub use presence::*;
 pub use questions::*;
@@ -54,12 +57,13 @@ pub use reactions::*;
 pub use roster::*;
 pub use status::*;
 pub use threads::*;
+pub use timeline::*;
 
 /// JetStream stream holding every durable ants message.
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
-pub const STREAM_SUBJECTS: [&str; 5] =
-    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>"];
+pub const STREAM_SUBJECTS: [&str; 6] =
+    ["ants.inbox.>", "ants.notes.>", "ants.approvals.>", "ants.dead.>", "ants.chan.>", subject::ALL_TIMELINE];
 /// The inbox subjects [`STREAM`] republishes each message it stores on, to [`STORED_INBOX_DESTINATION`]: what it
 /// sources from a leaf's outbox it stores without publishing it on its subject.
 pub const STORED_INBOX_SOURCE: &str = "ants.inbox.*.*";
@@ -141,6 +145,14 @@ pub const READ_BUCKET: &str = "ants_read";
 /// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
 /// webhook serve` reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
+/// KV bucket of the directory of human devices' encryption keys: the user JWT of each device of a human whose
+/// credentials carry an encryption key ([`DeviceKey`]), keyed by [`device_entry_key`] and put by its CLI on connecting
+/// when it differs, and a [`DeviceRevocation`] for each revoked key of a human's credentials, keyed by
+/// [`revoked_device_key`]. Each human reads all of it and writes only its own keys; only the short-lived credentials
+/// `ants auth revoke` and `ants auth push` issue from the account key put the revocation records
+/// ([`Permissions::for_device_revoker`]). A reader takes a device's key only from a JWT it verifies itself. Entries
+/// never expire.
+pub const DEVICES_BUCKET: &str = "ants_devices";
 /// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
 /// webhook serve` before each notice; and of what a snooze or quiet hours held back from it ([`HeldNotices`]), keyed by
@@ -163,8 +175,10 @@ pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
 /// one for every human too, which any human sets or clears, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
-/// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`],
-/// [`ChannelPost::title`], [`NotesPost::title`]) gets there through a human's CLI. Entries never expire.
+/// ([`Permissions::for_user`]), and the TL;DR of each thread a human's CLI asked an ant for ([`ThreadSummary`], keyed
+/// by [`summary_key`]), which any human puts or deletes. Ants read and write none of it: a title an ant suggests
+/// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]) and a TL;DR an ant replies with
+/// ([`Envelope::summary`]) get there through a human's CLI. Entries never expire.
 pub const THREADS_BUCKET: &str = "ants_threads";
 /// Most characters a thread title has.
 pub const MAX_TITLE: usize = 120;
