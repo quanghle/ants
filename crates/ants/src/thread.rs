@@ -111,6 +111,9 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
+    /// The title an inbox message that is not forged suggests for its thread ([`Envelope::title`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_title: Option<String>,
 }
 
 impl Entry {
@@ -130,6 +133,7 @@ impl Entry {
             forged: false,
             reactions: Vec::new(),
             reason: None,
+            suggested_title: None,
         }
     }
 
@@ -186,6 +190,7 @@ impl Parser {
                 text,
                 forged,
                 reason: e.escalation.map(|x| x.reason),
+                suggested_title: e.title.filter(|_| !forged),
                 ..entry(kind, e.thread_id)
             });
         }
@@ -280,6 +285,9 @@ pub struct Summary {
     /// The thread's title, which any human sets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The first title an ant suggested for it, and that ant.
+    #[serde(skip)]
+    pub suggested: Option<(UserId, String)>,
     /// Pinned by the CLI's human.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -348,6 +356,7 @@ impl Threads {
             matched: None,
             escalated: None,
             title: None,
+            suggested: None,
             pinned: false,
             archived: false,
             new_activity: false,
@@ -361,6 +370,11 @@ impl Threads {
         summary.channels.extend(entry.channel.iter().cloned());
         if summary.owner.is_none() {
             summary.owner.clone_from(&entry.owner);
+        }
+        if summary.suggested.is_none()
+            && let (Some(from), Some(title)) = (&entry.from, &entry.suggested_title)
+        {
+            summary.suggested = Some((from.clone(), title.clone()));
         }
         if let (Some(grep), None) = (&self.grep, &summary.matched) {
             summary.matched = entry.text.lines().find(|line| line.to_lowercase().contains(grep.as_str())).map(|line| {
@@ -814,6 +828,7 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
         for thread in &mut threads {
             thread.title = titles.remove(&thread.thread_id).map(|t| t.title);
         }
+        adopt_suggested(meta, &mut threads).await;
     }
     if json {
         for thread in &threads {
@@ -828,6 +843,18 @@ pub async fn list(nats: &crate::Nats<'_>, since: Option<Duration>, select: &Sele
         eprintln!("{omitted} less recently active threads left out: raise --limit or narrow --since");
     }
     Ok(())
+}
+
+/// Title each of `threads` without a title as an ant suggested, if it never had one
+/// ([`thread_meta::Meta::adopt_title`]).
+async fn adopt_suggested(meta: &thread_meta::Meta, threads: &mut [Summary]) {
+    for thread in threads.iter_mut().filter(|t| t.title.is_none()) {
+        let Some((by, text)) = &thread.suggested else { continue };
+        match meta.adopt_title(&thread.thread_id, text, by).await {
+            Ok(title) => thread.title = title.map(|t| t.title),
+            Err(e) => tracing::warn!(thread = %thread.thread_id, "not storing the title {by} suggested: {e:#}"),
+        }
+    }
 }
 
 /// Where to read threads marked so from: the earliest of their starts, or everything kept when an id is not
@@ -868,8 +895,9 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let entries = history(&js, thread, since).await?;
+    let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let (title, mark) =
-        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last()).await };
+        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last(), suggested).await };
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
@@ -883,7 +911,9 @@ pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, j
             None => println!("thread {thread}"),
         }
         if let Some(title) = title {
-            println!("title: {}", title.title);
+            let by_ant = entries.iter().any(|e| e.suggested_title.is_some() && e.from.as_ref() == Some(&title.by));
+            let suggested = if by_ant { format!(" (suggested by {})", title.by) } else { String::new() };
+            println!("title: {}{suggested}", title.title);
         }
         match mark {
             Some(Mark::Pinned) => println!("pinned"),
