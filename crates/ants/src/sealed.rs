@@ -12,7 +12,7 @@ use ants_daemon::keystore::{self, Store};
 use std::ops::ControlFlow;
 
 use ants_daemon::reading::{self, Reading};
-use ants_daemon::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_plain};
+use ants_daemon::sealing::{NONCE_LEN, open_message, open_plain, seal_envelope, seal_title};
 pub use ants_daemon::sealing::{Opening, State};
 use ants_daemon::{creds, files};
 use ants_proto::{
@@ -106,23 +106,6 @@ pub fn open_attachment(key: &Key, reference: &Attachment, stored: &[u8]) -> Resu
     XSalsa20Poly1305::new(key)
         .decrypt(Nonce::from_slice(&nonce), stored)
         .map_err(|_| anyhow!("attachment {name} does not open: forged"))
-}
-
-/// Seal the title of `title` for `recipients` like a message ([`seal`]), leaving it empty.
-pub fn seal_title(
-    title: &mut ThreadTitle,
-    device: DeviceId,
-    xkey: &XKey,
-    recipients: &[(DeviceId, &DeviceKey)],
-) -> Result<()> {
-    let body = SealedTitle {
-        thread_id: title.thread_id.clone(),
-        by: title.by.clone(),
-        title: std::mem::take(&mut title.title),
-    };
-    let key = XSalsa20Poly1305::generate_key(&mut OsRng);
-    title.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, &key, device, xkey, recipients)?));
-    Ok(())
 }
 
 /// Open the sealed part of `title` as [`open_message`] does a message's, giving its title.

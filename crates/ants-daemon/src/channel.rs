@@ -226,7 +226,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         origin_thread: None,
         escalation: None,
         approval: None,
-        on_behalf_of: None,
+        on_behalf_of: post.on_behalf_of.clone(),
         webhook: post.webhook,
         allow: post.allow.clone(),
         mention: None,
@@ -441,7 +441,7 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) ->
     let channel = &post.channel;
     let mut text = format!("[ants] Channel #{channel}, thread {}.\n\n", post.thread_id);
     text.push_str(&context_text(context));
-    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}\n\n", post.from, post.text);
+    let _ = write!(text, "[ants] Post from {} mentioning {ant}:\n{}\n\n", poster(post), post.text);
     let _ = write!(
         text,
         "[ants] The final answer of this turn is posted to #{channel} on this thread and spends one of its turns \
@@ -449,6 +449,14 @@ pub fn prompt(ant: &UserId, post: &ChannelPost, context: &Context, left: u32) ->
          mentioning nobody wakes nobody."
     );
     text
+}
+
+/// Who `post` is from: its sender, and the human it posted for when its `on_behalf_of`, checked on arrival, stands.
+fn poster(post: &ChannelPost) -> String {
+    match &post.on_behalf_of {
+        Some(human) => format!("{} for {human}", post.from),
+        None => post.from.to_string(),
+    }
 }
 
 /// What the prompt of the escalation leader's answer on a thread of `channel` adds: the answer is posted back to the
@@ -1053,6 +1061,10 @@ mod tests {
             root.thread_id, plan.id
         );
         assert_eq!(text, expected);
+        let for_alice = ask.on_behalf(Some(p("alice")));
+        let text = prompt(&p("dev-a"), &for_alice, &Context::default(), 6);
+        assert!(text.contains("[ants] Post from dev-b for alice mentioning dev-a:\n"), "{text}");
+        assert_eq!(as_envelope(&for_alice, &p("dev-a")).on_behalf_of, Some(p("alice")));
         let first = prompt(&p("dev-a"), &root, &Context::default(), 7);
         assert!(first.starts_with(&format!("[ants] Channel #ops, thread {}.\n\n[ants] Post from", root.thread_id)));
     }

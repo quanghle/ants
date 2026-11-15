@@ -4,11 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ants_daemon::caps::Spent;
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
+use ants_proto::{Acting, SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -27,6 +28,8 @@ pub struct Cards {
     pub titles: HashMap<ThreadId, String>,
     /// Each thread's done state, whether or not a message since reopened it.
     pub done: HashMap<ThreadId, ThreadDone>,
+    /// What the `on_behalf_of` of each done state claiming one came to ([`crate::behalf::Checker`]).
+    pub done_acting: HashMap<ThreadId, Acting>,
     pub tldr: HashMap<ThreadId, ThreadSummary>,
     /// Whether the TL;DRs were read once.
     pub tldr_read: bool,
@@ -61,11 +64,26 @@ impl Cards {
         Some(total)
     }
 
+    /// Who marked a thread `done`: an assistant for its human as [`Acting::label`] names it, a claim not checked
+    /// forged.
+    pub fn done_by(&self, done: &ThreadDone) -> String {
+        let acting = match &done.on_behalf_of {
+            None => Acting::Own,
+            Some(human) => {
+                self.done_acting.get(&done.thread_id).cloned().unwrap_or_else(|| Acting::Forged(human.clone()))
+            }
+        };
+        acting.label(done.by.as_str())
+    }
+
     /// Take `read`, keeping what an unread part had; the reasons of the parts that failed, if they changed.
     pub fn take(&mut self, read: Read) -> Option<String> {
         let mut failed = Vec::new();
         match read.meta {
-            Ok((done, tldr)) => (self.done, self.tldr, self.tldr_read) = (done, tldr, true),
+            Ok((done, tldr)) => {
+                (self.done, self.tldr, self.tldr_read) = (done, tldr, true);
+                self.done_acting = read.done_acting;
+            }
             Err(e) => failed.push(format!("reading the done states and TL;DRs: {e:#}")),
         }
         match read.titles {
@@ -97,6 +115,8 @@ impl Cards {
 pub struct Read {
     pub titles: Result<HashMap<ThreadId, String>>,
     pub meta: Result<(HashMap<ThreadId, ThreadDone>, HashMap<ThreadId, ThreadSummary>)>,
+    /// What the claims of the done states read came to.
+    pub done_acting: HashMap<ThreadId, Acting>,
     pub spend: Result<HashMap<ThreadId, Vec<(UserId, Spent)>>>,
     pub today: Result<Vec<(UserId, Spent)>>,
     pub snoozed: Result<ThreadSnoozes>,
@@ -109,13 +129,21 @@ pub struct Source {
     /// Why there is none, when ants_threads cannot be read.
     meta: Result<Rc<Meta>, String>,
     sessions: Result<DirectKv, String>,
+    /// What checks the claims of the done states an assistant marked for its human.
+    behalf: Arc<crate::behalf::Checker>,
 }
 
 impl Source {
     pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Self {
         let meta = thread_meta::open(nats, js).await.map(Rc::new).map_err(|e| format!("{e:#}"));
         let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await.map_err(|e| format!("{e:#}"));
-        Self { js: js.clone(), meta, sessions }
+        let behalf = Arc::new(crate::behalf::Checker::new(nats, js));
+        Self { js: js.clone(), meta, sessions, behalf }
+    }
+
+    /// The source, checking claims with `behalf` rather than a checker of its own.
+    pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
+        Self { behalf: behalf.unwrap_or(self.behalf), ..self }
     }
 
     /// Read what there is of `threads`: their titles, done states and TL;DRs, what was spent on them, that day's spend, and the
@@ -148,7 +176,12 @@ impl Source {
         };
         let snoozed = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.snoozes().await };
         let (titles, meta, spend, today, snoozed) = futures::join!(titles, meta, spend, today, snoozed);
-        Read { titles, meta, spend, today, snoozed }
+        let mut done_acting = HashMap::new();
+        for done in meta.iter().flat_map(|(done, _)| done.values()).filter(|d| d.on_behalf_of.is_some()) {
+            let acting = self.behalf.check(&done.by, done.on_behalf_of.as_ref()).await;
+            done_acting.insert(done.thread_id.clone(), acting);
+        }
+        Read { titles, meta, done_acting, spend, today, snoozed }
     }
 }
 
@@ -226,6 +259,7 @@ mod tests {
         let ok = || Read {
             titles: Ok(HashMap::new()),
             meta: Ok((HashMap::new(), HashMap::new())),
+            done_acting: HashMap::new(),
             spend: Ok([(thread.clone(), vec![(user("dev-a"), spent), (user("dev-b"), spent)])].into()),
             today: Ok(vec![(user("dev-a"), spent)]),
             snoozed: Ok(ThreadSnoozes::default()),

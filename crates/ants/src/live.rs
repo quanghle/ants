@@ -188,6 +188,8 @@ pub struct Feed {
     /// What checks the `on_behalf_of` of an assistant's messages, for the reads of the stream and of a thread's
     /// history; without it, every such claim is forged.
     behalf: Option<Arc<crate::behalf::Checker>>,
+    /// Keeps `behalf`'s checks fresh while the feed lives ([`crate::behalf::Checker::follow`]).
+    _following: Option<crate::behalf::Following>,
     /// The parser for the next read of the stream, None while one is in flight.
     parser: Option<Parser>,
     tail: Option<Tail>,
@@ -221,6 +223,7 @@ impl Feed {
             rosters: tokio::time::interval(ROSTER_EVERY),
             keyring: None,
             behalf: None,
+            _following: None,
             parser: Some(Parser::default()),
             tail: None,
             tail_wanted: true,
@@ -247,11 +250,17 @@ impl Feed {
         self
     }
 
-    /// Check the `on_behalf_of` of an assistant's messages with `behalf`.
+    /// Check the `on_behalf_of` of an assistant's messages with `behalf`, kept fresh while the feed lives.
     pub fn checking(mut self, behalf: Arc<crate::behalf::Checker>) -> Self {
         self.parser = Some(Parser::opening(self.keyring.clone()).checking(Some(behalf.clone())));
+        self._following = Some(behalf.follow());
         self.behalf = Some(behalf);
         self
+    }
+
+    /// What checks the `on_behalf_of` of an assistant's messages, if anything.
+    pub fn behalf(&self) -> Option<Arc<crate::behalf::Checker>> {
+        self.behalf.clone()
     }
 
     /// What opens sealed messages, if anything.
