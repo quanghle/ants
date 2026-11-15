@@ -57,6 +57,12 @@ pub struct Envelope {
     /// sender, and the requester takes it only from its own chain ([`Envelope::chain_decision`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<ApprovalDecision>>,
+    /// The human the sender, its assistant, sent the message for ([`crate::Acting`]): the sender stays `from`, and a
+    /// reader honours the claim only while the human's grant and the sender's credentials say it is the human's
+    /// assistant, else takes it as forged and the message as the sender's own. Never copied by [`Envelope::reply`] or
+    /// [`Envelope::follow_up`]: the sender sets it with [`Envelope::on_behalf`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     /// A webhook's message, as `ants webhook serve` marks it: its sender is no human, whatever the humans bucket says,
     /// and an answer to it goes to the thread's owner, if any, not to the webhook's inbox, which nobody reads
     /// ([`Envelope::sender_role`]). A daemon takes it only from a sender whose marker is in [`WEBHOOKS_BUCKET`]
@@ -197,6 +203,7 @@ impl Envelope {
             origin_thread: None,
             escalation: None,
             approval: None,
+            on_behalf_of: None,
             webhook: false,
             allow: None,
             mention: None,
@@ -221,6 +228,12 @@ impl Envelope {
     #[must_use]
     pub fn with_owner(self, owner: Option<UserId>) -> Self {
         Self { owner, ..self }
+    }
+
+    /// The envelope sent for `human`, by its assistant ([`Envelope::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// The envelope as a webhook's message ([`Envelope::webhook`]).
@@ -260,11 +273,13 @@ impl Envelope {
         Self { escalation: escalation.map(Box::new), ..self }
     }
 
-    /// `from`'s decision on an approval request, to the requesting ant on `thread_id`, the request's thread.
+    /// `from`'s decision on an approval request, to the requesting ant on `thread_id`, the request's thread; made for
+    /// a human when the decision says so ([`ApprovalDecision::on_behalf_of`]).
     pub fn decision(thread_id: ThreadId, from: UserId, decision: ApprovalDecision) -> Self {
         let text = format!("{} on approval request {}", decision.verdict.as_str(), decision.request_id);
         let to = decision.ant.clone();
-        Self { approval: Some(Box::new(decision)), ..Self::on_thread(thread_id, from, to, text) }
+        let on_behalf_of = decision.on_behalf_of.clone();
+        Self { approval: Some(Box::new(decision)), on_behalf_of, ..Self::on_thread(thread_id, from, to, text) }
     }
 
     /// Whether the sender is in `chain`, the escalate_to of the ant the envelope is for. Trust it only once the
@@ -275,8 +290,12 @@ impl Envelope {
 
     /// The approval decision the envelope carries on `request`, if it comes from `chain`, the requester's escalate_to,
     /// and is for that request. A verdict the request did not offer counts as [`Verdict::Reject`]. Trust it only once
-    /// the envelope passed [`Envelope::check_subject`].
+    /// the envelope passed [`Envelope::check_subject`]. A decision sent for a human ([`Envelope::on_behalf_of`]) is
+    /// none: it takes effect only once the human confirms it.
     pub fn chain_decision(&self, request: &ApprovalRequest, chain: &[UserId]) -> Option<ApprovalDecision> {
+        if self.on_behalf_of.is_some() {
+            return None;
+        }
         let decision = self.approval.as_ref()?;
         let ours = self.to == request.ant && decision.ant == request.ant;
         (ours && decision.request_id == request.id && self.is_from_chain(chain))
@@ -336,6 +355,7 @@ impl Envelope {
             origin_thread: self.origin_thread.clone(),
             escalation: None,
             approval: None,
+            on_behalf_of: None,
             webhook: false,
             allow: self.allow.clone(),
             mention: None,

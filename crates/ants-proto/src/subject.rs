@@ -393,6 +393,17 @@ pub fn devices_of(human: &UserId) -> String {
     format!("$KV.{}.{human}.>", super::DEVICES_BUCKET)
 }
 
+/// The record of `assistant`'s credentials in [`super::DEVICES_BUCKET`] ([`super::AssistantRecord`]): the subject
+/// only the assistant's credentials put it on.
+pub fn assistant_record(assistant: &UserId) -> String {
+    format!("$KV.{}.{}", super::DEVICES_BUCKET, super::assistant_record_key(assistant))
+}
+
+/// Every [`super::AssistantRecord`] in [`super::DEVICES_BUCKET`].
+pub fn assistant_records() -> String {
+    format!("$KV.{}.*.{}", super::DEVICES_BUCKET, super::ASSISTANT_RECORD)
+}
+
 /// Every [`super::DeviceRevocation`] in [`super::DEVICES_BUCKET`]: the subjects only the credentials `ants auth revoke`
 /// and `ants auth push` issue put records on.
 pub fn revoked_devices() -> String {

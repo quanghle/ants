@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    Attachment, AttachmentHandle, AttachmentScope, CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter,
-    Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role, State,
-    StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW,
-    subject,
+    Acting, Attachment, AttachmentHandle, AttachmentScope, CancelRequest, ChannelEntry, ChannelId, ChannelPost,
+    DeadLetter, Envelope, Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role,
+    State, StatusUpdate, SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid,
+    WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -23,6 +23,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
+use crate::behalf::Records;
 use crate::breaker::{self, Breaker, StartFailed};
 use crate::caps::{Caps, Ledger, Recorded, Warning};
 use crate::channel::{self, Channels, Context, Earlier, Threads, Wake};
@@ -250,6 +251,16 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     )
     .await?;
     connect_mcp(&mut mcp, config, &client, &js, &redactor).await?;
+    if let Some(creds) = &config.creds {
+        match crate::behalf::keep_record(&js, config.js_domain.as_ref(), &config.ant, creds).await {
+            Ok(Some(human)) => mcp.with_assisting(human),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                error = format!("{e:#}"),
+                "keeping the record of an assistant; nothing it does counts for its human"
+            ),
+        }
+    }
     let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
@@ -288,6 +299,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         webhooks: &webhooks,
         roster: &roster,
         humans: &humans,
+        behalf: Records::new(js.clone(), config.js_domain.clone(), crate::humans::account(config.creds.as_deref())),
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
         timeline_every: crate::timeline::allowed(config.creds.as_deref(), &config.ant).then_some(TIMELINE_EVERY),
@@ -882,6 +894,8 @@ struct Inbox<'a> {
     roster: &'a Roster,
     /// Who is a human, and who gets the escalations of a thread with no owner.
     humans: &'a Registry,
+    /// The assistants' records, against which an `on_behalf_of` is checked with the grants of `humans`.
+    behalf: Records,
     retry_delay: Duration,
     progress_every: Duration,
     /// How often at most a prompt's tool-call timeline is stored while it runs; never, when the credentials do not
@@ -1156,6 +1170,7 @@ impl Inbox<'_> {
             self.bury_unanswerable(msg, &format!("sender mismatch: {e}")).await;
             return None;
         }
+        self.check_behalf(&mut envelope).await;
         if envelope.approval.is_some() {
             if let Some(approvals) = self.approvals {
                 approvals.offer(&envelope);
@@ -1171,6 +1186,35 @@ impl Inbox<'_> {
             return None;
         }
         Some(Incoming { envelope, post: None, resume: None, steered: Steered::No })
+    }
+
+    /// Check the `on_behalf_of` of `envelope`, which arrived on its sender's subject: a forged one is cleared, so the
+    /// message counts as the sender's own; for an honoured one the human is told what its assistant did for it, as of
+    /// a stand-in's decision. Failing to tell, it only warns.
+    async fn check_behalf(&self, envelope: &mut Envelope) {
+        let acting = self.behalf.acting(self.humans, &envelope.from, envelope.on_behalf_of.as_ref()).await;
+        let notice = match &acting {
+            Acting::Own => return,
+            Acting::Forged(human) => {
+                tracing::warn!(from = %envelope.from, %human, "ignoring a forged on_behalf_of; taking the message as its sender's own");
+                envelope.on_behalf_of = None;
+                return;
+            }
+            Acting::For(human) => match envelope.approval.as_deref() {
+                Some(decision) => crate::behalf::held_notice(envelope, decision, human),
+                None => crate::behalf::sent_notice(envelope, human),
+            },
+        };
+        let id = format!("on-behalf-{}", envelope.id);
+        match bus::store(self.js, notice.subject(), &notice, &id).await {
+            Ok(_) => tracing::info!(from = %envelope.from, to = %notice.to, "told the human of its assistant's act"),
+            Err(e) => tracing::warn!(
+                from = %envelope.from,
+                to = %notice.to,
+                error = format!("{e:#}"),
+                "telling the human of its assistant's act"
+            ),
+        }
     }
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the

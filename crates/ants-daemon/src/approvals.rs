@@ -168,6 +168,10 @@ impl NatsApprover {
             tracing::debug!(%from, %request, "ignoring a decision on a request no longer waiting");
             return;
         };
+        if let Some(human) = &envelope.on_behalf_of {
+            held(envelope, human);
+            return;
+        }
         match envelope.chain_decision(request, &self.chain.escalate_to) {
             Some(decided) => {
                 let _ = chain_decided.send((envelope.from.clone(), decided));
@@ -374,6 +378,14 @@ impl NatsApprover {
             tracing::warn!(error = %e, "ignoring an approval decision with a forged sender");
             return None;
         }
+        if let Some(human) = envelope
+            .on_behalf_of
+            .as_ref()
+            .filter(|_| envelope.approval.as_ref().is_some_and(|d| d.request_id == request.id))
+        {
+            held(&envelope, human);
+            return None;
+        }
         let decided = envelope.chain_decision(request, &self.chain.escalate_to);
         if decided.is_none() && envelope.approval.as_ref().is_some_and(|d| d.request_id == request.id) {
             let (from, request) = (&envelope.from, request.id);
@@ -381,6 +393,15 @@ impl NatsApprover {
         }
         Some((envelope.from, decided?))
     }
+}
+
+/// Log that `envelope`'s decision, which its sender made for `human`, does not decide the request: the daemon tells
+/// the human when it admits the envelope, with the claim verified ([`crate::behalf::held_notice`]).
+// The integration point of the confirmation of such decisions (ants-y6zhm.4).
+fn held(envelope: &Envelope, human: &UserId) {
+    let Some(decision) = envelope.approval.as_deref() else { return };
+    let (from, request) = (&envelope.from, decision.request_id);
+    tracing::info!(%from, %human, %request, "holding an approval decision made for a human until the human confirms it");
 }
 
 /// See [`NatsApprover::begin`].

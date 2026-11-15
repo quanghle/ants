@@ -2,8 +2,8 @@
 
 use ants_daemon::reactions;
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, DecidedBy, Envelope,
-    NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
+    Acting, ApprovalDecision, ApprovalRequest, CancelReply, CancelRequest, ChannelPost, DeadLetter, DecidedBy,
+    Envelope, NotesPost, StatusEvent, StatusUpdate, ThreadId, UserId, subject,
 };
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
@@ -36,6 +36,7 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
     let mut sub = client.subscribe(filter).await?;
     let mut printer = Printer::default();
     let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
+    let behalf = crate::behalf::Checker::new(nats, &js);
     loop {
         let msg = tokio::select! {
             msg = sub.next() => match msg {
@@ -52,8 +53,11 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
         let forged = |ok: bool| if ok { String::new() } else { format!(" (forged: sent on {})", msg.subject) };
         let out = if let Ok(event) = serde_json::from_slice::<StatusEvent>(&msg.payload) {
             printer.status(&event, &forged(event.check_subject(&msg.subject).is_ok()))
-        } else if let Ok(e) = serde_json::from_slice::<Envelope>(&msg.payload) {
-            printer.line(&envelope_line(&e, &forged(e.check_subject(&msg.subject).is_ok())))
+        } else if let Ok(mut e) = serde_json::from_slice::<Envelope>(&msg.payload) {
+            let genuine = e.check_subject(&msg.subject).is_ok();
+            let acting = behalf.check(&e.from, e.on_behalf_of.as_ref()).await;
+            e.on_behalf_of = None;
+            printer.line(&envelope_line(&e, &acting, &forged(genuine)))
         } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
             // Before notes posts: a channel post has every field of one.
             printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
@@ -123,9 +127,9 @@ pub(crate) fn reaction_line(change: &reactions::Change) -> String {
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
 /// leader and the ants visited; an ant's approval decision in place of its text; the size of a sealed message's
-/// ciphertext in place of its text.
-pub(crate) fn envelope_line(e: &Envelope, forged: &str) -> String {
-    let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
+/// ciphertext in place of its text. An assistant's message for its human names both ([`Acting::label`]).
+pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str) -> String {
+    let head = format!("[{}] {} -> {}{forged}", e.thread_id, acting.label(e.from.as_str()), e.to);
     if let Some(d) = &e.approval {
         return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
     }
@@ -304,7 +308,7 @@ mod tests {
         let notice =
             Envelope::on_thread(t1.clone(), p("dev-a"), p("lead"), "[ants] stuck").with_escalation(Some(escalation));
         assert_eq!(
-            envelope_line(&notice, ""),
+            envelope_line(&notice, &Acting::Own, ""),
             "[t1] dev-a -> lead [escalation level 1, turn_budget: dev-a stuck on t1, leader lead, \
              visited dev-a > lead > dev-b]: [ants] stuck"
         );
@@ -327,7 +331,7 @@ mod tests {
         let decision = ApprovalDecision::new(id, p("dev-a"), ants_proto::Verdict::AllowOnce);
         let decided = Envelope::decision(t1, p("lead"), decision);
         assert_eq!(
-            envelope_line(&decided, ""),
+            envelope_line(&decided, &Acting::Own, ""),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
 

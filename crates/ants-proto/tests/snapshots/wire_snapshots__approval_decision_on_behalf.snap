@@ -1,0 +1,11 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "request_id": "019a7d2e-0000-7000-8000-00000000000a",
+  "ant": "dev-a",
+  "verdict": "allow_once",
+  "decided_at": "2025-01-01T12:01:00Z",
+  "on_behalf_of": "alice"
+}

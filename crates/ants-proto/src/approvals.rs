@@ -127,6 +127,7 @@ impl ApprovalRequest {
             verdict: if self.options.contains(&verdict) { verdict } else { Verdict::Reject },
             decided_at: Utc::now(),
             by: None,
+            on_behalf_of: None,
         }
     }
 }
@@ -142,13 +143,23 @@ pub struct ApprovalDecision {
     /// The human who decided, as the decider's client tells: the decision subject does not pin it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<UserId>,
+    /// The human whose assistant, the sender, made the decision for it ([`crate::Acting`]). A requester never takes such
+    /// a decision as the human's, nor applies it before the human confirms it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
 }
 
 impl ApprovalDecision {
     /// A decision on the request `request_id` of `ant`, made now, as an ant of its chain makes one from the
     /// [`Escalation`] alone. The requester maps a verdict it did not offer to [`Verdict::Reject`].
     pub fn new(request_id: Uuid, ant: UserId, verdict: Verdict) -> Self {
-        Self { request_id, ant, verdict, decided_at: Utc::now(), by: None }
+        Self { request_id, ant, verdict, decided_at: Utc::now(), by: None, on_behalf_of: None }
+    }
+
+    /// The same, made for `human` by its assistant ([`ApprovalDecision::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// The same, decided by the human `by`.
@@ -222,6 +233,8 @@ mod tests {
         let foreign = Envelope { to: p("dev-a"), ..Envelope::decision(request.thread_id.clone(), p("lead"), foreign) };
         assert_eq!(foreign.chain_decision(&request, &chain), None, "a decision on another ant's request");
         assert_eq!(Envelope::new(p("lead"), p("dev-a"), "hi").chain_decision(&request, &chain), None);
+        let held = Envelope { on_behalf_of: Some(p("alice")), ..msg.clone() };
+        assert_eq!(held.chain_decision(&request, &chain), None, "a decision for a human waits for the human");
 
         let always = ApprovalDecision::new(request.id, request.ant.clone(), Verdict::AllowAlways);
         let always = Envelope::decision(request.thread_id.clone(), p("lead"), always);

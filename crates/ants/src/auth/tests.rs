@@ -1385,7 +1385,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
         Answering::ListsAndChanges,
     ));
     let change = |message, reaction: &ants_proto::Reaction, remove| {
-        ReactionsRequest::change(dev_a.clone(), message, ReactionChange { reaction: reaction.clone(), remove })
+        ReactionsRequest::change(dev_a.clone(), message, ReactionChange::new(reaction.clone(), remove))
     };
     let applied = |changed| Some(ReactionsOutcome::Applied { changed });
     assert_eq!(reactions::request(&a_client, &change(message, &eyes, false)).await.unwrap(), applied(true));

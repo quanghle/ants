@@ -11,7 +11,7 @@ fn jwt(signer: &KeyPair, body: &Value) -> String {
     format!("{signed}.{signature}")
 }
 
-fn user_jwt(account: &KeyPair, user: &KeyPair, name: &str, tags: &[&str], exp: Option<u64>) -> String {
+pub(crate) fn user_jwt(account: &KeyPair, user: &KeyPair, name: &str, tags: &[&str], exp: Option<u64>) -> String {
     let mut body = json!({
         "iss": account.public_key(),
         "sub": user.public_key(),

@@ -15,12 +15,21 @@ pub struct ReactionEntry {
     pub by: UserId,
     pub reaction: Reaction,
     pub at: DateTime<Utc>,
+    /// The human whose assistant, `by`, reacted for it ([`crate::Acting`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
 }
 
 impl ReactionEntry {
     /// `by`'s `reaction` to `message`, made now.
     pub fn new(by: UserId, message: Uuid, reaction: Reaction) -> Self {
-        Self { message, by, reaction, at: Utc::now() }
+        Self { message, by, reaction, at: Utc::now(), on_behalf_of: None }
+    }
+
+    /// The same, made for `human` by its assistant ([`ReactionEntry::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// The KV key of the entry.
@@ -62,6 +71,22 @@ pub struct ReactionChange {
     pub reaction: Reaction,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove: bool,
+    /// The human the ant, its assistant, reacts for; the signer keeps it in the entry ([`ReactionEntry::on_behalf_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
+}
+
+impl ReactionChange {
+    /// Add `reaction`, or with `remove` remove it.
+    pub fn new(reaction: Reaction, remove: bool) -> Self {
+        Self { reaction, remove, on_behalf_of: None }
+    }
+
+    /// The same, made for `human` by its assistant ([`ReactionChange::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
+    }
 }
 
 impl ReactionsRequest {
@@ -171,7 +196,7 @@ mod tests {
         assert!(reply.check_subject("_INBOX.dev-b.reactions").is_err());
         assert_eq!(serde_json::to_value(&reply.outcome).unwrap(), serde_json::json!({"outcome": "unknown"}));
 
-        let change = ReactionChange { reaction: "eyes".parse().unwrap(), remove: false };
+        let change = ReactionChange::new("eyes".parse().unwrap(), false);
         let react = ReactionsRequest::change(p("dev-a"), Uuid::now_v7(), change);
         assert_eq!(react.subject(), "ants.reactions.dev-a.react");
         assert_eq!(react.reply_subject(), request.reply_subject());

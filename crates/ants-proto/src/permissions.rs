@@ -319,15 +319,16 @@ impl Permissions {
                     .iter()
                     .any(|prefix| s.starts_with(prefix))
         };
-        as_human.retain(|s| {
-            !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s)
-        });
+        as_human
+            .retain(|s| !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s));
         publish.extend(as_human);
         let chunks = format!("$O.{FILES_BUCKET}.C");
         publish.push(format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunks}.>"));
         let gets_only = |rights: &[String]| -> Vec<String> {
             rights.iter().filter(|s| s.starts_with("$JS.API.DIRECT.GET.")).cloned().collect()
         };
+        // The record of its credentials, which readers check the claims of its acts for its human against.
+        publish.push(subject::assistant_record(assistant));
         publish.extend(gets_only(&read_marker_rights(human)));
         publish.extend(gets_only(&thread_rights(human)));
         let attempts = kv_stream(ATTEMPTS_BUCKET);
@@ -581,6 +582,9 @@ impl Permissions {
             // Asking for the reactions to a message it reads, and to add or remove its own.
             subject::reactions(user),
             subject::react(user),
+            // Get of the assistants' records and of the revocations, to check what an assistant does for its human.
+            format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::assistant_records()),
+            format!("$JS.API.DIRECT.GET.{}.{}", kv_stream(DEVICES_BUCKET), subject::revoked_devices()),
         ]);
         // The spares of its inbox consumer and its notes and channel readers, for the CLI, each with the same
         // filter pinned; no ack, so the spares of the inbox consumer only read it.
@@ -969,7 +973,7 @@ impl Permissions {
 /// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
-pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(3);
+pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(4);
 
 /// A version of the permissions `ants auth` gives ([`PERMISSIONS_VERSION`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

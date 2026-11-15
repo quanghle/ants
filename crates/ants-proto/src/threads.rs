@@ -19,6 +19,9 @@ pub struct ThreadTitle {
     pub at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<Box<Sealed>>,
+    /// The human whose assistant, `by`, set the title for it ([`crate::Acting`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
 }
 
 /// What the [`Sealed::body`] of a sealed [`ThreadTitle`] holds: its title, with the thread and the human that set
@@ -39,7 +42,13 @@ impl ThreadTitle {
         if count == 0 || count > MAX_TITLE || trimmed.chars().any(breaks_title) {
             return Err(Error::InvalidTitle(title.to_owned()));
         }
-        Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now(), sealed: None })
+        Ok(Self { thread_id, title: trimmed.to_owned(), by, at: Utc::now(), sealed: None, on_behalf_of: None })
+    }
+
+    /// The same, set for `human` by its assistant ([`ThreadTitle::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 }
 
@@ -85,12 +94,21 @@ pub struct ThreadDone {
     pub by: UserId,
     pub at: DateTime<Utc>,
     pub after: u64,
+    /// The human whose assistant, `by`, marked the thread done for it ([`crate::Acting`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
 }
 
 impl ThreadDone {
     /// `thread_id` marked done by `by` now, as of sequence `after`.
     pub fn new(thread_id: ThreadId, by: UserId, after: u64) -> Self {
-        Self { thread_id, by, at: Utc::now(), after }
+        Self { thread_id, by, at: Utc::now(), after, on_behalf_of: None }
+    }
+
+    /// The same, marked for `human` by its assistant ([`ThreadDone::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// Whether the thread is still done, the last message, channel post or note stored on it having sequence `last`.

@@ -9,6 +9,7 @@ mod assistant;
 mod attachments;
 mod auth;
 mod backup;
+mod behalf;
 mod binding;
 mod bridge;
 mod channel;

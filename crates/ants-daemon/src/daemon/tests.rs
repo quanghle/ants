@@ -198,6 +198,7 @@ impl Bus {
             webhooks: &Webhooks::new(self.js.clone()),
             roster: &self.roster,
             humans: &self.humans,
+            behalf: Records::new(self.js.clone(), None, None),
             retry_delay: Duration::from_millis(300),
             progress_every,
             timeline_every: Some(Duration::from_millis(300)),
@@ -2872,6 +2873,30 @@ async fn an_ant_that_marks_its_message_as_a_webhook_s_gets_the_answer_itself() {
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing goes to the owner");
+}
+
+/// A message claiming to be sent for a human by an ant its grant does not name is the ant's own: answered as any
+/// other, with nothing told to the human.
+#[tokio::test]
+async fn a_claim_to_send_for_a_human_without_its_grant_is_forged() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [pa] = ants(["pa"]);
+    let [mut to_pa] = inboxes(&bus, &[pa.clone()]).await;
+    let claimed = Envelope::new(pa.clone(), bus.dev.clone(), "for the human").on_behalf(Some(UserId::human()));
+    let seq = bus::publish_json(&bus.js, claimed.subject(), &claimed, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let reply = next_envelope(&mut to_pa).await;
+        assert_eq!((&reply.to, reply.in_reply_to, &reply.on_behalf_of), (&pa, Some(claimed.id), &None));
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["for the human"]);
+    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "the human is told nothing");
 }
 
 #[tokio::test]

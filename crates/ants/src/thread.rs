@@ -16,7 +16,7 @@ use ants_daemon::channel::CLOCK_SLACK;
 use ants_daemon::reactions::Reacted;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
-    Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
+    Acting, Answer, Answered, ApprovalDecision, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, Envelope,
     EscalationReason, Humans, Mark, NotesPost, Question, SummaryRequest, ThreadId, ThreadMarks, Timeline, Timelines,
     UserId, Uuid, subject,
 };
@@ -130,6 +130,10 @@ pub struct Entry {
     /// The subject it was stored on names another sender (or ant) than the message: the message is forged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub forged: bool,
+    /// For whom the sender, an assistant, sent an inbox message, as the CLI checked its `on_behalf_of`
+    /// ([`crate::behalf::Checker`]): a claim not honoured is forged, and the message the sender's own.
+    #[serde(skip_serializing_if = "Acting::is_own")]
+    pub acting: Acting,
     /// What the CLI made of a sealed message between two humans: opened, its text the message's; else its text
     /// `[sealed]` or `[forged]` ([`sealed::State::placeholder`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,6 +209,7 @@ impl Entry {
             text: String::new(),
             attachments: Vec::new(),
             forged: false,
+            acting: Acting::Own,
             sealed: None,
             reactions: Vec::new(),
             reason: None,
@@ -255,9 +260,10 @@ impl Entry {
         question.question.as_ref()?.answered(answer)
     }
 
-    /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`.
+    /// Who sent it to whom: `alice -> dev-a`, `dev-a -> #ops`, `dev-a -> notes`, `(a human) -> dev-a`; for an
+    /// assistant's message for its human, `alice via pa -> dev-a`, or `pa (forged: for alice) -> dev-a`.
     pub(crate) fn route(&self) -> String {
-        let from = self.from.as_ref().map_or("(a human)", UserId::as_str);
+        let from = self.sender();
         match (self.kind, &self.to, &self.channel) {
             (Kind::Post, _, Some(channel)) => format!("{from} -> #{channel}"),
             (Kind::Note, ..) => format!("{from} -> notes"),
@@ -265,6 +271,11 @@ impl Entry {
             (_, Some(to), _) => format!("{from} -> {to}"),
             (_, None, _) => from.to_owned(),
         }
+    }
+
+    /// Who sent it, as [`Acting::label`] names an assistant acting for its human.
+    pub(crate) fn sender(&self) -> String {
+        self.acting.label(self.from.as_ref().map_or("(a human)", UserId::as_str))
     }
 
     /// The users it was between.
@@ -282,6 +293,7 @@ pub struct Parser {
     requests: HashMap<(UserId, Uuid), ThreadId>,
     questions: HashMap<Uuid, Envelope>,
     keyring: Option<Arc<sealed::Keyring>>,
+    behalf: Option<Arc<crate::behalf::Checker>>,
 }
 
 impl Parser {
@@ -290,9 +302,22 @@ impl Parser {
         Self { keyring, ..Self::default() }
     }
 
+    /// The parser, checking the `on_behalf_of` of inbox messages with `behalf`; without it, every such claim is forged.
+    pub fn checking(self, behalf: Option<Arc<crate::behalf::Checker>>) -> Self {
+        Self { behalf, ..self }
+    }
+
     /// Look the sending device of a sealed message stored on `subject` up unless known ([`sealed::Keyring::learn`]),
-    /// before [`Parser::entry`] takes it, so one from a device added since the keyring was loaded opens.
+    /// and check the claim of an inbox message sent on behalf of a human ([`crate::behalf::Checker::learn`]), before
+    /// [`Parser::entry`] takes it, so one from a device added since the keyring was loaded opens.
     pub async fn learn(&self, subject: &str, payload: &[u8]) {
+        if let Some(behalf) = &self.behalf
+            && subject::parse_inbox(subject).is_some()
+            && payload.windows(14).any(|w| w == b"\"on_behalf_of\"")
+            && let Ok(envelope) = serde_json::from_slice::<Envelope>(payload)
+        {
+            Box::pin(behalf.learn(&envelope)).await;
+        }
         let Some(keyring) = &self.keyring else { return };
         if subject::parse_inbox(subject).is_none() || !payload.windows(8).any(|w| w == b"\"sealed\"") {
             return;
@@ -330,6 +355,11 @@ impl Parser {
         let forged = e.check_subject(subject).is_err();
         let (e, sealed) = sealed::read(e, self.keyring.as_deref());
         let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged));
+        let acting = match (&self.behalf, &e.on_behalf_of) {
+            (_, None) => Acting::Own,
+            (Some(behalf), claim) => behalf.acting(&e.from, claim.as_ref()),
+            (None, Some(human)) => Acting::Forged(human.clone()),
+        };
         let (kind, note, text) = if let Some(d) = &e.approval {
             let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
             (Kind::Decision, None, text)
@@ -352,6 +382,7 @@ impl Parser {
             // Under the handles of the subject it was stored on, a forged one's too: its sender stored them.
             attachments: attachments::stored_on(subject, &e.attachments, stored_at),
             forged,
+            acting,
             stuck: e.escalation.as_ref().map(|x| x.stuck.clone()),
             sealed,
             reason: e.escalation.map(|x| x.reason),
@@ -1255,8 +1286,18 @@ pub async fn history(
     tools: bool,
     keyring: Option<Arc<sealed::Keyring>>,
 ) -> Result<Vec<Entry>> {
+    history_with(js, thread, since, tools, Parser::opening(keyring)).await
+}
+
+/// [`history`], read with `parser`.
+pub async fn history_with(
+    js: &jetstream::Context,
+    thread: &ThreadId,
+    since: Option<Duration>,
+    tools: bool,
+    mut parser: Parser,
+) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    let mut parser = Parser::opening(keyring);
     let mut timelines = Timelines::default();
     let mut seqs = HashMap::new();
     let start = show_start(thread, since);
@@ -1356,7 +1397,8 @@ pub async fn show(
     let js = connect(nats).await?;
     let thread = &pick.resolve(&js, &nats.me).await?;
     let keyring = sealed::Keyring::load(nats, &js).await.map(Arc::new);
-    let entries = history(&js, thread, since, !no_tools, keyring).await?;
+    let parser = Parser::opening(keyring).checking(Some(Arc::new(crate::behalf::Checker::new(nats, &js))));
+    let entries = history_with(&js, thread, since, !no_tools, parser).await?;
     let sealed = entries.iter().any(|e| e.sealed.is_some());
     let suggested = entries.iter().find_map(|e| Some((e.from.as_ref()?, e.suggested_title.as_deref()?)));
     let suggested = suggested.filter(|_| !sealed);

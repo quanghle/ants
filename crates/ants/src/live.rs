@@ -49,7 +49,8 @@ pub async fn start(
 ) -> Result<(Feed, State)> {
     let state = state(nats, &js, since).await?;
     let keyring = crate::sealed::Keyring::load(nats, &js).await.map(Arc::new);
-    Ok((Feed::new(client, js, since).await?.opening(keyring), state))
+    let behalf = Arc::new(crate::behalf::Checker::new(nats, &js));
+    Ok((Feed::new(client, js, since).await?.opening(keyring).checking(behalf), state))
 }
 
 /// The state of a live view of the window `since`, with the threads the human archived or left idle to be left out.
@@ -184,6 +185,9 @@ pub struct Feed {
     rosters: tokio::time::Interval,
     /// What opens sealed messages between two humans, for the reads of the stream and of a thread's history.
     keyring: Option<Arc<crate::sealed::Keyring>>,
+    /// What checks the `on_behalf_of` of an assistant's messages, for the reads of the stream and of a thread's
+    /// history; without it, every such claim is forged.
+    behalf: Option<Arc<crate::behalf::Checker>>,
     /// The parser for the next read of the stream, None while one is in flight.
     parser: Option<Parser>,
     tail: Option<Tail>,
@@ -216,6 +220,7 @@ impl Feed {
             rereads: tokio::time::interval(REREAD),
             rosters: tokio::time::interval(ROSTER_EVERY),
             keyring: None,
+            behalf: None,
             parser: Some(Parser::default()),
             tail: None,
             tail_wanted: true,
@@ -237,8 +242,15 @@ impl Feed {
 
     /// Open sealed messages between two humans with `keyring`.
     pub fn opening(mut self, keyring: Option<Arc<crate::sealed::Keyring>>) -> Self {
-        self.parser = Some(Parser::opening(keyring.clone()));
+        self.parser = Some(Parser::opening(keyring.clone()).checking(self.behalf.clone()));
         self.keyring = keyring;
+        self
+    }
+
+    /// Check the `on_behalf_of` of an assistant's messages with `behalf`.
+    pub fn checking(mut self, behalf: Arc<crate::behalf::Checker>) -> Self {
+        self.parser = Some(Parser::opening(self.keyring.clone()).checking(Some(behalf.clone())));
+        self.behalf = Some(behalf);
         self
     }
 
@@ -343,10 +355,10 @@ impl Feed {
     /// Read the history of `thread`, dropping any read of another one; with `tools`, with the tool calls its ants
     /// stored on their timelines ([`thread::history`]).
     pub fn load_history(&mut self, thread: ThreadId, tools: bool) {
-        let (js, keyring) = (self.js.clone(), self.keyring.clone());
+        let (js, parser) = (self.js.clone(), Parser::opening(self.keyring.clone()).checking(self.behalf.clone()));
         self.history = Some(
             async move {
-                let read = thread::history(&js, &thread, None, tools, keyring).await;
+                let read = thread::history_with(&js, &thread, None, tools, parser).await;
                 (thread, read)
             }
             .boxed_local(),

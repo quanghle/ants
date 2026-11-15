@@ -411,7 +411,7 @@ pub(crate) async fn react(
         // An ant's credentials write no reactions: `ants signer` makes the change once it found the ant reads the
         // message.
         Role::Ant => {
-            let change = ReactionChange { reaction: reaction.clone(), remove };
+            let change = ReactionChange::new(reaction.clone(), remove);
             match reactions::request(&client, &ReactionsRequest::change(me.clone(), message, change)).await? {
                 Some(ReactionsOutcome::Applied { changed }) => changed,
                 Some(ReactionsOutcome::Unknown) => {
