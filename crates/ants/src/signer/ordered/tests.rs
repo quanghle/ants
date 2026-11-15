@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{AdminOp, AdminOrder, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId, subject};
+use ants_proto::{
+    AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId, subject,
+};
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
 
 use crate::auth::tests::Server;
 use crate::auth::{self, NewDevice, issue_device_with, issue_host};
+use crate::members::{self, EnrollApprover};
 use crate::revoke::Kind;
 use crate::signer::{Options, serve};
 
@@ -41,15 +44,38 @@ async fn ask(
     order: &AdminOrder,
     wait: Duration,
 ) -> Option<EnrollReply> {
+    ask_through(client, creds, None, ant, key, order, wait).await
+}
+
+/// [`ask`], the request carrying the uplink credentials `leaf` of the leaf node of the machine they name, signed with
+/// their key too.
+async fn ask_through(
+    client: &async_nats::Client,
+    creds: &Path,
+    leaf: Option<(&str, &Path)>,
+    ant: &str,
+    key: &KeyPair,
+    order: &AdminOrder,
+    wait: Duration,
+) -> Option<EnrollReply> {
     let (jwt, signer) = auth::read_creds(creds).unwrap();
     let mut replies = client.subscribe(subject::enroll_reply(&p(ant))).await.unwrap();
     let mut request = EnrollRequest::new(p(ant), key.public_key(), "m1");
     request.enrollment = jwt;
     request.order = Some(Box::new(order.clone()));
+    let leaf = leaf.map(|(machine, creds)| {
+        let (jwt, key) = auth::read_creds(creds).unwrap();
+        request.leaf = Some(EnrollLeaf { machine: machine.parse().unwrap(), jwt, signature: String::new() });
+        key
+    });
     let asking = async {
         loop {
             request.sent_at = chrono::Utc::now();
             request.signature = auth::sign(&signer, &request.signed()).unwrap();
+            if let Some(key) = &leaf {
+                let signature = auth::sign(key, &request.signed()).unwrap();
+                request.leaf.as_mut().unwrap().signature = signature;
+            }
             client.publish(request.subject(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
             let reply = tokio::time::timeout(Duration::from_millis(200), replies.next()).await;
             if let Ok(Some(msg)) = reply {
@@ -130,6 +156,68 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
 
         let by_human = order("alice", &admin_creds, "m1", "dev-d", add());
         assert_eq!(ask(&client, &bob_creds, "dev-d", &second, &by_human, IGNORED).await, None, "no machine asks");
+    };
+    tokio::select! {
+        r = serving => panic!("the signer stopped: {r:?}"),
+        () = checks => {}
+    }
+}
+
+/// On a machine running a leaf node, the signer signs an add order's key only for a request carrying the leaf's
+/// uplink credentials, signed with their key too, and renews them to carry the ant, which it keeps among the leaf's
+/// members; it refuses a request carrying none, or another machine's.
+#[tokio::test]
+async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_an_order_adds() {
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let alice = p("alice");
+    let admin_creds = server.dir().join("alice-admin.creds");
+    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let rights = Permissions::for_user(&alice, Role::Human);
+    issue_device_with(&team, &alice, Kind::Human, rights, &admin, &admin_creds).unwrap();
+    let host_creds: PathBuf = server.dir().join("host-m1.creds");
+    let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
+    issue_host(&team, &m1, None, &host_creds).unwrap();
+    let on_leaf = auth::members(&[p("dev-a")], std::slice::from_ref(&alice));
+    let (m1_uplink, m2_uplink) = (server.dir().join("leaf-m1.creds"), server.dir().join("leaf-m2.creds"));
+    auth::issue_leaf(&team, &m1, &on_leaf, &[], EnrollApprover::Without, None, &m1_uplink).unwrap();
+    auth::issue_leaf(&team, &m2, &on_leaf, &[], EnrollApprover::Without, None, &m2_uplink).unwrap();
+    let client = async_nats::ConnectOptions::with_credentials_file(&host_creds)
+        .await
+        .unwrap()
+        .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m1))
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let config = server.dir().join("signer.toml");
+    std::fs::write(&config, "").unwrap();
+    let options =
+        Options { config: &config, approval_timeout: WAIT, reconnect: WAIT * 3, tick: Duration::from_millis(200) };
+    let serving = serve(&server.url, &team, None, &options, |_, _| {}, std::future::pending());
+
+    let checks = async {
+        let key = KeyPair::new_user();
+        let bare = order("alice", &admin_creds, "m1", "dev-c", add());
+        let refused = refusal(ask(&client, &host_creds, "dev-c", &key, &bare, WAIT).await);
+        assert!(refused.contains("m1 runs a leaf node"), "{refused}");
+        let other = order("alice", &admin_creds, "m1", "dev-c", add());
+        let through_m2 = Some(("m2", m2_uplink.as_path()));
+        let refused = refusal(ask_through(&client, &host_creds, through_m2, "dev-c", &key, &other, WAIT).await);
+        assert!(refused.contains("of m2, not of m1"), "{refused}");
+
+        let ok = order("alice", &admin_creds, "m1", "dev-c", add());
+        let through_m1 = Some(("m1", m1_uplink.as_path()));
+        let reply = ask_through(&client, &host_creds, through_m1, "dev-c", &key, &ok, WAIT).await;
+        let Some(EnrollReply::Approved { jwt, leaf_jwt: Some(renewed), .. }) = reply else {
+            panic!("signed with the uplink renewed: {reply:?}")
+        };
+        let (claims, _) = ants_proto::verified_jwt(&jwt).unwrap();
+        assert_eq!((claims.sub, claims.name.as_str()), (key.public_key(), "dev-c"));
+        let (old, _) = auth::read_creds(&m1_uplink).unwrap();
+        assert!(auth::allows_all(&renewed, &old).unwrap() && !auth::allows_all(&old, &renewed).unwrap());
+        let kept = members::issued(&team, &m1).unwrap().unwrap();
+        assert_eq!(kept.ants, [p("dev-a"), p("dev-c")], "a later `ants auth leaf m1` keeps dev-c");
+        assert_eq!(members::issued(&team, &m2).unwrap().unwrap().ants, [p("dev-a")]);
     };
     tokio::select! {
         r = serving => panic!("the signer stopped: {r:?}"),

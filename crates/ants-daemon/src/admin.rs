@@ -11,7 +11,7 @@
 //! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
 //! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +46,8 @@ const PROGRESS: Duration = Duration::from_secs(20);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
+/// How long recording a decided order's outcome is tried before the order is left to be delivered again.
+const RECORD_FOR: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Why every order is refused while the config sets `[admin] remote = false` (requirement: a machine may opt out).
@@ -72,7 +74,38 @@ pub struct Orders {
     pub js_domain: Option<JsDomain>,
     /// The ants the process serves, which restart their harnesses on an order.
     pub restarts: restart::Restarts,
+    /// The machine's leaf node, whose uplink an added ant needs to reach the hub; none on a machine without one.
+    pub leaf: Option<LeafNode>,
 }
+
+/// A machine's leaf node, as an add order needs it: the uplink credentials sign the order's enrollment request with the
+/// host credentials, and the signer's answer renews them to carry the added ant.
+#[derive(Clone)]
+pub struct LeafNode {
+    /// The leaf node's configuration (`leaf.conf`); while it does not exist, the machine runs no leaf node.
+    pub conf: PathBuf,
+    /// The machine name and the path of the uplink credentials the configuration names.
+    pub uplink: fn(&Path) -> Result<(Machine, PathBuf)>,
+    /// Put a renewed uplink JWT into the credentials of the leaf node of the configuration and have the node connect
+    /// its uplink again: what came of it; none when the credentials changed so that the JWT would drop something they
+    /// allow, and were left as they are.
+    pub renew: fn(&Path, &str) -> Result<Option<String>>,
+}
+
+impl std::fmt::Debug for LeafNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafNode").field("conf", &self.conf).finish_non_exhaustive()
+    }
+}
+
+/// Two leaf nodes are the same when their configurations are: a daemon builds its hooks from the same functions.
+impl PartialEq for LeafNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.conf == other.conf
+    }
+}
+
+impl Eq for LeafNode {}
 
 /// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
 /// reload it at once after an edit rather than at its next check of the file.
@@ -183,7 +216,7 @@ async fn handle(
                     Taken::Unreadable(outcome) => *outcome,
                     Taken::Unnamed(_) => unreachable!("handled above"),
                 };
-                let recorded = outcomes.create(&key, serde_json::to_vec(&outcome)?).await?;
+                let recorded = record(outcomes, &key, &outcome).await?;
                 tracing::info!(
                     key,
                     recorded,
@@ -196,6 +229,23 @@ async fn handle(
         }
     }
     bus::double_ack(&js.client(), msg).await
+}
+
+/// Store `outcome` under `key`, trying again for up to [`RECORD_FOR`]: an order delivered again would be decided again,
+/// redoing its effects, while the hub may be out of reach only for a moment, as when the machine's leaf node reconnects
+/// its uplink after an add order renewed it. Whether this stored it, not some earlier try or another daemon.
+async fn record(outcomes: &DirectKv, key: &str, outcome: &AdminOutcome) -> Result<bool> {
+    let value = serde_json::to_vec(outcome)?;
+    let until = tokio::time::Instant::now() + RECORD_FOR;
+    loop {
+        match outcomes.create(key, value.clone()).await {
+            Err(e) if tokio::time::Instant::now() < until => {
+                tracing::debug!(key, error = format!("{e:#}"), "recording an admin order's outcome; trying again");
+                tokio::time::sleep(RETRY_FIRST).await;
+            }
+            recorded => return recorded,
+        }
+    }
 }
 
 /// `work` on the order in `msg`, telling the stream every [`PROGRESS`] that it is in hand, so that an order taking
@@ -299,7 +349,7 @@ async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder, sto
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
-        AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
+        AdminOp::Add { settings } => Box::pin(add::apply(js, orders, order, settings)).await,
         AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),

@@ -348,7 +348,16 @@ pub(crate) mod tests {
         let creds = server.dir().join("host-m1.creds");
         issue_host(&server.dir().join("auth"), &"m1".parse().unwrap(), None, &creds).unwrap();
         let (url, creds) = (server.url.clone(), Some(creds));
-        let host = Host { machine: None, nats: url, creds, js_domain: None, remote_admin: remote, config, restarts };
+        let host = Host {
+            machine: None,
+            nats: url,
+            creds,
+            js_domain: None,
+            remote_admin: remote,
+            config,
+            restarts,
+            leaf: None,
+        };
         let (ants, watched) = tokio::sync::watch::channel(vec![p("dev-a")]);
         let task = tokio::spawn(host::run(host, watched));
         tokio::time::timeout(WAIT, async {
@@ -530,6 +539,7 @@ pub(crate) mod tests {
             remote_admin: true,
             config: None,
             restarts: Restarts::default(),
+            leaf: None,
         };
         let (ants, watched) = tokio::sync::watch::channel(vec![dev_a.clone()]);
         let task = tokio::spawn(host::run(host, watched));
