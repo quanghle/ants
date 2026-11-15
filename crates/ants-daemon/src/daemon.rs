@@ -2033,12 +2033,9 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
-        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
-            message.title = mcp.take_title(thread);
-        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
@@ -2101,8 +2098,8 @@ impl Inbox<'_> {
         Err(e)
     }
 
-    /// The reply carrying `text`, the answer to `incoming`: `None` when the answer went up the chain or nowhere instead,
-    /// and the message is done with.
+    /// The reply carrying `text`, the answer to `incoming`, and the title the turn suggested for the thread, whatever
+    /// kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is done with.
     async fn reply_for(
         &self,
         incoming: &Incoming,
@@ -2114,7 +2111,8 @@ impl Inbox<'_> {
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        Ok(Some(match (&incoming.post, read) {
+        let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
+        let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
                 let humans = self.humans.humans();
@@ -2163,7 +2161,7 @@ impl Inbox<'_> {
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
                         let (store, budget) = (self.notes, envelope.turn_budget);
-                        match notes::spend(store, thread, self.ant, &reply.text, budget).await? {
+                        match notes::spend(store, thread, self.ant, &reply.text, budget, title.clone()).await? {
                             Some(post) => Reply::Notes(post),
                             None => {
                                 let why = "Thread notes out of turns before the answer was posted";
@@ -2182,6 +2180,12 @@ impl Inbox<'_> {
                     }
                 }
             }
+        };
+        Ok(Some(match reply {
+            Reply::Message(message) => Reply::Message(Envelope { title, ..message }),
+            Reply::Post(post) => Reply::Post(ChannelPost { title, ..post }),
+            // Posted with the title already.
+            Reply::Notes(post) => Reply::Notes(post),
         }))
     }
 

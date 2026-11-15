@@ -283,6 +283,10 @@ pub struct NotesPost {
     pub text: String,
     /// Turns left in the notes after this post.
     pub turn_budget: u32,
+    /// The title the posting ant suggests for the thread, as [`Envelope::title`]: an ant's reply posted to the notes
+    /// carries the one its MCP tool suggest_thread_title took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -295,6 +299,7 @@ impl NotesPost {
             from,
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
+            title: None,
             sent_at: Utc::now(),
         }
     }
