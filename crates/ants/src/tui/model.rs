@@ -57,7 +57,8 @@ pub enum Action {
     MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
-    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence.
+    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence;
+    /// marking it done marks the human's inbox messages on it read too.
     Change(ThreadId, Change, u64),
     /// Copy the text to the terminal's clipboard.
     Copy(String),

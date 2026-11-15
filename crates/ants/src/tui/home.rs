@@ -2,7 +2,6 @@
 //! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
 //! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
-//! Humans' messages (ants-ofmi.26) are to join the reasons.
 
 use ants_proto::{ApprovalRequest, Question, ThreadId, Verdict};
 use chrono::{DateTime, Utc};
@@ -32,6 +31,8 @@ pub enum Why {
     Question,
     /// Escalated to a human, or a message given up on.
     Stuck,
+    /// An unread message from another human.
+    Message,
     /// An unread post @mentioning the human.
     Mention,
     /// An ant answered on a thread the human owns.
@@ -44,6 +45,7 @@ impl Why {
             Self::Approval => "approve",
             Self::Question => "question",
             Self::Stuck => "stuck",
+            Self::Message => "message",
             Self::Mention => "mention",
             Self::Finished => "finished",
         }
@@ -55,7 +57,7 @@ impl Why {
             Self::Approval => "a A r answer · z snooze",
             Self::Question => "1-9 answer · d done · z snooze",
             Self::Stuck => "g grant · x cancel · d done · z snooze",
-            Self::Mention => "r reply · d done · z snooze",
+            Self::Message | Self::Mention => "r reply · d done · z snooze",
             Self::Finished => "f follow up · d mark done · z snooze",
         }
     }
@@ -65,7 +67,7 @@ impl Why {
         match self {
             Self::Approval => "Enter details",
             Self::Finished => "Enter review",
-            Self::Question | Self::Stuck | Self::Mention => "Enter open",
+            Self::Question | Self::Stuck | Self::Message | Self::Mention => "Enter open",
         }
     }
 
@@ -74,6 +76,7 @@ impl Why {
             Self::Approval => Color::Yellow,
             Self::Question => Color::Cyan,
             Self::Stuck => Color::Red,
+            Self::Message => Color::Blue,
             Self::Mention => Color::Magenta,
             Self::Finished => Color::Green,
         }
@@ -124,6 +127,12 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
         }
         if let Some(alert) = data.stuck(thread) {
             items.push(item(Why::Stuck, thread, alert.at, alert.text.clone()));
+        }
+        let me = data.me();
+        if let Some(m) =
+            data.unread_on(thread).find(|i| i.kind == Kind::Message && i.from != *me && data.is_human(&i.from))
+        {
+            items.push(item(Why::Message, thread, m.at, format!("{}: {}", m.from, m.text)));
         }
         if let Some(m) = data.unread_on(thread).find(|i| i.kind == Kind::Mention) {
             let text = format!("{} in #{}: {}", m.from, m.channel.as_ref().map_or("?", |c| c.as_str()), m.text);
@@ -424,5 +433,36 @@ mod tests {
         m.key(Key::End, at(8));
         assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
         assert!(m.bar.focused, "the bar open to follow up on the thread");
+    }
+
+    #[test]
+    fn an_unread_message_from_another_human_is_a_home_item_after_stuck_ones() {
+        let (asked, stuck, ants) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        m.stored(
+            vec![
+                message(1, &asked, "bob", "alice", "lunch?"),
+                message(2, &stuck, "alice", "dev-b", "review"),
+                escalation(3, &stuck, "dev-b", "alice"),
+                message(4, &ants, "dev-a", "alice", "fyi"),
+                message(5, &asked, "alice", "alice", "note to self"),
+            ],
+            at(5),
+        );
+        let found: Vec<(Why, ThreadId, String)> =
+            items(&m.data, at(6)).into_iter().map(|i| (i.why, i.thread, i.text)).collect();
+        assert_eq!(found[1..], [(Why::Message, asked.clone(), "bob: lunch?".to_owned())]);
+        assert_eq!(found[0].0, Why::Stuck);
+        let screen = shown(&m, at(6));
+        assert!(screen.contains("message"), "{screen}");
+        assert!(screen.contains("r reply · d done · z snooze · Enter open"), "{screen}");
+
+        m.key(Key::End, at(6));
+        let last = m.data.live.summary(&asked).unwrap().last_reopening;
+        assert_eq!(m.key(Key::Char('d'), at(6)), Some(Action::Change(asked.clone(), Change::Done(true), last)));
+        assert_eq!(m.key(Key::Enter, at(6)), Some(Action::Open(asked)));
+        m.key(Key::Esc, at(6));
+        m.data.marker = Some(ants_proto::ReadMarker { below: 0, read: [1].into() });
+        assert_eq!(items(&m.data, at(6)).len(), 1, "read, it leaves home");
     }
 }

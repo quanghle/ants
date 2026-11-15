@@ -157,7 +157,7 @@ fn exercise_daemon(custom_tools: bool) {
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(
         status["home"],
-        serde_json::json!({"approve": 0, "question": 0, "stuck": 0, "mention": 0, "finished": 1})
+        serde_json::json!({"approve": 0, "question": 0, "stuck": 0, "message": 0, "mention": 0, "finished": 1})
     );
     assert!(status["working"].is_array() && status["spend_today"].is_number(), "{status}");
     let tmux = run(ants(&["status", "--tmux"]));

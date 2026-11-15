@@ -346,7 +346,12 @@ impl Chat {
                 self.feed.load_history(thread.clone(), true);
                 self.reads.mark_read(thread);
             }
-            Action::Change(thread, change, last) => self.acts.change(thread, change, last),
+            Action::Change(thread, change, last) => {
+                if change == acts::Change::Done(true) {
+                    self.reads.mark_read(thread.clone());
+                }
+                self.acts.change(thread, change, last);
+            }
             Action::Copy(text) => {
                 let copied =
                     std::io::stdout().write_all(osc52(&text).as_bytes()).and_then(|()| std::io::stdout().flush());
