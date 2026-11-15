@@ -29,6 +29,7 @@ mod presence;
 mod progress;
 mod queue;
 mod quiet;
+mod reacted;
 mod reload;
 mod renew;
 mod retire;

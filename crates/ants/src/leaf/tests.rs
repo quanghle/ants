@@ -372,6 +372,82 @@ async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
 
     reconnect_uplink(&conf, |_| Outcome::NotRunning).unwrap();
     assert_eq!(fs::read_to_string(&conf).unwrap(), before, "two respellings give the path back");
+
+    let said = use_renewed_uplink(&conf, |action| {
+        assert_eq!(action, Action::Reload, "nats-server before 2.14?");
+        assert!(hup());
+        Outcome::Done("kill -HUP".to_owned())
+    });
+    assert!(said.contains("reloaded to connect its uplink again"), "{said}");
+    assert_ne!(fs::read_to_string(&conf).unwrap(), before, "the path respelled");
+    assert!(reaches_hub_stream(&a_js, &dev_a, true).await, "dev-a lost the hub stream");
+    assert!(closed.try_recv().is_err(), "a local connection was closed");
+}
+
+/// A leaf node listening at a free port, in a configuration naming the credentials `creds`, answering connections
+/// with an `INFO` of `version` when given one.
+fn leaf_saying(version: Option<&str>, creds: &str) -> PathBuf {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = listener.local_addr().unwrap().to_string();
+    match version {
+        Some(version) => {
+            let info = format!("INFO {{\"server_id\":\"N\",\"version\":\"{version}\",\"max_payload\":1048576}}\r\n");
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let _ = std::io::Write::write_all(&mut stream.unwrap(), info.as_bytes());
+                }
+            });
+        }
+        None => drop(listener),
+    }
+    let conf = scratch_dir("leaf-saying").join("leaf.conf");
+    let text = format!(
+        "server_name: \"m1\"\nlisten: {}\nleafnodes {{\n  remotes: [\n    {{\n      credentials: {}\n    }}\n  ]\n}}\n",
+        quote(&listen),
+        quote(creds)
+    );
+    fs::write(&conf, text).unwrap();
+    conf
+}
+
+#[test]
+fn renewed_uplink_credentials_take_a_restart_before_nats_server_2_14() {
+    let creds = "/home/me/.config/ants/auth/leaf-m1.creds";
+    let respelled = "/home/me/.config/ants/auth/./leaf-m1.creds";
+    for (version, action) in [
+        (Some("2.14.0"), Action::Reload),
+        (Some("2.16.1-RC.2"), Action::Reload),
+        (Some("2.12.6"), Action::Restart),
+        (Some("unknown"), Action::Restart),
+        (None, Action::Restart),
+    ] {
+        let conf = leaf_saying(version, creds);
+        let said = use_renewed_uplink(&conf, |taken| {
+            assert_eq!(taken, action, "{version:?}");
+            Outcome::Done(format!("{taken:?}"))
+        });
+        let uplink = read_uplink(&conf).unwrap().1;
+        if action == Action::Reload {
+            assert!(said.starts_with("the leaf node reloaded to connect its uplink again"), "{said}");
+            assert_eq!(uplink, Path::new(respelled), "{version:?}");
+        } else {
+            assert_eq!(
+                said,
+                "leaf node restarted to use the renewed uplink credentials (Restart); a reload connects the uplink \
+                 again alone only with nats-server 2.14 and later"
+            );
+            assert_eq!(uplink, Path::new(creds), "{version:?}");
+        }
+        let _ = fs::remove_dir_all(conf.parent().unwrap());
+    }
+
+    let conf = leaf_saying(Some("2.10.0"), creds);
+    let by_hand = use_renewed_uplink(&conf, |_| Outcome::Unmanaged);
+    assert!(by_hand.starts_with("restart the leaf node to use the renewed uplink credentials ("), "{by_hand}");
+    assert!(by_hand.contains("ants.nats") || by_hand.contains("ants-nats"), "{by_hand}");
+    let stopped = use_renewed_uplink(&conf, |_| Outcome::NotRunning);
+    assert!(stopped.starts_with("the leaf node service is not running"), "{stopped}");
+    let _ = fs::remove_dir_all(conf.parent().unwrap());
 }
 
 #[test]

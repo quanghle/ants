@@ -1,4 +1,5 @@
-//! `ants dash`: an interactive terminal dashboard of the recent threads and their history, the ants' live progress and
+//! `ants dash`: an interactive terminal dashboard of the recent threads (but for those the human archived, by hand
+//! or for having been idle) and their history, the ants' live progress and
 //! the roster, and the pending tool requests, answered as `ants tools approve` and `reject` do. It reads with the
 //! CLI's own connection, as `ants thread`, `ants watch` and `ants tools list --follow` do, and keeps no service.
 
@@ -10,7 +11,9 @@ use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
 use ants_daemon::reading::{self, Reading};
-use ants_proto::{ApprovalRequest, Following, RosterEntry, STREAM, StatusEvent, ThreadId, UserId, Verdict, subject};
+use ants_proto::{
+    ApprovalRequest, Following, RosterEntry, STREAM, StatusEvent, ThreadId, ThreadMarks, UserId, Verdict, subject,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::connection::State as Connection;
 use async_nats::jetstream::{self, consumer};
@@ -22,7 +25,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 
 use self::model::{Action, Key, Level, Model};
 use crate::thread::{self, Entry, Parser};
-use crate::{presence, progress, roster, tools};
+use crate::{presence, progress, roster, thread_meta, tools};
 
 /// How often keys are read and the screen redrawn when something changed.
 const TICK: Duration = Duration::from_millis(50);
@@ -52,11 +55,19 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     if !nats.me.role.is_human() {
         bail!("the credentials of {me} are an ant's; `ants dash` shows what a human reads and answers");
     }
+    let auto_archive = crate::defaults::auto_archive()?;
     let (client, js) = nats.connect("ants-dash").await?;
+    let marks = async { thread_meta::open(nats, &js).await?.marks().await };
+    let marks = marks.await.unwrap_or_else(|e| {
+        tracing::warn!("not leaving archived threads out: {e:#}");
+        ThreadMarks::default()
+    });
     // The dashboard shows the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Dash::new(client, js.clone(), Model::new(me.clone(), since)).run(&mut screen.terminal)).await
+        let mut model = Model::new(me.clone(), since);
+        (model.marks, model.auto_archive) = (marks, auto_archive);
+        Box::pin(Dash::new(client, js.clone(), model).run(&mut screen.terminal)).await
     };
     Box::pin(presence::while_following(&js, nats.domain, me, nats.device.id, Following::Approvals, shown)).await
 }

@@ -96,6 +96,9 @@ pub struct Setup {
     pub config: PathBuf,
     /// The leaf node configuration of `ants leaf config`.
     pub leaf_config: PathBuf,
+    /// The local hub's nats-server configuration of `ants setup`, whose service is checked when it is there and the
+    /// leaf node configuration is not.
+    pub hub_config: PathBuf,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
     /// The team directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
@@ -917,7 +920,8 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     check_creds(&check, path, &finding, now)
 }
 
-/// A warning for each ant whose threads run at once in one git work tree, where they may clobber each other's edits.
+/// A warning for each ant whose threads run at once in one git work tree, worktrees turned off, where they may
+/// clobber each other's edits.
 fn check_shared_workdirs(ants: &[Ant], config: &Path) -> Vec<Check> {
     ants.iter()
         .filter(|ant| ants_daemon::worktrees::shares_git_workdir(&ant.workdir, ant.max_harnesses, ant.worktrees))
@@ -1162,15 +1166,18 @@ async fn check_outbox(
     }
 }
 
-/// The daemon service of the config file and the nats-server service of the leaf node configuration, as
-/// scripts/install-units.sh installs them.
+/// The daemon service of the config file, the nats-server service of the leaf node configuration, and that of the
+/// local hub's configuration when there is no leaf node one, as scripts/install-units.sh installs them.
 fn check_services(setup: &Setup, services: &mut Services) -> Vec<Check> {
     let daemon = ("daemon service", Service::Daemon, &setup.config, "--config");
     let nats = ("leaf node service", Service::Nats, &setup.leaf_config, "--nats-conf");
+    // `ants setup` runs a local hub only on a machine with no leaf node, from the same unit.
+    let hub = ("hub service", Service::Nats, &setup.hub_config, "--nats-conf");
+    let hub = (setup.hub_config.exists() && !setup.leaf_config.exists()).then_some(hub);
     // Only a machine with the webhooks' config file serves them.
     let webhook = ("webhook service", Service::Webhook, &setup.webhooks, "--webhook --webhook-config");
     let webhook = setup.webhooks.exists().then_some(webhook);
-    [Some(daemon), Some(nats), webhook]
+    [Some(daemon), Some(nats), hub, webhook]
         .into_iter()
         .flatten()
         .map(|(check, service, file, flag)| {

@@ -23,7 +23,8 @@ expression: value
     "other:ask_ant",
     "other:route",
     "other:escalate",
-    "other:react"
+    "other:react",
+    "other:suggest_thread_title"
   ],
   "sent_at": "2025-01-01T12:00:00Z"
 }

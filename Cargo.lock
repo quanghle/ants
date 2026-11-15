@@ -173,6 +173,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
+ "libc",
  "nkeys",
  "rmcp",
  "security-framework",

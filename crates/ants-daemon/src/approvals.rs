@@ -31,6 +31,9 @@
 //! consumer, which delivers it again later, acks it without prompting ([`NatsApprover::offer`]). The first decision
 //! wins: a member's, unless a human's is stored by the time the member's arrives. The escalation does not climb further
 //! nor wait in `ants_sessions`: the request has its own time limit, and only the ant's own chain may decide it.
+//!
+//! However a request is settled, by a human, an ant of the chain or its expiry, the ant tells it on the thread's status
+//! as a `decided` update before it goes on: observers, which read no inbox, learn of a member's decision that way.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -39,8 +42,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ApprovalDecision, ApprovalRequest, Envelope, Escalation, Hop, STREAM, State, ThreadId, ToolCall, UserId, Uuid,
-    Verdict,
+    ApprovalDecision, ApprovalRequest, DecidedBy, Envelope, Escalation, Hop, STREAM, State, StatusUpdate, ThreadId,
+    ToolCall, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
@@ -226,6 +229,17 @@ impl NatsApprover {
         }
     }
 
+    async fn store(&self, request: &ApprovalRequest) -> Result<()> {
+        self.js
+            .publish(request.subject(), serde_json::to_vec(request)?.into())
+            .await
+            .context("publishing the approval request")?
+            .await
+            .context("waiting for JetStream to store the approval request")?;
+        tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
+        Ok(())
+    }
+
     async fn ask(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> Result<Verdict> {
         let human = {
             let answering = self.answering.locked();
@@ -246,17 +260,12 @@ impl NatsApprover {
         let _pending = DropGuard::new(request.id, |id| {
             self.waiting.locked().remove(&id);
         });
-        self.js
-            .publish(request.subject(), serde_json::to_vec(&request)?.into())
-            .await
-            .context("publishing the approval request")?
-            .await
-            .context("waiting for JetStream to store the approval request")?;
-        tracing::info!(request = %request.id, thread = %request.thread_id, title = %request.tool.title, "waiting for approval");
+        self.store(&request).await?;
         let asked = self.ask_chain_logged(&request).await;
-        let waits = ants_proto::StatusUpdate::Approval { request_id: request.id };
+        let waits = StatusUpdate::Approval { request_id: request.id };
         crate::status::publish(&self.client, &self.ant, &request.thread_id, waits);
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::WaitingApproval);
+        // The verdict, who gave it, and the ant of the chain that did; None once nothing more can be heard.
         let wait = async {
             // The first decision heard for the request, acted on only if the stream cannot be asked.
             let mut heard: Option<ApprovalDecision> = None;
@@ -293,13 +302,13 @@ impl NatsApprover {
                         };
                         if let Some(human) = human {
                             self.tell_decided(&request, &human).await;
-                            return request.decide(human.verdict).verdict;
+                            return Some((request.decide(human.verdict).verdict, DecidedBy::Human, human.by));
                         }
                         let verdict = decision.verdict.as_str();
                         tracing::info!(request = %request.id, %from, verdict, "decided by the ant's chain");
-                        return decision.verdict;
+                        return Some((decision.verdict, DecidedBy::Chain, Some(from)));
                     }
-                    Heard::Closed => return Verdict::Reject,
+                    Heard::Closed => return None,
                     Heard::Nothing => {}
                 }
                 let Some(first) = &heard else { continue };
@@ -318,17 +327,22 @@ impl NatsApprover {
                 };
                 self.tell_decided(&request, &decision).await;
                 // A verdict the harness did not offer counts as a rejection.
-                return request.decide(decision.verdict).verdict;
+                return Some((request.decide(decision.verdict).verdict, DecidedBy::Human, decision.by));
             }
         };
-        let verdict = match tokio::time::timeout(self.timeout, wait).await {
-            Ok(verdict) => verdict,
+        let decided = match tokio::time::timeout(self.timeout, wait).await {
+            Ok(decided) => decided,
             Err(_) => {
                 tracing::info!(request = %request.id, "approval request expired; rejecting");
                 self.tell_expired(&request, &asked).await;
-                Verdict::Reject
+                Some((Verdict::Reject, DecidedBy::Expiry, None))
             }
         };
+        let verdict = decided.as_ref().map_or(Verdict::Reject, |(verdict, ..)| *verdict);
+        if let Some((verdict, by, decider)) = decided {
+            let decided = StatusUpdate::Decided { request_id: request.id, verdict, by, decider };
+            crate::status::publish(&self.client, &self.ant, &request.thread_id, decided);
+        }
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
     }

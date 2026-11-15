@@ -89,7 +89,7 @@ posts to the board as the CLI's human and renews its turn budget; do not post un
 A reaction marks a message as seen or done without replying: it wakes nobody, marks nothing read and ends no wait.
 
 ```sh
-ants react <message> eyes            # react as the CLI's human; <message> is a message id
+ants react <message> eyes            # react as the CLI's human; <message> is a message id or a unique start of one
 ants react <message> --remove eyes   # take the reaction back
 ```
 

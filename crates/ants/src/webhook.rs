@@ -5,8 +5,9 @@
 //! `ants auth user NAME --webhook --to ANT` or `--channel CHANNEL` ([`ants_proto::Permissions::for_webhook`]), or
 //! with its entry and secret from `ants webhook add` ([`crate::webhook_add`]): it sends as itself, to its destination
 //! only. `POST <path>/<name>` with the event:
-//! - is authenticated before anything else: an HMAC-SHA256 signature of the body, a bearer token, or a token in a
-//!   named header (401);
+//! - is authenticated before anything else: an HMAC-SHA256 signature of the body, a bearer token, a token in a
+//!   named header, or a [Standard Webhooks](https://www.standardwebhooks.com) signature with a recent timestamp
+//!   (401);
 //! - is identified by an id from a header, a JSON field or the body's hash; an event already delivered answers
 //!   200 with `"duplicate": true` and delivers nothing ([`WEBHOOKS_BUCKET`], and the stream's `Nats-Msg-Id`);
 //! - becomes the text of a message to the ant, or of a channel post, on a new thread, with the mentions the config
@@ -24,7 +25,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::metrics::{self, Exposition, Kind};
@@ -38,7 +39,7 @@ use ants_proto::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::stream::DirectGetErrorKind;
-use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
+use data_encoding::{BASE64, HEXLOWER, HEXLOWER_PERMISSIVE};
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, header};
@@ -57,6 +58,13 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:8424";
 const DEFAULT_PATH: &str = "/hooks";
 const DEFAULT_TEXT: &str = "[webhook {webhook}] {id}\n\n{body}";
 const DEFAULT_SIGNATURE_HEADER: &str = "x-hub-signature-256";
+/// How far a Standard Webhooks timestamp may be from now, unless the entry's `tolerance` says otherwise.
+const DEFAULT_TOLERANCE: Duration = Duration::from_mins(5);
+/// The longest `tolerance`, well within the 7 days an event's id is remembered.
+const MAX_TOLERANCE: Duration = Duration::from_hours(24);
+const WEBHOOK_ID: HeaderName = HeaderName::from_static("webhook-id");
+const WEBHOOK_TIMESTAMP: HeaderName = HeaderName::from_static("webhook-timestamp");
+const WEBHOOK_SIGNATURE: HeaderName = HeaderName::from_static("webhook-signature");
 /// Largest body taken: the message must stay under the NATS payload limit once JSON-escaped.
 const MAX_BODY: usize = 256 * 1024;
 /// Most of a refused body read, and dropped, before answering.
@@ -123,6 +131,7 @@ struct Entry {
     secret_file: Option<PathBuf>,
     signature_header: Option<String>,
     token_header: Option<String>,
+    tolerance: Option<String>,
     id: Option<String>,
     ant: Option<UserId>,
     channel: Option<ChannelId>,
@@ -140,6 +149,7 @@ enum AuthKind {
     HmacSha256,
     Bearer,
     Token,
+    StandardWebhooks,
 }
 
 /// The config file of `ants webhook serve`, checked.
@@ -181,6 +191,10 @@ enum Auth {
     Bearer(String),
     /// The token alone in the header, such as GitLab's `X-Gitlab-Token`.
     Token { secret: String, header: HeaderName },
+    /// [Standard Webhooks](https://www.standardwebhooks.com), such as GitLab's signing token: `webhook-signature`
+    /// lists `v1,<base64>` HMAC-SHA256 signatures of `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the
+    /// secret's base64 after `whsec_`, one of which must match, and the timestamp is within `tolerance` of now.
+    Standard { key: Vec<u8>, tolerance: Duration },
 }
 
 #[derive(Debug, PartialEq)]
@@ -395,6 +409,9 @@ impl Webhook {
         if entry.token_header.is_some() && !matches!(entry.auth, AuthKind::Token) {
             bail!("token_header goes with auth = \"token\" only");
         }
+        if entry.tolerance.is_some() && !matches!(entry.auth, AuthKind::StandardWebhooks) {
+            bail!("tolerance goes with auth = \"standard-webhooks\" only");
+        }
         let auth = match entry.auth {
             AuthKind::HmacSha256 => {
                 let header = entry.signature_header.as_deref().unwrap_or(DEFAULT_SIGNATURE_HEADER);
@@ -409,8 +426,22 @@ impl Webhook {
                     HeaderName::from_bytes(header.as_bytes()).with_context(|| format!("token_header {header:?}"))?;
                 Auth::Token { secret, header }
             }
+            AuthKind::StandardWebhooks => {
+                let tolerance = match entry.tolerance.as_deref() {
+                    None => DEFAULT_TOLERANCE,
+                    Some(text) => {
+                        let tolerance = ants_proto::duration::parse(text).map_err(|e| anyhow!(e))?;
+                        if tolerance.is_zero() || tolerance > MAX_TOLERANCE {
+                            bail!("tolerance {text:?}: from 1s to {}", ants_proto::duration::format(MAX_TOLERANCE));
+                        }
+                        tolerance
+                    }
+                };
+                Auth::Standard { key: signing_key(&secret)?, tolerance }
+            }
         };
         let id = match entry.id.as_deref() {
+            None if matches!(auth, Auth::Standard { .. }) => IdSource::Header(WEBHOOK_ID),
             None | Some("body-sha256") => IdSource::BodySha256,
             Some(id) => match placeholder(id)? {
                 Piece::Header(name) => IdSource::Header(name),
@@ -469,6 +500,15 @@ pub(crate) fn check_creds(kind: &str, name: &UserId, path: Option<&Path>, destin
         return Err(issue("do not allow this destination"));
     }
     Ok(())
+}
+
+/// The HMAC key of a Standard Webhooks signing secret: its base64, after `whsec_`.
+pub(crate) fn signing_key(secret: &str) -> Result<Vec<u8>> {
+    let encoded = secret.strip_prefix("whsec_").unwrap_or(secret);
+    match BASE64.decode(encoded.as_bytes()) {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => bail!("the secret is no Standard Webhooks signing secret: whsec_ and base64"),
+    }
 }
 
 pub(crate) fn read_secret(path: &Path) -> Result<String> {
@@ -578,6 +618,11 @@ impl Webhook {
                 .get(header)
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|given| crate::bridge::same(given.trim().as_bytes(), secret.as_bytes())),
+            Auth::Standard { tolerance, .. } => {
+                headers.get(WEBHOOK_ID).is_some_and(|id| !id.is_empty())
+                    && headers.contains_key(WEBHOOK_SIGNATURE)
+                    && recent(headers, *tolerance, SystemTime::now())
+            }
         }
     }
 
@@ -592,6 +637,23 @@ impl Webhook {
                     .map(|v| v.strip_prefix("sha256=").unwrap_or(v))
                     .and_then(|hex| HEXLOWER_PERMISSIVE.decode(hex.as_bytes()).ok());
                 signature.is_some_and(|signature| hmac::verify(&key, body, &signature).is_ok())
+            }
+            Auth::Standard { key, .. } => {
+                let (Some(id), Some(timestamp), Some(signatures)) =
+                    (headers.get(WEBHOOK_ID), headers.get(WEBHOOK_TIMESTAMP), headers.get(WEBHOOK_SIGNATURE))
+                else {
+                    return false;
+                };
+                let mut signed = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, key));
+                for part in [id.as_bytes(), b".", timestamp.as_bytes(), b".", body] {
+                    signed.update(part);
+                }
+                let expected = signed.sign();
+                String::from_utf8_lossy(signatures.as_bytes())
+                    .split_ascii_whitespace()
+                    .filter_map(|signature| signature.strip_prefix("v1,"))
+                    .filter_map(|signature| BASE64.decode(signature.as_bytes()).ok())
+                    .any(|signature| crate::bridge::same(&signature, expected.as_ref()))
             }
             Auth::Bearer(_) | Auth::Token { .. } => true,
         }
@@ -635,6 +697,15 @@ impl Webhook {
         let hash = HEXLOWER.encode(digest::digest(&digest::SHA256, id.as_bytes()).as_ref())[..ID_HASH_LEN].to_owned();
         Ok(Event { hash, text })
     }
+}
+
+/// Whether `webhook-timestamp`, in Unix seconds, is within `tolerance` of `now`, before or after it.
+fn recent(headers: &HeaderMap, tolerance: Duration, now: SystemTime) -> bool {
+    let Some(timestamp) = headers.get(WEBHOOK_TIMESTAMP).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()) else {
+        return false;
+    };
+    let now = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+    timestamp.abs_diff(now) <= tolerance.as_secs()
 }
 
 fn header_text(headers: &HeaderMap, name: &HeaderName) -> String {
@@ -1176,7 +1247,11 @@ impl Hook {
             Some(Refusal(StatusCode::METHOD_NOT_ALLOWED, "webhooks take POST only".to_owned()))
         } else if !self.config.authorized_before_body(&parts.headers) {
             self.warn_rejected();
-            Some(Refusal(StatusCode::UNAUTHORIZED, "missing or wrong token".to_owned()))
+            let why = match self.config.auth {
+                Auth::Standard { .. } => "missing webhook-id or webhook-signature, or no recent webhook-timestamp",
+                _ => "missing or wrong token",
+            };
+            Some(Refusal(StatusCode::UNAUTHORIZED, why.to_owned()))
         } else {
             None
         };

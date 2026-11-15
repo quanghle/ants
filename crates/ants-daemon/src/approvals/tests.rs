@@ -14,6 +14,21 @@ async fn subscribed(js: &jetstream::Context) {
     js.get_stream(ants_proto::STREAM).await.unwrap();
 }
 
+/// The next `decided` update heard on `statuses`, after which the ant goes on working: its verdict, who gave it and
+/// the deciding ant.
+async fn decided_update(statuses: &mut async_nats::Subscriber) -> (Verdict, DecidedBy, Option<UserId>) {
+    let mut next = async || {
+        let msg = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
+        serde_json::from_slice::<ants_proto::StatusEvent>(&msg.payload).unwrap().update
+    };
+    loop {
+        if let StatusUpdate::Decided { verdict, by, decider, .. } = next().await {
+            assert_eq!(next().await, StatusUpdate::State { state: State::Working });
+            return (verdict, by, decider);
+        }
+    }
+}
+
 fn tool() -> ToolCall {
     ToolCall { kind: "execute".into(), title: "git push".into(), ..Default::default() }
 }
@@ -46,9 +61,11 @@ async fn the_human_decides_and_silence_rejects() {
         assert_eq!(status.update, expected);
     }
 
-    let decision = request.decide(Verdict::AllowAlways);
+    let decision = request.decide(Verdict::AllowAlways).by(Some(UserId::human()));
     human_js.publish(decision.subject(), serde_json::to_vec(&decision).unwrap().into()).await.unwrap().await.unwrap();
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
+    let told = (Verdict::AllowAlways, DecidedBy::Human, Some(UserId::human()));
+    assert_eq!(decided_update(&mut statuses).await, told, "the human the decision names");
 
     // Both the request and the decision stay in the stream for a late `ants tools list`.
     assert_eq!(stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap().sequence, 1);
@@ -61,6 +78,7 @@ async fn the_human_decides_and_silence_rejects() {
     let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
     let turn = impatient.begin(&asked);
     assert_eq!(impatient.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]).await, Verdict::Reject);
+    assert_eq!(decided_update(&mut statuses).await, (Verdict::Reject, DecidedBy::Expiry, None));
     let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
     assert_eq!((&told.from, &told.owner), (&ant, &Some(alice.clone())));
@@ -221,6 +239,7 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     let mut asked = human.subscribe(subject::inbox_of(&lead)).await.unwrap();
+    let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
 
     let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
@@ -252,6 +271,8 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     let lead_says = decide(&lead, request.decide(Verdict::AllowOnce));
     send(&human_js, lead_says.subject(), &lead_says).await;
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+    let told = decided_update(&mut statuses).await;
+    assert_eq!(told, (Verdict::AllowOnce, DecidedBy::Chain, Some(lead.clone())), "observers learn who decided");
     assert!(approver.waiting.locked().is_empty(), "nothing waits once decided");
     approver.offer(&lead_says);
 }
@@ -299,6 +320,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
     bus::ensure_stream(&js).await.unwrap();
     let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
     let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
@@ -312,6 +334,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
     approver.offer(&Envelope::decision(thread.clone(), "dev-c".parse().unwrap(), request.decide(Verdict::AllowAlways)));
     approver.offer(&decide(&request, Verdict::AllowOnce));
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+    assert_eq!(decided_update(&mut statuses).await, (Verdict::AllowOnce, DecidedBy::Chain, Some(lead.clone())));
     let late = request.decide(Verdict::Reject);
     human_js.publish(late.subject(), serde_json::to_vec(&late).unwrap().into()).await.unwrap().await.unwrap();
 
@@ -336,4 +359,6 @@ async fn the_first_decision_wins_whoever_makes_it() {
     .unwrap();
     approver.offer(&decide(&request, Verdict::AllowOnce));
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
+    let told = decided_update(&mut statuses).await;
+    assert_eq!(told, (Verdict::AllowAlways, DecidedBy::Human, None), "the human's, though the lead's came with it");
 }
