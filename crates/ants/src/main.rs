@@ -107,6 +107,7 @@ async fn run() -> Result<()> {
         Command::Channel(command) => cmd::channel::run(&nats()?, command).await,
         Command::Notes { thread, text } => send::thread_notes(&nats()?, thread, text).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
+        Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,

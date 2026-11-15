@@ -101,6 +101,48 @@ fn a_message_on_another_sender_s_subject_is_marked_forged() {
 }
 
 #[test]
+fn a_question_shows_its_options_and_the_valid_answers_to_it() {
+    let alice = p("alice");
+    let options = ["yes".to_owned(), "not yet".to_owned()];
+    let question = ants_proto::Question::new("Ship it?", &options, true).unwrap();
+    let asked = Envelope::asking(t("t1"), p("dev-a"), alice.clone(), question.clone());
+    let answer = |choice| Envelope::answering(&asked, alice.clone(), choice).unwrap();
+    let picked = answer(ants_proto::Choice::Option(2));
+    let typed = answer(ants_proto::Choice::Typed("after lunch".to_owned()));
+    let mut wrong = answer(ants_proto::Choice::Option(1));
+    wrong.answer.as_mut().unwrap().option = Some(3);
+    let forged = answer(ants_proto::Choice::Option(1));
+    let read = entries(&[
+        (asked.subject(), json(&asked)),
+        (picked.subject(), json(&picked)),
+        (typed.subject(), json(&typed)),
+        (wrong.subject(), json(&wrong)),
+        ("ants.inbox.dev-a.mallory".to_owned(), json(&forged)),
+    ]);
+    assert_eq!(read[0].question.as_ref(), Some(&question));
+    assert_eq!(read[1].answers(&read[0]), Some(Answered::Option(2, "not yet")));
+    assert_eq!(read[2].answers(&read[0]), Some(Answered::Typed));
+    assert_eq!((&read[3].answer, &read[4].answer), (&None, &None), "invalid or forged: ordinary messages");
+    let by: Vec<Uuid> = answers_to(&read[0], &read).filter_map(|(e, _)| e.id).collect();
+    assert_eq!(by, [picked.id, typed.id]);
+
+    let shown = render(&read);
+    assert!(shown.contains(&format!("dev-a -> alice (message {}): Ship it?\n", asked.id)), "{shown}");
+    assert!(shown.contains("\n    1. yes\n    2. not yet\n"), "{shown}");
+    assert!(shown.contains("\n    Answer with an option's number or in own words.\n"), "{shown}");
+    assert!(shown.contains("\n    answered by alice: option 2, not yet\n"), "{shown}");
+    assert!(shown.contains("\n    answered by alice, typed: after lunch\n"), "{shown}");
+    assert!(!shown.contains("ants answer"), "answered: {shown}");
+    let line = format!("alice -> dev-a [answers {} with option 2] (message {}): not yet", asked.id, picked.id);
+    assert!(shown.contains(&line), "{shown}");
+    assert!(shown.contains(&format!("[answers {} as typed]", asked.id)), "{shown}");
+    let unanswered = render(&read[..1]);
+    assert!(unanswered.contains(&format!("\n    (`ants answer {} N|TEXT` answers it)\n", asked.id)), "{unanswered}");
+    let json = serde_json::to_value(&read[0]).unwrap();
+    assert_eq!(json["question"]["options"][1], "not yet");
+}
+
+#[test]
 fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_message() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let ask = Envelope::on_thread(t("t1"), alice, dev_a.clone(), "fix it");

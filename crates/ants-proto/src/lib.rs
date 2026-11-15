@@ -24,6 +24,7 @@ mod inbox;
 mod keys;
 mod permissions;
 mod presence;
+mod questions;
 mod queue;
 mod reactions;
 mod roster;
@@ -47,6 +48,7 @@ pub use inbox::*;
 pub use keys::*;
 pub use permissions::*;
 pub use presence::*;
+pub use questions::*;
 pub use queue::*;
 pub use reactions::*;
 pub use roster::*;
@@ -174,8 +176,8 @@ pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
-/// whose messages carry the narrowing on.
-pub const WEBHOOK_ALLOW: [&str; 14] = [
+/// whose messages carry the narrowing on, or ask a human a question.
+pub const WEBHOOK_ALLOW: [&str; 15] = [
     "read:*",
     "search",
     "think",
@@ -190,6 +192,7 @@ pub const WEBHOOK_ALLOW: [&str; 14] = [
     "other:react",
     "other:list_reactions",
     "other:suggest_thread_title",
+    "other:ask_human",
 ];
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
 pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Role,
-    ThreadId, UserId, subject,
+    Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
+    Question, Role, ThreadId, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -84,6 +84,16 @@ pub struct Envelope {
     /// sender, so only an ant that messaged on the thread suggests its title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A question the sender asks the recipient, a human, to answer by picking one of its options or typing an answer
+    /// ([`Envelope::asking`]). The envelope's id is the question's, and its text repeats the question with the options
+    /// numbered. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+    /// The answer to a question the recipient asked the sender on the thread ([`Envelope::answering`]); the text is the
+    /// option picked or the typed answer. A reader takes an invalid answer ([`Envelope::answers`]) as an ordinary
+    /// message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
     /// A human's message steering the ant on the thread, as `ants ask --steer` sends it: when the ant runs a prompt
     /// on the thread, the recipient's daemon cancels it and prompts the same session with this message next, ahead of
     /// the messages waiting there. Honoured only from a human ([`Envelope::sender_role`]) to an ant; any other, a
@@ -136,6 +146,8 @@ impl Envelope {
             allow: None,
             mention: None,
             title: None,
+            question: None,
+            answer: None,
             steer: false,
             attachments: Vec::new(),
             sent_at: Utc::now(),
@@ -271,6 +283,8 @@ impl Envelope {
             allow: self.allow.clone(),
             mention: None,
             title: None,
+            question: None,
+            answer: None,
             steer: false,
             attachments: Vec::new(),
             sent_at: Utc::now(),

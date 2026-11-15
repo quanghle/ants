@@ -142,7 +142,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 14, "{tools:?}");
+    assert_eq!(tools.len(), 15, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -295,6 +295,48 @@ async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
     drop(turn);
     let _turn = mcp.begin(&current);
     assert_eq!(mcp.take_title(thread), None, "a suggestion ends with its turn");
+}
+
+#[tokio::test]
+async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
+    let humans = Registry::with(UserId::human(), &["alice"]);
+    let (mcp, mut sent) = start_with(&home("ask-human"), Vec::new(), Arc::default(), humans).await;
+    let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q").with_owner(Some(user("alice")));
+    current.turn_budget = 0;
+    let client = {
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        http_client(&url, &token).await
+    };
+    let ask = |args: serde_json::Value| call(&client, "ask_human", args);
+    let (ok, text) = ask(serde_json::json!({"question": "Ship?", "options": ["yes", "no"]})).await;
+    assert!(!ok && text.contains("no message is being handled"), "{text}");
+
+    let _turn = mcp.begin(&current);
+    let (ok, text) = ask(serde_json::json!({"question": "Ship?", "options": ["yes"]})).await;
+    assert!(!ok && text.contains("invalid question"), "{text}");
+    let (ok, text) =
+        ask(serde_json::json!({"question": " Ship? ", "options": ["yes", "not yet"], "free_text": false})).await;
+    assert!(ok, "{text}");
+    let out = sent.recv().await.unwrap();
+    assert!(text.contains(&out.id.to_string()) && text.contains("alice"), "{text}");
+    assert_eq!((&out.to, &out.thread_id, out.turn_budget), (&user("alice"), &current.thread_id, 0));
+    let question = out.asks().unwrap();
+    assert_eq!((question.text.as_str(), question.free_text), ("Ship?", false));
+    assert_eq!(out.text, question.render());
+    assert_eq!(out.in_reply_to, None);
+
+    let plain = Envelope::new(user("dev-b"), user("dev-a"), "q");
+    let _turn = mcp.begin(&plain);
+    let client = {
+        let (url, token) = http_server(&mcp, &plain.thread_id);
+        http_client(&url, &token).await
+    };
+    let (ok, text) =
+        call(&client, "ask_human", serde_json::json!({"question": "Ship?", "options": ["yes", "no"]})).await;
+    assert!(ok, "{text}");
+    let out = sent.recv().await.unwrap();
+    assert_eq!(out.to, UserId::human(), "no owner: the default human");
+    assert!(out.asks().unwrap().free_text, "typed answers by default");
 }
 
 /// A channel manager in memory: it applies requests to its channels as `ants channel serve` does, roster aside,

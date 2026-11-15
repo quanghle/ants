@@ -114,6 +114,12 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        question: Some(Question {
+            text: "Ship the fix?".to_owned(),
+            options: vec!["yes".to_owned(), "not yet".to_owned()],
+            free_text: false,
+        }),
+        answer: Some(Answer { question: id(4), option: Some(2) }),
         steer: true,
         attachments: vec![attachment()],
         sent_at: at(0),
@@ -133,6 +139,8 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        question: None,
+        answer: None,
         steer: false,
         attachments: Vec::new(),
         ..envelope()
