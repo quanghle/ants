@@ -185,18 +185,27 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
+    /// earlier; none of either for a forged message.
+    fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Question>, Option<Answer>) {
+        if forged {
+            return (None, None);
+        }
+        let question = e.asks().cloned();
+        if question.is_some() {
+            self.questions.insert(e.id, Envelope { text: String::new(), ..e.clone() });
+        }
+        let asked = e.answer.as_ref().and_then(|a| self.questions.get(&a.question));
+        (question, asked.filter(|q| e.answers(q).is_some()).and(e.answer.clone()))
+    }
+
     /// The entry of the message stored at `seq` on `subject`, None for one that is not ants' or does not parse.
     pub fn entry(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
         let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         if subject::parse_inbox(subject).is_some() {
             let e: Envelope = serde_json::from_slice(payload).ok()?;
             let forged = e.check_subject(subject).is_err();
-            let question = e.asks().filter(|_| !forged).cloned();
-            if question.is_some() {
-                self.questions.insert(e.id, Envelope { text: String::new(), ..e.clone() });
-            }
-            let asked = e.answer.as_ref().and_then(|a| self.questions.get(&a.question));
-            let answer = asked.filter(|q| !forged && e.answers(q).is_some()).and(e.answer.clone());
+            let (question, answer) = self.question_and_answer(&e, forged);
             let (kind, note, text) = if let Some(d) = &e.approval {
                 let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
                 (Kind::Decision, None, text)
