@@ -113,7 +113,7 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env) -> Mem
         tasks: cap("tasks", core.tasks),
     };
     let ant_home = ant.home.clone().unwrap_or_else(|| env.home.join(".ants").join(ant.name.as_str()));
-    let globs = harness.map(Harness::memory_files).unwrap_or_default();
+    let globs = harness.map_or_default(Harness::memory_files);
     let files = files(globs, &ant.workdir, &ant_home, &env.home, &mut budget, &mut skipped);
     let db =
         ant.env.get("BD_DB").or_else(|| harness?.env.get("BD_DB")).or(env.bd_db.as_ref()).filter(|db| !db.is_empty());
