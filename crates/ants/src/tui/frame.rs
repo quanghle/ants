@@ -138,7 +138,7 @@ const HELP: &[(&str, &str)] = &[
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
-    ("t", "in a thread: its delegation tree"),
+    ("i t", "in a thread: the bar to reply there, its delegation tree"),
     ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("s", "in a thread or work: the bar on /steer for the ant at work"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),

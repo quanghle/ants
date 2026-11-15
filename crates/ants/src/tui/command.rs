@@ -464,6 +464,8 @@ impl Model {
             match key {
                 Key::Ctrl('k') => {}
                 Key::Char(c @ ('@' | '#')) if self.focus == Focus::View => self.bar.insert(c),
+                // The bar replies on the thread open.
+                Key::Char('i') if self.focus == Focus::View && matches!(self.page(), Page::Thread(_)) => {}
                 _ => return None,
             }
             self.bar.focused = true;
@@ -988,6 +990,22 @@ mod tests {
         assert_eq!(m.nav, nav::Item::Ant(user("dev-a")));
         assert_eq!(run(&mut m, "/goto ffff"), None);
         assert_eq!(m.bar.status.as_ref().unwrap().text, "no thread ffff read");
+    }
+
+    #[test]
+    fn i_in_a_thread_focuses_the_bar_to_reply_there() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.focus = Focus::View;
+        m.key(Key::Char('i'), at(1));
+        assert!(!m.bar.focused, "only in a thread");
+        m.pages.push(Page::Thread(thread::Page::new(thread)));
+        m.key(Key::Char('i'), at(1));
+        assert!(m.bar.focused);
+        assert_eq!(m.bar.text(), "", "i is not typed");
+        m.key(Key::Char('i'), at(1));
+        assert_eq!(m.bar.text(), "i", "typed once the bar has focus");
     }
 
     #[test]
