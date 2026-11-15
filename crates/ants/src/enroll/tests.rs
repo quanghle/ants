@@ -1,0 +1,350 @@
+use std::future::pending;
+
+use ants_proto::{Machine, UserId};
+use async_nats::Event;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+use super::*;
+use crate::auth::tests::Server;
+
+const WAIT: Duration = Duration::from_secs(5);
+const REPEAT: Duration = Duration::from_millis(100);
+const LISTEN: Duration = Duration::from_millis(400);
+
+fn p(s: &str) -> UserId {
+    s.parse().unwrap()
+}
+
+fn enrollment(server: &Server, ant: &UserId, ttl: Duration) -> std::path::PathBuf {
+    let out = server.dir().join(format!("enroll-{ant}.creds"));
+    auth::issue_enrollment(&server.dir().join("auth"), ant, ttl, &out).unwrap();
+    out
+}
+
+fn enrollment_in(team: &Path, dir: &Path, ant: &UserId) -> std::path::PathBuf {
+    let out = dir.join(format!("enroll-{ant}.creds"));
+    auth::issue_enrollment(team, ant, Duration::from_secs(60), &out).unwrap();
+    out
+}
+
+#[tokio::test]
+async fn enrollment_credentials_ask_only_for_their_ant() {
+    let Some(server) = Server::start() else { return };
+    let creds = enrollment(&server, &p("dev-a"), Duration::from_secs(60));
+    let (tx, mut errors) = mpsc::unbounded_channel();
+    let client = async_nats::ConnectOptions::with_credentials_file(&creds)
+        .await
+        .unwrap()
+        .event_callback(move |event| {
+            let tx = tx.clone();
+            async move {
+                if let Event::ServerError(e) = event {
+                    let _ = tx.send(e.to_string());
+                }
+            }
+        })
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let mut violation = async |what: &str| {
+        client.flush().await.unwrap();
+        let error = timeout(WAIT, errors.recv()).await.expect(what).unwrap();
+        assert!(error.to_lowercase().contains("permissions violation"), "{what}: {error}");
+    };
+    client.publish("ants.enroll.dev-b", "{}".into()).await.unwrap();
+    violation("asking for another ant").await;
+    let _all = client.subscribe(subject::ALL_ENROLL_REPLIES).await.unwrap();
+    violation("hearing the answers to others").await;
+    let _inbox = client.subscribe("ants.inbox.dev-a").await.unwrap();
+    violation("reading the ant's inbox").await;
+
+    let other = enrollment(&server, &p("dev-b"), Duration::from_secs(60));
+    let user = KeyPair::new_user();
+    let err = request(&server.url, &other, &p("dev-a"), &user, None, REPEAT, pending()).await.unwrap_err();
+    assert!(err.to_string().contains("not enroll-dev-a"), "{err:#}");
+}
+
+#[tokio::test]
+async fn an_approval_completes_the_credentials_of_the_asking_key() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
+    // With no expiry, as `--ttl 0` issues them.
+    let creds = enrollment(&server, &dev_a, Duration::ZERO);
+    let user = KeyPair::new_user();
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+
+    let asking = request(&server.url, &creds, &dev_a, &user, None, REPEAT, pending());
+    let approving = async {
+        let heard = approver.pending(None).await.unwrap();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!((&heard[0].ant, &heard[0].public_key), (&dev_a, &user.public_key()));
+        approver.approve(&team, &dev_a, None).await.unwrap()
+    };
+    let (jwt, approved) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+    assert_eq!(approved.public_key, user.public_key());
+    assert!(approved.leaf.is_none());
+    let approval = jwt.unwrap();
+    assert_eq!(approval.leaf_jwt, None);
+    let jwt = approval.jwt;
+
+    let out = server.dir().join("dev-a.creds");
+    auth::write_creds(&out, &jwt, &user).unwrap();
+    let (client, _) = bus::connect(&server.url, Some(&out), None, &dev_a, "test").await.unwrap();
+    client.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_webhook_approval_gives_a_webhooks_credentials_for_its_destination() {
+    let Some(server) = Server::start() else { return };
+    let (team, hook) = (server.dir().join("auth"), p("github"));
+    let creds = enrollment(&server, &hook, Duration::from_secs(60));
+    let user = KeyPair::new_user();
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let to = Destination::Ant(p("dev-a"));
+
+    let asking = request(&server.url, &creds, &hook, &user, None, REPEAT, pending());
+    let approving = approver.approve_webhook(&team, &hook, std::slice::from_ref(&to), None);
+    let (jwt, key) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+    assert_eq!(key.unwrap(), user.public_key());
+    let out = server.dir().join("github.creds");
+    auth::write_creds(&out, &jwt.unwrap().jwt, &user).unwrap();
+    crate::webhook::check_creds("webhook", &hook, Some(&out), &to).unwrap();
+    let other = Destination::Ant(p("dev-b"));
+    assert!(crate::webhook::check_creds("webhook", &hook, Some(&out), &other).is_err());
+    let issued = revoke::issued(&team).unwrap();
+    let record = issued.iter().find(|i| i.key == user.public_key()).unwrap();
+    assert_eq!(record.kind, revoke::Kind::Webhook);
+}
+
+/// Publish `request` for dev-a with the enrollment credentials at `creds`, as a machine would, signed as given.
+async fn forge(server: &Server, creds: &Path, request: &EnrollRequest) {
+    let client = async_nats::ConnectOptions::with_credentials_file(creds).await.unwrap().connect(&server.url).await;
+    let client = client.unwrap();
+    for _ in 0..8 {
+        client.publish(request.subject(), serde_json::to_vec(request).unwrap().into()).await.unwrap();
+        client.flush().await.unwrap();
+        tokio::time::sleep(REPEAT).await;
+    }
+}
+
+#[tokio::test]
+async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
+    let creds = enrollment(&server, &dev_a, Duration::from_secs(60));
+    let (enrollment_jwt, enrollment_key) = auth::read_creds(&creds).unwrap();
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf_creds = server.dir().join("leaf-m1.creds");
+    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], false, None, &leaf_creds).unwrap();
+    let (leaf_jwt, leaf_key) = auth::read_creds(&leaf_creds).unwrap();
+    // An ant named like a leaf's uplink user, which may connect as a client only.
+    let posing = server.dir().join("leaf-m1-ant.creds");
+    auth::issue(&team, &p("leaf-m1"), Role::Ant, None, &posing).unwrap();
+    let (posing_jwt, posing_key) = auth::read_creds(&posing).unwrap();
+    let revoked = server.dir().join("leaf-m1-revoked.creds");
+    auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], false, None, &revoked).unwrap();
+    let (revoked_jwt, revoked_key) = auth::read_creds(&revoked).unwrap();
+    revoke::revoke(&team, None, &[revoked_key.public_key()]).unwrap();
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+
+    let signed = |leaf: Option<(&str, &KeyPair)>, enrollment: &KeyPair| {
+        let mut request = EnrollRequest::new(dev_a.clone(), KeyPair::new_user().public_key(), "host");
+        request.enrollment = enrollment_jwt.clone();
+        if let Some((jwt, leaf_key)) = leaf {
+            request.leaf = Some(EnrollLeaf { machine: m1.clone(), jwt: jwt.to_owned(), signature: String::new() });
+            let signature = auth::sign(leaf_key, &request.signed()).unwrap();
+            request.leaf.as_mut().unwrap().signature = signature;
+        }
+        request.signature = auth::sign(enrollment, &request.signed()).unwrap();
+        request
+    };
+    let stranger = KeyPair::new_user();
+    let good = signed(Some((&leaf_jwt, &leaf_key)), &enrollment_key);
+    let mut unsigned = good.clone();
+    unsigned.signature = String::new();
+    let mut moved = good.clone();
+    moved.leaf.as_mut().unwrap().machine = "m2".parse().unwrap();
+    let forged = [
+        signed(None, &stranger),
+        unsigned,
+        moved,
+        signed(Some((&leaf_jwt, &stranger)), &enrollment_key),
+        signed(Some((&posing_jwt, &posing_key)), &enrollment_key),
+        signed(Some((&revoked_jwt, &revoked_key)), &enrollment_key),
+    ];
+    let sending = async {
+        for request in forged.iter().chain([&good]) {
+            forge(&server, &creds, request).await;
+        }
+    };
+    let listening = async {
+        let mut heard = Vec::new();
+        while !heard.contains(&good) {
+            heard.extend(approver.pending(Some(&dev_a)).await.unwrap());
+        }
+        heard
+    };
+    let ((), heard) = Box::pin(timeout(WAIT * 4, async { tokio::join!(sending, listening) })).await.unwrap();
+    assert!(heard.contains(&good), "the proven request is heard");
+    assert!(heard.iter().all(|r| *r == good), "{heard:#?}");
+
+    let approving = approver.approve(&team, &dev_a, None);
+    let ((), approved) =
+        Box::pin(timeout(WAIT * 2, async { tokio::join!(forge(&server, &creds, &good), approving) })).await.unwrap();
+    let approved = approved.unwrap_or_else(|e| panic!("{e:#}"));
+    let leaf = approved.leaf.unwrap();
+    assert_eq!(leaf.machine, m1);
+    assert!(!leaf.outbox, "no outbox of m1 to admit dev-a from");
+}
+
+/// A real hub and two leaf nodes: an ant new to m1 asks through m1's uplink, `ants enroll` approves it through
+/// m2's (issued with `--enroll-approver`), and once m1's leaf restarts with the renewed uplink credentials, the
+/// ant reaches the hub and what it keeps in m1's outbox reaches the hub's stream.
+#[tokio::test]
+async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
+    use ants_proto::{JsDomain, STREAM, ThreadId};
+    use ants_test_support::NatsServer;
+
+    use crate::leaf;
+    use crate::outbox::tests::{eventually, free_port, spawn_hub};
+
+    let Some(hub) = spawn_hub(free_port(), "feature_flags { js_api_reply_v2: true }") else { return };
+    let leaf_port = {
+        let conf = std::fs::read_to_string(hub.dir().join("nats.conf")).unwrap();
+        let at = conf.find("leafnodes { listen: \"127.0.0.1:").unwrap() + "leafnodes { listen: \"127.0.0.1:".len();
+        conf[at..].split('"').next().unwrap().to_owned()
+    };
+    let team = hub.dir().join("auth");
+    let domain: JsDomain = "hub".parse().unwrap();
+    let (human, dev_a, dev_c) = (UserId::human(), p("dev-a"), p("dev-c"));
+    let creds = |user: &UserId| {
+        let out = hub.dir().join(format!("{user}.creds"));
+        auth::issue(&team, user, Role::by_default(user), Some(&domain), &out).unwrap();
+        out
+    };
+    let (h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
+    bus::init_stream(&h_js).await.unwrap();
+    bus::ensure_links(&h_js).await.unwrap();
+
+    let spawn_leaf = |machine: &Machine, members: &[(UserId, Role)], approver: bool| {
+        // Its configuration, outbox and uplink credentials outlive each of its runs.
+        let dir = hub.dir().join(machine.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+        let leaf_creds = dir.join("uplink.creds");
+        if !leaf_creds.exists() {
+            auth::issue_leaf(&team, machine, members, &[], approver, Some(&domain), &leaf_creds).unwrap();
+        }
+        let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+        let listen = format!("127.0.0.1:{}", free_port());
+        let config = leaf::Leaf {
+            machine,
+            hub_domain: Some(&domain),
+            uplinks: &uplinks,
+            creds: &leaf_creds,
+            system_creds: None,
+            server_conf: &team.join(auth::SERVER_CONF),
+            ca_file: None,
+            proxy: None,
+            listen: &listen,
+        };
+        leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        let hub_dir = hub.dir().file_name().unwrap().to_string_lossy().into_owned();
+        let node = NatsServer::spawn_with(|_| format!("include \"../{hub_dir}/{machine}/leaf.conf\"\n")).unwrap();
+        (node, dir.join("leaf.conf"))
+    };
+    let (m1, m2): (Machine, Machine) = ("m1".parse().unwrap(), "m2".parse().unwrap());
+    let on_m1 = [(dev_a.clone(), Role::Ant), (human.clone(), Role::Human)];
+    let (m1_node, m1_conf) = spawn_leaf(&m1, &on_m1, false);
+    let (m2_node, _) = spawn_leaf(&m2, &[(human.clone(), Role::Human)], true);
+    let (_a, a_js) = bus::connect(&m1_node.url, Some(&creds(&dev_a)), Some(&domain), &dev_a, "test").await.unwrap();
+    eventually("m1 reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
+    let setup = crate::outbox::connect(&hub.url, Some(&creds(&human)), &human, &m1).await.unwrap();
+    crate::outbox::admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+
+    let enroll_creds = enrollment_in(&team, hub.dir(), &dev_c);
+    let (machine, uplink_creds) = leaf::read_uplink(&m1_conf).unwrap();
+    let m1_leaf = Leaf { machine, creds: uplink_creds.clone() };
+    let user = KeyPair::new_user();
+    let approver = Approver::connect(&m2_node.url, &team, Some(&domain), Duration::from_millis(1500)).await.unwrap();
+    let asking = request(&m1_node.url, &enroll_creds, &dev_c, &user, Some(&m1_leaf), REPEAT, pending());
+    let approving = async {
+        loop {
+            match approver.approve(&team, &dev_c, None).await {
+                Ok(approved) => break approved,
+                Err(e) if e.to_string().contains("no enrollment request") => continue,
+                Err(e) => panic!("{e:#}"),
+            }
+        }
+    };
+    let (approval, approved) = Box::pin(timeout(WAIT * 6, async { tokio::join!(asking, approving) })).await.unwrap();
+    let approval = approval.unwrap();
+    let leaf_approved = approved.leaf.unwrap();
+    assert_eq!(leaf_approved.machine, m1);
+    assert!(leaf_approved.outbox, "the hub sources m1's outbox");
+    let kept = members::issued(&team, &m1, &uplink_creds).unwrap().unwrap();
+    assert_eq!(kept.ants, [dev_a.clone(), dev_c.clone()], "a later `ants auth leaf m1` keeps dev-c");
+
+    let (old, key) = auth::read_creds(&uplink_creds).unwrap();
+    let renewed = approval.leaf_jwt.unwrap();
+    assert!(auth::allows_all(&renewed, &old).unwrap() && !auth::allows_all(&old, &renewed).unwrap());
+    let c_creds = hub.dir().join("dev-c-enrolled.creds");
+    auth::write_creds(&c_creds, &approval.jwt, &user).unwrap();
+    let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
+    assert!(bus::open_stream(&c_js, &dev_c).await.is_err(), "the uplink does not carry dev-c yet");
+    auth::write_creds(&uplink_creds, &renewed, &key).unwrap();
+    let carried = members::uplink(&m1_conf, &m1).unwrap();
+    assert!(carried.ants.contains(&dev_c), "a later `ants leaf outbox m1` admits dev-c: {carried}");
+    drop((_a, _c));
+    drop(m1_node);
+    let (m1_node, _) = spawn_leaf(&m1, &on_m1, false);
+
+    let (_c, c_js) = bus::connect(&m1_node.url, Some(&c_creds), Some(&domain), &dev_c, "test").await.unwrap();
+    eventually("dev-c reaches the hub", async || bus::open_stream(&c_js, &dev_c).await.is_ok()).await;
+    let direct = ants_proto::Envelope::new(dev_c.clone(), human.clone(), "hello");
+    assert_eq!(bus::publish(&c_js, &direct).await.unwrap(), bus::Stored::Hub);
+    // Its notes kept in m1's outbox reach the hub's stream: only its own admission takes them.
+    let thread: ThreadId = "t1".parse().unwrap();
+    let post = ants_proto::NotesPost::new(thread.clone(), dev_c.clone(), "kept");
+    let kept = subject::outbox(&post.subject()).unwrap();
+    c_js.publish(kept, serde_json::to_vec(&post).unwrap().into()).await.unwrap().await.unwrap();
+    let notes = subject::notes(&thread, &dev_c);
+    eventually("the outbox's notes reach the hub", async || {
+        let stream = h_js.get_stream(STREAM).await.unwrap();
+        stream.get_last_raw_message_by_subject(&notes).await.is_ok()
+    })
+    .await;
+    drop(h);
+}
+
+#[tokio::test]
+async fn a_rejection_or_the_expiry_ends_the_request() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
+    let creds = enrollment(&server, &dev_a, Duration::from_secs(60));
+    let (first, second) = (KeyPair::new_user(), KeyPair::new_user());
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+
+    let both = async {
+        let first = request(&server.url, &creds, &dev_a, &first, None, REPEAT, pending());
+        let second = request(&server.url, &creds, &dev_a, &second, None, REPEAT, pending());
+        tokio::join!(first, second)
+    };
+    let answering = async {
+        let err = approver.approve(&team, &dev_a, None).await.unwrap_err().to_string();
+        assert!(err.contains("several machines ask for dev-a"), "{err}");
+        approver.reject(&dev_a, None, Some("unknown machine")).await.unwrap()
+    };
+    let ((first_err, second_err), rejected) =
+        Box::pin(timeout(WAIT * 2, async { tokio::join!(both, answering) })).await.unwrap();
+    assert_eq!(rejected.len(), 2);
+    for err in [first_err.unwrap_err(), second_err.unwrap_err()] {
+        assert!(err.to_string().contains("rejected: unknown machine"), "{err:#}");
+    }
+
+    let err = approver.approve(&team, &dev_a, None).await.unwrap_err().to_string();
+    assert!(err.contains("no enrollment request for dev-a"), "{err}");
+    let short = enrollment(&server, &dev_a, Duration::from_secs(1));
+    let err = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("expire"), "{err:#}");
+}
