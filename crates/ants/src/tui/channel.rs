@@ -30,6 +30,8 @@ pub struct Post {
     pub id: Uuid,
     pub thread: ThreadId,
     pub from: String,
+    /// Who posted it, an assistant's post for its human naming both ([`Entry::sender`]).
+    pub by: String,
     pub at: DateTime<Utc>,
     pub text: String,
     pub attachments: Vec<Listed>,
@@ -79,6 +81,7 @@ impl Feeds {
                 id,
                 thread: entry.thread_id.clone(),
                 from,
+                by: entry.sender(),
                 at: entry.stored_at,
                 text: entry.text.clone(),
                 attachments: entry.attachments.clone(),
@@ -222,7 +225,7 @@ fn post_lines(post: &Post, data: &Data, now: DateTime<Utc>, marked: Option<usize
     let face = post.from.parse().ok().and_then(|from| data.face(&from));
     let mut head: Vec<Span<'static>> = face.into_iter().flatten().collect();
     head.extend([
-        Span::styled(post.from.clone(), Style::new().fg(Color::Blue).bold()),
+        Span::styled(post.by.clone(), Style::new().fg(Color::Blue).bold()),
         Span::styled(format!(" {} ", ago(post.at, now)), frame::dim()),
         Span::raw(crate::excerpt(first, 200)),
     ]);

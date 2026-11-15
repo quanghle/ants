@@ -405,6 +405,10 @@ pub struct NotesPost {
     /// The files attached to the post, stored before it under its [`NotesPost::attachment_handle`]s.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The human the author, its assistant, posts for, as [`Envelope::on_behalf_of`]: a reader honours it only as
+    /// [`crate::Acting`] tells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -419,8 +423,15 @@ impl NotesPost {
             turn_budget: DEFAULT_TURN_BUDGET,
             title: None,
             attachments: Vec::new(),
+            on_behalf_of: None,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The same, posted for `human` by its assistant ([`NotesPost::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// An ant's post, spending one turn of what is left: the lower of `budget`, the turns of the message the ant

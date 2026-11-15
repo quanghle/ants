@@ -196,6 +196,10 @@ pub struct ChannelPost {
     /// by [`ChannelPost::reply`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The human the author, its assistant, posts for, as [`Envelope::on_behalf_of`]: a reader honours it only as
+    /// [`crate::Acting`] tells. Never copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<UserId>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -227,8 +231,15 @@ impl ChannelPost {
             allow: None,
             title: None,
             attachments: Vec::new(),
+            on_behalf_of: None,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The same, posted for `human` by its assistant ([`ChannelPost::on_behalf_of`]).
+    #[must_use]
+    pub fn on_behalf(self, human: Option<UserId>) -> Self {
+        Self { on_behalf_of: human, ..self }
     }
 
     /// The post with `owner` as the human who started its thread.

@@ -871,6 +871,44 @@ mod tests {
         assert_eq!(checked[&message][0].acting, [(pa.clone(), Acting::Forged(alice.clone()))].into());
     }
 
+    /// pa's channel and notes posts for alice read as hers through pa; bob's claim to post for alice is forged.
+    #[tokio::test]
+    async fn an_assistant_s_posts_for_its_human_show_as_hers() {
+        use ants_proto::{ChannelPost, NotesPost, ThreadId};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, bob) = (p("alice"), p("pa"), p("bob"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        auth::issue_device_with(&server.dir().join("auth"), &pa, revoke::Kind::Assistant, rights, &new, &assistant)
+            .unwrap();
+        let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let checker = std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js));
+        let mut parser = crate::thread::Parser::default().checking(Some(checker));
+        let mut read = async |subject: String, payload: Vec<u8>| {
+            parser.read(1, chrono::Utc::now(), &subject, &payload).await.unwrap().route()
+        };
+        let ops = "ops".parse().unwrap();
+        let posted = ChannelPost::new(ops, pa.clone(), "deploy friday").on_behalf(Some(alice.clone()));
+        assert_eq!(read(posted.subject(), serde_json::to_vec(&posted).unwrap()).await, "alice via pa -> #ops");
+        let forged = ChannelPost { from: bob.clone(), ..posted };
+        assert_eq!(
+            read(forged.subject(), serde_json::to_vec(&forged).unwrap()).await,
+            "bob (forged: for alice) -> #ops"
+        );
+        let noted = NotesPost::new(ThreadId::generate(), pa.clone(), "noted").on_behalf(Some(alice.clone()));
+        assert_eq!(read(noted.subject(), serde_json::to_vec(&noted).unwrap()).await, "alice via pa -> notes");
+    }
+
     /// The store the daemon's tools act for a human through reads and writes with its assistant's own credentials:
     /// the human's messages and the tool requests waiting for it, its read marker, its threads' titles and done marks,
     /// the assistant's reactions, and the directory its sealing reads device keys from.

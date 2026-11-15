@@ -322,10 +322,12 @@ pub(crate) async fn post(
     let on_thread = channel::thread_posts(posts, post, replies.wait);
     let shown = reacted::Shown::default();
     shown.add(post.id, &post.from, &post.text);
+    let behalf = crate::behalf::Checker::new(nats, &js);
     let shown_replies = replies.show(&post.thread_id, on_thread, async |reply: ChannelPost| {
+        let by = behalf.label(&reply.from, reply.on_behalf_of.as_ref()).await;
         progress::clear();
         shown.add(reply.id, &reply.from, &reply.text);
-        println!("{}: {}", reply.from, reply.text);
+        println!("{by}: {}", reply.text);
         print!("{}", attachments::render(&attachments::listed_on(&reply.subject(), &reply.attachments), "  "));
         Ok(())
     });
@@ -433,9 +435,11 @@ pub(crate) async fn thread_notes(
     if read.posts.is_empty() {
         println!("thread {thread} has no notes");
     }
+    let behalf = crate::behalf::Checker::new(nats, &js);
     for post in &read.posts {
         let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
-        println!("{time} {} ({} turns left): {}", post.from, post.turn_budget, post.text);
+        let by = behalf.label(&post.from, post.on_behalf_of.as_ref()).await;
+        println!("{time} {by} ({} turns left): {}", post.turn_budget, post.text);
         print!("{}", attachments::render(&attachments::listed_on(&post.subject(), &post.attachments), "  "));
     }
     Ok(())

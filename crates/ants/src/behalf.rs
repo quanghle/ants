@@ -77,6 +77,11 @@ impl Checker {
         acting
     }
 
+    /// Who `publisher`'s act claiming `claim` is by, as [`Acting::label`] names it once checked ([`Checker::check`]).
+    pub async fn label(&self, publisher: &UserId, claim: Option<&UserId>) -> String {
+        self.check(publisher, claim).await.label(publisher.as_str())
+    }
+
     /// What `publisher`'s act claiming `claim` came to, as checked before ([`Checker::check`]): a claim not checked
     /// is forged.
     pub fn acting(&self, publisher: &UserId, claim: Option<&UserId>) -> Acting {

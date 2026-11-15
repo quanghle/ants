@@ -472,6 +472,7 @@ fn notes() {
             turn_budget: 7,
             title: Some("Rewrite the parser".to_owned()),
             attachments: vec![attachment()],
+            on_behalf_of: Some(user("alice")),
             sent_at: at(0),
         },
     );
@@ -547,6 +548,7 @@ fn channels() {
             allow: Some(vec!["read:*".to_owned()]),
             title: Some("Fix CI".to_owned()),
             attachments: vec![attachment()],
+            on_behalf_of: Some(user("alice")),
             sent_at: at(0),
         },
     );

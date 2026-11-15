@@ -308,15 +308,28 @@ impl Parser {
     }
 
     /// Look the sending device of a sealed message stored on `subject` up unless known ([`sealed::Keyring::learn`]),
-    /// and check the claim of an inbox message sent on behalf of a human ([`crate::behalf::Checker::learn`]), before
-    /// [`Parser::entry`] takes it, so one from a device added since the keyring was loaded opens.
+    /// and check the claim of an inbox message, channel post or notes post made on behalf of a human
+    /// ([`crate::behalf::Checker::check`]), before [`Parser::entry`] takes it, so one from a device added since the
+    /// keyring was loaded opens.
     pub async fn learn(&self, subject: &str, payload: &[u8]) {
+        /// The part of any of the three that names a claim.
+        #[derive(serde::Deserialize)]
+        struct Claim {
+            from: UserId,
+            on_behalf_of: Option<UserId>,
+        }
+        let claimed = || payload.windows(14).any(|w| w == b"\"on_behalf_of\"");
+        let kept = || {
+            subject::parse_inbox(subject).is_some()
+                || subject::parse_chan(subject).is_some()
+                || subject::parse_notes(subject).is_some()
+        };
         if let Some(behalf) = &self.behalf
-            && subject::parse_inbox(subject).is_some()
-            && payload.windows(14).any(|w| w == b"\"on_behalf_of\"")
-            && let Ok(envelope) = serde_json::from_slice::<Envelope>(payload)
+            && claimed()
+            && kept()
+            && let Ok(claim) = serde_json::from_slice::<Claim>(payload)
         {
-            Box::pin(behalf.learn(&envelope)).await;
+            Box::pin(behalf.check(&claim.from, claim.on_behalf_of.as_ref())).await;
         }
         let Some(keyring) = &self.keyring else { return };
         if subject::parse_inbox(subject).is_none() || !payload.windows(8).any(|w| w == b"\"sealed\"") {
@@ -348,6 +361,16 @@ impl Parser {
         (question, asked.filter(|q| e.answers(q).is_some()).and(e.answer.clone()))
     }
 
+    /// What `from`'s act claiming `claim` comes to, as checked by [`Parser::learn`]: without a checker, any claim is
+    /// forged.
+    fn acting(&self, from: &UserId, claim: Option<&UserId>) -> Acting {
+        match (&self.behalf, claim) {
+            (_, None) => Acting::Own,
+            (Some(behalf), claim) => behalf.acting(from, claim),
+            (None, Some(human)) => Acting::Forged(human.clone()),
+        }
+    }
+
     /// The entry of the envelope stored at `seq` on inbox `subject`, None for one that does not parse.
     fn envelope_entry(&mut self, seq: u64, stored_at: DateTime<Utc>, subject: &str, payload: &[u8]) -> Option<Entry> {
         let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
@@ -355,11 +378,7 @@ impl Parser {
         let forged = e.check_subject(subject).is_err();
         let (e, sealed) = sealed::read(e, self.keyring.as_deref());
         let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged));
-        let acting = match (&self.behalf, &e.on_behalf_of) {
-            (_, None) => Acting::Own,
-            (Some(behalf), claim) => behalf.acting(&e.from, claim.as_ref()),
-            (None, Some(human)) => Acting::Forged(human.clone()),
-        };
+        let acting = self.acting(&e.from, e.on_behalf_of.as_ref());
         let (kind, note, text) = if let Some(d) = &e.approval {
             let text = format!("{} on {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
             (Kind::Decision, None, text)
@@ -408,10 +427,12 @@ impl Parser {
             let post: ChannelPost = serde_json::from_slice(payload).ok()?;
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
+            let acting = self.acting(&post.from, post.on_behalf_of.as_ref());
             return Some(Entry {
                 attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
+                acting,
                 channel: Some(post.channel),
                 mentions: post.mentions,
                 owner: post.owner,
@@ -427,10 +448,12 @@ impl Parser {
             let post: NotesPost = serde_json::from_slice(payload).ok()?;
             let forged = post.check_subject(subject).is_err();
             let note = Some(format!("{} turns left", post.turn_budget));
+            let acting = self.acting(&post.from, post.on_behalf_of.as_ref());
             return Some(Entry {
                 attachments: attachments::stored_on(subject, &post.attachments, stored_at),
                 id: Some(post.id),
                 from: Some(post.from),
+                acting,
                 note,
                 text: post.text,
                 forged,
