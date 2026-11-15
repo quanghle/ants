@@ -32,6 +32,11 @@ pub fn auto_archive() -> Result<Option<std::time::Duration>> {
     Ok(CliDefaults::load(&path()?)?.auto_archive)
 }
 
+/// When and whom the CLI asks for catch-up summaries: the summary keys of the config file's `[cli]`.
+pub fn summaries() -> Result<config::SummaryConfig> {
+    Ok(CliDefaults::load(&path()?)?.summaries)
+}
+
 /// Set the global connection flags that neither the command line nor the environment set from the file at `path`,
 /// if it exists, except for `ants daemon` and `ants add`: their flags describe ants, and they read the file's
 /// top-level keys themselves.

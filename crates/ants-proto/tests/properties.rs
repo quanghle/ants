@@ -300,6 +300,8 @@ proptest! {
             (subject::cancel_of(&ant), vec!["ants", "cancel", a, "*"]),
             (subject::cancelled_of(&ant), vec!["ants", "cancelled", a, "*"]),
             (subject::presence_of(&ant), vec!["$KV", ants_proto::PRESENCE_BUCKET, a, ">"]),
+            (subject::devices_of(&ant), vec!["$KV", ants_proto::DEVICES_BUCKET, a, ">"]),
+            (subject::revoked_devices(), vec!["$KV", ants_proto::DEVICES_BUCKET, "revoked", "*"]),
             (ants_proto::reactions_to(&message), vec!["*", &m, "*"]),
             (ants_proto::links_to(&thread), vec!["*", t, "*"]),
         ];
@@ -360,6 +362,11 @@ proptest! {
                     prop_assert_eq!(destination, format!("ants.{}", expected.join(".")));
                 }
             }
+            // The chunks a user writes, of any sender for a human, under the same handles.
+            let (filter, destination) = machine.admitted_files(&ant, role);
+            let handles = filter.strip_prefix(&format!("ants.in.{m}.ants.out.files.")).unwrap_or_default();
+            prop_assert_eq!(handles, if role.is_human() { ">".to_owned() } else { format!("{ant}.>") });
+            prop_assert_eq!(destination, format!("$O.ants_files.C.{handles}"));
         }
     }
 

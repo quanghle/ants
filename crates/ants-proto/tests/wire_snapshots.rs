@@ -114,6 +114,7 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        summary: Some(SummaryRequest { tokens: Some(1834), ..SummaryRequest::thread(other_thread(), 4211) }),
         question: Some(Question {
             text: "Ship the fix?".to_owned(),
             options: vec!["yes".to_owned(), "not yet".to_owned()],
@@ -139,6 +140,7 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        summary: None,
         question: None,
         answer: None,
         steer: false,
@@ -256,6 +258,18 @@ fn kv_entries() {
     );
     snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
     snap(
+        "thread_summary",
+        &ThreadSummary {
+            thread_id: thread(),
+            text: "Asked for a release; the build is fixed; the tag waits on alice.".to_owned(),
+            by: user("messenger"),
+            asker: user("alice"),
+            at: at(0),
+            upto: 4211,
+            tokens: 1834,
+        },
+    );
+    snap(
         "thread_marks",
         &ThreadMarks {
             pinned: BTreeMap::from([(thread(), at(0))]),
@@ -317,7 +331,22 @@ fn envelopes() {
     snap("envelope_steer", &Envelope { owner: Some(user("alice")), steer: true, ..message.clone() });
     snap(
         "envelope_mention_notice",
-        &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message },
+        &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message.clone() },
+    );
+    let digest = SummaryRequest::since(at(0), 4211);
+    snap(
+        "envelope_summary_request",
+        &Envelope { from: user("alice"), to: user("messenger"), summary: Some(digest.clone()), ..message.clone() },
+    );
+    snap(
+        "envelope_summary_reply",
+        &Envelope {
+            from: user("messenger"),
+            to: user("alice"),
+            in_reply_to: Some(id(1)),
+            summary: Some(SummaryRequest { tokens: Some(1834), ..digest }),
+            ..message
+        },
     );
     snap("mention", &mention());
 }
@@ -543,6 +572,45 @@ fn enrollment() {
 }
 
 #[test]
+fn login() {
+    snap(
+        "login_request",
+        &LoginRequest {
+            name: user("alice"),
+            public_key: "UDEF".to_owned(),
+            reply_xkey: "XREPLY".to_owned(),
+            xkey: Some("XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap()),
+            label: Some("Alice's laptop".to_owned()),
+            made_at: at(0),
+            expires_at: at(15),
+            signature: "c2lnLWxvZ2lu".to_owned(),
+        },
+    );
+    snap(
+        "login_reply",
+        &LoginReply {
+            name: user("alice"),
+            public_key: "UDEF".to_owned(),
+            sender: "XSIGNER".to_owned(),
+            sealed: "c2VhbGVk".to_owned(),
+        },
+    );
+    snap(
+        "login_answer_variants",
+        &vec![
+            LoginAnswer::Verify {
+                url: "https://github.com/login/device".to_owned(),
+                user_code: "WDJB-MJHT".to_owned(),
+                expires_at: at(15),
+            },
+            LoginAnswer::Waiting { login: "octocat".to_owned(), reason: "outside the registration policy".to_owned() },
+            LoginAnswer::Refused { reason: "alice is bound to another GitHub user".to_owned() },
+            LoginAnswer::Signed { jwt: "eyJ0eXAiOiJKV1QifQ.alice".to_owned() },
+        ],
+    );
+}
+
+#[test]
 fn ant_requests() {
     snap(
         "ant_request",
@@ -606,6 +674,7 @@ fn status() {
                 title: Some("cargo test".to_owned()),
                 tool_kind: Some("execute".to_owned()),
                 status: Some("in_progress".to_owned()),
+                paths: Some(vec!["crates/ants/src/main.rs".to_owned()]),
             },
         ),
         (
@@ -634,6 +703,30 @@ fn status() {
         let event = StatusEvent { ant: user("dev-a"), thread_id: thread(), update, at: at(0) };
         snap(&format!("status_event_{kind}"), &event);
     }
+}
+
+#[test]
+fn timeline() {
+    let call = TimelineCall {
+        id: "call-1".to_owned(),
+        tool_kind: Some("execute".to_owned()),
+        title: "cargo test".to_owned(),
+        status: Some("completed".to_owned()),
+        started: at(0),
+        duration_ms: Some(2100),
+        paths: vec!["crates/ants/src/main.rs".to_owned()],
+    };
+    let plan =
+        TimelineEntry::Plan { steps: vec![PlanStep { content: "fix".to_owned(), status: "in_progress".to_owned() }] };
+    let record = Timeline {
+        ant: user("dev-a"),
+        thread_id: thread(),
+        message: id(1),
+        entries: vec![TimelineEntry::Tool(call), plan],
+        omitted: 3,
+        at: at(1),
+    };
+    snap("timeline", &record);
 }
 
 #[test]

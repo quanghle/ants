@@ -15,8 +15,12 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
-use ants_proto::{Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
+use ants_proto::{
+    DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions,
+    REVOKED_DEVICES, Role, UserId,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::{KeyPair, XKey};
@@ -113,10 +117,14 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
-/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take.
+/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take, and
+/// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records.
 pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if *user == UserId::channel_manager() {
         bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
+    }
+    if user.as_str() == REVOKED_DEVICES {
+        bail!("{user} is reserved for the revocation records of {DEVICES_BUCKET}; choose another name");
     }
     Ok(())
 }
@@ -146,16 +154,47 @@ pub fn issue_device(
     label: Option<&str>,
     out: &Path,
 ) -> Result<Option<DeviceId>> {
+    issue_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, out)
+}
+
+/// What the registry records of a human's new device besides its key, and when its credentials expire.
+#[derive(Debug, Clone, Default)]
+pub struct NewDevice<'a> {
+    pub label: Option<&'a str>,
+    /// The GitHub user the human's name is bound to ([`crate::binding`]).
+    pub github: Option<GithubAccount>,
+    /// Why `ants signer` signed it.
+    pub grant: Option<Grant>,
+    /// Seconds since the epoch; none for credentials that never expire.
+    pub expires_at: Option<u64>,
+}
+
+impl NewDevice<'_> {
+    fn record(&self, issued: Issued, device: Option<DeviceId>, xkey: Option<DeviceKey>) -> Issued {
+        let issued = with_device(issued, device, self.label, xkey);
+        Issued { github: self.github.clone(), grant: self.grant.clone(), ..issued }
+    }
+}
+
+/// [`issue_device`], recording `new` with the device.
+pub fn issue_device_with(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    new: &NewDevice<'_>,
+    out: &Path,
+) -> Result<Option<DeviceId>> {
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let key = KeyPair::new_user();
     let xkey = (kind == Kind::Human).then(XKey::new);
     let bound = xkey.as_ref().map(device_key).transpose()?;
-    let (device, extra) = device_claims(kind, label, bound.as_ref())?;
-    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, None)?;
+    let (device, extra) = device_claims(kind, new.label, bound.as_ref())?;
+    let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
     write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
-    let issued = Issued::new(&key.public_key(), user.as_str(), kind, None)?;
-    revoke::record(dir, &with_device(issued, device, label, bound))?;
+    let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
+    revoke::record(dir, &new.record(issued, device, bound))?;
     Ok(device)
 }
 
@@ -281,7 +320,7 @@ pub fn leaf_user(machine: &Machine) -> String {
 }
 
 /// Refuse `jwt`, uplink credentials of `machine`'s leaf node, if the hub would not take it in the leaf's CONNECT.
-/// Each ant adds about 4 KB to them, 8 KB with a JetStream domain.
+/// Each ant adds about 4.7 KB to them, 8.7 KB with a JetStream domain.
 fn check_uplink_size(jwt: &str, machine: &Machine) -> Result<()> {
     if jwt.len() > MAX_UPLINK_JWT {
         bail!(
@@ -473,13 +512,26 @@ pub fn sign_device(
     public_key: &str,
     xkey: Option<&DeviceKey>,
 ) -> Result<(String, Option<DeviceId>)> {
+    sign_device_with(dir, user, kind, permissions, &NewDevice { label, ..NewDevice::default() }, public_key, xkey)
+}
+
+/// [`sign_device`], recording `new` with the device.
+pub fn sign_device_with(
+    dir: &Path,
+    user: &UserId,
+    kind: Kind,
+    permissions: Permissions,
+    new: &NewDevice<'_>,
+    public_key: &str,
+    xkey: Option<&DeviceKey>,
+) -> Result<(String, Option<DeviceId>)> {
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (device, extra) = device_claims(kind, label, xkey)?;
-    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, None)?;
-    let issued = Issued::new(public_key, user.as_str(), kind, None)?;
-    revoke::record(dir, &with_device(issued, device, label, xkey.cloned()))?;
+    let (device, extra) = device_claims(kind, new.label, xkey)?;
+    let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
+    let issued = Issued::new(public_key, user.as_str(), kind, new.expires_at)?;
+    revoke::record(dir, &new.record(issued, device, xkey.cloned()))?;
     Ok((jwt, device))
 }
 
@@ -601,7 +653,9 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
             }
             (permissions, json!({ "allowed_connection_types": LEAF_CONNECTIONS }))
         }
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => unreachable!("no registry kind"),
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => {
+            unreachable!("no registry kind")
+        }
     };
     let mut permissions = permissions.with_js_domain(finding.js_domain.as_ref());
     dedup(&mut permissions);
@@ -616,10 +670,8 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
         bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
     }
     let previous = issued.iter().rev().find(|i| i.key == claims.sub);
-    let mut record = Issued::new(public_key, name, kind, exp)?;
+    let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous);
     record.renewed_from = Some(claims.sub.clone());
-    record.template = previous.and_then(|p| p.template.clone());
-    record.added_by = previous.and_then(|p| p.added_by.clone());
     if let Some(device) = finding.device {
         record = record.for_device(device, previous.and_then(|p| p.label.clone()), xkey);
     }
@@ -631,6 +683,14 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
     Ok(Renewed { jwt, finding: renewed, previous: claims.sub })
 }
 
+/// `record` of renewed credentials, with what the registry recorded of the `previous` ones beyond their key: the
+/// template and manager of an added ant, and the GitHub binding and grant of a registered device.
+fn inherited(record: Issued, previous: Option<&Issued>) -> Issued {
+    let Some(p) = previous else { return record };
+    let (template, added_by) = (p.template.clone(), p.added_by.clone());
+    Issued { template, added_by, github: p.github.clone(), grant: p.grant.clone(), ..record }
+}
+
 /// The registry's kind of credentials of `kind`, if they may be renewed ([`renew`]).
 fn registry_kind(kind: &CredsKind) -> Option<Kind> {
     match kind {
@@ -640,7 +700,7 @@ fn registry_kind(kind: &CredsKind) -> Option<Kind> {
         CredsKind::ChannelManager => Some(Kind::ChannelManager),
         CredsKind::Observer => Some(Kind::Observer),
         CredsKind::Leaf { .. } => Some(Kind::Leaf),
-        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } => None,
+        CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => None,
     }
 }
 
@@ -671,17 +731,42 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     Ok(exp)
 }
 
-/// The text of short-lived credentials for `ants enroll`, which hear enrollment requests and answer them
-/// ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
+/// Issue the team's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
+/// file to `out`, readable by all as they are meant to be shared: they may only ask `ants signer` to register a
+/// human's device and hear its answers ([`Permissions::for_bootstrap`]), with messages of at most
+/// [`ants_proto::BOOTSTRAP_MAX_PAYLOAD`] bytes. Returns their public key and when they expire, in seconds since the
+/// epoch.
+pub fn issue_bootstrap(dir: &Path, ttl: Duration, out: &Path) -> Result<(String, Option<u64>)> {
+    if !ttl.is_zero() && ttl < Duration::from_secs(1) {
+        bail!("a ttl of {ttl:?} is under a second: give at least 1s, or 0 for no expiry");
+    }
+    let account = load(&dir.join(ACCOUNT_SEED))?;
+    let user = KeyPair::new_user();
+    let exp = if ttl.is_zero() { None } else { Some(now()? + ttl.as_secs()) };
+    let name = ants_proto::BOOTSTRAP_USER;
+    let limits = json!({ "payload": ants_proto::BOOTSTRAP_MAX_PAYLOAD });
+    let jwt = user_jwt(&account, &user.public_key(), name, Permissions::for_bootstrap(), limits, exp)?;
+    fs::write(out, creds(&jwt, &seed(&user)?)).with_context(|| format!("writing {}", out.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(out, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+    revoke::record(dir, &Issued::new(&user.public_key(), name, Kind::Bootstrap, exp)?)?;
+    Ok((user.public_key(), exp))
+}
+
+/// The text of short-lived credentials for `ants enroll` and `ants signer`, which hear enrollment requests and answer
+/// them ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
 /// account key of each run.
 pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     short_lived_creds(dir, js_domain, Permissions::for_enroll_approver())
 }
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
-/// ([`Permissions::for_reactions_responder`]).
+/// ([`Permissions::for_reactions_responder`]) and humans' registration requests ([`Permissions::for_registrar`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
-    short_lived_creds(dir, js_domain, signer_permissions())
+    let mut permissions = signer_permissions();
+    // Registration happens on the hub only: a leaf uplink with signer_permissions never carries it.
+    merge(&mut permissions, Permissions::for_registrar());
+    short_lived_creds(dir, js_domain, permissions)
 }
 
 /// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`] and
@@ -690,6 +775,12 @@ fn signer_permissions() -> Permissions {
     let mut permissions = Permissions::for_enroll_approver();
     merge(&mut permissions, Permissions::for_reactions_responder());
     permissions
+}
+
+/// The text of short-lived credentials signed with the account key in `dir`, for the hub's JetStream domain if it has
+/// one, that put the revocation records of humans' keys ([`Permissions::for_device_revoker`]).
+pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
 }
 
 fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
@@ -721,7 +812,7 @@ pub fn verified(jwt: &str) -> Result<Claims> {
 }
 
 /// [`verified`], with all of the JWT's claims.
-fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
+pub(crate) fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
     let jwt = jwt.trim();
     let (signed, signature) = jwt.rsplit_once('.').context("not a JWT")?;
     let (_, body) = signed.split_once('.').context("not a JWT")?;

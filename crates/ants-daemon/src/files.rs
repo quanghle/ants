@@ -1,14 +1,28 @@
 //! The bytes of attachments in their store ([`FILES_STREAM`]): [`put`] stores those of an attachment as chunks under
-//! its handle before the message carrying it is sent, [`get`] reads them back by direct gets, which is all an ant's
-//! credentials allow, checking them against the reference.
+//! its handle before the message carrying it is sent, out of the hub's reach in the machine's outbox, as [`bus::store`]
+//! keeps messages; [`get`] reads them back by direct gets, which is all an ant's credentials allow, checking them
+//! against the reference.
 
-use ants_proto::{ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM};
+use std::time::Duration;
+
+use ants_proto::{ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM, MAX_ATTACHMENTS};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
 use async_nats::jetstream::stream::DirectGetErrorKind;
+use chrono::{DateTime, Utc};
 use data_encoding::HEXLOWER;
+
+use crate::bus::{self, Stored};
+
+/// How long a reader waits for the missing chunks of a recent attachment ([`RECENT`]) to arrive: the hub's stream and
+/// the attachments' store take what a leaf's outbox kept apart, so a message may come before its chunks.
+pub const SETTLE: Duration = Duration::from_secs(60);
+/// How old a message may be for a reader to wait for the missing chunks of its attachments ([`SETTLE`]).
+pub const RECENT: Duration = Duration::from_hours(1);
+/// How often a reader looks for the missing chunks of a recent attachment again.
+const RETRY: Duration = Duration::from_millis(500);
 
 /// The SHA-256 of `bytes` in lowercase hex, as [`Attachment::sha256`] holds it.
 pub fn sha256(bytes: &[u8]) -> String {
@@ -20,15 +34,27 @@ pub fn reference(name: &str, mime: &str, bytes: &[u8]) -> Result<Attachment> {
     Ok(Attachment::new(name, mime, bytes.len() as u64, sha256(bytes))?)
 }
 
+/// The `Nats-Msg-Id` of chunk `n` under `handle`, the same for every copy of it, so the store keeps one.
+pub fn chunk_id(handle: &AttachmentHandle, n: usize) -> String {
+    format!("{handle}.{n}")
+}
+
 /// Store `bytes`, those of `attachment`, under `handle`, chunk by chunk, the first carrying the reference
-/// ([`ATTACHMENT_HEADER`]). Each chunk is stored once: a chunk found there already was stored by an earlier try, as
-/// only the sender writes under its handles and each attachment has a fresh id.
+/// ([`ATTACHMENT_HEADER`]), and say where. Each chunk is stored once: a chunk found there already was stored by an
+/// earlier try, as only the sender writes under its handles and each attachment has a fresh id.
+///
+/// A chunk the hub's store does not take as its publish finds no stream (the leaf node's uplink is down) or none in
+/// time is kept in the machine's outbox instead ([`AttachmentHandle::outbox_chunk_subject`]), for the hub to source
+/// into the store once the uplink is back ([`Stored::Outbox`]), as [`bus::store`] keeps a message; send the message
+/// carrying the attachment after this returns, so it follows its chunks. Every copy of a chunk carries the same
+/// `Nats-Msg-Id`, so the store keeps one, should one that timed out have landed after all. The outbox copy expects
+/// nothing of the store, as an expectation the store refused would stall the source.
 pub async fn put(
     js: &jetstream::Context,
     handle: &AttachmentHandle,
     attachment: &Attachment,
     bytes: &[u8],
-) -> Result<()> {
+) -> Result<Stored> {
     attachment.check()?;
     ensure!(handle.id == attachment.id, "the handle {handle} names another attachment than {}", attachment.id);
     ensure!(
@@ -36,38 +62,144 @@ pub async fn put(
         "the bytes of {} differ from its reference",
         attachment.name
     );
-    let mut acks = Vec::new();
+    let reference = serde_json::to_string(attachment)?;
     // An empty file is one empty chunk, which carries the reference all the same.
     let chunks: Vec<&[u8]> = if bytes.is_empty() { vec![&[]] } else { bytes.chunks(ATTACHMENT_CHUNK).collect() };
-    for (n, chunk) in chunks.into_iter().enumerate() {
-        let mut message = PublishMessage::build().payload(chunk.to_vec().into()).expected_last_subject_sequence(0);
-        if n == 0 {
-            message = message.header(ATTACHMENT_HEADER, serde_json::to_string(attachment)?.as_str());
-        }
+    let message = |n: usize| {
+        let message = PublishMessage::build().payload(chunks[n].to_vec().into()).message_id(chunk_id(handle, n));
+        if n == 0 { message.header(ATTACHMENT_HEADER, reference.as_str()) } else { message }
+    };
+    let mut acks = Vec::new();
+    for n in 0..chunks.len() {
         let subject = handle.chunk_subject(n as u64);
-        let ack = js.send_publish(subject.clone(), message).await;
-        acks.push((subject, ack));
+        let ack = js.send_publish(subject.clone(), message(n).expected_last_subject_sequence(0)).await;
+        acks.push((n, subject, ack));
     }
-    for (subject, ack) in acks {
+    let mut unreachable = None;
+    let mut kept = Vec::new();
+    for (n, subject, ack) in acks {
         let stored = match ack {
             Ok(ack) => ack.await.map(drop),
             Err(e) => Err(e),
         };
         match stored {
+            Ok(()) => {}
             Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => {}
+            Err(e) if bus::out_of_reach(&e) => {
+                kept.push(n);
+                unreachable.get_or_insert((subject, e));
+            }
             Err(e) => {
-                return Err(crate::bus::explain(js, &subject, e).await)
+                return Err(bus::explain(js, &subject, e).await)
                     .with_context(|| format!("storing attachment {}", attachment.name));
             }
-            Ok(()) => {}
         }
     }
-    Ok(())
+    let Some((subject, unreachable)) = unreachable else {
+        return Ok(Stored::Hub);
+    };
+    let uncaptured = unreachable.kind() == PublishErrorKind::StreamNotFound && bus::uncaptured(js).await;
+    let mut acks = Vec::new();
+    for n in kept {
+        acks.push(js.send_publish(handle.outbox_chunk_subject(n as u64), message(n)).await);
+    }
+    for ack in acks {
+        let kept = match ack {
+            Ok(ack) => ack.await.map(drop),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = kept {
+            let context = || format!("storing attachment {}", attachment.name);
+            if uncaptured {
+                return Err(bus::explained(unreachable, &subject, uncaptured)).with_context(context);
+            }
+            return Err(anyhow::anyhow!(e))
+                .with_context(|| {
+                    format!(
+                        "the hub's attachments' store did not store {subject} ({unreachable}), nor did this machine's \
+                         outbox (`ants leaf outbox` sets it up on a leaf node)"
+                    )
+                })
+                .with_context(context);
+        }
+    }
+    if uncaptured {
+        bus::warn_uncaptured(&subject, "kept in this machine's outbox");
+    } else {
+        tracing::warn!(
+            %handle,
+            "the hub's attachments' store is out of reach ({unreachable}); kept in this machine's outbox"
+        );
+    }
+    Ok(Stored::Outbox)
 }
 
 /// Read the bytes of the attachment under `handle`, and its reference as stored with them. Given `expected`, the
-/// reference the message carrying it holds, the bytes must match that one.
+/// reference the message carrying it holds, the bytes must match that one. Chunks missing of an attachment made within
+/// [`RECENT`] (by the time in its id) may still be on their way from a leaf's outbox: the read waits up to [`SETTLE`]
+/// for them.
 pub async fn get(
+    js: &jetstream::Context,
+    handle: &AttachmentHandle,
+    expected: Option<&Attachment>,
+) -> Result<(Attachment, Vec<u8>)> {
+    get_stored(js, handle, expected, None).await
+}
+
+/// [`get`] of an attachment of a message the hub stored at `stored`: missing chunks are waited for when the attachment
+/// or the message is recent, as a message from a leaf's outbox comes as late as the uplink is back.
+pub async fn get_stored(
+    js: &jetstream::Context,
+    handle: &AttachmentHandle,
+    expected: Option<&Attachment>,
+    stored: Option<DateTime<Utc>>,
+) -> Result<(Attachment, Vec<u8>)> {
+    let wait = if recent(handle, stored, Utc::now()) { SETTLE } else { Duration::ZERO };
+    get_within(js, handle, expected, wait).await
+}
+
+/// Whether the attachment under `handle`, made at the time in its id, or the message carrying it, stored at `stored`,
+/// is within [`RECENT`] of `now`. A time ahead of `now`, from a clock running ahead, is recent.
+fn recent(handle: &AttachmentHandle, stored: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    let made = handle.id.get_timestamp().and_then(|t| {
+        let (secs, nanos) = t.to_unix();
+        DateTime::from_timestamp(i64::try_from(secs).ok()?, nanos)
+    });
+    let recent = chrono::Duration::from_std(RECENT).expect("an hour");
+    made.into_iter().chain(stored).any(|at| now - at < recent)
+}
+
+/// [`get`], waiting up to `wait` for chunks missing.
+pub async fn get_within(
+    js: &jetstream::Context,
+    handle: &AttachmentHandle,
+    expected: Option<&Attachment>,
+    wait: Duration,
+) -> Result<(Attachment, Vec<u8>)> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match read(js, handle, expected).await {
+            Err(e) if e.is::<Missing>() && tokio::time::Instant::now() + RETRY <= deadline => {
+                tokio::time::sleep(RETRY).await;
+            }
+            read => return read,
+        }
+    }
+}
+
+/// A chunk of an attachment is not in the store.
+#[derive(Debug)]
+struct Missing(AttachmentHandle);
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "attachment {} is not stored: kept only as long as the messages, or not stored yet", self.0)
+    }
+}
+
+impl std::error::Error for Missing {}
+
+async fn read(
     js: &jetstream::Context,
     handle: &AttachmentHandle,
     expected: Option<&Attachment>,
@@ -75,9 +207,7 @@ pub async fn get(
     let store = js.get_stream_no_info(FILES_STREAM).await.context("opening the attachments' store")?;
     let chunk = async |n: u64| match store.direct_get_last_for_subject(handle.chunk_subject(n)).await {
         Ok(message) => Ok(message),
-        Err(e) if e.kind() == DirectGetErrorKind::NotFound => {
-            bail!("attachment {handle} is not stored: kept only as long as the messages, or not stored yet")
-        }
+        Err(e) if e.kind() == DirectGetErrorKind::NotFound => bail!(Missing(handle.clone())),
         Err(e) => Err(e).with_context(|| format!("reading attachment {handle}")),
     };
     let first = chunk(0).await?;
@@ -98,6 +228,67 @@ pub async fn get(
         "attachment {handle} does not match its reference: it changed or is incomplete"
     );
     Ok((stored, bytes))
+}
+
+/// The media types of attachments a harness taking images is handed as images: those every model reading images
+/// reads.
+pub const PROMPT_IMAGES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// The files attached to the message a prompt hands the harness, each with the handle the subject of that message
+/// gives it. Their bytes are read only as the prompt runs, once it is known whether the harness takes images.
+pub struct Attached {
+    js: jetstream::Context,
+    files: Vec<(AttachmentHandle, Attachment)>,
+}
+
+/// What a prompt shows of the files attached to its message ([`Attached::show`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// A line for each attachment, naming it and how to read it, for the end of the prompt's text.
+    pub lines: String,
+    /// The images to hand the harness after the text, as media type and bytes.
+    pub images: Vec<(String, Vec<u8>)>,
+}
+
+impl Attached {
+    /// The `files` attached to a message, read from the store through `js`; None when there are none.
+    pub fn new(js: jetstream::Context, files: Vec<(AttachmentHandle, Attachment)>) -> Option<Self> {
+        (!files.is_empty()).then_some(Self { js, files })
+    }
+
+    /// What the prompt shows of the attachments: to a harness taking `images`, each image ([`PROMPT_IMAGES`]) that
+    /// reads back as its reference says; for every attachment, a line naming it, its type, size and handle, and the
+    /// read_attachment tool, or why it is unavailable.
+    pub async fn show(self, images: bool) -> Shown {
+        let mut shown = Shown::default();
+        let mut lines = Vec::new();
+        for (handle, attachment) in self.files.into_iter().take(MAX_ATTACHMENTS) {
+            let Attachment { name, mime, size, .. } = &attachment;
+            let what = format!("[ants] Attached: {name:?} ({mime}, {size} bytes), handle {handle}");
+            if let Err(e) = attachment.check() {
+                lines.push(format!("{what}: unavailable ({e})."));
+                continue;
+            }
+            if !images || !PROMPT_IMAGES.contains(&mime.as_str()) {
+                lines.push(format!("{what}; call read_attachment with the handle to read it."));
+                continue;
+            }
+            match get(&self.js, &handle, Some(&attachment)).await {
+                Ok((_, bytes)) => {
+                    lines.push(format!("{what}; shown as an image after this text."));
+                    shown.images.push((mime.clone(), bytes));
+                }
+                Err(e) => {
+                    tracing::warn!(%handle, error = format!("{e:#}"), "reading an attachment for a prompt");
+                    lines.push(format!(
+                        "{what}: unavailable now ({e:#}); call read_attachment with the handle to try again."
+                    ));
+                }
+            }
+        }
+        shown.lines = lines.join("\n");
+        shown
+    }
 }
 
 #[cfg(test)]
@@ -136,7 +327,45 @@ mod tests {
         let lying = Attachment { id: big.id, ..other.clone() };
         assert!(get(&js, &handle_of(&big), Some(&lying)).await.is_err(), "the bytes match the message's reference");
         assert!(put(&js, &handle_of(&other), &other, b"changed").await.is_err());
-        let missing = get(&js, &handle_of(&other), None).await.unwrap_err().to_string();
+        let missing = get_within(&js, &handle_of(&other), None, Duration::ZERO).await.unwrap_err().to_string();
         assert!(missing.contains("is not stored"), "{missing}");
+
+        // Chunks on their way from a leaf's outbox are waited for, those of an old attachment not.
+        let late = reference("late.txt", "text/plain", b"late").unwrap();
+        let reading = tokio::spawn({
+            let (js, handle, late) = (js.clone(), handle_of(&late), late.clone());
+            async move { get(&js, &handle, Some(&late)).await }
+        });
+        tokio::time::sleep(RETRY * 2).await;
+        assert_eq!(put(&js, &handle_of(&late), &late, b"late").await.unwrap(), Stored::Hub);
+        assert_eq!(reading.await.unwrap().unwrap().1, b"late");
+        let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_700_000_000, 0));
+        let started = std::time::Instant::now();
+        assert!(get(&js, &handle_of(&Attachment { id: old, ..other }), None).await.is_err());
+        assert!(started.elapsed() < SETTLE / 2, "not waited for");
+    }
+
+    #[test]
+    fn missing_chunks_are_waited_for_when_the_attachment_or_its_message_is_recent() {
+        let now = Utc::now();
+        let at = |ago: chrono::Duration| {
+            let at = now - ago;
+            let id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+                uuid::NoContext,
+                at.timestamp().try_into().unwrap(),
+                at.timestamp_subsec_nanos(),
+            ));
+            AttachmentHandle {
+                from: "alice".parse().unwrap(),
+                scope: AttachmentScope::Inbox("dev-a".parse().unwrap()),
+                id,
+            }
+        };
+        let (minute, day) = (chrono::Duration::minutes(1), chrono::Duration::days(1));
+        assert!(recent(&at(minute), None, now));
+        assert!(recent(&at(-minute), None, now), "a clock ahead");
+        assert!(!recent(&at(day), None, now));
+        assert!(recent(&at(day), Some(now - minute), now), "kept in an outbox for a day, stored just now");
+        assert!(!recent(&at(day), Some(now - day), now));
     }
 }

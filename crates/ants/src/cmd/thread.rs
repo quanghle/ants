@@ -1,4 +1,4 @@
-//! `ants thread`: list, show, search, title, pin, archive, mark done and mute threads.
+//! `ants thread`: list, show, search, title, pin, archive, mark done, mute and summarise threads.
 
 use std::time::Duration;
 
@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
-use crate::{Nats, completions, quiet, search, thread, thread_meta};
+use crate::{Nats, completions, quiet, search, summary, thread, thread_meta};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ThreadCommand {
@@ -51,6 +51,8 @@ pub(crate) enum ThreadCommand {
         json: bool,
     },
     /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
+    /// The tool calls its ants made show among them by when each started, as entries of kind tool: the ant, the
+    /// call's title and, in brackets, its kind, status and duration.
     Show {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
@@ -62,6 +64,9 @@ pub(crate) enum ThreadCommand {
         /// One JSON entry per line.
         #[arg(long)]
         json: bool,
+        /// Leave out the tool calls the thread's ants made.
+        #[arg(long)]
+        no_tools: bool,
     },
     /// Find the messages stored on any thread that match every filter given, the latest --limit of them, printed
     /// oldest first: time, thread, kind, sender and recipient, message id and a line of text. Times without an offset
@@ -108,6 +113,20 @@ pub(crate) enum ThreadCommand {
         /// Remove the title.
         #[arg(long)]
         clear: bool,
+    },
+    /// Print a thread's TL;DR: the one kept for every human while no entry came after it, else one asked of the
+    /// config file's `[cli]` `summary_ant` (by default the messenger) and kept. The request opens a thread of its own,
+    /// left out of `ants thread list`, `ants inbox` and `ants dash`.
+    Tldr {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+        /// Ask for a new one even if the one kept is current.
+        #[arg(long)]
+        new: bool,
+        /// The TL;DR as one JSON object.
+        #[arg(long)]
+        json: bool,
     },
     /// Pin a thread, unarchiving it, for every device of the human: `ants thread list` lists it after the others.
     Pin {
@@ -179,12 +198,15 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ThreadCommand) -> Result<()> {
         ThreadCommand::Unarchive { thread } => thread_meta::mark(nats, thread, thread_meta::Marking::Unarchive).await,
         ThreadCommand::Done { thread } => thread_meta::done(nats, thread, true).await,
         ThreadCommand::Undone { thread } => thread_meta::done(nats, thread, false).await,
-        ThreadCommand::Show { thread, since, json } => thread::show(nats, thread, since, json).await,
+        ThreadCommand::Show { thread, since, json, no_tools } => {
+            thread::show(nats, thread, since, json, no_tools).await
+        }
         ThreadCommand::Search { grep, from, to, channel, kinds, since, until, limit, json } => {
             let kinds = kinds.into_iter().collect();
             let search = search::Search { from, to, channel, kinds, grep, limit, ..Default::default() };
             search::search(nats, search, since, until, json).await
         }
+        ThreadCommand::Tldr { thread, new, json } => summary::tldr(nats, thread, new, json).await,
         ThreadCommand::Mute { thread, duration } => quiet::mute(nats, thread, duration).await,
         ThreadCommand::Unmute { thread } => quiet::unmute(nats, thread).await,
     }

@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
-    Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, ThreadId, ThreadOrigin, UserId, Uuid,
-    WEBHOOK_ALLOW, subject,
+    Attachment, AttachmentHandle, CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope,
+    Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate,
+    SummaryOf, SummaryRequest, TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -28,6 +28,7 @@ use crate::channel::{self, Channels, Context, Earlier, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::fallback::{Failover, OnFallback};
+use crate::files::Attached;
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
@@ -288,6 +289,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         humans: &humans,
         retry_delay: RETRY_DELAY,
         progress_every: PROGRESS_EVERY,
+        timeline_every: crate::timeline::allowed(config.creds.as_deref(), &config.ant).then_some(TIMELINE_EVERY),
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
         breaker: Breaker::default(),
@@ -358,6 +360,8 @@ struct Ran {
     spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
     /// The fallback the prompt ran on, `None` for the ant's own harness.
     fallback: Option<usize>,
+    /// The tokens the prompt spent so far, as the harness reported them.
+    tokens: u64,
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
@@ -711,6 +715,23 @@ enum Steered {
     Ahead,
 }
 
+impl Incoming {
+    /// The files attached to the message, each with its handle: a channel post's under the post's channel, as the
+    /// envelope made of it carries none ([`channel::as_envelope`]).
+    fn attached(&self) -> Vec<(AttachmentHandle, Attachment)> {
+        match &self.post {
+            Some(posted) => {
+                let post = &posted.post;
+                post.attachments.iter().map(|a| (post.attachment_handle(a.id), a.clone())).collect()
+            }
+            None => {
+                let envelope = &self.envelope;
+                envelope.attachments.iter().map(|a| (envelope.attachment_handle(a.id), a.clone())).collect()
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Posted {
     post: ChannelPost,
@@ -860,6 +881,9 @@ struct Inbox<'a> {
     humans: &'a Registry,
     retry_delay: Duration,
     progress_every: Duration,
+    /// How often at most a prompt's tool-call timeline is stored while it runs; never, when the credentials do not
+    /// allow it.
+    timeline_every: Option<Duration>,
     /// Whether the harness is signed out, holding the messages.
     sign_in: SignIn,
     /// How often a signed-out harness, or one failing to start, is checked.
@@ -1898,6 +1922,10 @@ impl Inbox<'_> {
     /// daemon's alone ([`Escalator::took_climb`]).
     async fn arrived(&self, incoming: &mut Incoming) -> Result<bool> {
         let sender = self.humans.sender_role(&incoming.envelope);
+        // Only a human asks for a summary.
+        if !sender.is_human() {
+            incoming.envelope.summary = None;
+        }
         if incoming.post.is_none() && !sender.is_human() && self.escalator.took_climb(&incoming.envelope).await? {
             return Ok(false);
         }
@@ -2063,7 +2091,7 @@ impl Inbox<'_> {
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
-        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, mut spend, fallback } =
+        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, tokens } =
             self.run_prompt(incoming, msg, seq, text, flush).await;
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
@@ -2075,12 +2103,7 @@ impl Inbox<'_> {
             Ok(reply) => reply,
         };
         let fallback_notice = self.served_by(fallback);
-        // Spend reported as the prompt ended, such as its tokens.
-        while let Ok(spent) = spend.try_recv() {
-            if let Some(cap) = self.record(envelope, &spent).await {
-                reached.get_or_insert(cap);
-            }
-        }
+        let tokens = tokens + self.record_ended(envelope, spend, &mut reached).await;
 
         // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
         let cut = reply.cut.is_some() && !cut_by_cancel;
@@ -2094,9 +2117,12 @@ impl Inbox<'_> {
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
+        if let Reply::Message(message) = &mut reply {
+            message.summary = envelope.summary.clone().map(|s| SummaryRequest { tokens: Some(tokens), ..s });
+        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
@@ -2214,7 +2240,7 @@ impl Inbox<'_> {
                 };
                 let mut reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
                 reply.to = owner;
-                Reply::Message(reply)
+                Reply::Message(Box::new(reply))
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
@@ -2237,13 +2263,13 @@ impl Inbox<'_> {
                         if let Some(Route::Stuck(stuck)) = route {
                             reply.to = stuck;
                         }
-                        Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+                        Reply::Message(Box::new(reply.with_escalation(envelope.escalation.as_deref().cloned())))
                     }
                 }
             }
         };
         Ok(Some(match reply {
-            Reply::Message(message) => Reply::Message(Envelope { title, ..message }),
+            Reply::Message(message) => Reply::Message(Box::new(Envelope { title, ..*message })),
             Reply::Post(post) => Reply::Post(ChannelPost { title, ..post }),
             // Posted with the title already.
             Reply::Notes(post) => Reply::Notes(post),
@@ -2260,9 +2286,10 @@ impl Inbox<'_> {
         };
         let text = match (&incoming.post, read) {
             (Some(posted), Some(read)) => self.channel_prompt(posted, read, humans).await,
-            _ => match escalation::group_note(self.ant, envelope) {
-                Some(note) => format!("{note}\n\n{}", envelope.text),
-                None => envelope.text.clone(),
+            _ => match (&envelope.summary, escalation::group_note(self.ant, envelope)) {
+                (Some(summary), _) => format!("{}\n\n{}", summary_note(summary), envelope.text),
+                (None, Some(note)) => format!("{note}\n\n{}", envelope.text),
+                (None, None) => envelope.text.clone(),
             },
         };
         let text = match &incoming.resume {
@@ -2317,6 +2344,11 @@ impl Inbox<'_> {
         let mut reached = None;
         let (progress_tx, mut streamed) = tokio::sync::mpsc::channel(status::BUFFER);
         let mut status = Status::new(self.client, self.ant, thread, self.redactor);
+        let mut timeline = self.timeline_every.map(|every| {
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            (crate::timeline::Collector::new(self.ant, thread, envelope.id, self.redactor), tick)
+        });
         let history = crate::history::Thread {
             js: self.js.clone(),
             ant: self.ant.clone(),
@@ -2331,6 +2363,7 @@ impl Inbox<'_> {
             stop: Some(stop),
             progress: Some(progress_tx),
             history: Some(history.history()),
+            attachments: Attached::new(self.js.clone(), incoming.attached()),
         };
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
@@ -2344,14 +2377,23 @@ impl Inbox<'_> {
         let mut progress = self.progress();
         // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
         let mut worked = false;
+        let mut tokens = 0;
         let reply = loop {
             tokio::select! {
                 r = &mut prompt => break r,
                 Some(update) = streamed.recv() => {
                     worked |= matches!(update, StatusUpdate::Tool { .. });
+                    if let Some((calls, _)) = &mut timeline {
+                        calls.push(&update, chrono::Utc::now());
+                    }
                     status.push(update);
                 }
                 _ = flush.tick() => status.flush_settled(),
+                () = stored_every(&mut timeline) => {
+                    if let Some(record) = timeline.as_mut().and_then(|(calls, _)| calls.take()) {
+                        crate::timeline::store(self.js, record);
+                    }
+                }
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
                     tracing::info!(%thread, by = %by.by, steer = by.steer, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
@@ -2361,6 +2403,7 @@ impl Inbox<'_> {
                     cancelled_by = Some(by);
                 }
                 Some(spent) = spend.recv() => {
+                    tokens += spent_tokens(&spent);
                     if let Some(cap) = self.record(envelope, &spent).await {
                         if let Some(stop) = stop_tx.take() {
                             let _ = stop.send(cap.clone());
@@ -2377,11 +2420,19 @@ impl Inbox<'_> {
         };
         while let Ok(update) = streamed.try_recv() {
             worked |= matches!(update, StatusUpdate::Tool { .. });
+            if let Some((calls, _)) = &mut timeline {
+                calls.push(&update, chrono::Utc::now());
+            }
             status.push(update);
         }
         status.flush();
+        if let Some((calls, _)) = &mut timeline {
+            while let Some(record) = calls.take() {
+                crate::timeline::store(self.js, record);
+            }
+        }
         drop((cancellable, prompting));
-        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback }
+        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback, tokens }
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
@@ -2438,6 +2489,24 @@ impl Inbox<'_> {
         }
         status::state(self.client, self.ant, reply.thread_id(), State::Idle);
         Ok(())
+    }
+
+    /// Record the spend reported as a prompt ended, such as its tokens, keeping the first cap it reached in `reached`.
+    /// The tokens it reported.
+    async fn record_ended(
+        &self,
+        envelope: &Envelope,
+        mut spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
+        reached: &mut Option<String>,
+    ) -> u64 {
+        let mut tokens = 0;
+        while let Ok(spent) = spend.try_recv() {
+            tokens += spent_tokens(&spent);
+            if let Some(cap) = self.record(envelope, &spent).await {
+                reached.get_or_insert(cap);
+            }
+        }
+        tokens
     }
 
     /// Count what the harness spent on the thread of `envelope`, warning a human of each cap nearly reached. Returns
@@ -2650,6 +2719,33 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
     Some(request)
 }
 
+/// The tokens `spent` reports.
+fn spent_tokens(spent: &Spend) -> u64 {
+    match spent {
+        Spend::Tokens(n) => *n,
+        Spend::Cost { .. } => 0,
+    }
+}
+
+/// The `[ants]` line that turns a human's message carrying `summary` into a request for a summary of the entries its
+/// text carries.
+fn summary_note(summary: &SummaryRequest) -> String {
+    let what = match &summary.of {
+        SummaryOf::Thread(thread) => format!(
+            "a TL;DR of thread {thread} from the entries below: what was asked, decided and done, and what waits on whom"
+        ),
+        SummaryOf::Since(since) => format!(
+            "a digest of the threads with entries since {} from the entries below: what finished, what is stuck, and \
+             what waits on the human",
+            since.format("%Y-%m-%d %H:%M UTC")
+        ),
+    };
+    format!(
+        "[ants] A human asks for {what}. Answer with at most 120 words of plain text; use no tools and message no \
+         one: the reply is the summary."
+    )
+}
+
 /// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to
 /// `ask_ant` that wait on its thread for `check_inbox`.
 /// The line starting the prompt of a human's steer message that interrupted the prompt running on its thread.
@@ -2802,6 +2898,17 @@ impl<N: NotesStore> NotesStore for RedactingNotes<N> {
                 Box::pin(async move { self.notes.post(&post, last_seq).await })
             }
         }
+    }
+}
+
+/// When the next record of a prompt's tool-call timeline is due: at its next tick once something changed; never
+/// without a timeline.
+async fn stored_every(timeline: &mut Option<(crate::timeline::Collector<'_>, tokio::time::Interval)>) {
+    match timeline {
+        Some((calls, tick)) if calls.pending() => {
+            tick.tick().await;
+        }
+        _ => std::future::pending().await,
     }
 }
 

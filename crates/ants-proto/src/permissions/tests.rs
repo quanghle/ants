@@ -125,12 +125,13 @@ fn leaf_permissions_cover_each_user_once() {
     assert_eq!(
         extra,
         [
-            // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a`, `ants.chan.*.dev-a` and
-            // `ants.chanadm.*.dev-a`.
+            // Already allowed by `ants.inbox.*.dev-a`, `ants.notes.*.dev-a`, `ants.chan.*.dev-a`,
+            // `ants.chanadm.*.dev-a` and `ants.timeline.*.dev-a`.
             "ants.inbox.dev-a.dev-a",
             "ants.notes.dev-a.dev-a",
             "ants.chan.dev-a.dev-a",
             "ants.chanadm.dev-a.dev-a",
+            "ants.timeline.dev-a.dev-a",
             "$JS.S.m1.>",
             "$JSC.R.m1.*.ANTS_OUT.>",
             "_INBOX.human.leaf.m1.>",
@@ -152,7 +153,7 @@ fn leaf_permissions_cover_each_user_once() {
 }
 
 #[test]
-fn outboxes_take_inbox_notes_channel_and_dead_letter_subjects_only() {
+fn outboxes_take_inbox_notes_channel_dead_letter_and_timeline_subjects_only() {
     let t: ThreadId = "t1".parse().unwrap();
     let c: ChannelId = "ops".parse().unwrap();
     assert_eq!(subject::outbox(&subject::inbox(&p("dev-a"), &p("dev-b"))).unwrap(), "ants.out.inbox.dev-a.dev-b");
@@ -163,7 +164,9 @@ fn outboxes_take_inbox_notes_channel_and_dead_letter_subjects_only() {
         assert_eq!(subject::outbox(&other), None, "{other}");
     }
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
-    for s in ["ants.out.inbox.*.dev-a", "ants.out.notes.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"] {
+    assert_eq!(subject::outbox(&subject::timeline(&t, &p("dev-a"))).unwrap(), "ants.out.timeline.t1.dev-a");
+    let own = ["ants.out.inbox.*.dev-a", "ants.out.notes.*.dev-a", "ants.out.chan.*.dev-a", "ants.out.dead.dev-a"];
+    for s in own.into_iter().chain(["ants.out.timeline.*.dev-a"]) {
         assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
     }
     assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.approvals")));
@@ -183,15 +186,22 @@ fn the_hub_admits_from_a_machine_what_its_users_may_send() {
             ("ants.in.m1.ants.out.notes.*.dev-a".to_owned(), "ants.notes.{{wildcard(1)}}.dev-a".to_owned()),
             ("ants.in.m1.ants.out.chan.*.dev-a".to_owned(), "ants.chan.{{wildcard(1)}}.dev-a".to_owned()),
             ("ants.in.m1.ants.out.dead.dev-a".to_owned(), "ants.dead.dev-a".to_owned()),
+            ("ants.in.m1.ants.out.timeline.*.dev-a".to_owned(), "ants.timeline.{{wildcard(1)}}.dev-a".to_owned()),
         ]
     );
     let human = m1.admitted(&UserId::human(), Role::Human, true);
     assert_eq!(human[0], ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned()));
     assert!(human.iter().all(|(filter, _)| !filter.contains(".dead.")), "no dead letters of a human");
+    assert!(human.iter().all(|(filter, _)| !filter.contains(".timeline.")), "no timeline of a human");
     let rest: Vec<_> = m1.admitted(&p("dev-a"), Role::Ant, false).into_iter().map(|(filter, _)| filter).collect();
     assert_eq!(
         rest,
-        ["ants.in.m1.ants.out.notes.*.dev-a", "ants.in.m1.ants.out.chan.*.dev-a", "ants.in.m1.ants.out.dead.dev-a"],
+        [
+            "ants.in.m1.ants.out.notes.*.dev-a",
+            "ants.in.m1.ants.out.chan.*.dev-a",
+            "ants.in.m1.ants.out.dead.dev-a",
+            "ants.in.m1.ants.out.timeline.*.dev-a",
+        ],
         "no inbox subjects"
     );
     assert_eq!(
@@ -532,11 +542,13 @@ fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
 }
 
 #[test]
-fn humans_set_every_title_and_done_state_but_only_their_own_pins_and_archives_and_ants_neither() {
+fn humans_set_every_title_tldr_and_done_state_but_only_their_own_pins_and_archives_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
         "$KV.ants_threads.title.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.title.*",
+        "$KV.ants_threads.summary.*",
+        "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.summary.*",
         "$KV.ants_threads.done.*",
         "$JS.API.DIRECT.GET.KV_ants_threads.$KV.ants_threads.done.*",
         "$KV.ants_threads.marks.alice",
@@ -600,6 +612,42 @@ fn humans_write_only_their_own_reactions_ants_ask_and_only_the_responder_writes_
 }
 
 #[test]
+fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_revocations() {
+    let devices = |perms: &Permissions| -> Vec<String> {
+        perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_devices")).cloned().collect()
+    };
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$JS.API.STREAM.INFO.KV_ants_devices",
+        "$JS.API.STREAM.CREATE.KV_ants_devices",
+        "$JS.API.DIRECT.GET.KV_ants_devices.>",
+        "$JS.API.CONSUMER.CREATE.KV_ants_devices",
+        "$KV.ants_devices.alice.>",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let puts: Vec<String> = devices(&human).into_iter().filter(|s| s.starts_with("$KV.")).collect();
+    assert_eq!(puts, ["$KV.ants_devices.alice.>"], "only its own devices, no revocation record");
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&p("alice"), Role::Human), (&p("dev-a"), Role::Ant)]);
+    assert!(leaf.publish.iter().any(|s| s == "$KV.ants_devices.alice.>"), "a human on a leaf puts its own");
+
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let observer = Permissions::for_observer(&p("watcher"));
+    let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    for none in [ant, observer, webhook, Permissions::for_channel_manager(), Permissions::for_reactions_responder()] {
+        assert_eq!(devices(&none), Vec::<String>::new());
+    }
+
+    let revoker = Permissions::for_device_revoker();
+    let puts: Vec<&String> = revoker.publish.iter().filter(|s| s.starts_with("$KV.")).collect();
+    assert_eq!(puts, ["$KV.ants_devices.revoked.*"]);
+    assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
+    assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
+    assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
+}
+
+#[test]
 fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_they_read() {
     let files = |perms: &Permissions| -> Vec<String> {
         perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_files")).cloned().collect()
@@ -626,10 +674,18 @@ fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_th
         "ants.out.files.>",
         "$JS.API.STREAM.INFO.OBJ_ants_files",
         "$JS.API.STREAM.CREATE.OBJ_ants_files",
+        "$JS.API.STREAM.UPDATE.OBJ_ants_files",
         "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.>",
     ] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
+    // Admitting an ant new to a leaf node into the store, from the leaf's outbox.
+    let approver = Permissions::for_enroll_approver();
+    assert_eq!(
+        files(&approver),
+        ["$JS.API.STREAM.INFO.OBJ_ants_files", "$JS.API.STREAM.UPDATE.OBJ_ants_files"],
+        "no chunk"
+    );
     let domain: JsDomain = "hub".parse().unwrap();
     let ant_in_domain = ant.clone().with_js_domain(Some(&domain));
     assert!(
@@ -669,6 +725,21 @@ fn ants_write_only_their_own_chain_and_read_every_one() {
 }
 
 #[test]
+fn ants_store_only_their_own_timeline_and_read_none() {
+    let timeline =
+        |list: &[String]| -> Vec<String> { list.iter().filter(|s| s.contains("timeline")).cloned().collect() };
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert_eq!(timeline(&ant.publish), ["ants.timeline.*.dev-a", "ants.out.timeline.*.dev-a"]);
+    assert!(timeline(&ant.subscribe).is_empty());
+    assert!(!ant.subscribe.iter().any(|s| s == subject::ALL || s == ">"));
+    // A human stores none, and reads them all as it reads every stored message.
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    assert!(timeline(&human.publish).is_empty());
+    assert!(human.subscribe.iter().any(|s| s == subject::ALL));
+    assert!(human.publish.iter().any(|s| s == &format!("$JS.API.STREAM.MSG.GET.{STREAM}")));
+}
+
+#[test]
 fn the_permissions_version_travels_as_a_user_jwt_tag() {
     let tag = PERMISSIONS_VERSION.tag();
     assert_eq!(tag, format!("ants-perms:{}", PERMISSIONS_VERSION.0));
@@ -677,4 +748,23 @@ fn the_permissions_version_travels_as_a_user_jwt_tag() {
     assert_eq!(PermissionsVersion::from_tags([device.as_str()]), None);
     assert_eq!(PermissionsVersion::from_tags(["ants-perms:x"]), None);
     assert!(PermissionsVersion(0) < PERMISSIONS_VERSION);
+}
+
+#[test]
+fn only_bootstrap_credentials_ask_to_register_and_only_the_signer_hears_them() {
+    let bootstrap = Permissions::for_bootstrap();
+    assert_eq!(bootstrap.publish, [subject::ALL_LOGIN_REQUESTS]);
+    assert_eq!(bootstrap.subscribe, [subject::ALL_LOGIN_REPLIES]);
+    let registrar = Permissions::for_registrar();
+    assert_eq!((registrar.publish, registrar.subscribe), (bootstrap.subscribe, bootstrap.publish));
+    let (dev_a, alice): (UserId, UserId) = ("dev-a".parse().unwrap(), "alice".parse().unwrap());
+    let m1: Machine = "m1".parse().unwrap();
+    let mut leaf = Permissions::for_leaf(&m1, [(&dev_a, Role::Ant), (&alice, Role::Human)]);
+    leaf.publish.extend(Permissions::for_enroll_approver().publish);
+    leaf.subscribe.extend(Permissions::for_enroll_approver().subscribe);
+    let others = [Permissions::for_user(&dev_a, Role::Ant), Permissions::for_user(&alice, Role::Human), leaf];
+    for permissions in others {
+        let subjects = permissions.publish.iter().chain(&permissions.subscribe);
+        assert!(subjects.clone().all(|s| !s.starts_with("ants.login.") && s != ">"), "{subjects:?}");
+    }
 }

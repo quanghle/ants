@@ -28,7 +28,7 @@ They publish no message, answer no tool request, cancel no prompt and write no b
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
 or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_roster` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
-`ants_presence`, `ants_notify`, `ants_reactions` and `ants_threads`, and the attachment store `ants_files`.
+`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads` and `ants_devices`, and the attachment store `ants_files`.
 
 Event payloads can still contain prompt or tool text:
 
@@ -117,7 +117,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `state` | `state`: `working`, `waiting_approval`, `idle`, `failed`, `signed_out` | The thread's state changed |
 | `message` | `text` | More of the reply, as streamed |
 | `thought` | `text` | More of the reasoning, where the harness shares it |
-| `tool` | `id`, `title`?, `tool_kind`?, `status`? (`pending`, `in_progress`, `completed`, `failed`) | A tool call started or changed |
+| `tool` | `id`, `title`?, `tool_kind`?, `status`? (`pending`, `in_progress`, `completed`, `failed`), `paths`? (≤ 8, absent when none or unchanged) | A tool call started or changed |
 | `plan` | `steps`: `[{"content", "status"}]` | The harness's whole plan |
 | `queued` | `message` (id), `ahead` | A message waits behind `ahead` others |
 | `approval` | `request_id` | A tool request waits for a decision |
@@ -162,6 +162,22 @@ a decision of an ant of its chain sent to its inbox (which observers cannot read
 counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
 `expiry` (rejected unanswered). A human's decision names its human in `decider` when its `ApprovalDecision` names one
 (`by`, as the deciding client claims it); the `ApprovalDecision` feed holds it.
+
+### `Timeline` on `ants.timeline.<thread>.<ant>`
+
+Stored in `ANTS`: part of the tool-call timeline of an ant's prompt on a thread, so a thread's history shows the calls
+after their live status updates are gone. Humans read it back by message gets (`ants thread show`); no ant reads it.
+`ant`, `thread_id`, `message` (the id of the message whose prompt it covers), `at`, `omitted`? (calls of the prompt
+left out past 200) and 1 to 50 `entries`, each named by `type`:
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `tool` | `id`, `title` (≤ 200 chars), `tool_kind`?, `status`?, `started`, `duration_ms`? (once ended), `paths`? (≤ 8) | A tool call as it stands |
+| `plan` | `steps`: `[{"content", "status"}]` (≤ 50) | The prompt's plan as last reported |
+
+A daemon stores a record at most every 30 s while calls changed and the rest when the prompt ends. Merge calls by
+`ant`, `message` and `id`, later records replacing earlier ones; ignore entries of other types and unknown fields.
+Check: `subject == "ants.timeline." + thread_id + "." + ant`.
 
 ### `RosterEntry` at `ants_roster` key `<ant>`
 

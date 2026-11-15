@@ -151,6 +151,11 @@ pub fn title_key(thread: &ThreadId) -> String {
     format!("title.{thread}")
 }
 
+/// Key in [`THREADS_BUCKET`] of the TL;DR of `thread` ([`ThreadSummary`]).
+pub fn summary_key(thread: &ThreadId) -> String {
+    format!("summary.{thread}")
+}
+
 /// Key in [`THREADS_BUCKET`] of the done state of `thread` ([`crate::ThreadDone`]).
 pub fn done_key(thread: &ThreadId) -> String {
     format!("done.{thread}")

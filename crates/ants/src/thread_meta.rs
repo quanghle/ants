@@ -1,5 +1,5 @@
-//! What humans make of threads, in [`THREADS_BUCKET`]: a title and a done state per thread, each shared by every
-//! human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by
+//! What humans make of threads, in [`THREADS_BUCKET`]: a title, a TL;DR ([`ThreadSummary`]) and a done state per
+//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by
 //! direct gets and plain publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices
 //! marking at once lose nothing.
 
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadTitle, UserId, done_key,
-    marks_key, title_key,
+    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSummary, ThreadTitle, UserId,
+    done_key, marks_key, summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
@@ -48,8 +48,14 @@ fn done_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.done.*")
 }
 
-/// The titles, done states and the marks of the CLI's human, unless its credentials are no human's: a request they
-/// deny would only time out. Credentials that may not read done states leave them out ([`Meta::done`]).
+/// The direct get subject of every TL;DR, which credentials issued before permissions version 2 lack.
+fn summaries_right() -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
+}
+
+/// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
+/// they deny would only time out. Credentials that may not read done states or TL;DRs leave them out ([`Meta::done`],
+/// [`Meta::summary`]).
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&marks_right(me)) {
@@ -60,6 +66,7 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
     }
     let mut meta = Meta::open(js, nats.domain, me).await?;
     meta.done_right = nats.rights.may_publish(&done_right());
+    meta.summaries_right = nats.rights.may_publish(&summaries_right());
     Ok(meta)
 }
 
@@ -259,18 +266,62 @@ pub async fn last_sequence(js: &jetstream::Context) -> Result<u64> {
     Ok(stream.cached_info().state.last_sequence)
 }
 
-/// The titles, the done states and the marks of one human.
+/// The titles, the TL;DRs, the done states and the marks of one human.
 pub struct Meta {
     kv: DirectKv,
     human: UserId,
     /// Whether its credentials may read and write done states.
     done_right: bool,
+    /// Whether its credentials may read and write TL;DRs.
+    summaries_right: bool,
 }
 
 impl Meta {
     /// Those of `human`, through `js`, made for JetStream domain `js_domain`.
     pub async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>, human: &UserId) -> Result<Self> {
-        Ok(Self { kv: DirectKv::new(js, js_domain, THREADS_BUCKET).await?, human: human.clone(), done_right: true })
+        let kv = DirectKv::new(js, js_domain, THREADS_BUCKET).await?;
+        Ok(Self { kv, human: human.clone(), done_right: true, summaries_right: true })
+    }
+
+    /// Whether the credentials may read and write TL;DRs; warns once per process when they may not.
+    fn may_summarise(&self) -> bool {
+        static WARNED: Once = Once::new();
+        if !self.summaries_right {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "the credentials of {} predate TL;DRs of threads (permissions version 2): going on without \
+                     keeping them; `ants renew` renews them",
+                    self.human
+                );
+            });
+        }
+        self.summaries_right
+    }
+
+    /// The TL;DR of `thread`, if it has one and the credentials may read it. An entry naming another thread than its
+    /// key is none.
+    pub async fn summary(&self, thread: &ThreadId) -> Result<Option<ThreadSummary>> {
+        if !self.may_summarise() {
+            return Ok(None);
+        }
+        match self.kv.lookup(summary_key(thread)).await.context("reading the TL;DR")? {
+            Lookup::NoBucket => bail!(MISSING),
+            Lookup::NoValue => Ok(None),
+            Lookup::Value(value) => {
+                Ok(serde_json::from_slice::<ThreadSummary>(&value).ok().filter(|t| t.thread_id == *thread))
+            }
+        }
+    }
+
+    /// Store `summary` as its thread's TL;DR for every human, in place of any it had, if the credentials may. Whether
+    /// it did.
+    pub async fn put_summary(&self, summary: &ThreadSummary) -> Result<bool> {
+        if !self.may_summarise() {
+            return Ok(false);
+        }
+        let key = summary_key(&summary.thread_id);
+        self.kv.put(key, serde_json::to_vec(summary)?).await.context("storing the TL;DR")?;
+        Ok(true)
     }
 
     /// The title of `thread`, if it has one. An entry naming another thread than its key is no title.
@@ -442,10 +493,10 @@ impl Meta {
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
-    /// the human's marks, which `marks` are as last read, and with `titles`, every title and done state; and the keeps
-    /// of threads `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A mark,
-    /// title or done state set again meanwhile stays: marks change by compare-and-set and a title or done state is
-    /// deleted only if unchanged since read. How many marks, and titles and done states, it forgot.
+    /// the human's marks, which `marks` are as last read, and with `titles`, every title, TL;DR and done state; and
+    /// the keeps of threads `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A
+    /// mark, title, TL;DR or done state set again meanwhile stays: marks change by compare-and-set and the others are
+    /// deleted only if unchanged since read. How many marks, and titles, TL;DRs and done states, it forgot.
     pub async fn prune(
         &self,
         marks: &ThreadMarks,
@@ -470,6 +521,9 @@ impl Meta {
             if self.done_right {
                 shared += self.prune_dones(before, &gone).await?;
             }
+            if self.summaries_right {
+                shared += self.prune_summaries(before, &gone).await?;
+            }
         }
         Ok((marked, shared))
     }
@@ -482,11 +536,15 @@ impl Meta {
         self.prune_shared("done", before, gone, |v| Some(serde_json::from_slice::<ThreadDone>(v).ok()?.at)).await
     }
 
-    /// Drop, of the threads `gone` says have no message left, the entries under `prefix` (titles or done states) set
-    /// before `before`, as `at` reads the time an entry was set, and the delete markers of those cleared before then,
-    /// each replaced by a delete marker lasting [`PRUNED_MARKER`] if unchanged since read: a cleared title's marker
-    /// keeps an ant's suggestion from replacing it ([`Meta::adopt_title`]) only while its thread has messages. How
-    /// many it dropped.
+    async fn prune_summaries(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("summary", before, gone, |v| Some(serde_json::from_slice::<ThreadSummary>(v).ok()?.at)).await
+    }
+
+    /// Drop, of the threads `gone` says have no message left, the entries under `prefix` (titles, TL;DRs or done
+    /// states) set before `before`, as `at` reads the time an entry was set, and the delete markers of those cleared
+    /// before then, each replaced by a delete marker lasting [`PRUNED_MARKER`] if unchanged since read: a cleared
+    /// title's marker keeps an ant's suggestion from replacing it ([`Meta::adopt_title`]) only while its thread has
+    /// messages. How many it dropped.
     async fn prune_shared(
         &self,
         prefix: &str,

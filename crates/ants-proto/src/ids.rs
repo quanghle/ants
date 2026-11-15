@@ -4,9 +4,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Error, LINKS_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, inbox_prefix, subject};
 #[cfg(doc)]
-use crate::{HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
+use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
+use crate::{Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, inbox_prefix, subject};
 
 /// Whether `s` is safe as one NATS subject token and as a JetStream consumer name.
 fn valid_token(s: &str) -> bool {
@@ -149,7 +149,7 @@ impl Machine {
 
     /// What the hub's [`STREAM`] admits from the machine's outbox for `user` in `role`, as pairs of an
     /// [`INTAKE_STREAM`] subject filter and the subject it is stored under: exactly the inbox, notes and channel
-    /// subjects the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters.
+    /// subjects the user may publish itself ([`subject::sendable`]), and for an ant its own dead letters and timeline.
     /// With `inbox` false, no inbox subjects: a human's admission takes every inbox subject of a machine it is on, and
     /// the filters of one stream's sources may not overlap. A human's dead letters, of any ant, are written from
     /// what only the hub holds, so none are buffered.
@@ -157,7 +157,7 @@ impl Machine {
         let [own_inbox, own_notes, own_chan] = subject::sendable(user, role);
         let mut patterns = if inbox { vec![own_inbox, own_notes, own_chan] } else { vec![own_notes, own_chan] };
         if !role.is_human() {
-            patterns.push(subject::dead(user));
+            patterns.extend([subject::dead(user), subject::timeline_from(user)]);
         }
         patterns
             .into_iter()
@@ -193,6 +193,15 @@ impl Machine {
     pub fn admitted_owners(&self) -> (String, String) {
         let filter = format!("ants.in.{self}.ants.out.owners.*.*");
         (filter, format!("$KV.{OWNERS_BUCKET}.{{{{wildcard(1)}}}}.{{{{wildcard(2)}}}}"))
+    }
+
+    /// What the hub's attachments' store ([`FILES_BUCKET`]) admits from the machine's outbox for `user` in `role`, as
+    /// an [`INTAKE_STREAM`] subject filter and the subject it is stored under: the chunks of attachments `user` may
+    /// write itself ([`AttachmentHandle::outbox_chunk_subject`]), under their handles; for a human, those of any
+    /// sender, as it sends under any to replay dead letters as they were.
+    pub fn admitted_files(&self, user: &UserId, role: Role) -> (String, String) {
+        let sender = if role.is_human() { String::new() } else { format!("{user}.") };
+        (format!("ants.in.{self}.ants.out.files.{sender}>"), format!("$O.{FILES_BUCKET}.C.{sender}>"))
     }
 }
 

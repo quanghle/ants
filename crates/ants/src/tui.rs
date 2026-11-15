@@ -1,6 +1,7 @@
 //! `ants chat`, which bare `ants` runs on a terminal: the full-screen chat UI. A nav of home (what waits for the
 //! human), work (the threads by state), the human's channels, the ants and the people, beside the view selected in it,
-//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`]).
+//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`], [`people::Io`]),
+//! and searched ([`search::Searches`]).
 //!
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
@@ -8,12 +9,16 @@
 mod channel;
 mod command;
 mod complete;
+mod dm;
 mod exec;
 mod frame;
 mod home;
+mod markdown;
 mod model;
 mod nav;
+mod people;
 mod reads;
+mod search;
 mod thread;
 mod work;
 
@@ -33,6 +38,7 @@ use ratatui::crossterm::{execute, terminal};
 use self::exec::Exec;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
+use self::search::Searches;
 use crate::live::{self, Feed, Screen};
 use crate::{compose, presence, progress, thread_meta};
 
@@ -128,11 +134,15 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
         exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let reads = Reads::new(js.clone(), me.clone());
+    let may_read = nats.rights.may_publish(&presence::online_right());
+    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
+    let searches = Searches::new(js.clone());
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        let chat = Chat { feed, reads, exec: Exec::new(ctx), model: Model::new(state, server), edit: None };
+        let chat =
+            Chat { feed, reads, people, searches, exec: Exec::new(ctx), model: Model::new(state, server), edit: None };
         Box::pin(chat.run(&mut screen.terminal)).await
     };
     let (domain, device) = (nats.domain, nats.device);
@@ -176,6 +186,8 @@ struct Chat {
     feed: Feed,
     reads: Reads,
     exec: Exec,
+    people: people::Io,
+    searches: Searches,
     model: Model,
     /// The command bar's text to edit in the editor.
     edit: Option<String>,
@@ -224,6 +236,16 @@ impl Chat {
                     dirty = true;
                     self.model.outcome(outcome).into_iter().collect()
                 }
+                event = self.people.next() => {
+                    dirty = true;
+                    self.model.people(event, Utc::now());
+                    Vec::new()
+                }
+                found = self.searches.next() => {
+                    dirty = true;
+                    self.model.found(found);
+                    Vec::new()
+                }
             };
             for action in actions {
                 if self.act(action).is_break() {
@@ -268,9 +290,12 @@ impl Chat {
             Action::Decide(request, verdict) => self.feed.decide(request, verdict, self.model.data.me().clone()),
             Action::Edit(text) => self.edit = Some(text),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
+            Action::Send(draft) => self.people.send(draft),
+            Action::Search(search) => self.searches.start(search),
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();
+                self.people.refresh();
                 if let Some(thread) = self.model.open_thread() {
                     self.feed.load_history(thread);
                 }

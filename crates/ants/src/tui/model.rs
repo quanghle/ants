@@ -10,7 +10,7 @@ use super::command::Bar;
 use super::exec::Job;
 use super::reads::Read;
 use super::work::{Facts, Filter};
-use super::{channel, home, nav, thread, work};
+use super::{channel, dm, home, nav, people, search, thread, work};
 use crate::live::{self, State};
 use crate::thread::Entry;
 
@@ -47,6 +47,8 @@ pub enum Action {
     MarkRead(ThreadId),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
+    /// Send a message to another human on a new thread, as `ants ask @human` does.
+    Send(dm::Draft),
     /// Read again what may have missed changes.
     Refresh,
     /// Run the command bar's job, for the bar's text.
@@ -55,6 +57,8 @@ pub enum Action {
     Decide(ApprovalRequest, Verdict),
     /// Edit the command bar's text in the editor.
     Edit(String),
+    /// Find the messages matching the search, replacing any search running.
+    Search(crate::search::Search),
     Quit,
 }
 
@@ -93,6 +97,8 @@ pub struct Data {
     pub humans: Option<Humans>,
     /// The reactions to the messages watched.
     pub reactions: Reactions,
+    /// Who of the other humans is online, and the messages with each.
+    pub people: people::People,
 }
 
 impl Data {
@@ -138,6 +144,8 @@ pub enum Page {
     Work(work::Page),
     Channel(channel::Page),
     Thread(thread::Page),
+    Dm(dm::Page),
+    Search(search::Page),
 }
 
 impl Page {
@@ -147,9 +155,10 @@ impl Page {
             nav::Item::Home => Self::Home(home::Page::default()),
             nav::Item::Work(state) => Self::Work(work::Page::new(Filter { state: *state, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
-            nav::Item::Ant(user) | nav::Item::Person(user) => {
+            nav::Item::Ant(user) => {
                 Self::Work(work::Page::new(Filter { user: Some(user.clone()), ..Filter::default() }))
             }
+            nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
         }
     }
 
@@ -159,6 +168,8 @@ impl Page {
             Self::Work(_) => "work",
             Self::Channel(_) => "channel",
             Self::Thread(_) => "thread",
+            Self::Dm(_) => "dm",
+            Self::Search(_) => "search",
         }
     }
 }
@@ -167,6 +178,8 @@ impl Page {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum To {
     Thread(ThreadId),
+    /// A thread, shown at a message on it.
+    Message(ThreadId, Uuid),
     Work(Filter),
 }
 
@@ -180,6 +193,8 @@ pub struct Model {
     pub help: bool,
     pub notice: Option<Notice>,
     pub bar: Bar,
+    /// The search prompt, while open.
+    pub prompt: Option<search::Prompt>,
 }
 
 impl Model {
@@ -193,6 +208,7 @@ impl Model {
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
+            people: people::People::default(),
         };
         let nav = nav::Item::Home;
         Self {
@@ -203,6 +219,7 @@ impl Model {
             help: false,
             notice: None,
             bar: Bar::default(),
+            prompt: None,
         }
     }
 
@@ -258,6 +275,7 @@ impl Model {
         let mut posted = false;
         for entry in &entries {
             data.facts.add(entry, &me);
+            data.people.dms.add(entry, &me);
             posted |= data.feeds.add(entry);
         }
         let mut actions = Vec::new();
@@ -296,6 +314,21 @@ impl Model {
         }
     }
 
+    /// Take what was read of the other humans, or done for them.
+    pub fn people(&mut self, event: people::Event, now: DateTime<Utc>) {
+        match event {
+            people::Event::Online(read) => {
+                if let Some(text) = self.data.people.read(read) {
+                    self.notify(text, Level::Error, now);
+                }
+            }
+            people::Event::Sent(sent) => {
+                let (text, level) = sent.notice();
+                self.notify(text, level, now);
+            }
+        }
+    }
+
     /// The open thread, to be read again from the start: its history is to be loaded.
     pub fn open_thread(&mut self) -> Option<ThreadId> {
         let Some(Page::Thread(page)) = self.pages.last_mut() else { return None };
@@ -321,11 +354,32 @@ impl Model {
             self.help = false;
             return None;
         }
+        if let Some(prompt) = &mut self.prompt {
+            return match prompt.key(key) {
+                search::Edit::Typing => None,
+                search::Edit::Close => {
+                    self.prompt = None;
+                    None
+                }
+                search::Edit::Run(query) => self.search(query, now),
+            };
+        }
+        if !self.bar.focused
+            && self.focus == Focus::View
+            && let Some(Page::Dm(page)) = self.pages.last_mut()
+            && let Some(action) = page.write(key)
+        {
+            return action;
+        }
         if let Some(action) = self.bar_key(key) {
             return action;
         }
         match key {
             Key::Char('q') => Some(Action::Quit),
+            Key::Char('/') => {
+                self.prompt = Some(search::Prompt::default());
+                None
+            }
             Key::Char('?') => {
                 self.help = true;
                 None
@@ -376,6 +430,40 @@ impl Model {
         }
     }
 
+    /// Run the search `query` asks for, listing its matches over the view; a query refused stays in the prompt.
+    fn search(&mut self, query: String, now: DateTime<Utc>) -> Option<Action> {
+        match search::parse(&query, now) {
+            Ok(search) => {
+                self.prompt = None;
+                for page in &mut self.pages {
+                    if let Page::Search(page) = page
+                        && page.found.is_none()
+                    {
+                        page.found = Some(Err("stopped for a later search".to_owned()));
+                    }
+                }
+                self.pages.push(Page::Search(search::Page::new(query, &search)));
+                self.focus = Focus::View;
+                Some(Action::Search(search))
+            }
+            Err(e) => {
+                self.prompt.get_or_insert_default().error = Some(e);
+                None
+            }
+        }
+    }
+
+    /// Take the matches of the search run last.
+    pub fn found(&mut self, found: anyhow::Result<(Vec<Entry>, usize)>) {
+        let page = self.pages.iter_mut().rev().find_map(|page| match page {
+            Page::Search(page) if page.found.is_none() => Some(page),
+            _ => None,
+        });
+        if let Some(page) = page {
+            page.found(found);
+        }
+    }
+
     fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Esc {
             if self.pages.len() > 1 {
@@ -391,10 +479,16 @@ impl Model {
             Page::Work(page) => page.key(key, data),
             Page::Channel(page) => page.key(key, data),
             Page::Thread(page) => page.key(key),
+            Page::Dm(page) => page.key(key, data),
+            Page::Search(page) => page.key(key),
         }?;
         match to {
             To::Thread(thread) => {
                 self.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+                Some(Action::Open(thread))
+            }
+            To::Message(thread, message) => {
+                self.pages.push(Page::Thread(thread::Page::at(thread.clone(), message)));
                 Some(Action::Open(thread))
             }
             To::Work(filter) => {
@@ -476,6 +570,40 @@ pub mod tests {
         assert_eq!(m.open_thread(), Some(thread), "a refresh reads the open thread again");
         m.key(Key::Esc, at(6));
         assert_eq!((m.page().name(), m.focus), ("work", Focus::View));
+    }
+
+    #[test]
+    fn slash_searches_and_a_match_opens_its_thread_at_it() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.key(Key::Tab, at(0));
+        assert_eq!(m.key(Key::Char('/'), at(0)), None);
+        for c in "deploy since:soon".chars() {
+            assert_eq!(m.key(Key::Char(c), at(0)), None, "keys go to the prompt");
+        }
+        assert_eq!(m.key(Key::Enter, at(0)), None);
+        let error = m.prompt.as_ref().and_then(|p| p.error.clone());
+        assert!(error.is_some_and(|e| e.starts_with("invalid time \"soon\"")), "a refused query stays");
+        m.key(Key::Ctrl('w'), at(0));
+        let Some(Action::Search(search)) = m.key(Key::Enter, at(0)) else { panic!("no search") };
+        assert_eq!(search.grep.as_deref(), Some("deploy"));
+        assert_eq!((m.prompt.is_none(), m.page().name(), m.focus), (true, "search", Focus::View));
+
+        m.key(Key::Char('/'), at(1));
+        m.key(Key::Char('d'), at(1));
+        assert!(matches!(m.key(Key::Enter, at(1)), Some(Action::Search(_))));
+        let Page::Search(earlier) = &m.pages[1] else { panic!("not a search") };
+        assert_eq!(earlier.found, Some(Err("stopped for a later search".to_owned())));
+        let found = message(1, &thread, "dev-a", "alice", "deployed");
+        m.found(Ok((vec![found], 0)));
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
+        assert_eq!(m.page().name(), "thread");
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.page().name(), "search", "Esc goes back to the matches");
+        m.key(Key::Char('/'), at(4));
+        m.key(Key::Esc, at(4));
+        assert!(m.prompt.is_none(), "Esc closes the prompt");
+        assert_eq!(m.key(Key::Char('q'), at(4)), Some(Action::Quit));
     }
 
     #[test]

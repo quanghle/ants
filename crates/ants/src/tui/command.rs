@@ -549,8 +549,10 @@ impl Model {
 
     /// What plain text does: reply on the open thread, as a post on a channel's thread, else ask the messenger.
     fn say(&self, text: String) -> Job {
-        let Page::Thread(page) = self.page() else {
-            return Job::Ask { to: UserId::messenger(), thread: None, text, steer: false };
+        let page = match self.page() {
+            Page::Thread(page) => page,
+            Page::Dm(page) => return Job::Ask { to: page.with.clone(), thread: None, text, steer: false },
+            _ => return Job::Ask { to: UserId::messenger(), thread: None, text, steer: false },
         };
         let thread = page.history.thread.clone();
         match self.data.live.summary(&thread).and_then(|s| s.channels.first()) {
@@ -567,6 +569,7 @@ impl Model {
             Page::Home(page) => page.thread(data),
             Page::Work(page) => page.thread(data),
             Page::Channel(page) => page.post(data).map(|p| p.thread.clone()),
+            Page::Dm(_) | Page::Search(_) => None,
         };
         thread.ok_or_else(|| "no thread open or selected".to_owned())
     }
@@ -806,6 +809,20 @@ mod tests {
         typed(&mut m, "go on");
         let post = Job::Post { channel: "ops".parse().unwrap(), thread: Some(thread), text: "go on".into() };
         assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(post, "go on".into())), "a channel thread gets a post");
+    }
+
+    #[test]
+    fn a_dm_being_written_keeps_its_keys_and_the_bar_asks_its_person() {
+        let mut m = model();
+        m.pages.push(Page::Dm(crate::tui::dm::Page::new(user("bob"))));
+        typed(&mut m, "n@");
+        assert!(!m.bar.focused, "@ goes to the message being written");
+        m.key(Key::Esc, at(0));
+        m.key(Key::Ctrl('k'), at(0));
+        typed(&mut m, "n");
+        assert_eq!(m.bar.text(), "n", "the focused bar takes the keys of the DM");
+        let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), steer: false };
+        assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "n".into())));
     }
 
     #[test]

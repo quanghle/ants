@@ -114,7 +114,7 @@ impl Model {
         let channel = match self.page() {
             Page::Channel(page) => Some(page.channel.clone()),
             Page::Thread(page) => data.live.summary(&page.history.thread).and_then(|s| s.channels.first().cloned()),
-            Page::Home(_) | Page::Work(_) => None,
+            Page::Home(_) | Page::Work(_) | Page::Dm(_) | Page::Search(_) => None,
         };
         let members = channel.and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
         let users: BTreeSet<&UserId> = match members {
