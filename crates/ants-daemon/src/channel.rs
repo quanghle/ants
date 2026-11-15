@@ -522,6 +522,9 @@ fn context_text(context: &Context) -> String {
     text.push_str(", oldest first:\n");
     for post in &context.posts {
         let _ = writeln!(text, "{}: {}", post.from, post.text);
+        for line in crate::files::earlier_lines(&post.attachments, |id| post.attachment_handle(id)) {
+            let _ = writeln!(text, "{line}");
+        }
     }
     text.push('\n');
     text
@@ -1028,19 +1031,23 @@ mod tests {
 
     #[test]
     fn the_prompt_shows_the_thread_then_the_post_and_where_the_reply_goes() {
-        let root = post("human", "deploy friday?");
+        let mut root = post("human", "deploy friday?");
+        let plan = crate::files::reference("plan.md", "text/markdown", b"# plan").unwrap();
+        root.attachments = vec![plan.clone()];
         let ask = ChannelPost::on_thread(root.channel.clone(), root.thread_id.clone(), p("dev-b"), "@dev-a agree?");
         let context = Context { posts: vec![root.clone()], skipped: 2, ..Context::default() };
         let text = prompt(&p("dev-a"), &ask, &context, 6);
         let expected = format!(
             "[ants] Channel #ops, thread {}.\n\n\
              [ants] Earlier posts on the thread not shown before (2 older ones left out), oldest first:\n\
-             human: deploy friday?\n\n\
+             human: deploy friday?\n\
+             [ants] Attached: \"plan.md\" (text/markdown, 6 bytes), handle human.chan.ops.{}; call read_attachment \
+             with the handle to read it.\n\n\
              [ants] Post from dev-b mentioning dev-a:\n@dev-a agree?\n\n\
              [ants] The final answer of this turn is posted to #ops on this thread and spends one of its turns (6 \
              left after it). An @mention in it wakes that member of the channel, or notifies it if a human; \
              mentioning nobody wakes nobody.",
-            root.thread_id
+            root.thread_id, plan.id
         );
         assert_eq!(text, expected);
         let first = prompt(&p("dev-a"), &root, &Context::default(), 7);

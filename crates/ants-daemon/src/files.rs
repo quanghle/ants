@@ -5,7 +5,9 @@
 
 use std::time::Duration;
 
-use ants_proto::{ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM, MAX_ATTACHMENTS};
+use ants_proto::{
+    ATTACHMENT_CHUNK, ATTACHMENT_HEADER, Attachment, AttachmentHandle, FILES_STREAM, MAX_ATTACHMENTS, Uuid,
+};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 use async_nats::jetstream::context::PublishErrorKind;
@@ -263,8 +265,8 @@ impl Attached {
         let mut shown = Shown::default();
         let mut lines = Vec::new();
         for (handle, attachment) in self.files.into_iter().take(MAX_ATTACHMENTS) {
-            let Attachment { name, mime, size, .. } = &attachment;
-            let what = format!("[ants] Attached: {name:?} ({mime}, {size} bytes), handle {handle}");
+            let what = named(&handle, &attachment);
+            let mime = &attachment.mime;
             if let Err(e) = attachment.check() {
                 lines.push(format!("{what}: unavailable ({e})."));
                 continue;
@@ -289,6 +291,31 @@ impl Attached {
         shown.lines = lines.join("\n");
         shown
     }
+}
+
+/// How a prompt names `attachment`, under `handle`: its name, media type, size and handle.
+fn named(handle: &AttachmentHandle, attachment: &Attachment) -> String {
+    let Attachment { name, mime, size, .. } = attachment;
+    format!("[ants] Attached: {name:?} ({mime}, {size} bytes), handle {handle}")
+}
+
+/// The lines a prompt shows under an earlier message or post of the thread for its `attachments`, each with the handle
+/// `handle_of` gives its id, those of the subject of that message or post: one per attachment, naming it and the
+/// read_attachment tool, or why it is unavailable. Nothing is read from the store.
+pub fn earlier_lines(attachments: &[Attachment], handle_of: impl Fn(Uuid) -> AttachmentHandle) -> Vec<String> {
+    let mut ids = std::collections::HashSet::new();
+    attachments
+        .iter()
+        .take(MAX_ATTACHMENTS)
+        .map(|attachment| {
+            let what = named(&handle_of(attachment.id), attachment);
+            match attachment.check() {
+                Err(e) => format!("{what}: unavailable ({e})."),
+                Ok(()) if !ids.insert(attachment.id) => format!("{what}: unavailable (its id is repeated)."),
+                Ok(()) => format!("{what}; call read_attachment with the handle to read it."),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

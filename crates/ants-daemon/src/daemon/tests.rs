@@ -550,14 +550,19 @@ async fn a_failed_message_is_retried_before_the_rest_of_its_thread() {
 #[tokio::test]
 async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_thread_history_tried() {
     let Some((bus, mut replies)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::files_config()).await.unwrap();
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
-    bus.send(&t1, "hello").await;
+    let mut hello = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hello");
+    let to = hello.clone();
+    let notes = attach(&bus, |id| to.attachment_handle(id), "notes.txt", "text/plain", b"notes").await;
+    hello.attachments = vec![notes.clone()];
+    bus::publish_json(&bus.js, hello.subject(), &hello, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
-        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hello".to_owned()));
+        assert_eq!(next_reply(&mut replies).await.0, t1);
         bus.send(&t1, "overflows").await;
         let notice = next_envelope(&mut replies).await;
         let why = "The prompt does not fit the context window of test's model, even in a new session: ";
@@ -568,11 +573,19 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let history = "[ants] The thread's history, read back from ants, oldest first:\n\nhuman to dev-a:\nhello\n\n\
-                       dev-a to human:\ns1: hello\n\n[ants] End of the thread's history.\n\noverflows";
+    let line = format!(
+        "[ants] Attached: \"notes.txt\" (text/plain, 5 bytes), handle human.inbox.dev-a.{}; call read_attachment with \
+         the handle to read it.",
+        notes.id
+    );
+    // The fake harness echoes its prompt, the attachment's line included.
+    let history = format!(
+        "[ants] The thread's history, read back from ants, oldest first:\n\nhuman to dev-a:\nhello\n{line}\n\n\
+         dev-a to human:\ns1: hello\n\n{line}\n\n[ants] End of the thread's history.\n\noverflows"
+    );
     let prompts = log.locked().prompts.clone();
     assert_eq!(prompts.len(), 3, "{prompts:?}");
-    assert!(prompts[2].ends_with(history), "{}", prompts[2]);
+    assert!(prompts[2].ends_with(&history), "{}", prompts[2]);
     assert_eq!(bus.unacked().await, 0);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
 }
