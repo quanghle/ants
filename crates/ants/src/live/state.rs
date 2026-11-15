@@ -32,7 +32,7 @@ pub struct State {
     /// How far back the threads are read.
     pub since: Duration,
     threads: Threads,
-    /// How the human marked threads when the view started: archived ones are left out of `order`.
+    /// How the human marked threads, as last read: archived ones are left out of `order`.
     pub marks: ThreadMarks,
     /// How long a thread goes without a message before it counts as archived; None for never.
     pub auto_archive: Option<Duration>,
@@ -76,6 +76,11 @@ impl State {
             self.threads.add(entry);
         }
         self.stored_at = Some(now);
+        self.reorder(now);
+    }
+
+    /// Order the threads again at `now`, as after the marks changed.
+    pub fn reorder(&mut self, now: DateTime<Utc>) {
         let idle_before = thread::idle_before(self.auto_archive, now);
         let shown = |s: &&Summary| {
             let mark = self.marks.mark_at(&s.thread_id, s.last_seq, s.last_at, idle_before);

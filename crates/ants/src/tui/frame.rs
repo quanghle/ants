@@ -36,18 +36,6 @@ pub fn highlight(focused: bool) -> Style {
     if focused { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new().add_modifier(Modifier::BOLD) }
 }
 
-/// `line` cut into lines of at most `width` characters, those after the first indented.
-pub fn wrap(line: &str, width: usize) -> Vec<String> {
-    const INDENT: &str = "    ";
-    let mut chars = line.chars().peekable();
-    let mut out = vec![chars.by_ref().take(width.max(1)).collect::<String>()];
-    while chars.peek().is_some() {
-        let rest: String = chars.by_ref().take(width.saturating_sub(INDENT.len()).max(1)).collect();
-        out.push(format!("{INDENT}{rest}"));
-    }
-    out
-}
-
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
@@ -111,6 +99,8 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
+    ("y", "in a thread: copy the selected message"),
+    ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
