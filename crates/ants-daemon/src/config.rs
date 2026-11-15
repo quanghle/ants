@@ -1516,6 +1516,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if let Some(harness) = &ant.harness {
         set("harness", toml_string(harness));
     }
+    if !ant.fallback.is_empty() {
+        set("fallback", strings(&mut ant.fallback.iter().map(String::as_str)));
+    }
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());
     }
