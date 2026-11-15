@@ -149,6 +149,9 @@ pub struct Config {
     /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
     /// restarts no harness ([`crate::pause::Pause::replace`]).
     pub pause: crate::pause::Pause,
+    /// The ant's settings this machine's config sets otherwise than its shared settings, which the ant runs with
+    /// ([`crate::shared`]), as its roster entry reports them.
+    pub drift: Vec<String>,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until

@@ -6,8 +6,10 @@
 //! with its uncommitted changes and untracked files, the clone's key signed by `ants signer` on the order, each session
 //! forked when the harness can (else marked to start over, [`crate::history::Rebuild::Cloned`]) and stored under the
 //! clone's keys, and its identity record written: a new id and birth, the prompts of the ant cloned and where it came
-//! from ([`ants_proto::ClonedFrom`]). Its `[[ant]]` table, a copy of the cloned ant's with the order's settings over
-//! it, goes last, which starts it on the reload, and the ant cloned resumes. A failure undoes what was done, the signed
+//! from ([`ants_proto::ClonedFrom`]). Where the hub keeps shared settings ([`crate::shared`]), the clone gets its own
+//! record of them: those of the ant cloned, with the order's settings over them. Its `[[ant]]` table, a copy of the
+//! cloned ant's with its shared settings and the order's settings over it, goes last, which starts it on the reload,
+//! and the ant cloned resumes. A failure undoes what was done, the signed
 //! key aside, which no one holds once the credentials are deleted. A comment above the table names the order, so that
 //! the order taken again after the table was written is applied without cloning twice.
 //!
@@ -18,7 +20,9 @@ use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, AntIdentity, ClonedFrom, ThreadId, UserId};
+use ants_proto::{
+    AdminOrder, AdminOutcome, AntIdentity, ClonedFrom, SharedSettings, ThreadId, UserId, is_shared_field,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use chrono::Utc;
@@ -26,12 +30,12 @@ use serde_json::{Map, Value, json};
 
 use super::add::{NOT_GIVEN, entry, entry_text, key_for, leaf_uplink, renew, sign, write_secret};
 use super::{ConfigFile, NO_CONFIG, Orders, applied, refused};
-#[cfg(doc)]
-use crate::clone::Snapshot;
-use crate::clone::ThreadCopy;
+use crate::clone::{Snapshot, ThreadCopy};
 use crate::config::{self, edit::Edit};
+use crate::direct_kv::DirectKv;
 use crate::identity::{self, Identity};
 use crate::pool::{SessionStore, Stored};
+use crate::shared::{self, Found};
 use crate::{bus, creds, harness};
 
 /// How long the daemon serving the ant waits for its prompts to end and reads its snapshot: past the default
@@ -47,6 +51,7 @@ const NOT_CLONED: [&str; 8] = ["name", "creds", "paused", "added_by", "template"
 
 pub(super) async fn apply(
     js: &jetstream::Context,
+    identities: &DirectKv,
     orders: &Orders,
     order: &AdminOrder,
     new: &UserId,
@@ -57,7 +62,7 @@ pub(super) async fn apply(
         return refused(order, "the machine has no host credentials to ask `ants signer` with");
     };
     let mut done = Done::default();
-    let result = clone(js, orders, config, host_creds, order, new, settings, &mut done).await;
+    let result = clone(js, identities, orders, config, host_creds, order, new, settings, &mut done).await;
     let (paused, key) = (done.paused, done.key.take());
     if result.is_err() {
         done.undo(order).await;
@@ -98,6 +103,8 @@ struct Done {
     key: Option<String>,
     sessions: Option<(SessionStore, Vec<ThreadId>)>,
     identity: Option<Identity>,
+    /// The bucket the clone's shared settings were written to.
+    shared: Option<(DirectKv, String)>,
 }
 
 impl Done {
@@ -105,6 +112,11 @@ impl Done {
         let warn = |what: &str, e: anyhow::Error| {
             tracing::warn!(order = %order.id, error = format!("{e:#}"), "undoing a clone: {what}");
         };
+        if let Some((kv, key)) = self.shared
+            && let Err(e) = kv.delete(&key).await
+        {
+            warn("deleting the shared settings", e);
+        }
         if let Some(identity) = self.identity
             && let Err(e) = identity.delete().await
         {
@@ -157,6 +169,8 @@ struct Plan {
     /// The directory of the host credentials, where the clone's go.
     dir: PathBuf,
     creds_path: PathBuf,
+    /// The clone's shared settings, where the hub keeps them.
+    shared: Option<Map<String, Value>>,
 }
 
 /// Check the clone of the order's ant as `new` with the config at `path`: none when the config shows it done already.
@@ -166,6 +180,7 @@ fn plan(
     order: &AdminOrder,
     new: &UserId,
     settings: &Map<String, Value>,
+    src_shared: Option<Option<Map<String, Value>>>,
 ) -> Result<Option<Plan>> {
     let src = &order.ant;
     let mark = mark(order);
@@ -211,10 +226,13 @@ fn plan(
     }
     let dir = host_creds.parent().context("the host credentials are in no directory")?;
     let creds_path = dir.join(format!("{new}.creds"));
-    let (table, probe, workdir) = table(path, ant, &src_home, &new_home, settings, &creds_path, new, &mark)?;
+    let shared_over = src_shared.as_ref().and_then(Option::as_ref);
+    let (table, probe, workdir, shared) =
+        table(path, ant, &src_home, &new_home, settings, shared_over, &creds_path, new, &mark)?;
     config::parse(&entry_text(&text, &probe), &std::path::absolute(path)?, &user_home)
         .context("the config with the clone added")?;
-    Ok(Some(Plan { table, workdir, src_home, new_home, dir: dir.to_owned(), creds_path }))
+    let shared = src_shared.map(|_| shared);
+    Ok(Some(Plan { table, workdir, src_home, new_home, dir: dir.to_owned(), creds_path, shared }))
 }
 
 /// Carry out the clone of the order's ant as `new`, noting in `done` what to undo: what it did, none when the config
@@ -222,6 +240,7 @@ fn plan(
 #[expect(clippy::too_many_arguments)]
 async fn clone(
     js: &jetstream::Context,
+    identities: &DirectKv,
     orders: &Orders,
     config: &ConfigFile,
     host_creds: &Path,
@@ -231,8 +250,13 @@ async fn clone(
     done: &mut Done,
 ) -> Result<Option<Value>> {
     let (src, path) = (&order.ant, &config.path);
-    let Some(Plan { table, workdir, src_home, new_home, dir, creds_path }) =
-        plan(path, host_creds, order, new, settings)?
+    let src_shared = match shared::read(identities, src).await? {
+        Found::Record(record, _) => Some(Some(record.fields)),
+        Found::None(_) | Found::Malformed(..) => Some(None),
+        Found::NoBucket => None,
+    };
+    let Some(Plan { table, workdir, src_home, new_home, dir, creds_path, shared }) =
+        plan(path, host_creds, order, new, settings, src_shared)?
     else {
         return Ok(None);
     };
@@ -279,26 +303,10 @@ async fn clone(
     let domain = orders.js_domain.as_ref();
     let (_client, new_js) = bus::connect(&orders.nats, Some(&creds_path), domain, new, "clone").await?;
     let store = SessionStore::kv(bus::ensure_sessions(&new_js, domain, new).await?, new.clone());
-    let (mut forked, mut restart) = (Vec::new(), Vec::new());
-    for copy in &snapshot.threads {
-        let tree = new_home.join("worktrees").join(copy.thread.as_str());
-        let cwd = if trees.iter().any(|t| t.thread == copy.thread) { tree } else { workdir.clone() };
-        let stored = session(snapshot.launch.as_ref(), copy, cwd).await;
-        if stored.cloned {
-            restart.push(copy.thread.to_string());
-        } else {
-            forked.push(copy.thread.to_string());
-        }
-        done.sessions.get_or_insert_with(|| (store.clone(), Vec::new())).1.push(copy.thread.clone());
-        store.put(&copy.thread, stored).await?;
-    }
+    let (forked, restart) = store_sessions(&store, &snapshot, &trees, &new_home, &workdir, done).await?;
 
     let identity = Identity::new(&new_js, domain, new).await?;
-    let mut record = identity::born(new)?;
-    if let Some(src_identity) = &snapshot.identity {
-        record.prompts = src_identity.prompts;
-        record.cloned_from = Some(ClonedFrom { ant: src.clone(), id: src_identity.id.clone(), at: Utc::now() });
-    }
+    let record = born(new, src, snapshot.identity.as_ref())?;
     done.identity = Some(identity.clone());
     identity.replace(&record).await?;
 
@@ -310,6 +318,18 @@ async fn clone(
         Some((leaf, machine, renewed)) => Some(renew(leaf, &machine, new, renewed).await),
         None => None,
     };
+    if let Some(fields) = shared {
+        let record = SharedSettings {
+            ant: new.clone(),
+            fields,
+            machine: orders.machine.clone(),
+            by: None,
+            updated_at: Utc::now(),
+        };
+        done.shared = Some((identities.clone(), record.key()));
+        identities.put(record.key(), serde_json::to_vec(&record)?).await?;
+        config.shared.store(record);
+    }
     config::append(path, &table)?;
     if let Err(e) = std::fs::remove_file(&seed_path)
         && e.kind() != std::io::ErrorKind::NotFound
@@ -330,6 +350,43 @@ async fn clone(
         result["uplink"] = Value::String(uplink);
     }
     Ok(Some(result))
+}
+
+/// Store in `store`, the clone's, a session for each thread of `snapshot`, forked in the thread's worktree among
+/// `trees`, added again in `new_home`, else in `workdir`, or marked to start over: the threads forked, and those that
+/// start over.
+async fn store_sessions(
+    store: &SessionStore,
+    snapshot: &Snapshot,
+    trees: &[Tree],
+    new_home: &Path,
+    workdir: &Path,
+    done: &mut Done,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut forked, mut restart) = (Vec::new(), Vec::new());
+    for copy in &snapshot.threads {
+        let tree = new_home.join("worktrees").join(copy.thread.as_str());
+        let cwd = if trees.iter().any(|t| t.thread == copy.thread) { tree } else { workdir.to_owned() };
+        let stored = session(snapshot.launch.as_ref(), copy, cwd).await;
+        if stored.cloned {
+            restart.push(copy.thread.to_string());
+        } else {
+            forked.push(copy.thread.to_string());
+        }
+        done.sessions.get_or_insert_with(|| (store.clone(), Vec::new())).1.push(copy.thread.clone());
+        store.put(&copy.thread, stored).await?;
+    }
+    Ok((forked, restart))
+}
+
+/// The identity record of `new`, a clone of `src`, whose record is `src_identity`.
+fn born(new: &UserId, src: &UserId, src_identity: Option<&AntIdentity>) -> Result<AntIdentity> {
+    let mut record = identity::born(new)?;
+    if let Some(src_identity) = src_identity {
+        record.prompts = src_identity.prompts;
+        record.cloned_from = Some(ClonedFrom { ant: src.clone(), id: src_identity.id.clone(), at: Utc::now() });
+    }
+    Ok(record)
 }
 
 fn record_summary(record: &AntIdentity) -> Value {
@@ -381,7 +438,8 @@ async fn session(launch: Option<&harness::Launch>, copy: &ThreadCopy, cwd: PathB
 
 /// The `[[ant]]` table of the clone `new` of `ant`, one to check the file with before its workdir exists, and its
 /// workdir: the table of `ant` in the file at `path` (or, for an ant added from a template, the settings the template
-/// gave it) with `settings` over it, its workdir moved into `new_home` if it was in `src_home`.
+/// gave it) with `shared`, its shared settings when it has a record of them, and `settings` over it, its workdir moved
+/// into `new_home` if it was in `src_home`; and the clone's shared settings, as the table gives them.
 #[expect(clippy::too_many_arguments)]
 fn table(
     path: &Path,
@@ -389,10 +447,11 @@ fn table(
     src_home: &Path,
     new_home: &Path,
     settings: &Map<String, Value>,
+    shared: Option<&Map<String, Value>>,
     creds: &Path,
     new: &UserId,
     mark: &str,
-) -> Result<(String, String, PathBuf)> {
+) -> Result<(String, String, PathBuf, Map<String, Value>)> {
     let raw = Edit::open(path)?.table(&ant.name)?;
     let mut table = if ant.template.is_some() {
         let mut plain = resolved(ant);
@@ -402,6 +461,10 @@ fn table(
         raw
     };
     table.retain(|key, _| !NOT_CLONED.contains(&key.as_str()));
+    if let Some(shared) = shared {
+        table.retain(|key, _| !is_shared_field(key));
+        table.extend(shared.iter().filter(|(key, _)| is_shared_field(key)).map(|(k, v)| (k.clone(), v.clone())));
+    }
     if let Ok(inside) = ant.workdir.strip_prefix(src_home) {
         let workdir = new_home.join(inside);
         table.insert("workdir".to_owned(), Value::from(workdir.to_str().context("the workdir is not UTF-8")?));
@@ -415,7 +478,8 @@ fn table(
         table.insert("workdir".to_owned(), Value::from(base.to_str().context("the config's directory is not UTF-8")?));
     }
     let probe = entry(new, creds, None, &table, mark)?;
-    Ok((text, probe, workdir))
+    let shared = table.iter().filter(|(key, _)| is_shared_field(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    Ok((text, probe, workdir, shared))
 }
 
 /// The settings of `ant`, added from a template, as a table of its own.

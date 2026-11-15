@@ -6,9 +6,12 @@ use std::sync::{Arc, Mutex};
 use ants_daemon::admin::ConfigFile;
 use ants_daemon::admin::restart::Restarts;
 use ants_daemon::config::edit::Edit;
+use ants_daemon::direct_kv::DirectKv;
 use ants_daemon::identity::{self, Identity};
 use ants_daemon::pool::{SessionStore, Stored};
-use ants_proto::{AdminOp, Envelope, MovedMark, OrderState, Permissions, Role, ThreadId, UserId};
+use ants_proto::{
+    AdminOp, Envelope, IDENTITIES_BUCKET, MovedMark, OrderState, Permissions, Role, SharedSettings, ThreadId, UserId,
+};
 use serde_json::{Value, json};
 
 use crate::auth::tests::Server;
@@ -99,6 +102,26 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let restarts = Restarts::default();
     let (ants, task) = host_of_m1_serving(&server, &js, true, Some(config), restarts.clone()).await;
     let m1: ants_proto::Machine = "m1".parse().unwrap();
+    // dev-a's shared settings, set by an order since its table was written.
+    let host = async_nats::ConnectOptions::with_credentials_file(server.dir().join("host-m1.creds"))
+        .await
+        .unwrap()
+        .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m1))
+        .connect(&server.url)
+        .await
+        .unwrap();
+    let host_kv = DirectKv::new(&async_nats::jetstream::new(host), None, IDENTITIES_BUCKET).await.unwrap();
+    let Value::Object(fields) = json!({ "whoami": "Reviews parsers", "model": "o4", "escalate_to": ["lead"] }) else {
+        unreachable!()
+    };
+    let shared = SharedSettings {
+        ant: dev_a.clone(),
+        fields,
+        machine: m1.clone(),
+        by: Some(alice.clone()),
+        updated_at: chrono::Utc::now(),
+    };
+    host_kv.put(shared.key(), serde_json::to_vec(&shared).unwrap()).await.unwrap();
 
     let _served = restarts.serve(&dev_a);
     let mut listening = restarts.listen_clones(&dev_a);
@@ -164,6 +187,12 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         let ant = loaded.ants.iter().find(|a| a.name == dev_c).expect("listed");
         assert_eq!((ant.model.as_deref(), ant.home.as_deref()), (Some("gpt-5"), Some(home_c.as_path())));
         assert_eq!((ant.escalate_to.as_slice(), ant.paused), (&[p("lead")][..], false));
+        assert_eq!(ant.whoami.as_deref(), Some("Reviews parsers"), "dev-a's shared settings, not its table's");
+        let shared = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        let record = shared.get(SharedSettings::key_of(&dev_c)).await.unwrap().expect("dev-c's own shared settings");
+        let record: SharedSettings = serde_json::from_slice(&record).unwrap();
+        let want = json!({ "whoami": "Reviews parsers", "model": "gpt-5", "escalate_to": ["lead"] });
+        assert_eq!(Value::Object(record.fields), want, "dev-a's with the order's over them");
 
         // The signer refuses: the team holds credentials of dev-d already.
         server.creds_as(&p("dev-d"), Role::Ant);
@@ -178,6 +207,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         assert!(!home_d.exists(), "the home goes");
         assert!(git(&repo, &["branch", "--list", "ants/dev-d/*"]).is_empty(), "the branch goes");
         assert!(!server.dir().join("dev-d.nk").exists() && !server.dir().join("dev-d.creds").exists());
+        assert!(shared.get(SharedSettings::key_of(&p("dev-d"))).await.unwrap().is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), edited, "dev-a resumed, nothing added");
 
         let refusal = async |new: &str, ant: &UserId| {

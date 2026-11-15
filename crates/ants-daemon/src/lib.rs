@@ -47,6 +47,7 @@ pub mod redact;
 pub mod roster;
 pub mod schedule;
 pub mod sealing;
+pub mod shared;
 pub mod signin;
 pub mod status;
 pub mod storage;

@@ -110,6 +110,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         memory_low: None,
         model: None,
         paused: None,
+        drift: Vec::new(),
     }
 }
 
