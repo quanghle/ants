@@ -448,8 +448,8 @@ fn bootstrap(ttl: std::time::Duration, dir: Option<PathBuf>, out: Option<PathBuf
         None => "valid with no expiry".to_owned(),
     };
     println!(
-        "{}\n{key}, {expires}; share the file with the humans who may register: ants login NAME --creds FILE \
-         --nats HUB, served by ants signer with a [registration] table",
+        "{}\n{key}, {expires}; share the file with the humans who may register: ants login --hub HUB --name NAME \
+         --bootstrap FILE, served by ants signer with a [registration] table",
         out.display()
     );
     Ok(())
