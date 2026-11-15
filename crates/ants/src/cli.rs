@@ -15,8 +15,8 @@ use crate::cmd::{
     tools::ToolsCommand, webhook::WebhookCommand,
 };
 use crate::{
-    add, attachments, channel, completions, compose, hook, keys, login, progress, renew, retire, serve, setup, spend,
-    thread, upgrade,
+    add, assistant, attachments, channel, completions, compose, hook, keys, login, progress, renew, retire, serve,
+    setup, spend, thread, upgrade,
 };
 
 #[derive(Parser)]
@@ -221,8 +221,9 @@ pub(crate) enum Command {
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]
     Notify(NotifyCommand),
-    /// Designate the ant that acts for the CLI's human as its assistant, withdraw it, or show a human's. The human's
-    /// device signs the designation. Needs a human device's credentials, but for `show`.
+    /// Create the CLI's human's dedicated assistant ant, designate an existing ant as its assistant, withdraw or
+    /// retire it, or show a human's. The human's device signs the designation. Needs a human device's credentials,
+    /// but for `show`.
     #[command(subcommand)]
     Assistant(AssistantCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
@@ -579,8 +580,16 @@ pub(crate) enum NotifyCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AssistantCommand {
+    /// Create the human's dedicated assistant ant and designate it, in one step: its credentials naming the human
+    /// (`ants auth user ANT --assistant-of HUMAN`), an [[ant]] working in its own home with an assistant's whoami and
+    /// no fetch or execute rules, and the grant; then reload the daemon. Needs the team's account key; run again,
+    /// it keeps what is in place and completes the rest.
+    Enable(Box<assistant::EnableArgs>),
+    /// Withdraw the human's assistant and offer to retire the dedicated one `enable` created: unlist it, revoke its
+    /// credentials and remove their file, keeping its home.
+    Disable(assistant::DisableArgs),
     /// Designate ANT as the human's assistant, in place of any other. Refused for an ant added from a template; a
-    /// warning for one with a workdir or tools allowed without asking. ANT acts for the human only while its
+    /// warning for one with a workdir other than its home or tools allowed without asking. ANT acts for the human only while its
     /// credentials also name the human (`ants auth user ANT --assistant-of HUMAN`).
     Set {
         #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]

@@ -1,6 +1,7 @@
 //! `ants assistant set|clear|show`: the human of the CLI's credentials designates its assistant ant, or none, by a
 //! grant its device signs ([`AssistantGrant`]), kept in [`HUMANS_BUCKET`] under the human's own name. See
-//! [`ants_proto::Grants`] for how readers honour it.
+//! [`ants_proto::Grants`] for how readers honour it. `enable` and `disable` ([`dedicated`]) create and retire a
+//! dedicated assistant ant around the grant.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,11 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
 
 use crate::{Nats, auth, devices, humans, revoke, roster};
+
+mod dedicated;
+
+use crate::cli::AssistantCommand;
+pub use dedicated::{DisableArgs, EnableArgs};
 
 /// How many times storing a record is tried again when another device of the human stored one meanwhile.
 const CONFLICTS: usize = 5;
@@ -33,6 +39,7 @@ struct AntEntry {
     name: String,
     template: Option<String>,
     workdir: Option<PathBuf>,
+    home: Option<PathBuf>,
     #[serde(default)]
     allow: Vec<String>,
     #[serde(default)]
@@ -80,9 +87,13 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
         );
     }
     let mut warnings = Vec::new();
+    let home = local.entry.as_ref().and_then(|e| e.home.as_deref());
     let workdirs = roster.iter().filter_map(|e| e.workdir.clone());
     let local_workdir = local.entry.as_ref().and_then(|e| e.workdir.as_ref()).filter(|w| !w.as_os_str().is_empty());
-    let mut workdirs: Vec<String> = workdirs.chain(local_workdir.map(|w| w.display().to_string())).collect();
+    let mut workdirs: Vec<String> = workdirs
+        .chain(local_workdir.map(|w| w.display().to_string()))
+        .filter(|w| !is_home(ant, Path::new(w), home))
+        .collect();
     workdirs.sort();
     workdirs.dedup();
     if !workdirs.is_empty() {
@@ -93,11 +104,7 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
         ));
     }
     if let Some(entry) = &local.entry {
-        let risky = |rule: &&String| {
-            let kind = rule.trim().split(':').next().unwrap_or_default();
-            ["*", "fetch", "execute"].contains(&kind)
-        };
-        let mut rules: Vec<&str> = entry.allow.iter().filter(risky).map(String::as_str).collect();
+        let mut rules: Vec<&str> = entry.allow.iter().map(String::as_str).filter(|r| risky(r)).collect();
         if entry.allow_tools {
             rules.insert(0, "allow_tools");
         }
@@ -122,11 +129,35 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
     Ok(warnings)
 }
 
+/// Whether the allow rule `rule` lets an ant run what can bring in untrusted content or act beyond reading: `*`,
+/// `fetch` or `execute` requests.
+fn risky(rule: &str) -> bool {
+    let kind = rule.trim().split(':').next().unwrap_or_default();
+    ["*", "fetch", "execute"].contains(&kind)
+}
+
+/// Whether `workdir` is the home of `ant`, `home` as its entry sets one, or as `~/.ants/<ant>` by default on any
+/// machine: the workdir of a dedicated assistant, holding no repository.
+fn is_home(ant: &UserId, workdir: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|home| home == workdir) || workdir.ends_with(Path::new(".ants").join(ant.as_str()))
+}
+
 /// The credentials of the human the CLI acts as, which sign its grant: a human device's.
 fn signing_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
     match nats.creds {
         Some(creds) if nats.me.role.is_human() && nats.device.is_some() => Ok(creds),
         _ => bail!("signing a grant needs a human device's credentials (`ants auth user NAME --human`)"),
+    }
+}
+
+/// `ants assistant`.
+pub async fn run(nats: &Nats<'_>, command: AssistantCommand) -> Result<()> {
+    match command {
+        AssistantCommand::Enable(args) => dedicated::enable(nats, *args).await,
+        AssistantCommand::Disable(args) => dedicated::disable(nats, args).await,
+        AssistantCommand::Set { ant } => set(nats, &ant).await,
+        AssistantCommand::Clear => clear(nats).await,
+        AssistantCommand::Show { human } => show(nats, human).await,
     }
 }
 
@@ -154,16 +185,21 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
         println!("warning: {warning}");
     }
     let before = put(&js, creds, human, Some(ant.clone())).await?;
-    match before.and_then(|g| g.assistant) {
-        Some(before) if before == *ant => println!("{ant} stays the assistant of {human}"),
-        Some(before) => println!("{ant} is now the assistant of {human}, in place of {before}"),
-        None => println!("{ant} is now the assistant of {human}"),
-    }
+    designated(ant, human, before);
     println!(
         "It acts for {human} only while its credentials name {human} as the human it assists, as the team's account \
          signs them."
     );
     Ok(())
+}
+
+/// Say that `ant` is the assistant of `human` now, the grant replacing `before`.
+fn designated(ant: &UserId, human: &UserId, before: Option<VerifiedGrant>) {
+    match before.and_then(|g| g.assistant) {
+        Some(before) if before == *ant => println!("{ant} stays the assistant of {human}"),
+        Some(before) => println!("{ant} is now the assistant of {human}, in place of {before}"),
+        None => println!("{ant} is now the assistant of {human}"),
+    }
 }
 
 /// `ants assistant clear`.
