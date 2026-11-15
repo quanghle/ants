@@ -332,7 +332,7 @@ While the ant's own harness cannot serve, each message goes to the first fallbac
 
 ### Lost sessions and context window
 
-When ACP `session/load` fails, the daemon opens a new session and prepends an `[ants]` notice plus the thread's stored history from `ANTS` (read with the ant's credentials: inbound messages, own outbound messages via `sentread-<ant>`, thread notes, channel posts), truncated to the history budget (each entry capped at 1/8 of the budget, preceded by a summary of omitted counts, senders and time span).
+When ACP `session/load` fails, the daemon opens a new session and prepends an `[ants]` notice plus the thread's stored history from `ANTS` (read with the ant's credentials: inbound messages, own outbound messages via `sentread-<ant>`, thread notes, channel posts), truncated to the history budget (each entry's text capped at 1/8 of the budget, followed by one `[ants] Attached:` line per attachment naming its name, type, size and handle for `read_attachment`, and preceded by a summary of omitted counts, senders and time span).
 
 When a prompt overflows the model's context window (`context_length_exceeded`, `maximum context length`, `prompt is too long`, `exceeds the context window`, or `context_overflow`), the daemon immediately rebuilds the session with **half** the history budget and retries without spending an attempt. If the fresh session also overflows, the daemon escalates `context_window` on the thread and acks the message without dead-lettering.
 
@@ -420,12 +420,12 @@ Matched calls auto-approve (`allow_once`). Unmatched calls publish an `ApprovalR
 
 ### Redaction
 
-Before publishing tool requests (redacted before the 2000-byte input cut), status streams (buffered to whitespace / PEM boundaries so secrets never split across frames), replies, escalations, thread notes, MCP messages/posts, and failing-harness errors, the daemon replaces secrets with `[redacted]`:
+Before publishing tool requests (redacted before the 2000-byte input cut), status streams (buffered to whitespace / PEM boundaries so secrets never split across frames), replies, escalations, thread notes, MCP messages/posts, files MCP tools attach (`attach`, `attach_to_reply`) whose bytes are UTF-8 text whatever their type (a `.env`, a config dump; the reference records the redacted size and SHA-256, and other files are stored as they are), and failing-harness errors, the daemon replaces secrets with `[redacted]`:
 
 - **Environment values** (≥ 8 chars, not starting with `/`, `~`, `.` or a drive letter): values from the ant's `env`, harness `env`, and daemon env whose variable name contains `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `AUTH` or `CREDENTIALS`, plus token-like values (alphanumeric, no spaces/slashes/file extensions) in ant/harness `env`.
 - **Patterns:** PEM private keys, `Bearer`/`Basic` headers, GitHub/GitLab/Slack/OpenAI/Anthropic/AWS/Google/Stripe/npm/Hugging Face/Telegram tokens, Slack/Discord webhook URLs, NKey seeds, JWTs, URL passwords (`scheme://user:pass@host`), and secret-named assignments containing a digit (`API_KEY=...`, `"password": "..."`, `--token ...`).
 
-Top-level `redact = false` disables daemon redaction. `ants webhook serve` always redacts outbound notifications (patterns + secret-named process env vars). Local logs are not redacted.
+Top-level `redact = false` disables daemon redaction. Files a human attaches with the CLI are never redacted. `ants webhook serve` always redacts outbound notifications (patterns + secret-named process env vars). Local logs are not redacted.
 
 ## Schedules
 

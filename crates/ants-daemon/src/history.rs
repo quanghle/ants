@@ -14,6 +14,7 @@ use ants_proto::{
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
 
+use crate::files::earlier_lines;
 use crate::reading::{self, Reading};
 
 /// The history of a thread as a prompt shows it, read when the prompt needs it and shown within the bytes given.
@@ -178,8 +179,9 @@ impl Thread {
     ) {
         let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) else { return };
         if envelope.thread_id == self.thread && envelope.check_subject(subject).is_ok() {
+            let attachments = earlier_lines(&envelope.attachments, |id| envelope.attachment_handle(id));
             let place = Place::Inbox(envelope.to);
-            entries.insert(seq, Entry { from: envelope.from, place, text: envelope.text, at });
+            entries.insert(seq, Entry { from: envelope.from, place, text: envelope.text, attachments, at });
         }
     }
 
@@ -190,7 +192,8 @@ impl Thread {
             if let Ok(post) = serde_json::from_slice::<NotesPost>(payload)
                 && post.check_subject(subject).is_ok()
             {
-                entries.insert(seq, Entry { from: post.from, place: Place::Notes, text: post.text, at });
+                let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
+                entries.insert(seq, Entry { from: post.from, place: Place::Notes, text: post.text, attachments, at });
             }
             ControlFlow::Continue(())
         })
@@ -205,8 +208,9 @@ impl Thread {
                 && post.thread_id == self.thread
                 && (seq < self.before || post.from == self.ant)
             {
+                let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
                 let place = Place::Channel(post.channel);
-                entries.insert(seq, Entry { from: post.from, place, text: post.text, at });
+                entries.insert(seq, Entry { from: post.from, place, text: post.text, attachments, at });
             }
             ControlFlow::Continue(())
         })
@@ -231,6 +235,8 @@ struct Entry {
     from: UserId,
     place: Place,
     text: String,
+    /// A line for each file attached to it ([`earlier_lines`]).
+    attachments: Vec<String>,
     /// When the stream stored it.
     at: SystemTime,
 }
@@ -244,7 +250,7 @@ enum Place {
 }
 
 impl Entry {
-    /// The entry as a prompt shows it, its text cut to `most` bytes.
+    /// The entry as a prompt shows it, its text cut to `most` bytes, then a line for each attachment.
     fn show(&self, most: usize) -> String {
         let from = &self.from;
         let heading = match &self.place {
@@ -253,11 +259,17 @@ impl Entry {
             Place::Channel(channel) => format!("{from} in channel {channel}:"),
         };
         let text = self.text.trim();
-        if text.len() <= most {
-            return format!("{heading}\n{text}");
+        let mut shown = if text.len() <= most {
+            format!("{heading}\n{text}")
+        } else {
+            let kept = text.floor_char_boundary(most);
+            format!("{heading}\n{} … ({} bytes left out)", &text[..kept], text.len() - kept)
+        };
+        for line in &self.attachments {
+            shown.push('\n');
+            shown.push_str(line);
         }
-        let kept = text.floor_char_boundary(most);
-        format!("{heading}\n{} … ({} bytes left out)", &text[..kept], text.len() - kept)
+        shown
     }
 }
 
@@ -341,7 +353,7 @@ mod tests {
     }
 
     fn entry(from: &str, place: Place, text: &str, minutes: u64) -> Entry {
-        Entry { from: p(from), place, text: text.to_owned(), at: at(minutes) }
+        Entry { from: p(from), place, text: text.to_owned(), attachments: Vec::new(), at: at(minutes) }
     }
 
     fn to(from: &str, to: &str, text: &str) -> Entry {
@@ -386,6 +398,28 @@ mod tests {
             "[ants] 10 older entries are left out: 10 thread notes from dev-0, dev-1, dev-2, dev-3, dev-4, dev-5, \
              dev-6, dev-7 and 2 others, at 2026-11-14 09:01 UTC."
         );
+    }
+
+    #[test]
+    fn an_entry_names_its_attachments_within_the_budget() {
+        let mut message = Envelope::new(p("alice"), p("dev-a"), "the logs");
+        let log = crate::files::reference("build.log", "text/plain", b"error").unwrap();
+        message.attachments = vec![log.clone(), log.clone()];
+        let attachments = earlier_lines(&message.attachments, |id| message.attachment_handle(id));
+        let entry = Entry { attachments, ..to("alice", "dev-a", "the logs") };
+        let line = format!("[ants] Attached: \"build.log\" (text/plain, 5 bytes), handle alice.inbox.dev-a.{}", log.id);
+        assert_eq!(
+            entry.show(DEFAULT_BUDGET),
+            format!(
+                "alice to dev-a:\nthe logs\n{line}; call read_attachment with the handle to read it.\n{line}: \
+                 unavailable (its id is repeated)."
+            )
+        );
+        let shown = entry.show(usize::MAX).len();
+        let older = to("dev-b", "dev-a", "older");
+        assert!(format(vec![older.clone(), entry.clone()], shown).contains(&line));
+        let left_out = format(vec![older, entry], shown - 1);
+        assert!(!left_out.contains(&line), "the lines count toward the budget: {left_out}");
     }
 
     #[test]

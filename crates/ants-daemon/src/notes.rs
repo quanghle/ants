@@ -8,7 +8,7 @@
 
 use std::ops::ControlFlow;
 
-use ants_proto::{NotesPost, ThreadId, UserId, notes_consumer, subject};
+use ants_proto::{Attachment, NotesPost, ThreadId, UserId, notes_consumer, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::{self, consumer};
@@ -113,9 +113,9 @@ pub async fn publish(js: &jetstream::Context, post: &NotesPost, last_seq: Option
     }
 }
 
-/// Post `text` from `from` to the notes of `thread`, suggesting `title` for the thread ([`NotesPost::title`]),
-/// spending one of its turns, at most `budget` left: the notes are read again when another post took the turn first.
-/// None when the notes have no turns left.
+/// Post `text` from `from` to the notes of `thread`, suggesting `title` for the thread ([`NotesPost::title`]) and
+/// carrying `attachments`, stored already under the thread's notes handles, spending one of its turns, at most `budget`
+/// left: the notes are read again when another post took the turn first. None when the notes have no turns left.
 pub async fn spend(
     store: &dyn NotesStore,
     thread: &ThreadId,
@@ -123,13 +123,14 @@ pub async fn spend(
     text: &str,
     budget: u32,
     title: Option<String>,
+    attachments: Vec<Attachment>,
 ) -> Result<Option<NotesPost>> {
     for _ in 0..SPEND_TRIES {
         let notes = store.read(thread).await?;
         let Ok(post) = NotesPost::spend(thread.clone(), from.clone(), text, budget, notes.last()) else {
             return Ok(None);
         };
-        let post = NotesPost { title: title.clone(), ..post };
+        let post = NotesPost { title: title.clone(), attachments: attachments.clone(), ..post };
         if store.post(&post, notes.last_seq).await? {
             return Ok(Some(post));
         }
