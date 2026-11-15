@@ -12,7 +12,7 @@ use ants_daemon::files;
 use ants_daemon::reading::{self, Reading};
 use ants_proto::{
     Attachment, AttachmentHandle, AttachmentScope, Envelope, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, SealedAttachment,
-    Uuid, guess_mime,
+    Uuid, chan_reader, guess_mime, inbox_consumer, notes_consumer,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
@@ -20,6 +20,7 @@ use async_nats::jetstream::consumer::DeliverPolicy;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::humans::Me;
 use crate::sealed;
 
 /// The `--attach` of `ants ask`, `ants post` and `ants notes`.
@@ -295,26 +296,26 @@ pub async fn save(
 /// `ants attachment get HANDLE [-o PATH]`.
 pub async fn get(nats: &crate::Nats<'_>, handle: &AttachmentHandle, out: Option<&Path>) -> Result<()> {
     let (_, js) = nats.connect("ants-cli").await?;
-    let human = nats.me.role.is_human();
-    let keyring = if human { sealed::Keyring::load(nats, &js).await } else { None };
-    let (attachment, bytes, path) = save_handle(&js, human, keyring.as_ref(), handle, out).await?;
+    let keyring = if nats.me.role.is_human() { sealed::Keyring::load(nats, &js).await } else { None };
+    let (attachment, bytes, path) = save_handle(&js, &nats.me, keyring.as_ref(), handle, out).await?;
     println!("saved {} ({}, {}) to {}", attachment.name, size(bytes), attachment.mime, path.display());
     Ok(())
 }
 
 /// [`save`] of the attachment under `handle`, with no message at hand. Missing chunks of one made over
-/// [`files::RECENT`] ago are waited for when, read with a `human`'s credentials, the message carrying it was stored
+/// [`files::RECENT`] ago are waited for when the message carrying it, read back with `me`'s credentials, was stored
 /// within that time ([`carried_recently`]), as one from a leaf's outbox after a long outage.
 async fn save_handle(
     js: &jetstream::Context,
-    human: bool,
+    me: &Me,
     keyring: Option<&sealed::Keyring>,
     handle: &AttachmentHandle,
     out: Option<&Path>,
 ) -> Result<(Attachment, u64, PathBuf)> {
     match save(js, keyring, handle, None, None, out).await {
-        Err(e) if human && files::missing(&e) && !files::recent(handle, None, Utc::now()) => {
-            match carried_recently(js, keyring, handle).await? {
+        Err(e) if files::missing(&e) && !files::recent(handle, None, Utc::now()) => {
+            let Some(reader) = carrier_reader(me, handle) else { return Err(e) };
+            match carried_recently(js, &reader, Reading::cli(me.role), keyring, handle).await? {
                 Some(stored) => save(js, keyring, handle, None, Some(stored), out).await,
                 None => Err(e),
             }
@@ -323,11 +324,28 @@ async fn save_handle(
     }
 }
 
-/// When the hub stored the message carrying the attachment under `handle`, if within [`files::RECENT`]: looked for by
-/// message gets, as a human's credentials read, among the messages stored on its message's subject since, a sealed
-/// one opened with `keyring`.
+/// The reader through which `me` reads back the messages on the subject of the message carrying the attachment under
+/// `handle` ([`Reading::cli`]): none to name for a human, who reads by message gets; for an ant, a spare of its inbox
+/// consumer, its notes reader or its channel reader, whose pinned filters cover that subject. None for an inbox message
+/// an ant sent to another, which only its daemon reads back ([`ants_proto::sent_reader`]).
+fn carrier_reader(me: &Me, handle: &AttachmentHandle) -> Option<String> {
+    if me.role.is_human() {
+        return Some(String::new());
+    }
+    match &handle.scope {
+        AttachmentScope::Inbox(to) => (to == &me.id).then(|| inbox_consumer(&me.id)),
+        AttachmentScope::Notes(_) => Some(notes_consumer(&me.id)),
+        AttachmentScope::Chan(_) => Some(chan_reader(&me.id)),
+    }
+}
+
+/// When the hub stored the message carrying the attachment under `handle`, if within [`files::RECENT`]: looked for
+/// among the messages stored on its message's subject since, read back as `reading` says through `reader`
+/// ([`carrier_reader`]), a sealed one opened with `keyring`.
 async fn carried_recently(
     js: &jetstream::Context,
+    reader: &str,
+    reading: Reading,
     keyring: Option<&sealed::Keyring>,
     handle: &AttachmentHandle,
 ) -> Result<Option<DateTime<Utc>>> {
@@ -354,7 +372,7 @@ async fn carried_recently(
     let since = std::time::SystemTime::now() - files::RECENT;
     let start = DeliverPolicy::ByStartTime { start_time: since.into() };
     let mut found = None;
-    reading::read_back(js, "", Reading::Gets, &handle.message_subject(), start, |_, stored, _, payload| {
+    reading::read_back(js, reader, reading, &handle.message_subject(), start, |_, stored, _, payload| {
         if !carries(payload) {
             return ControlFlow::Continue(());
         }
@@ -370,7 +388,7 @@ async fn carried_recently(
 mod tests {
     use std::time::Duration;
 
-    use ants_proto::{Role, UserId};
+    use ants_proto::{NotesPost, Role, UserId};
 
     use super::*;
     use crate::auth::tests::Server;
@@ -493,7 +511,8 @@ mod tests {
         let handle = message.attachment_handle(kept.id);
         let getting = tokio::spawn({
             let (js, handle, out) = (js.clone(), handle.clone(), out.clone());
-            async move { save_handle(&js, true, None, &handle, Some(&out)).await }
+            let me = Me { id: alice.clone(), role: Role::Human };
+            async move { save_handle(&js, &me, None, &handle, Some(&out)).await }
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
         files::put(&js, &handle, &kept, b"kept").await.unwrap();
@@ -502,8 +521,59 @@ mod tests {
 
         // One no recent message carries is not waited for.
         let started = std::time::Instant::now();
-        let gone = save_handle(&js, true, None, &message.attachment_handle(old(1)), Some(&out)).await.unwrap_err();
+        let me = Me { id: alice, role: Role::Human };
+        let gone = save_handle(&js, &me, None, &message.attachment_handle(old(1)), Some(&out)).await.unwrap_err();
         assert!(files::missing(&gone), "{gone:#}");
         assert!(started.elapsed() < files::SETTLE / 2, "not waited for");
+    }
+
+    #[tokio::test]
+    async fn an_ant_waits_for_an_old_attachment_on_a_message_it_reads_stored_just_now() {
+        let Some(server) = Server::start() else { return };
+        let (alice, dev_a, dev_b): (UserId, UserId, UserId) =
+            ("alice".parse().unwrap(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        js.create_stream(ants_daemon::hub::stream_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
+        let (_, ant_js) = server.connect_as(&dev_a, Role::Ant).await;
+        let me = Me { id: dev_a.clone(), role: Role::Ant };
+        let out = server.dir().join("got");
+        std::fs::create_dir_all(&out).unwrap();
+        // UUIDv7 ids made in November 2023.
+        let old = |n: u8| -> Uuid { format!("018bcfe5-6800-7000-8000-0000000000{n:02x}").parse().unwrap() };
+        let kept =
+            |n: u8| Attachment { id: old(n), ..files::reference(&format!("{n}.txt"), "text/plain", b"kept").unwrap() };
+
+        // Each kept in a leaf's outbox through a long outage: the message is stored now, its chunks later. The ant reads
+        // them through spares of its inbox consumer and its notes reader.
+        let mut message = Envelope::new(alice.clone(), dev_a.clone(), "see attached");
+        message.attachments = vec![kept(0)];
+        ants_daemon::bus::store(&js, message.subject(), &message, &message.id.to_string()).await.unwrap();
+        let mut post = NotesPost::new(message.thread_id.clone(), alice.clone(), "notes attached");
+        post.attachments = vec![kept(1)];
+        ants_daemon::bus::store(&js, post.subject(), &post, &post.id.to_string()).await.unwrap();
+        for (handle, attachment) in
+            [(message.attachment_handle(old(0)), kept(0)), (post.attachment_handle(old(1)), kept(1))]
+        {
+            let getting = tokio::spawn({
+                let (js, me, handle, out) = (ant_js.clone(), me.clone(), handle.clone(), out.clone());
+                async move { save_handle(&js, &me, None, &handle, Some(&out)).await }
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            files::put(&js, &handle, &attachment, b"kept").await.unwrap();
+            let (saved, _, path) = getting.await.unwrap().unwrap();
+            assert_eq!((saved, std::fs::read(path).unwrap()), (attachment, b"kept".to_vec()));
+        }
+
+        // Nor one no recent message carries, nor one of a message it sent, which only its daemon reads back.
+        let mut sent = Envelope::new(dev_a.clone(), dev_b, "sent attached");
+        sent.attachments = vec![kept(2)];
+        ants_daemon::bus::store(&ant_js, sent.subject(), &sent, &sent.id.to_string()).await.unwrap();
+        for handle in [message.attachment_handle(old(3)), sent.attachment_handle(old(2))] {
+            let started = std::time::Instant::now();
+            let gone = save_handle(&ant_js, &me, None, &handle, Some(&out)).await.unwrap_err();
+            assert!(files::missing(&gone), "{gone:#}");
+            assert!(started.elapsed() < files::SETTLE / 2, "not waited for");
+        }
     }
 }
