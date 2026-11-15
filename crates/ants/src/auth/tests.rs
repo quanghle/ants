@@ -294,6 +294,108 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
 }
 
 #[test]
+fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
+    use ants_daemon::creds;
+    let dir = ants_test_support::scratch_dir("admin");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let out = |name: &str| dir.join(format!("{name}.creds"));
+    let human = || Permissions::for_user(&p("alice"), Role::Human);
+    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    issue_device_with(&team, &p("alice"), Kind::Human, human(), &admin, &out("admin")).unwrap();
+    issue_device(&team, &p("alice"), Kind::Human, human(), Some("phone"), &out("phone")).unwrap();
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let err = issue_device_with(&team, &p("dev-a"), Kind::Ant, ant, &admin, &out("dev-a")).unwrap_err();
+    assert!(err.to_string().contains("admin"), "{err}");
+
+    let (jwt, key) = read_creds(&out("admin")).unwrap();
+    let finding = creds::Finding::from_jwt(&jwt).unwrap();
+    assert_eq!(
+        (&finding.kind, finding.admin, finding.holder()),
+        (&creds::Kind::Human, true, "human alice (admin)".into())
+    );
+    let account = account_key(&team).unwrap();
+    let order = b"an order";
+    let signature = BASE64URL_NOPAD.encode(&key.sign(order).unwrap());
+    let verified = ants_proto::verify_admin(&jwt, [account.as_str()], order, &signature, now().unwrap()).unwrap();
+    assert_eq!((verified.id, verified.public_key), (p("alice"), key.public_key()));
+    let (phone, _) = read_creds(&out("phone")).unwrap();
+    assert!(!creds::Finding::from_jwt(&phone).unwrap().admin);
+    let refused = ants_proto::verify_admin(&phone, [account.as_str()], order, &signature, now().unwrap());
+    assert_eq!(refused.unwrap_err(), ants_proto::JwtError::NotAdmin(p("alice")));
+
+    let new = KeyPair::new_user().public_key();
+    let renewed = renew(&team, &jwt, &new, None).unwrap();
+    assert!(renewed.finding.admin, "the renewal keeps the role");
+    let admins = |now| revoke::admins(&team, now).unwrap().into_iter().map(|a| a.key).collect::<Vec<_>>();
+    assert_eq!(admins(now().unwrap()), [key.public_key(), new.clone()], "the phone's are no admin's");
+    revoke::revoke(&team, None, std::slice::from_ref(&new)).unwrap();
+    assert_eq!(admins(now().unwrap()), [key.public_key()]);
+    revoke::revoke(&team, Some("alice"), &[]).unwrap();
+    assert!(admins(now().unwrap()).is_empty(), "revoking the human withdraws the role");
+    assert!(renew(&team, &jwt, &KeyPair::new_user().public_key(), None).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
+    use ants_daemon::creds;
+    let dir = ants_test_support::scratch_dir("assistant");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let out = |name: &str| dir.join(format!("{name}.creds"));
+    let (alice, pa, pb) = (p("alice"), p("pa"), p("pb"));
+    let assistant = |user: &UserId, of: &UserId| {
+        let new = NewDevice { assistant_of: Some(of.clone()), ..NewDevice::default() };
+        let rights = Permissions::for_assistant(user, of);
+        issue_device_with(&team, user, Kind::Assistant, rights, &new, &out(user.as_str()))
+    };
+    let refused = |user: &UserId, of: &UserId, why: &str| {
+        let err = check_assistant(&team, user, of).unwrap_err().to_string();
+        assert!(err.contains(why), "{user} of {of}: {err}");
+    };
+    refused(&pa, &alice, "not a human of the team");
+    check_assistant(&team, &pa, &UserId::human()).unwrap();
+    issue_device(&team, &alice, Kind::Human, Permissions::for_user(&alice, Role::Human), None, &out("alice")).unwrap();
+    issue(&team, &p("carol"), Role::Human, None, &out("carol")).unwrap();
+    refused(&alice, &alice, "its own assistant");
+    refused(&UserId::human(), &alice, "is a human");
+    refused(&p("carol"), &alice, "a human's credentials");
+    check_assistant(&team, &pa, &alice).unwrap();
+    assert!(issue_with(&team, &pa, Kind::Assistant, Permissions::for_assistant(&pa, &alice), &out("pa")).is_err());
+    assistant(&pa, &alice).unwrap();
+
+    let (jwt, key) = read_creds(&out("pa")).unwrap();
+    let finding = creds::Finding::from_jwt(&jwt).unwrap();
+    assert_eq!(
+        (finding.kind.clone(), finding.holder()),
+        (creds::Kind::Assistant { of: alice.clone() }, "ant pa, assistant of alice".into())
+    );
+    let account = account_key(&team).unwrap();
+    let verified = ants_proto::verify_assistant_of(&jwt, [account.as_str()], &alice, now().unwrap()).unwrap();
+    assert_eq!((verified.id, verified.public_key), (pa.clone(), key.public_key()));
+    check_assistant(&team, &pa, &alice).unwrap();
+    refused(&pb, &alice, "already the assistant of alice");
+    refused(&pa, &p("carol"), "the assistant of alice");
+
+    let renewed = renew(&team, &jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(renewed.finding.kind, creds::Kind::Assistant { of: alice.clone() });
+    let line = revoke::issued(&team).unwrap().pop().unwrap();
+    assert_eq!((line.kind, line.assistant_of), (Kind::Assistant, Some(alice.clone())));
+    let listed: Vec<(String, bool)> =
+        revoke::assistants(&team, "alice").unwrap().into_iter().map(|(i, revoked)| (i.key, revoked)).collect();
+    assert_eq!(listed, [(key.public_key(), false), (verified_key(&renewed.jwt), false)]);
+    revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    assert!(revoke::assistants(&team, "alice").unwrap().iter().all(|(_, revoked)| *revoked));
+    check_assistant(&team, &pb, &alice).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn verified_key(jwt: &str) -> String {
+    verified(jwt).unwrap().sub
+}
+
+#[test]
 fn only_credentials_a_registration_granted_are_marked_registered() {
     let dir = ants_test_support::scratch_dir("renew-registered");
     let team = dir.join("auth");
@@ -787,6 +889,48 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     }
     heard.sort();
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
+}
+
+/// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
+/// its human's read marker but never moves it, nor sends as anyone else.
+#[tokio::test]
+async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, pa) = (p("alice"), p("bob"), p("pa"));
+    let (_a_client, a_js) = server.connect_as(&alice, Role::Human).await;
+    let (_, b_js) = server.connect_as(&bob, Role::Human).await;
+    let creds = server.dir().join("pa-assistant.creds");
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&server.dir().join("auth"), &pa, Kind::Assistant, rights, &new, &creds).unwrap();
+    let (pa_client, mut pa_js) = bus::connect(&server.url, Some(&creds), None, &pa, "test").await.unwrap();
+    pa_js.set_timeout(Duration::from_secs(1));
+    bus::ensure_stream(&a_js).await.unwrap();
+    bus::init_own_buckets(&a_js).await.unwrap();
+
+    let marker = |n: &str| serde_json::to_vec(&json!({ "seq": n })).unwrap();
+    let a_read = crate::inbox::ensure_bucket(&a_js).await.unwrap();
+    a_read.put(alice.as_str(), marker("1").into()).await.unwrap();
+    crate::inbox::ensure_bucket(&b_js).await.unwrap().put(bob.as_str(), marker("2").into()).await.unwrap();
+    let pa_read = crate::inbox::ensure_bucket(&pa_js).await.unwrap();
+    assert_eq!(pa_read.get(alice.as_str()).await.unwrap().unwrap(), marker("1"), "it reads its human's marker");
+    assert!(pa_read.get(bob.as_str()).await.is_err(), "and no other human's");
+    assert!(pa_read.put(alice.as_str(), marker("3").into()).await.is_err(), "nor moves it");
+    pa_read.put(pa.as_str(), marker("4").into()).await.unwrap();
+    assert_eq!(a_read.get(alice.as_str()).await.unwrap().unwrap(), marker("1"));
+
+    // It watches all traffic, as a human does, and serves its own inbox, as an ant does.
+    let mut all = pa_client.subscribe(subject::ALL).await.unwrap();
+    subscribed(&pa_js, &pa).await;
+    let to_pa = Envelope::new(alice.clone(), pa.clone(), "hello");
+    bus::publish(&a_js, &to_pa).await.unwrap();
+    assert_eq!(timeout(WAIT, all.next()).await.unwrap().unwrap().subject.as_str(), to_pa.subject());
+    let mut inbox = crate::inbox::Inbox::open(&pa_js, &pa).await.unwrap();
+    assert!(inbox.unread(&crate::inbox::Select::default()).await.is_ok());
+    assert!(bus::publish(&pa_js, &Envelope::new(alice.clone(), bob.clone(), "as alice")).await.is_err());
+    bus::publish(&pa_js, &Envelope::new(pa.clone(), alice.clone(), "as itself")).await.unwrap();
+    let alice_s = async { crate::inbox::Inbox::open(&pa_js, &alice).await?.unread(&Default::default()).await };
+    assert!(alice_s.await.is_err(), "it reads no human's inbox");
 }
 
 #[tokio::test]

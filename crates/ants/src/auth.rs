@@ -19,8 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
 use ants_proto::{
-    DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions,
-    REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
+    ADMIN_TAG, AssistantOf, DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION,
+    Permissions, REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
@@ -118,6 +118,47 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
+/// Fail unless the ant `user` may get the credentials of the assistant of `human` in the team in `dir`: `human` is the
+/// default human or one the registry knows, `user` is neither a human nor an ant a manager added from a template, and
+/// no credentials neither revoked nor expired make another ant `human`'s assistant or `user` another human's.
+pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> {
+    if user == human {
+        bail!("{user} cannot be its own assistant");
+    }
+    if user.is_human() {
+        bail!("{user} is a human; an assistant is an ant");
+    }
+    let issued = revoke::issued(dir)?;
+    let revoked = revoke::revoked(dir)?;
+    let now = now()?;
+    let live = |i: &revoke::Issued| !revoked.iter().any(|r| r.key == i.key) && i.expires_at.is_none_or(|exp| exp > now);
+    let named = |i: &&revoke::Issued, name: &UserId| i.name == name.as_str();
+    if !human.is_human() && !issued.iter().any(|i| named(&i, human) && i.kind == revoke::Kind::Human) {
+        bail!("{human} is not a human of the team: issue its credentials with `ants auth user {human} --human` first");
+    }
+    let mine = issued.iter().filter(|i| named(i, user));
+    if let Some(i) = mine.clone().find(|i| i.kind == revoke::Kind::Human) {
+        bail!("{user} holds a human's credentials ({}); an assistant is an ant", i.key);
+    }
+    if mine.clone().any(|i| i.template.is_some()) {
+        bail!("{user} is an ant a manager added from a template; such an ant cannot be an assistant");
+    }
+    let assisting = |i: &&revoke::Issued| i.kind == revoke::Kind::Assistant && live(i);
+    if let Some(i) = mine.filter(assisting).find(|i| i.assistant_of.as_ref() != Some(human)) {
+        let of = i.assistant_of.as_ref().map_or("another human", UserId::as_str);
+        bail!("{user} is the assistant of {of} ({}): revoke those credentials first", i.key);
+    }
+    let mut others = issued.iter().filter(|i| !named(i, user) && i.assistant_of.as_ref() == Some(human));
+    if let Some(i) = others.find(assisting) {
+        bail!(
+            "{} is already the assistant of {human} ({}); a human has one: revoke those credentials first",
+            i.name,
+            i.key
+        );
+    }
+    Ok(())
+}
+
 /// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take,
 /// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records, [`UserId::signer`], and
 /// [`ants_proto::BOOTSTRAP_USER`], the name of the public bootstrap credentials, which `ants auth revoke bootstrap`
@@ -176,12 +217,22 @@ pub struct NewDevice<'a> {
     pub grant: Option<Grant>,
     /// Seconds since the epoch; none for credentials that never expire.
     pub expires_at: Option<u64>,
+    /// Whether a human's credentials carry the admin role ([`ADMIN_TAG`]).
+    pub admin: bool,
+    /// The human whose assistant an ant's credentials ([`Kind::Assistant`]) make it ([`AssistantOf`]).
+    pub assistant_of: Option<UserId>,
 }
 
 impl NewDevice<'_> {
     fn record(&self, issued: Issued, device: Option<DeviceId>, xkey: Option<DeviceKey>) -> Issued {
         let issued = with_device(issued, device, self.label, xkey);
-        Issued { github: self.github.clone(), grant: self.grant.clone(), ..issued }
+        Issued {
+            github: self.github.clone(),
+            grant: self.grant.clone(),
+            admin: self.admin,
+            assistant_of: self.assistant_of.clone(),
+            ..issued
+        }
     }
 }
 
@@ -213,8 +264,17 @@ pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
 }
 
 /// A new device for credentials of `kind`, if a human's, and the claims carrying it with its encryption key `xkey`,
-/// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`).
+/// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`) and [`ADMIN_TAG`] for an admin
+/// (`new.admin`); an assistant's carry its human's [`AssistantOf::tag`] instead.
 fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
+    if new.admin && kind != Kind::Human {
+        bail!("only a human's credentials carry the admin role");
+    }
+    match (kind, &new.assistant_of) {
+        (Kind::Assistant, None) => bail!("an assistant's credentials name the human it assists"),
+        (Kind::Assistant, Some(_)) | (_, None) => {}
+        (_, Some(_)) => bail!("only an assistant's credentials name a human it assists"),
+    }
     if kind != Kind::Human {
         if new.label.is_some() {
             bail!("only a human's credentials are for a device with a label");
@@ -222,12 +282,14 @@ fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> R
         if xkey.is_some() {
             bail!("only a human's credentials bind an encryption key");
         }
-        return Ok((None, json!({})));
+        let tags: Vec<String> = new.assistant_of.iter().map(AssistantOf::tag).collect();
+        return Ok((None, if tags.is_empty() { json!({}) } else { json!({ "tags": tags }) }));
     }
     new.label.map(revoke::check_label).transpose()?;
     let device = DeviceId::generate();
     let tags = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag));
-    let tags: Vec<String> = tags.chain(new.grant.is_some().then(|| REGISTERED_TAG.to_owned())).collect();
+    let tags = tags.chain(new.grant.is_some().then(|| REGISTERED_TAG.to_owned()));
+    let tags: Vec<String> = tags.chain(new.admin.then(|| ADMIN_TAG.to_owned())).collect();
     Ok((Some(device), json!({ "tags": tags })))
 }
 
@@ -662,13 +724,57 @@ fn renew_as(
         bail!("the new key {public_key} was issued to other credentials; generate a new one");
     }
     let name = &claims.name;
+    let (permissions, extra) = renewed_rights(&finding, &body, name, xkey.as_ref(), registered.is_some())?;
+    let mut permissions = in_domain(permissions, &finding.kind, finding.js_domain.as_ref());
+    dedup(&mut permissions);
+    let lifetime = claims.exp.map(|exp| exp.saturating_sub(body["iat"].as_u64().unwrap_or(now)));
+    let exp = lifetime.map(|lifetime| now + lifetime.max(1));
+    let jwt = user_jwt(&account, public_key, name, permissions, extra, exp)?;
+    if let CredsKind::Leaf { machine, .. } = &finding.kind {
+        check_uplink_size(&jwt, machine)?;
+    }
+    let renewed = Finding::from_jwt(&jwt)?;
+    if !finding.same_credentials(&renewed) || renewed.xkey != xkey {
+        bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
+    }
+    let previous = issued.iter().rev().find(|i| i.key == claims.sub);
+    let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous, registered);
+    record.renewed_from = Some(claims.sub.clone());
+    record.admin = renewed.admin;
+    if let CredsKind::Assistant { of } = &renewed.kind {
+        record.assistant_of = Some(of.clone());
+    }
+    if let Some(device) = finding.device {
+        record = record.for_device(device, previous.and_then(|p| p.label.clone()), xkey);
+    }
+    if let CredsKind::Leaf { ants, humans, webhooks, enroll_approver, .. } = &renewed.kind {
+        let (ants, humans, webhooks) = (ants.clone(), humans.clone(), webhooks.clone());
+        record.members = Some(crate::members::Members { ants, humans, webhooks, enroll_approver: *enroll_approver });
+    }
+    revoke::record(dir, &record)?;
+    Ok(Renewed { jwt, finding: renewed, previous: claims.sub })
+}
+
+/// The rights and the rest of the claims (`nats` beyond them) of the renewal of credentials found as `finding`, whose
+/// claims are `body`, named `name`, binding `xkey`, and `registered` by a registration.
+fn renewed_rights(
+    finding: &Finding,
+    body: &Value,
+    name: &str,
+    xkey: Option<&DeviceKey>,
+    registered: bool,
+) -> Result<(Permissions, Value)> {
     let user = || name.parse::<UserId>().map_err(|e| anyhow!("credentials named {name:?}: {e}"));
-    let (permissions, extra) = match &finding.kind {
+    Ok(match &finding.kind {
         CredsKind::Ant => (Permissions::for_user(&user()?, Role::Ant), json!({})),
         CredsKind::Human => {
-            let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.iter().map(DeviceKey::tag));
-            let tags: Vec<String> = tags.chain(registered.is_some().then(|| REGISTERED_TAG.to_owned())).collect();
+            let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.map(DeviceKey::tag));
+            let tags = tags.chain(registered.then(|| REGISTERED_TAG.to_owned()));
+            let tags: Vec<String> = tags.chain(finding.admin.then(|| ADMIN_TAG.to_owned())).collect();
             (Permissions::for_user(&user()?, Role::Human), json!({ "tags": tags }))
+        }
+        CredsKind::Assistant { of } => {
+            (Permissions::for_assistant(&user()?, of), json!({ "tags": [AssistantOf::tag(of)] }))
         }
         CredsKind::Webhook { to, channels } => {
             let to = to.iter().cloned().map(Destination::Ant);
@@ -683,7 +789,7 @@ fn renew_as(
         CredsKind::Leaf { machine, ants, humans, webhooks, enroll_approver } => {
             let members = members(ants, humans);
             let mut permissions = Permissions::for_leaf(machine, members.iter().map(|(m, r)| (m, *r)));
-            let publish = allowed(&body).publish;
+            let publish = allowed(body).publish;
             for webhook in webhooks {
                 let to = publish.iter().filter_map(|s| ants_proto::subject::parse_inbox(s));
                 let to = to.filter(|(_, from)| from == webhook).map(|(to, _)| Destination::Ant(to));
@@ -700,31 +806,7 @@ fn renew_as(
         CredsKind::LeafSystem { .. } | CredsKind::Enrollment { .. } | CredsKind::Bootstrap => {
             unreachable!("no registry kind")
         }
-    };
-    let mut permissions = in_domain(permissions, &finding.kind, finding.js_domain.as_ref());
-    dedup(&mut permissions);
-    let lifetime = claims.exp.map(|exp| exp.saturating_sub(body["iat"].as_u64().unwrap_or(now)));
-    let exp = lifetime.map(|lifetime| now + lifetime.max(1));
-    let jwt = user_jwt(&account, public_key, name, permissions, extra, exp)?;
-    if let CredsKind::Leaf { machine, .. } = &finding.kind {
-        check_uplink_size(&jwt, machine)?;
-    }
-    let renewed = Finding::from_jwt(&jwt)?;
-    if !finding.same_credentials(&renewed) || renewed.xkey != xkey {
-        bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
-    }
-    let previous = issued.iter().rev().find(|i| i.key == claims.sub);
-    let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous, registered);
-    record.renewed_from = Some(claims.sub.clone());
-    if let Some(device) = finding.device {
-        record = record.for_device(device, previous.and_then(|p| p.label.clone()), xkey);
-    }
-    if let CredsKind::Leaf { ants, humans, webhooks, enroll_approver, .. } = &renewed.kind {
-        let (ants, humans, webhooks) = (ants.clone(), humans.clone(), webhooks.clone());
-        record.members = Some(crate::members::Members { ants, humans, webhooks, enroll_approver: *enroll_approver });
-    }
-    revoke::record(dir, &record)?;
-    Ok(Renewed { jwt, finding: renewed, previous: claims.sub })
+    })
 }
 
 /// `record` of renewed credentials, with what the registry recorded of the `previous` ones beyond their key: the
@@ -745,6 +827,7 @@ fn registry_kind(kind: &CredsKind) -> Option<Kind> {
     match kind {
         CredsKind::Ant => Some(Kind::Ant),
         CredsKind::Human => Some(Kind::Human),
+        CredsKind::Assistant { .. } => Some(Kind::Assistant),
         CredsKind::Webhook { .. } => Some(Kind::Webhook),
         CredsKind::ChannelManager => Some(Kind::ChannelManager),
         CredsKind::Observer => Some(Kind::Observer),
@@ -862,17 +945,8 @@ pub fn verified(jwt: &str) -> Result<Claims> {
 
 /// [`verified`], with all of the JWT's claims.
 pub(crate) fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
-    let jwt = jwt.trim();
-    let (signed, signature) = jwt.rsplit_once('.').context("not a JWT")?;
-    let (_, body) = signed.split_once('.').context("not a JWT")?;
-    let decode = |part: &str| BASE64URL_NOPAD.decode(part.as_bytes()).context("not a JWT");
-    let claims: Value = serde_json::from_slice(&decode(body)?).context("not a JWT")?;
-    let text = |field: &str| claims[field].as_str().map(str::to_owned).with_context(|| format!("JWT without {field}"));
-    let iss = text("iss")?;
-    let issuer = KeyPair::from_public_key(&iss).map_err(|e| anyhow!("JWT issuer {iss}: {e}"))?;
-    issuer.verify(signed.as_bytes(), &decode(signature)?).map_err(|_| anyhow!("JWT not signed by its issuer {iss}"))?;
-    let verified = Claims { sub: text("sub")?, iss, name: text("name")?, exp: claims["exp"].as_u64() };
-    Ok((verified, claims))
+    let (claims, body) = ants_proto::verified_jwt(jwt)?;
+    Ok((Claims { sub: claims.sub, iss: claims.iss, name: claims.name, exp: claims.exp }, body))
 }
 
 /// The user JWT of a `.creds` file's text: the line after the `BEGIN NATS USER JWT` marker.

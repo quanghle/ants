@@ -943,7 +943,7 @@ fn issue(ant: &Ant) -> String {
     format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
 }
 
-/// An ant's credentials: an ant's of its name, issued for the JetStream domain it uses.
+/// An ant's credentials: an ant's, or an assistant's, of its name, issued for the JetStream domain it uses.
 fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     let check = format!("ant {} credentials", ant.name);
     let name = &ant.name;
@@ -955,7 +955,7 @@ fn check_ant_creds(ant: &Ant, now: u64) -> Check {
         Ok(finding) => finding,
         Err(e) => return Check::fail(check, format!("{e:#}"), vec![issue]),
     };
-    if finding.kind != Kind::Ant || finding.name != name.as_str() {
+    if !matches!(finding.kind, Kind::Ant | Kind::Assistant { .. }) || finding.name != name.as_str() {
         let detail = format!("{} are the credentials of {}, not of ant {name}", path.display(), finding.holder());
         return Check::fail(check, detail, vec![issue]);
     }

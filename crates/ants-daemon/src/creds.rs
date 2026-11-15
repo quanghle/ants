@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ants_proto::{
-    ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, JsDomain, Machine, PERMISSIONS_VERSION, PermissionsVersion, UserId,
-    WEBHOOKS_BUCKET, inbox_prefix, subject, tagged_registered,
+    AssistantOf, ChannelId, DeviceId, DeviceKey, ENROLL_INBOX, JsDomain, Machine, PERMISSIONS_VERSION,
+    PermissionsVersion, UserId, WEBHOOKS_BUCKET, inbox_prefix, is_admin, subject, tagged_registered,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64URL_NOPAD;
@@ -32,6 +32,11 @@ pub const RECHECK_EVERY: Duration = Duration::from_hours(24);
 pub enum Kind {
     Ant,
     Human,
+    /// An ant that is the assistant `of` a human ([`ants_proto::AssistantOf`]), with
+    /// [`ants_proto::Permissions::for_assistant`].
+    Assistant {
+        of: UserId,
+    },
     /// A webhook of `ants webhook serve`, delivering to the ants of `to` and the channels of `channels`.
     Webhook {
         to: Vec<UserId>,
@@ -108,6 +113,9 @@ pub struct Finding {
     /// ([`ants_proto::REGISTERED_TAG`]): `ants signer` renews them, not `ants enroll renew`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub registered: bool,
+    /// Whether they are a human's carrying the admin role ([`ants_proto::ADMIN_TAG`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
 }
 
 impl Finding {
@@ -135,12 +143,20 @@ impl Finding {
             let types = list(&nats["allowed_connection_types"]);
             !types.is_empty() && types.iter().all(|t| t.starts_with("LEAFNODE"))
         };
-        let kind = kind(&name, &publish, &subscribe, leaf_only)?;
-        let device = DeviceId::from_tags(tags.iter().map(String::as_str));
+        let mut kind = kind(&name, &publish, &subscribe, leaf_only)?;
+        let tag_list = || tags.iter().map(String::as_str);
+        match (AssistantOf::from_tags(tag_list()), &kind) {
+            // An ant's rights and the traffic of the whole team to watch, as a human.
+            (Some(of), Kind::Ant) if subscribe.iter().any(|s| s == subject::ALL) => kind = Kind::Assistant { of },
+            (Some(of), _) => bail!("{name}'s credentials say it assists {of} without an assistant's permissions"),
+            (None, _) => {}
+        }
+        let device = DeviceId::from_tags(tag_list());
         if kind == Kind::Human && device.is_none() {
             bail!("a human's credentials without a device id");
         }
-        let registered = kind == Kind::Human && tagged_registered(tags.iter().map(String::as_str));
+        let registered = kind == Kind::Human && tagged_registered(tag_list());
+        let admin = kind == Kind::Human && is_admin(tag_list());
         Ok(Self {
             kind,
             version: PermissionsVersion::from_tags(tags.iter().map(String::as_str))
@@ -150,6 +166,7 @@ impl Finding {
             device,
             xkey: DeviceKey::from_tags(tags.iter().map(String::as_str)),
             registered,
+            admin,
             name,
             key,
         })
@@ -177,7 +194,9 @@ impl Finding {
     pub fn holder(&self) -> String {
         match &self.kind {
             Kind::Ant => format!("ant {}", self.name),
+            Kind::Human if self.admin => format!("human {} (admin)", self.name),
             Kind::Human => format!("human {}", self.name),
+            Kind::Assistant { of } => format!("ant {}, assistant of {of}", self.name),
             Kind::Webhook { .. } => format!("webhook {}", self.name),
             Kind::ChannelManager => "the channel manager".to_owned(),
             Kind::Observer => format!("observer {}", self.name),
@@ -194,7 +213,11 @@ impl Finding {
         let flags = |flag: &str, ids: &[UserId]| ids.iter().map(|id| format!(" --{flag} {id}")).collect::<String>();
         match &self.kind {
             Kind::Ant => vec![format!("ants auth user {}{domain}", self.name)],
-            Kind::Human => vec![format!("ants auth user {} --human{domain}", self.name)],
+            Kind::Human => {
+                let admin = if self.admin { " --admin" } else { "" };
+                vec![format!("ants auth user {} --human{admin}{domain}", self.name)]
+            }
+            Kind::Assistant { of } => vec![format!("ants auth user {} --assistant-of {of}{domain}", self.name)],
             Kind::Webhook { to, channels } => {
                 let channels: String = channels.iter().map(|c| format!(" --channel {c}")).collect();
                 vec![format!("ants auth user {} --webhook{}{channels}{domain}", self.name, flags("to", to))]
@@ -221,7 +244,8 @@ impl Finding {
     }
 
     /// Whether `other` are the same credentials as these, for another key or with other permissions: the same name,
-    /// kind (members in any order), device and JetStream domain, as renewing keeps them.
+    /// kind (members in any order, the human of an assistant), device, admin role and JetStream domain, as renewing
+    /// keeps them.
     pub fn same_credentials(&self, other: &Finding) -> bool {
         fn sorted(kind: &Kind) -> Kind {
             let mut kind = kind.clone();
@@ -242,6 +266,7 @@ impl Finding {
         self.name == other.name
             && sorted(&self.kind) == sorted(&other.kind)
             && self.device == other.device
+            && self.admin == other.admin
             && self.js_domain == other.js_domain
     }
 
@@ -868,6 +893,31 @@ mod tests {
         let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
         let tags = [PERMISSIONS_VERSION.tag(), ants_proto::REGISTERED_TAG.to_owned()];
         assert!(!Finding::from_claims(&claims("dev-a", &ant, &tags, None)).unwrap().registered, "only a human's");
+    }
+
+    #[test]
+    fn only_the_user_jwt_makes_an_assistant_or_an_admin() {
+        let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
+        let tags = [PERMISSIONS_VERSION.tag(), "ants-assistant-of:alice".to_owned()];
+        let finding = Finding::from_claims(&claims("pa", &assistant, &tags, None)).unwrap();
+        assert_eq!((&finding.kind, finding.device, finding.admin), (&Kind::Assistant { of: p("alice") }, None, false));
+        assert_eq!(finding.holder(), "ant pa, assistant of alice");
+        assert_eq!(finding.renew(), ["ants auth user pa --assistant-of alice"]);
+        assert!(finding.same_credentials(&finding.clone()));
+        let ant = Permissions::for_user(&p("pa"), Role::Ant);
+        assert!(Finding::from_claims(&claims("pa", &ant, &tags, None)).is_err(), "the tag without the permissions");
+        let human = Permissions::for_user(&p("pa"), Role::Human);
+        assert!(Finding::from_claims(&claims("pa", &human, &tags, None)).is_err(), "nor with a human's");
+
+        let human = Permissions::for_user(&p("alice"), Role::Human);
+        let tags = [PERMISSIONS_VERSION.tag(), DeviceId::generate().tag(), "ANTS-ADMIN".to_owned()];
+        let admin = Finding::from_claims(&claims("alice", &human, &tags, None)).unwrap();
+        assert!(admin.admin);
+        assert_eq!(admin.holder(), "human alice (admin)");
+        assert_eq!(admin.renew(), ["ants auth user alice --human --admin"]);
+        assert!(serde_json::to_value(&admin).unwrap()["admin"] == true);
+        let tags = [PERMISSIONS_VERSION.tag(), "ants-admin".to_owned()];
+        assert!(!Finding::from_claims(&claims("dev-a", &ant, &tags, None)).unwrap().admin, "only a human's");
     }
 
     #[test]

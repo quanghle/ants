@@ -12,9 +12,9 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest,
-    ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key,
-    link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    AntRequest, AssistantOf, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs,
+    QueueRequest, ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key,
+    daily_spend_key, link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -271,6 +271,70 @@ impl Permissions {
         } else {
             Self::ant_rights(user, &mut publish, &mut subscribe);
         }
+        Self { publish, subscribe }
+    }
+
+    /// What the credentials of `assistant`, the assistant of `human` ([`AssistantOf`]), allow: everything an ant may do,
+    /// as it is one run by a daemon, and what a human may read and keep of its own besides ([`Self::for_user`]): it
+    /// watches all ants traffic, so its human's home queue, reads the stream and the buckets a human reads, sets
+    /// titles, TL;DRs and done states, puts its own reactions, pins, archives and read markers, and reads every
+    /// attachment and every device's encryption key. Of its human's own keys it reads, by direct gets, never writes,
+    /// the read markers, pins, archives and snoozed threads ([`read_marker_rights`], [`thread_rights`]) and the markers
+    /// of messages kept waiting ([`unserved_key`]), so it sees what its human has read and set aside.
+    ///
+    /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
+    /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
+    /// human's: deciding approval requests, cancelling, queueing or withdrawing an ant's messages, recording a
+    /// thread's owner, putting dead letters, answering an ant's reactions requests or another's renewal. Nor does it
+    /// change the team: no entry of [`HUMANS_BUCKET`] (where its human's grant stands) or [`CHANNELS_BUCKET`], no
+    /// stream created, updated or purged of a message. It puts no device encryption key, no presence and no
+    /// notification holds, which only a human's devices have, and it gets no power of the account key: it signs no
+    /// credentials and records no revocation.
+    pub fn for_assistant(assistant: &UserId, human: &UserId) -> Self {
+        let mut publish = Self::shared_publish(assistant, Role::Ant);
+        let mut subscribe = vec![format!("{}.>", inbox_prefix(assistant))];
+        Self::ant_rights(assistant, &mut publish, &mut subscribe);
+        let mut as_human = Vec::new();
+        Self::human_rights(assistant, &mut as_human, &mut subscribe);
+        let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
+        let notify = notify_prefs_rights(assistant);
+        let unattributed = [
+            subject::ALL_APPROVAL_DECISIONS.to_owned(),
+            subject::ALL_CANCELS.to_owned(),
+            subject::ALL_QUEUE_REQUESTS.to_owned(),
+            subject::ALL_REACTIONS_REPLIES.to_owned(),
+            subject::ALL_RENEW_REQUESTS.to_owned(),
+            subject::DEAD_ALL.to_owned(),
+            format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+            format!("$KV.{OWNERS_BUCKET}.*.*"),
+            "ants.out.owners.*.*".to_owned(),
+            format!("$KV.{HUMANS_BUCKET}.>"),
+            format!("$KV.{CHANNELS_BUCKET}.>"),
+            format!("$JS.API.STREAM.INFO.{OUTBOX_STREAM}"),
+            format!("$JS.API.STREAM.INFO.{INTAKE_STREAM}"),
+        ];
+        let changes_streams = |s: &str| {
+            ["$JS.API.STREAM.CREATE.", "$JS.API.STREAM.UPDATE.", "$JS.API.STREAM.MSG.DELETE.", "$JS.*.API."]
+                .iter()
+                .any(|prefix| s.starts_with(prefix))
+        };
+        as_human.retain(|s| {
+            !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !changes_streams(s)
+        });
+        publish.extend(as_human);
+        let chunks = format!("$O.{FILES_BUCKET}.C");
+        publish.push(format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunks}.>"));
+        let gets_only = |rights: &[String]| -> Vec<String> {
+            rights.iter().filter(|s| s.starts_with("$JS.API.DIRECT.GET.")).cloned().collect()
+        };
+        publish.extend(gets_only(&read_marker_rights(human)));
+        publish.extend(gets_only(&thread_rights(human)));
+        let attempts = kv_stream(ATTEMPTS_BUCKET);
+        publish.push(format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{human}.unserved.*"));
+        let mut seen = std::collections::HashSet::new();
+        publish.retain(|s| seen.insert(s.clone()));
+        let mut seen = std::collections::HashSet::new();
+        subscribe.retain(|s| seen.insert(s.clone()));
         Self { publish, subscribe }
     }
 

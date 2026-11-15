@@ -69,6 +69,7 @@ fn kind(kind: Kind) -> &'static str {
         Kind::Enrollment => "enrollment",
         Kind::Observer => "an observer's",
         Kind::Bootstrap => "bootstrap",
+        Kind::Assistant => "an assistant's",
     }
 }
 
