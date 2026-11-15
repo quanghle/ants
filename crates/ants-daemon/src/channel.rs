@@ -232,6 +232,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         title: None,
         question: None,
         answer: None,
+        steer: false,
         sent_at: post.sent_at,
     }
 }

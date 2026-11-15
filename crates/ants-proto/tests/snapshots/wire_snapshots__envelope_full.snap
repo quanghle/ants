@@ -54,5 +54,6 @@ expression: value
     "question": "019a7d2e-0000-7000-8000-000000000004",
     "option": 2
   },
+  "steer": true,
   "sent_at": "2025-01-01T12:00:00Z"
 }

@@ -546,9 +546,9 @@ pub(crate) mod fake {
         pub broken: bool,
     }
 
-    /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`
-    /// waits for a permit from the returned semaphore first; one starting with `flaky` fails the first time; one with
-    /// the word `doomed` waits for a permit too, then fails, every time. Words in
+    /// In-process fake harnesses that answer each prompt with `<session>: <text>`. A prompt starting with `hold`, or
+    /// with a line starting with `hold:`, waits for a permit from the returned semaphore first; one starting with
+    /// `flaky` fails the first time; one with the word `doomed` waits for a permit too, then fails, every time. Words in
     /// a prompt make it report spend and work: `tools N` starts N tool calls, `cost X` reports X as the session's
     /// cost, `tokens N` reports N tokens in the response, and `stall` replies `partial` and waits for session/cancel.
     /// `overflows` fails as a prompt that outgrew the context window, and so does `overflow` unless the session was
@@ -657,7 +657,7 @@ pub(crate) mod fake {
                                 (t.text.clone(), gate.clone(), cx.clone(), on_prompt.clone(), cancels.clone());
                             // Answer from a task, so a held prompt does not stall the connection.
                             cx.spawn(async move {
-                                if text.starts_with("hold") {
+                                if text.starts_with("hold") || text.lines().any(|line| line.starts_with("hold:")) {
                                     gate.acquire().await.unwrap().forget();
                                 }
                                 if text.split_whitespace().any(|w| w == "doomed") {

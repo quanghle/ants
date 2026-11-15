@@ -346,8 +346,8 @@ fn give_up_retries(threads: &mut HashMap<ThreadId, Thread>) {
 /// What came of running a prompt.
 struct Ran {
     reply: Result<crate::harness::Reply>,
-    /// Who cancelled the prompt, if anyone did.
-    cancelled_by: Option<UserId>,
+    /// The human's cancel of the prompt, if one came.
+    cancelled_by: Option<Cancel>,
     /// Whether the cancel cut the prompt short.
     cut_by_cancel: bool,
     /// Whether a tool call started, so tools may have run.
@@ -431,8 +431,11 @@ async fn connect_mcp(
     mcp.listen(bus::live_inbox(client, &config.ant).await?);
     mcp.with_channels(redacting_posts(crate::mcp::jetstream_channels(js.clone()), redactor.clone()));
     mcp.with_lookup(crate::mcp::jetstream_lookup(js.clone()));
-    mcp.with_reactor(crate::mcp::jetstream_reactor(js.clone(), config.js_domain.clone(), config.ant.clone()));
-    mcp.with_reaction_reader(crate::mcp::nats_reaction_reader(client.clone(), config.ant.clone()));
+    // Without credentials the server is open, with no `ants signer` to answer, and the daemon reads what it would.
+    mcp.with_reaction_asker(match config.creds {
+        Some(_) => crate::mcp::nats_reaction_asker(client.clone()),
+        None => crate::mcp::local_reaction_asker(js.clone(), config.js_domain.clone()),
+    });
     if let Some(requester) = &config.requester.0 {
         mcp.with_requester(requester.clone());
     }
@@ -691,6 +694,21 @@ struct Incoming {
     /// The channel the answer goes to instead of the sender's inbox: that of the thread, when the message is the
     /// escalation leader's reply that renewed it ([`Inbox::arrived`]).
     resume: Option<ChannelId>,
+    /// How a human's steer ([`Envelope::steer`]) placed the message on its thread.
+    steered: Steered,
+}
+
+/// Whether a message steers its thread: one that does goes ahead of the messages waiting there, after those that
+/// steered it before.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Steered {
+    /// An ordinary message, waiting its turn.
+    #[default]
+    No,
+    /// It cancelled the prompt running on its thread as it arrived.
+    Interrupted,
+    /// It arrived behind another steer that cancelled the running prompt already.
+    Ahead,
 }
 
 #[derive(Clone)]
@@ -756,21 +774,41 @@ enum Wait {
 
 /// The prompt running on each thread, and where to send the human who cancels it.
 #[derive(Default)]
-struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<UserId>>>);
+struct Cancels(std::sync::Mutex<HashMap<ThreadId, tokio::sync::mpsc::Sender<Cancel>>>);
+
+/// A human's cancel of a running prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Cancel {
+    by: UserId,
+    /// Whether it came with a steer message ([`Envelope::steer`]), which the thread takes next.
+    steer: bool,
+}
+
+impl Cancel {
+    /// The `[ants]` line ending the cancelled prompt's reply.
+    fn notice(&self, ant: &UserId) -> String {
+        let by = &self.by;
+        if self.steer {
+            format!("[ants] {by} interrupted the prompt to steer {ant} (ants ask --steer).")
+        } else {
+            format!("[ants] The prompt was cancelled by {by} (ants cancel).")
+        }
+    }
+}
 
 impl Cancels {
     /// Make the prompt about to run on `thread` cancellable until the guard drops; the cancels arrive on the receiver.
-    fn register<'a>(&'a self, thread: &ThreadId) -> (Cancellable<'a>, tokio::sync::mpsc::Receiver<UserId>) {
+    fn register<'a>(&'a self, thread: &ThreadId) -> (Cancellable<'a>, tokio::sync::mpsc::Receiver<Cancel>) {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         self.0.locked().insert(thread.clone(), tx);
         (Cancellable { cancels: self, thread: thread.clone() }, rx)
     }
 
-    /// Cancel the prompt running on `thread` for `by`, if one is; one cancelled already stays so.
-    fn cancel(&self, thread: &ThreadId, by: UserId) -> bool {
+    /// Cancel the prompt running on `thread`, if one is; one cancelled already stays so.
+    fn cancel(&self, thread: &ThreadId, cancel: Cancel) -> bool {
         use tokio::sync::mpsc::error::TrySendError;
         let cancels = self.0.locked();
-        cancels.get(thread).is_some_and(|tx| !matches!(tx.try_send(by), Err(TrySendError::Closed(_))))
+        cancels.get(thread).is_some_and(|tx| !matches!(tx.try_send(cancel), Err(TrySendError::Closed(_))))
     }
 }
 
@@ -969,6 +1007,14 @@ impl Inbox<'_> {
         if t.retry.is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
             t.retry = None;
             t.waiting.push_front((incoming, msg));
+        } else if let Some(steered) = self.steer(&incoming, &thread, t) {
+            let at = t.waiting.iter().take_while(|(waiting, _)| waiting.steered != Steered::No).count();
+            tracing::info!(%thread, by = %incoming.envelope.from, ahead = at, "a human steers the thread");
+            t.waiting.insert(at, (Incoming { steered, ..incoming }, msg));
+            let behind = t.waiting.iter().map(|(waiting, _)| waiting.envelope.id).enumerate().skip(at + 1);
+            for (before, message) in behind.filter(|(_, message)| t.queued.contains(message)) {
+                status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead: before + 1 });
+            }
         } else {
             let (message, ahead) = (incoming.envelope.id, t.ahead());
             t.waiting.push_back((incoming, msg));
@@ -981,6 +1027,20 @@ impl Inbox<'_> {
             }
         }
         Some(thread)
+    }
+
+    /// How the message in `incoming` steers `thread`, holding `t`, if it does: a human's steer to the ant while a prompt
+    /// runs there ([`Envelope::steer`]), which it cancels unless a steer waiting already did.
+    fn steer(&self, incoming: &Incoming, thread: &ThreadId, t: &Thread) -> Option<Steered> {
+        let envelope = &incoming.envelope;
+        if !envelope.steer || incoming.post.is_some() || !self.humans.sender_role(envelope).is_human() || !t.busy {
+            return None;
+        }
+        if t.waiting.front().is_some_and(|(waiting, _)| waiting.steered != Steered::No) {
+            return Some(Steered::Ahead);
+        }
+        let cancel = Cancel { by: envelope.from.clone(), steer: true };
+        self.cancels.cancel(thread, cancel).then_some(Steered::Interrupted)
     }
 
     /// Tell the messages waiting on `thread` where they stand now that `started` left the queue, and `started` that
@@ -1039,7 +1099,7 @@ impl Inbox<'_> {
                 tracing::warn!(error = %e, "ignoring a forged cancel request");
                 continue;
             }
-            let cancelled = self.cancels.cancel(&request.thread_id, request.by.clone());
+            let cancelled = self.cancels.cancel(&request.thread_id, Cancel { by: request.by.clone(), steer: false });
             if !cancelled {
                 tracing::info!(thread = %request.thread_id, by = %request.by, "no prompt to cancel");
             }
@@ -1083,7 +1143,7 @@ impl Inbox<'_> {
         if self.claim(&envelope, msg).await {
             return None;
         }
-        Some(Incoming { envelope, post: None, resume: None })
+        Some(Incoming { envelope, post: None, resume: None, steered: Steered::No })
     }
 
     /// The channel post `msg` to answer, if it wakes the ant ([`channel::wake`]). Any other is acked at once: the
@@ -1136,7 +1196,8 @@ impl Inbox<'_> {
         let origin = if post.starts_thread() { ThreadOrigin::of_root(&post, &humans) } else { ThreadOrigin::default() };
         origin.apply(&mut post);
         let envelope = channel::as_envelope(&post, self.ant);
-        Some(Incoming { envelope, post: Some(Box::new(Posted { post, triage, owned })), resume: None })
+        let posted = Some(Box::new(Posted { post, triage, owned }));
+        Some(Incoming { envelope, post: posted, resume: None, steered: Steered::No })
     }
 
     /// Notify the human members `post`, in `msg`, @mentions ([`Threads::notify_mentioned`]) before the post is acked,
@@ -2027,18 +2088,15 @@ impl Inbox<'_> {
         let limit_notice =
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
         let cancelled = cancelled_by.is_some();
-        let cancel_notice = cancelled_by.map(|by| format!("[ants] The prompt was cancelled by {by} (ants cancel)."));
+        let cancel_notice = cancelled_by.map(|cancel| cancel.notice(self.ant));
         let [branch_notice, publish_notice] = self.branch_notices(envelope, msg, cancelled).await;
         let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice, publish_notice];
         let notice = notice.into_iter().flatten().collect::<Vec<_>>().join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
-        let Some(mut reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
+        let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
             return Ok(());
         };
-        if let (Reply::Message(message), Some(mcp)) = (&mut reply, self.mcp) {
-            message.title = mcp.take_title(thread);
-        }
         // Before the reply is recorded, so a redelivery that only resends the reply still escalates; its message id
         // keeps a second escalation out of the stream.
         if let Some(limit) = limit
@@ -2101,8 +2159,8 @@ impl Inbox<'_> {
         Err(e)
     }
 
-    /// The reply carrying `text`, the answer to `incoming`: `None` when the answer went up the chain or nowhere instead,
-    /// and the message is done with.
+    /// The reply carrying `text`, the answer to `incoming`, and the title the turn suggested for the thread, whatever
+    /// kind of reply it is: `None` when the answer went up the chain or nowhere instead, and the message is done with.
     async fn reply_for(
         &self,
         incoming: &Incoming,
@@ -2114,7 +2172,8 @@ impl Inbox<'_> {
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
-        Ok(Some(match (&incoming.post, read) {
+        let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
+        let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 // Other members' replies stored during the prompt spent the thread's turns too.
                 let humans = self.humans.humans();
@@ -2163,7 +2222,7 @@ impl Inbox<'_> {
                 match escalation::route(self.ant, envelope).map(|(_, route)| route) {
                     Some(Route::Notes) => {
                         let (store, budget) = (self.notes, envelope.turn_budget);
-                        match notes::spend(store, thread, self.ant, &reply.text, budget).await? {
+                        match notes::spend(store, thread, self.ant, &reply.text, budget, title.clone()).await? {
                             Some(post) => Reply::Notes(post),
                             None => {
                                 let why = "Thread notes out of turns before the answer was posted";
@@ -2182,6 +2241,12 @@ impl Inbox<'_> {
                     }
                 }
             }
+        };
+        Ok(Some(match reply {
+            Reply::Message(message) => Reply::Message(Envelope { title, ..message }),
+            Reply::Post(post) => Reply::Post(ChannelPost { title, ..post }),
+            // Posted with the title already.
+            Reply::Notes(post) => Reply::Notes(post),
         }))
     }
 
@@ -2211,7 +2276,11 @@ impl Inbox<'_> {
             Some(line) => format!("{line}\n\n{text}"),
             None => text,
         };
-        prompt_text(&text, cut_off, late)
+        let text = prompt_text(&text, cut_off, late);
+        match incoming.steered {
+            Steered::Interrupted => format!("{}\n\n{text}", steer_note(&envelope.from)),
+            Steered::No | Steered::Ahead => text,
+        }
     }
 
     /// The `[ants]` line telling that `envelope`, a human's message, answers a question the ant asked on the thread
@@ -2284,9 +2353,9 @@ impl Inbox<'_> {
                 }
                 _ = flush.tick() => status.flush_settled(),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
-                    tracing::info!(%thread, %by, "cancelling the prompt");
+                    tracing::info!(%thread, by = %by.by, steer = by.steer, "cancelling the prompt");
                     if let Some(stop) = stop_tx.take() {
-                        let _ = stop.send(format!("Cancelled by {by}"));
+                        let _ = stop.send(format!("Cancelled by {}", by.by));
                         cut_by_cancel = true;
                     }
                     cancelled_by = Some(by);
@@ -2583,6 +2652,14 @@ fn queue_request(msg: &async_nats::Message) -> Option<QueueRequest> {
 
 /// The prompt for a message: warned when an earlier attempt at it was cut off, and noting the `late` replies to
 /// `ask_ant` that wait on its thread for `check_inbox`.
+/// The line starting the prompt of a human's steer message that interrupted the prompt running on its thread.
+fn steer_note(by: &UserId) -> String {
+    format!(
+        "[ants] {by} interrupted the previous prompt on this thread with this message; tool calls it had in flight \
+         were cancelled, so check what they left before repeating any."
+    )
+}
+
 fn prompt_text(text: &str, cut_off: bool, late: usize) -> String {
     let late = match late {
         0 => None,

@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::auth::tests::Server;
 
-    /// A human's credentials follow every reaction; an ant's, which read only its own, follow none and fail nothing.
+    /// A human's credentials follow every reaction; an ant's, which read none, follow none and fail nothing.
     #[tokio::test]
     async fn only_credentials_reading_every_reaction_follow_them() {
         let Some(server) = Server::start() else { return };
@@ -103,10 +103,10 @@ mod tests {
         let mut as_human = follow(&human, Role::Human, &h_js).await;
         let mut as_ant = follow(&dev_a, Role::Ant, &a_js).await;
         let message = Uuid::now_v7();
-        assert!(reactions::add(&a_js, None, &dev_a, &message, &"eyes".parse().unwrap()).await.unwrap());
+        assert!(reactions::add(&h_js, None, &human, &message, &"eyes".parse().unwrap()).await.unwrap());
         let wait = Duration::from_secs(5);
         let change = tokio::time::timeout(wait, as_human.next()).await.unwrap().unwrap();
-        assert_eq!((change.message, &change.by, change.removed), (message, &dev_a, false));
+        assert_eq!((change.message, &change.by, change.removed), (message, &human, false));
         let none = tokio::time::timeout(Duration::from_millis(300), as_ant.next()).await;
         assert!(none.is_err(), "an ant follows no reactions");
     }

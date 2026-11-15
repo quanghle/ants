@@ -167,6 +167,30 @@ fn a_thread_keeps_the_first_title_an_ant_suggested_but_none_from_a_forged_messag
 }
 
 #[test]
+fn channel_and_notes_posts_suggest_titles_too_unless_forged() {
+    let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
+    let ops: ChannelId = "ops".parse().unwrap();
+    let top = ChannelPost::new(ops.clone(), alice, "@dev-a the build broke");
+    let thread = top.thread_id.clone();
+    let reply = ChannelPost::on_thread(ops, thread.clone(), dev_a.clone(), "on it");
+    let reply = ChannelPost { title: Some("Fix the build".to_owned()), ..reply };
+    let forged = ChannelPost { from: dev_b.clone(), title: Some("Forged".to_owned()), ..reply.clone() };
+    let note = NotesPost { title: Some("Plan the fix".to_owned()), ..NotesPost::new(thread.clone(), dev_b, "plan") };
+    let messages = [
+        (top.subject(), json(&top)),
+        (reply.subject(), json(&forged)),
+        (reply.subject(), json(&reply)),
+        (note.subject(), json(&note)),
+    ];
+    let read = entries(&messages);
+    let suggested: Vec<_> = read.iter().map(|e| (e.forged, e.suggested_title.as_deref())).collect();
+    assert_eq!(suggested, [(false, None), (true, None), (false, Some("Fix the build")), (false, Some("Plan the fix"))]);
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    assert_eq!(threads.get(&thread).unwrap().suggested, Some((dev_a, "Fix the build".to_owned())));
+}
+
+#[test]
 fn threads_sum_up_their_users_owner_times_and_opening() {
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let one = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "first line\nmore");

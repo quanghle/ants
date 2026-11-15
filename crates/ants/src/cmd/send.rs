@@ -2,7 +2,10 @@
 
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
-use ants_proto::{ChannelId, ChannelPost, Choice, Envelope, NotesPost, Reaction, ThreadId, UserId, Uuid, subject};
+use ants_proto::{
+    ChannelId, ChannelPost, Choice, Envelope, NotesPost, Reaction, ReactionChange, ReactionsOutcome, ReactionsRequest,
+    Role, ThreadId, UserId, Uuid, subject,
+};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::StreamExt as _;
@@ -27,15 +30,20 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
 pub(crate) async fn ask(
     nats: &Nats<'_>,
     thread: Option<thread::Pick>,
+    steer: bool,
     replies: &Replies,
     input: &compose::Input,
     words: Vec<String>,
 ) -> Result<()> {
+    if steer && !nats.me.role.is_human() {
+        bail!("the credentials of {} are an ant's; only a human steers an ant", nats.me.id);
+    }
     // Refuse a message with nothing to send before connecting.
     let (to, text) = recipient(words, input)?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let envelope = ask_envelope(&nats.me, thread, to, text);
+    let envelope = if steer { envelope.steering() } else { envelope };
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
@@ -235,19 +243,34 @@ pub(crate) async fn react(
     reaction: Reaction,
     remove: bool,
 ) -> Result<()> {
-    let (_, js) = nats.connect("ants-cli").await?;
+    let (client, js) = nats.connect("ants-cli").await?;
     let message = message.resolve(&js, &nats.me).await?;
     let me = &nats.me.id;
-    let line = if remove {
-        if reactions::remove(&js, nats.domain, me, &message, &reaction).await? {
-            format!("removed {reaction} from message {message}")
-        } else {
-            format!("no {reaction} reaction to message {message} to remove")
+    let changed = match nats.me.role {
+        Role::Human if remove => reactions::remove(&js, nats.domain, me, &message, &reaction).await?,
+        Role::Human => reactions::add(&js, nats.domain, me, &message, &reaction).await?,
+        // An ant's credentials write no reactions: `ants signer` makes the change once it found the ant reads the
+        // message.
+        Role::Ant => {
+            let change = ReactionChange { reaction: reaction.clone(), remove };
+            match reactions::request(&client, &ReactionsRequest::change(me.clone(), message, change)).await? {
+                Some(ReactionsOutcome::Applied { changed }) => changed,
+                Some(ReactionsOutcome::Unknown) => {
+                    bail!("message {message} is none {me} reads, or the stream no longer keeps it: nothing changed")
+                }
+                Some(ReactionsOutcome::Listed { .. }) => bail!("an answer to another request"),
+                None => bail!(
+                    "no answer about the reaction, so it may not be made: `ants signer`, on the machine with the \
+                     account key, makes such changes"
+                ),
+            }
         }
-    } else if reactions::add(&js, nats.domain, me, &message, &reaction).await? {
-        format!("reacted {reaction} to message {message}")
-    } else {
-        format!("already reacted {reaction} to message {message}")
+    };
+    let line = match (remove, changed) {
+        (true, true) => format!("removed {reaction} from message {message}"),
+        (true, false) => format!("no {reaction} reaction to message {message} to remove"),
+        (false, true) => format!("reacted {reaction} to message {message}"),
+        (false, false) => format!("already reacted {reaction} to message {message}"),
     };
     println!("{line}");
     Ok(())
