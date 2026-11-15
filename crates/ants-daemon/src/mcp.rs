@@ -1350,6 +1350,16 @@ fn describe(entries: &[&RosterEntry]) -> String {
                     limited.until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 );
             }
+            if let Some(low) = &e.memory_low {
+                let _ = write!(
+                    text,
+                    "\n  memory low on {} since {}: at most {} {} at once, so messages may wait longer",
+                    e.machine,
+                    low.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    low.max_harnesses,
+                    if low.max_harnesses == 1 { "harness runs" } else { "harnesses run" }
+                );
+            }
             if let Some(whoami) = &e.whoami
                 && !whoami.trim().is_empty()
             {

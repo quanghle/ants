@@ -144,9 +144,9 @@ notice of a harness failing to start (observed via `failing` in `ants_roster`), 
 
 What a daemon says of an ant it serves: `ant`, `machine`, `instance`?, `harness`, `agent`? (`{name, version}`),
 `capabilities`, `whoami`?, `workdir`, `started_at`, `heartbeat_at`, `activity`? (`idle`, `working`), `handling`?,
-`harnesses`?, `escalate_to`, `version`?, `perms`?, `signed_out`?, `limited`?, `failing`?. The daemon puts it on start
-and every 10 s, and deletes it on a clean stop; the bucket's entries expire after 30 s, so a daemon that died leaves
-none. `ants hook run --on roster` hands on puts only, every heartbeat included. Check: `key == ant`.
+`harnesses`?, `escalate_to`, `version`?, `perms`?, `signed_out`?, `limited`?, `failing`?, `memory_low`?
+(`{since, available, max_harnesses}`). The daemon puts it on start and every 10 s, and deletes it on a clean stop; the
+bucket's entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on roster` hands on puts only, every heartbeat included. Check: `key == ant`.
 
 ## `ants hook run`
 

@@ -115,6 +115,8 @@ pub struct Config {
     pub spend_warn_percent: u8,
     /// When to warn a human of JetStream storage filling up.
     pub storage: crate::storage::Settings,
+    /// When memory is low, and the harnesses run at most while it is ([`crate::pressure`]).
+    pub memory_pressure: crate::pressure::Settings,
     /// The daily caps the ant shares with the other ants added from its template, if any.
     pub pool: Option<crate::caps::Pool>,
     /// Serve the ant only while holding its roster entry, as the built-in messenger does: wait while another
@@ -435,8 +437,9 @@ async fn harness_pool(
     sessions: SessionStore,
     workload: &std::sync::Arc<roster::Workload>,
 ) -> Pool {
-    let mut pool =
-        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
+    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout)
+        .reporting_to(workload.clone())
+        .with_memory_pressure(config.memory_pressure, crate::pressure::system_probe());
     let isolating =
         if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
     if let Some(worktrees) = isolating {

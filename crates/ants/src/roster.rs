@@ -122,6 +122,26 @@ fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     ))
 }
 
+/// One line per ant whose machine is low on memory: since when, how much is available and how many harnesses run.
+pub fn memory_low(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let low = e.memory_low.as_ref()?;
+            let harnesses = if low.max_harnesses == 1 { "harness runs" } else { "harnesses run" };
+            Some(format!(
+                "{}: memory low on {} for {} ({} available); idle harnesses stop at once and at most {} {harnesses} \
+                 until it recovers.",
+                e.ant,
+                e.machine,
+                short(since(low.since, now)),
+                ants_daemon::storage::show_size(low.available),
+                low.max_harnesses
+            ))
+        })
+        .collect()
+}
+
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
 /// kept for it either, the name may be wrong), a stale entry, or a harness signed out or held back by a provider
 /// limit.
@@ -276,9 +296,9 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
         if let Some(note) = crate::versions::harness_note(&entries, now) {
             println!("{note}");
         }
-        let held = held(&entries, now);
-        if !held.is_empty() {
-            println!("\n{}", held.join("\n"));
+        let notes = [held(&entries, now), memory_low(&entries, now)].concat();
+        if !notes.is_empty() {
+            println!("\n{}", notes.join("\n"));
         }
     }
     Ok(())
@@ -313,6 +333,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            memory_low: None,
         }
     }
 
@@ -431,6 +452,14 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();
         assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
+        let mut low = entry("dev-i", 600, 2, now);
+        low.memory_low = Some(ants_proto::MemoryLow { since, available: 768 << 20, max_harnesses: 1 });
+        assert_eq!(held(std::slice::from_ref(&low), now), Vec::<String>::new(), "messages do not wait");
+        assert_eq!(
+            memory_low(&[low, out], now),
+            ["dev-i: memory low on m1 for 5m (768.0 MB available); idle harnesses stop at once and at most 1 harness \
+              runs until it recovers."]
+        );
 
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];

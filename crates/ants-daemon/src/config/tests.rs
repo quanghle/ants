@@ -488,6 +488,22 @@ fn the_storage_table_reaches_every_ant() {
 }
 
 #[test]
+fn the_memory_pressure_table_reaches_every_ant() {
+    let loaded = parse_all(
+        "[memory_pressure]\nmin_available = \"10%\"\nmax_harnesses = 2\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"",
+    )
+    .unwrap();
+    let settings = pressure::Settings { min_available: pressure::Threshold::Percent(10), max_harnesses: 2 };
+    assert!(loaded.ants.iter().all(|ant| ant.memory_pressure == settings));
+    assert_eq!(config(loaded.ants[0].clone()).unwrap().memory_pressure, settings);
+    let default = parse_all("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert_eq!(default.ants[0].memory_pressure, pressure::Settings::default(), "on unless turned off");
+    let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
+    assert!(err("[memory_pressure]\nmax_harnesses = 0").contains("max_harnesses must be at least 1"));
+    assert!(err("[memory_pressure]\nmin_available = \"100%\"").contains("invalid share"));
+}
+
+#[test]
 fn schedules_take_the_top_level_server_and_unique_names() {
     let loaded = parse_all(
         "nats = \"wss://hub.example/nats\"\njs_domain = \"hub\"\n\
