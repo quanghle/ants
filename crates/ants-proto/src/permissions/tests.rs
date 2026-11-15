@@ -554,30 +554,37 @@ fn humans_set_every_title_but_only_their_own_pins_and_archives_and_ants_neither(
 }
 
 #[test]
-fn everyone_writes_only_their_own_reactions_and_only_humans_read_others() {
-    let own = "$KV.ants_reactions.dev-a.>";
+fn humans_write_only_their_own_reactions_ants_ask_and_only_the_responder_writes_others() {
     let others = ["$JS.API.DIRECT.GET.KV_ants_reactions.>", "$JS.API.CONSUMER.CREATE.KV_ants_reactions"];
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
-    assert!(ant.publish.iter().any(|s| s == own), "{:?}", ant.publish);
-    assert!(ant.publish.iter().any(|s| s == "$JS.API.DIRECT.GET.KV_ants_reactions.$KV.ants_reactions.dev-a.>"));
-    let reactions: Vec<&String> = ant.publish.iter().filter(|s| s.contains("ants_reactions")).collect();
-    assert_eq!(reactions.len(), 2, "nothing of others' reactions: {reactions:?}");
+    let reactions: Vec<&String> =
+        ant.publish.iter().chain(&ant.subscribe).filter(|s| s.contains("ants_reactions")).collect();
+    assert!(reactions.is_empty(), "an ant neither reads nor writes reactions: {reactions:?}");
     let human = Permissions::for_user(&p("alice"), Role::Human);
     assert!(human.publish.iter().any(|s| s == "$KV.ants_reactions.alice.>"));
     assert!(!human.publish.iter().any(|s| s == "$KV.ants_reactions.>" || s == "$KV.ants_reactions.*.>"));
     for s in others.into_iter().chain(["$JS.API.STREAM.CREATE.KV_ants_reactions"]) {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
+    let responder = Permissions::for_reactions_responder();
+    for s in others.into_iter().chain(["$KV.ants_reactions.>", "$JS.API.DIRECT.GET.ANTS", "$JS.API.STREAM.INFO.ANTS"]) {
+        assert!(responder.publish.iter().any(|have| have == s), "{s} missing from {:?}", responder.publish);
+    }
+    assert!(!responder.publish.iter().any(|s| s.contains("STREAM.CREATE") || s.starts_with("ants.")));
+    assert_eq!(responder.subscribe[..2], [subject::ALL_REACTIONS_REQUESTS, subject::ALL_REACT_REQUESTS]);
     let observer = Permissions::for_observer(&p("watcher"));
     assert!(!observer.publish.iter().chain(&observer.subscribe).any(|s| s.contains("ants_reactions")));
 
-    // Ants ask for the reactions to messages they read only as themselves, and only humans answer.
+    // Ants ask about the reactions to messages they read only as themselves, and only humans and the responder
+    // answer.
     let asks = |list: &[String]| -> Vec<String> {
         list.iter().filter(|s| s.starts_with("ants.reactions.")).cloned().collect()
     };
-    assert_eq!(asks(&ant.publish), ["ants.reactions.dev-a"]);
+    assert_eq!(asks(&ant.publish), ["ants.reactions.dev-a", "ants.reactions.dev-a.react"]);
     assert!(ant.subscribe.iter().any(|s| s == "_INBOX.dev-a.>"), "hears the answers in its reply inboxes");
-    assert!(human.publish.iter().any(|s| s == subject::ALL_REACTIONS_REPLIES), "only humans answer");
+    for answering in [&human, &responder] {
+        assert!(answering.publish.iter().any(|s| s == subject::ALL_REACTIONS_REPLIES), "{:?}", answering.publish);
+    }
     for other in [&observer, &Permissions::for_user(&p("dev-b"), Role::Ant)] {
         assert!(!other.publish.iter().any(|s| s.starts_with("_INBOX.*")), "{:?}", other.publish);
     }
@@ -585,6 +592,7 @@ fn everyone_writes_only_their_own_reactions_and_only_humans_read_others() {
     let m1: Machine = "m1".parse().unwrap();
     let leaf = Permissions::for_leaf(&m1, [(&p("dev-a"), Role::Ant), (&p("alice"), Role::Human)]);
     assert!(leaf.publish.iter().any(|s| s == "ants.reactions.dev-a"), "an ant on a leaf asks through its uplink");
+    assert!(leaf.publish.iter().any(|s| s == "ants.reactions.dev-a.react"));
     assert!(leaf.publish.iter().any(|s| s == subject::ALL_REACTIONS_REPLIES), "and a human there answers");
     assert!(leaf.subscribe.iter().any(|s| s == "_INBOX.dev-a.>"), "and its answers come down");
 }

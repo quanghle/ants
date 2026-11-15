@@ -305,12 +305,12 @@ fn a_github_binding_and_its_grant_are_listed_with_the_device_and_kept_on_renewal
     let key = nkeys::KeyPair::new_user();
     let permissions = ants_proto::Permissions::for_user(&alice, ants_proto::Role::Human);
     let (jwt, device) =
-        auth::sign_device_with(&team, &alice, Kind::Human, permissions, &new, &key.public_key()).unwrap();
+        auth::sign_device_with(&team, &alice, Kind::Human, permissions, &new, &key.public_key(), None).unwrap();
 
     let listed = devices(&team, "alice").unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!((listed[0].github.as_deref(), listed[0].grant.as_ref()), (Some("octocat"), new.grant.as_ref()));
-    auth::renew(&team, &jwt, &nkeys::KeyPair::new_user().public_key()).unwrap();
+    auth::renew(&team, &jwt, &nkeys::KeyPair::new_user().public_key(), None).unwrap();
     let renewed = issued(&team).unwrap().pop().unwrap();
     assert_eq!(renewed.device, device);
     assert_eq!((renewed.github, renewed.grant), (new.github, new.grant));

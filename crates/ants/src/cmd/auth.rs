@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::{ChannelId, Destination, JsDomain, Machine, Permissions, UserId};
+use ants_proto::{ChannelId, Destination, DeviceKey, JsDomain, Machine, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
@@ -54,6 +54,11 @@ pub(crate) enum AuthCommand {
         /// the JWT, given to `ants add --jwt` there, completes the credentials.
         #[arg(long, value_name = "KEY")]
         public_key: Option<String>,
+        /// With --public-key, for a human: the public encryption key (X...) generated on the device beside its NKey,
+        /// for the JWT to bind. Without it, credentials signed for a key generated elsewhere bind none until
+        /// `ants renew` adds one; generated credentials always bind a new one.
+        #[arg(long, value_name = "XKEY", requires = "public_key")]
+        xkey: Option<DeviceKey>,
         /// With --human (or for `human`): a label for the device the credentials are for, such as "Quang's laptop",
         /// shown by `ants auth devices`. Each human's credentials are for a new device with a generated id.
         #[arg(long, conflicts_with = "webhook")]
@@ -248,6 +253,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             dir,
             out,
             public_key,
+            xkey,
             label,
             store_key,
             github,
@@ -263,8 +269,11 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             if store_key {
                 let out = out.unwrap_or_else(|| dir.join(format!("{user}.creds")));
                 let key = nkeys::KeyPair::new_user();
-                let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key())?;
-                keys::issue_stored(&out, &jwt, &key, conn.nats).await?;
+                let xkey = (kind == revoke::Kind::Human).then(nkeys::XKey::new);
+                let bound = xkey.as_ref().map(auth::device_key).transpose()?;
+                let (jwt, device) =
+                    auth::sign_device_with(&dir, &user, kind, permissions, &new, &key.public_key(), bound.as_ref())?;
+                keys::issue_stored(&out, &jwt, &key, xkey.as_ref(), conn.nats).await?;
                 println!("{}", out.display());
                 if let Some(device) = device {
                     eprintln!("device {device}");
@@ -280,7 +289,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
                 }
                 return Ok(());
             };
-            let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key)?;
+            let (jwt, device) = auth::sign_device_with(&dir, &user, kind, permissions, &new, &key, xkey.as_ref())?;
             if let Some(device) = device {
                 eprintln!("device {device}");
             }
@@ -301,7 +310,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             if store_key {
                 let key = nkeys::KeyPair::new_user();
                 let jwt = auth::sign_channel_manager(&dir, domain, &key.public_key())?;
-                keys::issue_stored(&out, &jwt, &key, conn.nats).await?;
+                keys::issue_stored(&out, &jwt, &key, None, conn.nats).await?;
             } else {
                 auth::issue_channel_manager(&dir, domain, &out)?;
             }

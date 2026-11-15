@@ -1,4 +1,4 @@
-//! `ants signer`: sign the credentials of the ants manager ants ask for.
+//! `ants signer`: sign the credentials of the ants manager ants ask for, and answer ants' reactions requests.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,7 +23,8 @@ pub(crate) async fn run(
     let templates = ants_daemon::config::signer_templates(&config)?;
     let names: Vec<_> = templates.iter().map(|t| t.name.as_str()).collect();
     eprintln!(
-        "signing the ants manager ants ask for, within the templates of {} ({}); Ctrl-C stops",
+        "signing the ants manager ants ask for, within the templates of {} ({}), and answering ants' reactions \
+         requests; Ctrl-C stops",
         config.display(),
         if names.is_empty() { "none yet: every request goes to a human".to_owned() } else { names.join(", ") }
     );
