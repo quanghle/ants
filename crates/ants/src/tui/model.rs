@@ -3,9 +3,11 @@
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use ants_daemon::reactions::Reactions;
-use ants_proto::{ChannelEntry, Humans, ReadMarker, ThreadId, UserId, Uuid};
+use ants_proto::{ApprovalRequest, ChannelEntry, Humans, ReadMarker, ThreadId, UserId, Uuid, Verdict};
 use chrono::{DateTime, TimeDelta, Utc};
 
+use super::command::Bar;
+use super::exec::Job;
 use super::reads::Read;
 use super::work::{Facts, Filter};
 use super::{channel, home, nav, thread, work};
@@ -23,6 +25,12 @@ pub enum Key {
     Tab,
     Enter,
     Esc,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    /// Alt-Enter: a new line in the command bar.
+    Newline,
     /// Ctrl-C.
     Interrupt,
     /// Ctrl and another key, for the views to come (Ctrl-K, Ctrl-X).
@@ -41,6 +49,12 @@ pub enum Action {
     Reactions(Vec<Uuid>),
     /// Read again what may have missed changes.
     Refresh,
+    /// Run the command bar's job, for the bar's text.
+    Run(Job, String),
+    /// Store a decision on a tool request.
+    Decide(ApprovalRequest, Verdict),
+    /// Edit the command bar's text in the editor.
+    Edit(String),
     Quit,
 }
 
@@ -165,6 +179,7 @@ pub struct Model {
     pub pages: Vec<Page>,
     pub help: bool,
     pub notice: Option<Notice>,
+    pub bar: Bar,
 }
 
 impl Model {
@@ -180,7 +195,15 @@ impl Model {
             reactions: Reactions::new(),
         };
         let nav = nav::Item::Home;
-        Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None }
+        Self {
+            data,
+            pages: vec![Page::of(&nav)],
+            nav,
+            focus: Focus::View,
+            help: false,
+            notice: None,
+            bar: Bar::default(),
+        }
     }
 
     pub fn page(&self) -> &Page {
@@ -204,7 +227,8 @@ impl Model {
             live::Event::Status(event) => self.data.live.status(&event, now),
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.data.live.approval(&update),
-            live::Event::FollowEnded(Ok(())) | live::Event::Decided(_) => {}
+            live::Event::FollowEnded(Ok(())) => {}
+            live::Event::Decided(decided) => self.decided(decided),
             live::Event::FollowEnded(Err(e)) => {
                 self.notify(format!("following the tool requests: {e:#}"), Level::Error, now);
             }
@@ -296,6 +320,9 @@ impl Model {
         if self.help {
             self.help = false;
             return None;
+        }
+        if let Some(action) = self.bar_key(key) {
+            return action;
         }
         match key {
             Key::Char('q') => Some(Action::Quit),

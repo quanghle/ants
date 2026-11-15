@@ -53,15 +53,18 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     frame.render_widget(Paragraph::new(header_line(model, now)), header);
     let [left, right] = Layout::horizontal([Constraint::Length(NAV_WIDTH), Constraint::Min(20)]).areas(body);
-    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav);
-    let focused = model.focus == Focus::View;
+    nav::draw(frame, left, &model.data, &model.nav, now, model.focus == Focus::Nav && !model.bar.focused);
+    let [view, bar] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(model.bar.height(right.width))]).areas(right);
+    let focused = model.focus == Focus::View && !model.bar.focused;
     let data = &model.data;
     match model.page() {
-        Page::Home(page) => page.draw(frame, right, data, now, focused),
-        Page::Work(page) => page.draw(frame, right, data, now, focused),
-        Page::Channel(page) => page.draw(frame, right, data, now, focused),
-        Page::Thread(page) => page.draw(frame, right, data, now, focused),
+        Page::Home(page) => page.draw(frame, view, data, now, focused),
+        Page::Work(page) => page.draw(frame, view, data, now, focused),
+        Page::Channel(page) => page.draw(frame, view, data, now, focused),
+        Page::Thread(page) => page.draw(frame, view, data, now, focused),
     }
+    model.bar.draw(frame, bar);
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
         draw_help(frame);
@@ -93,6 +96,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         };
         return Line::styled(format!(" {}", notice.text), style);
     }
+    if model.bar.focused {
+        return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
+    }
     let keys = match (model.focus, model.page()) {
         (Focus::Nav, _) => "↑↓ select · Enter view",
         (Focus::View, Page::Home(_)) => home::Page::KEYS,
@@ -111,6 +117,9 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
+    ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
+    ("/", "in the bar: a command on the selection (Ctrl-K lists them)"),
+    ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -181,5 +190,24 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    #[test]
+    fn the_command_bar_shows_its_hint_then_its_text_status_and_keys() {
+        let mut m = model();
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
+        m.key(Key::Char('@'), at(0));
+        for c in "dev-a".chars() {
+            m.key(Key::Char(c), at(0));
+        }
+        m.key(Key::Enter, at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@dev-a"), "{shown}");
+        assert!(shown.contains("nothing to send to @dev-a"), "{shown}");
+        assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
+        m.key(Key::Ctrl('k'), at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/quit"), "{shown}");
     }
 }

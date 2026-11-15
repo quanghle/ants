@@ -137,28 +137,34 @@ pub async fn mute(nats: &Nats<'_>, pick: thread::Pick, hold: Option<Duration>) -
     until(Utc::now(), hold).context("--for")?;
     let js = connect(nats, "muting a thread").await?;
     let thread = pick.resolve(&js, &nats.me).await?;
-    let prefs = update(&js, &nats.me.id, |prefs, now| {
+    println!("{}", muted(&js, &nats.me.id, &thread, hold).await?);
+    Ok(())
+}
+
+/// Mute `thread` for `human` for `hold`, through `js`; what `ants thread mute` prints.
+pub async fn muted(js: &jetstream::Context, human: &UserId, thread: &ThreadId, hold: Duration) -> Result<String> {
+    until(Utc::now(), hold).context("--for")?;
+    let prefs = update(js, human, |prefs, now| {
         if let Ok(until) = until(now, hold) {
             prefs.muted.insert(thread.clone(), until);
         }
     })
     .await?;
-    let until = prefs.muted.get(&thread).copied().map_or_default(local);
-    println!("thread {thread} muted until {until}: no notice of it reaches {}", nats.me.id);
-    Ok(())
+    let until = prefs.muted.get(thread).copied().map_or_default(local);
+    Ok(format!("thread {thread} muted until {until}: no notice of it reaches {human}"))
 }
 
 /// `ants thread unmute THREAD`.
 pub async fn unmute(nats: &Nats<'_>, pick: thread::Pick) -> Result<()> {
     let js = connect(nats, "unmuting a thread").await?;
     let thread: ThreadId = pick.resolve(&js, &nats.me).await?;
-    let was = std::cell::Cell::new(false);
-    update(&js, &nats.me.id, |prefs, now| was.set(prefs.muted.remove(&thread).is_some_and(|until| now < until)))
-        .await?;
-    if was.get() {
-        println!("thread {thread} unmuted");
-    } else {
-        println!("thread {thread} was not muted");
-    }
+    println!("{}", unmuted(&js, &nats.me.id, &thread).await?);
     Ok(())
+}
+
+/// Unmute `thread` for `human`, through `js`; what `ants thread unmute` prints.
+pub async fn unmuted(js: &jetstream::Context, human: &UserId, thread: &ThreadId) -> Result<String> {
+    let was = std::cell::Cell::new(false);
+    update(js, human, |prefs, now| was.set(prefs.muted.remove(thread).is_some_and(|until| now < until))).await?;
+    Ok(if was.get() { format!("thread {thread} unmuted") } else { format!("thread {thread} was not muted") })
 }

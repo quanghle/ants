@@ -150,6 +150,20 @@ impl Status {
         Self { mine, ants: Vec::new() }
     }
 
+    /// The ants at work on the thread now: those heard working, thinking, writing, calling a tool or waiting for a
+    /// tool's approval.
+    pub fn busy(&self) -> impl Iterator<Item = &UserId> {
+        self.ants
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v.stand,
+                    Stand::Working | Stand::Thinking | Stand::Writing | Stand::Tool { .. } | Stand::Approval(_)
+                )
+            })
+            .map(|v| &v.ant)
+    }
+
     /// Start with `ant` standing at `stand`, before any update.
     pub fn with(mut self, ant: UserId, stand: Stand) -> Self {
         self.ants.push(View { ant, stand, signed_out: false });

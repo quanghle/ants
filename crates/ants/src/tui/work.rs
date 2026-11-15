@@ -273,6 +273,12 @@ impl Page {
         rows
     }
 
+    /// The selected thread.
+    pub fn thread(&self, data: &Data) -> Option<ThreadId> {
+        let rows = self.rows(data);
+        rows.get(self.at(&rows)).map(|(t, _)| t.clone())
+    }
+
     fn at(&self, rows: &[(ThreadId, ThreadState)]) -> usize {
         self.selected.as_ref().and_then(|s| rows.iter().position(|(t, _)| t == s)).unwrap_or(0)
     }

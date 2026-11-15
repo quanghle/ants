@@ -124,6 +124,9 @@ pub struct Entry {
     /// The reason of the escalation an inbox message carries, which the note spells out.
     #[serde(skip)]
     pub reason: Option<EscalationReason>,
+    /// The stuck ant of the escalation an inbox message carries.
+    #[serde(skip)]
+    pub stuck: Option<UserId>,
     /// The title an inbox message, channel post or notes post that is not forged suggests for its thread
     /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,7 +141,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
+    pub(crate) fn new(seq: u64, stored_at: DateTime<Utc>, kind: Kind, thread_id: ThreadId) -> Self {
         Self {
             seq,
             id: None,
@@ -154,6 +157,7 @@ impl Entry {
             forged: false,
             reactions: Vec::new(),
             reason: None,
+            stuck: None,
             suggested_title: None,
             question: None,
             answer: None,
@@ -237,6 +241,7 @@ impl Parser {
                 note,
                 text,
                 forged,
+                stuck: e.escalation.as_ref().map(|x| x.stuck.clone()),
                 reason: e.escalation.map(|x| x.reason),
                 suggested_title: e.title.filter(|_| !forged),
                 question,
