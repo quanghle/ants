@@ -525,6 +525,23 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
 }
 
 #[test]
+fn humans_keep_only_their_own_read_markers_and_ants_none() {
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$KV.ants_read.alice",
+        "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice",
+        "$KV.ants_read.alice.chan",
+        "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice.chan",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let read: Vec<&String> = human.publish.iter().filter(|s| s.contains("$KV.ants_read")).collect();
+    assert!(read.iter().all(|s| (s.ends_with(".alice") || s.ends_with(".alice.chan")) && !s.contains('>')), "{read:?}");
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    assert!(!ant.publish.iter().any(|s| s.contains("$KV.ants_read")), "{:?}", ant.publish);
+}
+
+#[test]
 fn humans_keep_only_their_own_holds_and_held_notices_and_ants_neither() {
     let human = Permissions::for_user(&p("alice"), Role::Human);
     for s in [
@@ -674,10 +691,18 @@ fn users_write_only_their_own_attachments_and_ants_read_those_of_the_messages_th
         "ants.out.files.>",
         "$JS.API.STREAM.INFO.OBJ_ants_files",
         "$JS.API.STREAM.CREATE.OBJ_ants_files",
+        "$JS.API.STREAM.UPDATE.OBJ_ants_files",
         "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C.>",
     ] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
+    // Admitting an ant new to a leaf node into the store, from the leaf's outbox.
+    let approver = Permissions::for_enroll_approver();
+    assert_eq!(
+        files(&approver),
+        ["$JS.API.STREAM.INFO.OBJ_ants_files", "$JS.API.STREAM.UPDATE.OBJ_ants_files"],
+        "no chunk"
+    );
     let domain: JsDomain = "hub".parse().unwrap();
     let ant_in_domain = ant.clone().with_js_domain(Some(&domain));
     assert!(

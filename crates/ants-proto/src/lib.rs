@@ -139,13 +139,15 @@ pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
-/// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
+/// of its devices; and of its [`ChannelReadMarkers`], keyed by [`channel_reads_key`]: which channel posts it has read.
+/// Each human reads and writes only its own keys ([`Permissions::for_user`]); entries never expire.
 pub const READ_BUCKET: &str = "ants_read";
 /// KV bucket of where each human is reading: one [`Presence`] per device of a human following its inbox or the tool
 /// requests, keyed by [`presence_key`], put when the following starts, renewed every [`PRESENCE_HEARTBEAT`] and
 /// deleted when it ends. Kept in memory with a max age of [`PRESENCE_TTL`], so the presence of a CLI that died expires
-/// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
-/// webhook serve` reads them so a notice skips the push targets of a device reading it already.
+/// on its own. Each human writes only its own keys and reads every human's, by direct gets and a watch, so a CLI
+/// shows which humans have a device following; no ant reads any ([`Permissions::for_user`]). `ants webhook serve`
+/// reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
 /// KV bucket of the directory of human devices' encryption keys: the user JWT of each device of a human whose
 /// credentials carry an encryption key ([`DeviceKey`]), keyed by [`device_entry_key`] and put by its CLI on connecting

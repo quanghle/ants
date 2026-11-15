@@ -74,7 +74,7 @@ pub fn parse_when(text: &str) -> Result<When, String> {
 }
 
 /// What `ants thread search` keeps: messages matching every filter set.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Search {
     /// Only messages this ant or human sent (a human's decision on a tool request names no sender).
     pub from: Option<UserId>,
@@ -194,7 +194,7 @@ impl Search {
 }
 
 /// The first line of `text` containing `grep`, whatever the case.
-fn matched<'a>(text: &'a str, grep: &str) -> Option<&'a str> {
+pub fn matched<'a>(text: &'a str, grep: &str) -> Option<&'a str> {
     let grep = grep.to_lowercase();
     text.lines().find(|line| line.to_lowercase().contains(&grep))
 }
@@ -222,7 +222,7 @@ pub fn render(entries: &[Entry], grep: Option<&str>) -> String {
 }
 
 /// The times `--since` and `--until` name, `now` being now: by default [`DEFAULT_SINCE`] before the end.
-fn bounds(since: Option<When>, until: Option<When>, now: DateTime<Utc>) -> Result<(Option<Time>, Option<Time>)> {
+pub fn bounds(since: Option<When>, until: Option<When>, now: DateTime<Utc>) -> Result<(Option<Time>, Option<Time>)> {
     let until = until.and_then(|until| until.at(now));
     let since = match since {
         Some(since) => since.at(now),

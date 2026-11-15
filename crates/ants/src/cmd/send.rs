@@ -3,8 +3,8 @@
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, questions, reactions};
 use ants_proto::{
-    ChannelId, ChannelPost, Choice, Envelope, NotesPost, Reaction, ReactionChange, ReactionsOutcome, ReactionsRequest,
-    Role, ThreadId, UserId, Uuid, subject,
+    ChannelId, ChannelPost, Choice, Envelope, JsDomain, NotesPost, Reaction, ReactionChange, ReactionsOutcome,
+    ReactionsRequest, Role, ThreadId, UserId, Uuid, subject,
 };
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
@@ -79,10 +79,7 @@ pub(crate) async fn ask(
         None
     };
     attachments::store(&js, &files, |id| envelope.attachment_handle(id)).await?;
-    if let Some(owner) = &envelope.owner {
-        owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
-    }
-    if bus::publish(&js, &envelope).await? == bus::Stored::Outbox {
+    if deliver(&js, nats.domain, &envelope).await? == bus::Stored::Outbox {
         println!("kept in this machine's outbox until the hub is reachable");
     }
     println!("thread {}", envelope.thread_id);
@@ -170,6 +167,19 @@ pub(crate) fn ask_envelope(me: &humans::Me, thread: Option<ThreadId>, to: UserId
         None => Envelope::new(me.id.clone(), to, text),
     };
     envelope.with_owner(me.role.is_human().then(|| me.id.clone()))
+}
+
+/// Send `envelope` from [`ask_envelope`] as `ants ask` does: its owner recorded for the thread and recipient first,
+/// then the message stored in the hub's stream, or else in the leaf node's outbox.
+pub(crate) async fn deliver(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    envelope: &Envelope,
+) -> Result<bus::Stored> {
+    if let Some(owner) = &envelope.owner {
+        owners::recording(js, js_domain, &envelope.thread_id, &envelope.to, owner).await;
+    }
+    bus::publish(js, envelope).await
 }
 
 pub(crate) async fn post(

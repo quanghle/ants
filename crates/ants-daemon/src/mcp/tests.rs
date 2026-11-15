@@ -123,7 +123,7 @@ async fn http_client(url: &str, token: &str) -> Client {
 
 /// The URL and token the sessions of `thread` get over HTTP.
 fn http_server(mcp: &Mcp, thread: &ThreadId) -> (String, String) {
-    let [McpServer::Http(server)] = &mcp.servers()(thread, true)[..] else { panic!("one HTTP server") };
+    let [McpServer::Http(server)] = &mcp.servers()(thread, Path::new("/"), true)[..] else { panic!("one HTTP server") };
     let token = server.headers[0].value.strip_prefix("Bearer ").unwrap().to_owned();
     (server.url.clone(), token)
 }
@@ -142,7 +142,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 15, "{tools:?}");
+    assert_eq!(tools.len(), 16, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
@@ -1130,7 +1130,9 @@ async fn the_socket_serves_the_tools_after_the_token() {
     let (mcp, mut sent) = start(&home("sock")).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
-    let [McpServer::Stdio(server)] = &mcp.servers()(&current.thread_id, false)[..] else { panic!("stdio") };
+    let [McpServer::Stdio(server)] = &mcp.servers()(&current.thread_id, Path::new("/"), false)[..] else {
+        panic!("stdio")
+    };
     assert_eq!(server.args[..2], ["mcp", "--socket"]);
     let token = &server.env.iter().find(|e| e.name == TOKEN_ENV).unwrap().value;
 
@@ -1241,4 +1243,157 @@ async fn harnesses_without_http_get_the_stdio_bridge() {
     let seen = seen.locked();
     let [McpServer::Stdio(stdio)] = &seen[0][..] else { panic!("{:?}", seen[0]) };
     assert_eq!(stdio.command, std::env::current_exe().unwrap());
+}
+
+/// An attachments' store in memory, by handle.
+type MemoryFiles = Arc<StdMutex<HashMap<AttachmentHandle, (Attachment, Vec<u8>)>>>;
+
+fn memory_files(stored: MemoryFiles) -> FileAccess {
+    let reader = stored.clone();
+    FileAccess {
+        put: Arc::new(move |handle, attachment, bytes| {
+            stored.locked().insert(handle, (attachment, bytes.to_vec()));
+            Box::pin(async { Ok(()) })
+        }),
+        get: Arc::new(move |handle| {
+            let found = reader.locked().get(&handle).cloned();
+            Box::pin(async move { found.ok_or_else(|| anyhow::anyhow!("attachment {handle} is not stored")) })
+        }),
+    }
+}
+
+/// A client for the sessions of `thread`, working in `dir`.
+async fn client_in(mcp: &Mcp, thread: &ThreadId, dir: &Path) -> Client {
+    let [McpServer::Http(server)] = &mcp.servers()(thread, dir, true)[..] else { panic!("one HTTP server") };
+    let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+    http_client(&server.url, token).await
+}
+
+#[tokio::test]
+async fn attach_sends_files_from_the_working_directory_only() {
+    let home = home("attach");
+    let (mcp, mut sent) = start(&home).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    std::fs::write(work.join("notes.txt"), "hello").unwrap();
+    std::fs::write(work.join("sub/shot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    std::fs::write(home.join("secret.txt"), "keep out").unwrap();
+    std::fs::File::create(work.join("big.bin")).unwrap().set_len(ants_proto::MAX_ATTACHMENT_SIZE + 1).unwrap();
+    let current = from_human();
+    let _turn = mcp.begin(&current);
+    let client = client_in(&mcp, &current.thread_id, &work).await;
+    let send = |attach: serde_json::Value| serde_json::json!({"to": "dev-b", "text": "see", "attach": attach});
+
+    let (ok, text) = call(&client, "send_message", send(serde_json::json!(["notes.txt"]))).await;
+    assert!(!ok && text.contains("attachments are not available here; nothing sent"), "{text}");
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.clone());
+
+    let (ok, text) = call(&client, "send_message", send(serde_json::json!(["notes.txt", "./sub/shot.png"]))).await;
+    assert!(ok, "{text}");
+    let out = sent.try_recv().unwrap();
+    let got: Vec<_> = out.attachments.iter().map(|a| (a.name.as_str(), a.mime.as_str(), a.size)).collect();
+    assert_eq!(got, [("notes.txt", "text/plain", 5), ("shot.png", "image/png", 4)]);
+    let held = stored.locked().get(&out.attachment_handle(out.attachments[0].id)).cloned().unwrap();
+    assert_eq!(held, (out.attachments[0].clone(), b"hello".to_vec()), "stored under the message's handle");
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../secret.txt", work.join("link")).unwrap();
+    let nine = serde_json::json!(vec!["notes.txt"; 9]);
+    for (attach, why) in [
+        (serde_json::json!(["../secret.txt"]), "outside the working directory"),
+        (serde_json::json!([home.join("secret.txt")]), "outside the working directory"),
+        #[cfg(unix)]
+        (serde_json::json!(["link"]), "outside the working directory"),
+        (serde_json::json!(["sub"]), "no regular file"),
+        (serde_json::json!(["notes.txt", "gone.txt"]), "cannot attach \"gone.txt\""),
+        (serde_json::json!(["big.bin"]), "over the 8 MiB"),
+        (nine, "at most 8 files"),
+    ] {
+        let (ok, text) = call(&client, "send_message", send(attach)).await;
+        assert!(!ok && text.contains(why) && text.ends_with("nothing sent"), "{text}");
+    }
+    assert!(sent.try_recv().is_err(), "nothing sent");
+    assert_eq!(stored.locked().len(), 2, "nothing stored");
+
+    // Notes posts and channel posts carry them too, each under its own handle.
+    let (ok, text) = call(&client, "post_notes", serde_json::json!({"text": "log", "attach": ["notes.txt"]})).await;
+    assert!(ok, "{text}");
+    let (ok, text) = call(&client, "read_notes", serde_json::json!({})).await;
+    let handle = format!("dev-a.notes.{}.", current.thread_id);
+    assert!(ok && text.contains("log\n📎 notes.txt (text/plain, 5 B) handle ") && text.contains(&handle), "{text}");
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(user("dev-a"));
+    let posted = Arc::new(StdMutex::new(Vec::new()));
+    mcp.with_channels(channels(vec![ops], posted.clone()));
+    let post = serde_json::json!({"channel": "ops", "text": "shot", "attach": ["sub/shot.png"]});
+    let (ok, text) = call(&client, "post_channel", post).await;
+    assert!(ok, "{text}");
+    let post = posted.locked().pop().unwrap();
+    let held = stored.locked().get(&post.attachment_handle(post.attachments[0].id)).cloned().unwrap();
+    assert_eq!(held.1, [0x89, b'P', b'N', b'G']);
+}
+
+#[tokio::test]
+async fn read_attachment_returns_images_and_text_and_saves_other_files() {
+    let home = home("read-attachment");
+    let (mcp, _sent) = start(&home).await;
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.clone());
+    let tree = home.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let current = Envelope::new(user("dev-b"), user("dev-a"), "files");
+    let _turn = mcp.begin(&current);
+    let client = client_in(&mcp, &current.thread_id, &tree).await;
+    let put = |envelope: &Envelope, name: &str, bytes: &[u8]| {
+        let attachment = crate::files::reference(name, ants_proto::guess_mime(name), bytes).unwrap();
+        let handle = envelope.attachment_handle(attachment.id);
+        stored.locked().insert(handle.clone(), (attachment, bytes.to_vec()));
+        handle.to_string()
+    };
+    let read = async |handle: &str| {
+        let args = serde_json::json!({"handle": handle});
+        let serde_json::Value::Object(args) = args else { unreachable!() };
+        client.call_tool(CallToolRequestParams::new("read_attachment").with_arguments(args)).await.unwrap()
+    };
+
+    let image = read(&format!("`{}`", put(&current, "shot.png", b"png bytes"))).await;
+    let [text, picture] = &image.content[..] else { panic!("{image:?}") };
+    assert!(text.as_text().unwrap().text.contains("shot.png (image/png, 9 B)"));
+    let picture = picture.as_image().unwrap();
+    assert_eq!((picture.data.as_str(), picture.mime_type.as_str()), ("cG5nIGJ5dGVz", "image/png"));
+
+    let (ok, text) =
+        call(&client, "read_attachment", serde_json::json!({"handle": put(&current, "a.md", b"# hi")})).await;
+    assert!(ok && text.ends_with("a.md (text/markdown, 4 B)\n# hi"), "{text}");
+
+    // Other files are saved into the thread's directory, the same bytes once, different ones beside them.
+    let handle = put(&current, "data.bin", &[0, 1, 2]);
+    for _ in 0..2 {
+        let (ok, text) = call(&client, "read_attachment", serde_json::json!({"handle": handle})).await;
+        assert!(ok && text.ends_with(&format!("saved as {}", tree.canonicalize().unwrap().join("data.bin").display())));
+    }
+    let other = put(&current, "data.bin", &[3]);
+    let (ok, text) = call(&client, "read_attachment", serde_json::json!({"handle": other})).await;
+    assert!(ok && text.ends_with("data-2.bin"), "{text}");
+    assert_eq!(std::fs::read(tree.join("data.bin")).unwrap(), [0, 1, 2]);
+    assert_eq!(std::fs::read(tree.join("data-2.bin")).unwrap(), [3]);
+    assert!(!home.join("data.bin").exists(), "not in the workdir");
+
+    // Only a message the ant reads: one between two other ants is not.
+    let theirs = Envelope::new(user("dev-b"), user("dev-c"), "private");
+    let (ok, text) = call(&client, "read_attachment", serde_json::json!({"handle": put(&theirs, "x.txt", b"x")})).await;
+    assert!(!ok && text.contains("is on a message dev-a does not read"), "{text}");
+    let unknown = current.attachment_handle(Uuid::now_v7()).to_string();
+    let (ok, text) = call(&client, "read_attachment", serde_json::json!({"handle": unknown})).await;
+    assert!(!ok && text.contains("is not stored"), "{text}");
+    let (ok, _) = call(&client, "read_attachment", serde_json::json!({"handle": "nonsense"})).await;
+    assert!(!ok);
+
+    // A message with attachments lists them with their handles.
+    let mut late = Envelope::on_thread(current.thread_id.clone(), user("dev-b"), user("dev-a"), "here");
+    late.attachments = vec![crate::files::reference("log.txt", "text/plain", b"ok").unwrap()];
+    let listed = super::shown(&late);
+    let handle = late.attachment_handle(late.attachments[0].id);
+    assert_eq!(listed, format!("here\n📎 log.txt (text/plain, 2 B) handle {handle}"));
 }

@@ -3,8 +3,8 @@
 use std::assert_matches;
 use std::process::Command;
 
-use ants_daemon::{bus, links, notes, owners};
-use ants_proto::{ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
+use ants_daemon::{bus, files, links, notes, owners};
+use ants_proto::{ATTACHMENT_CHUNK, ChannelId, ChannelPost, DeadLetter, Envelope, JsDomain, NotesPost, ThreadId};
 use ants_test_support::NatsServer;
 use async_nats::jetstream::message::{PublishMessage, StreamMessage};
 use futures::StreamExt as _;
@@ -68,6 +68,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_links(&h_js).await.unwrap();
     bus::ensure_owners(&h_js).await.unwrap();
+    h_js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
 
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     // The CLI runs on m1 too.
@@ -141,7 +142,13 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
         PublishMessage::build().payload(serde_json::to_vec(&direct).unwrap().into()).message_id(direct.id.to_string());
     let outboxed = subject::outbox(&direct.subject()).unwrap();
     a_js.send_publish(outboxed, copy).await.unwrap().await.unwrap();
-    eventually("the copy reaches the intake", async || messages(&h_js, INTAKE_STREAM).await == 1).await;
+    // So is a copy of a chunk of an attachment stored directly.
+    let note = files::reference("note.txt", "text/plain", b"direct").unwrap();
+    let note_handle = Envelope::new(dev_a.clone(), human.clone(), "").attachment_handle(note.id);
+    assert_eq!(files::put(&a_js, &note_handle, &note, b"direct").await.unwrap(), bus::Stored::Hub);
+    let copy = PublishMessage::build().payload("direct".into()).message_id(files::chunk_id(&note_handle, 0));
+    a_js.send_publish(note_handle.outbox_chunk_subject(0), copy).await.unwrap().await.unwrap();
+    eventually("the copies reach the intake", async || messages(&h_js, INTAKE_STREAM).await == 2).await;
 
     for replies in &mut waiters {
         assert_eq!(next(replies).await, direct);
@@ -149,7 +156,14 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
 
     reload(dead_port);
     eventually("the uplink is down", async || bus::open_stream(&a_js, &dev_a).await.is_err()).await;
-    let kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
+    // The chunks of an attachment wait in the outbox ahead of the message carrying it.
+    let shot_bytes: Vec<u8> = (0..ATTACHMENT_CHUNK + 10).map(|i| i as u8).collect();
+    let shot = files::reference("shot.png", "image/png", &shot_bytes).unwrap();
+    let mut kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
+    kept.attachments = vec![shot.clone()];
+    let shot_handle = kept.attachment_handle(shot.id);
+    assert_eq!(files::put(&a_js, &shot_handle, &shot, &shot_bytes).await.unwrap(), bus::Stored::Outbox);
+    assert_eq!(files::put(&a_js, &shot_handle, &shot, &shot_bytes).await.unwrap(), bus::Stored::Outbox, "again");
     assert_eq!(bus::publish(&a_js, &kept).await.unwrap(), bus::Stored::Outbox);
     // A waiter that never reads back, as a daemon's, gets it only as the hub's stream republishes it.
     let mut live = bus::live_inbox(&h, &human).await.unwrap();
@@ -168,6 +182,10 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     let stray_dead = DeadLetter::of_envelope(dev_b.clone(), 2, 5, "stray", direct.clone());
     let stored = bus::store(&b_js, stray_dead.subject(), &stray_dead, &stray_dead.msg_id()).await.unwrap();
     assert_eq!(stored, bus::Stored::Outbox);
+    // With a human on m1, the store takes chunks under every sender, as the stream does inboxes.
+    let b_file = files::reference("b.txt", "text/plain", b"from dev-b").unwrap();
+    let b_handle = stray.attachment_handle(b_file.id);
+    assert_eq!(files::put(&b_js, &b_handle, &b_file, b"from dev-b").await.unwrap(), bus::Stored::Outbox);
     // Links passed on wait in the outbox too; dev-b's stay out of the links bucket like its posts.
     let channel_thread = ThreadId::generate();
     let spun = |from: &UserId, to: &UserId| {
@@ -189,8 +207,13 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     assert!(messages(&h_js, STREAM).await == 1);
 
     reload(leaf_port);
-    eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 13).await;
+    eventually("the intake takes the outbox", async || messages(&h_js, INTAKE_STREAM).await == 17).await;
     eventually("the hub's stream takes what dev-a sent", async || messages(&h_js, STREAM).await == 6).await;
+    eventually("the store takes the chunks", async || messages(&h_js, FILES_STREAM).await == 4).await;
+    let (stored, bytes) = files::get(&h_js, &shot_handle, Some(&shot)).await.unwrap();
+    assert_eq!((stored, bytes), (shot.clone(), shot_bytes));
+    assert_eq!(files::get(&h_js, &note_handle, Some(&note)).await.unwrap().1, b"direct");
+    assert_eq!(files::get(&h_js, &b_handle, Some(&b_file)).await.unwrap().1, b"from dev-b");
     let ants = h_js.get_stream(STREAM).await.unwrap();
     let last = ants.get_last_raw_message_by_subject(&kept.subject()).await.unwrap();
     assert_eq!(serde_json::from_slice::<Envelope>(&last.payload).unwrap(), kept);
@@ -223,6 +246,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     assert!(!source(first));
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(messages(&h_js, STREAM).await, 6, "stored once");
+    assert_eq!(messages(&h_js, FILES_STREAM).await, 4, "each chunk stored once");
     for replies in &mut waiters {
         assert!(futures::FutureExt::now_or_never(replies.next()).is_none(), "each once, live or stored");
     }
@@ -249,7 +273,9 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     assert!(on_leaf.is_err() && on_hub.is_err() && ant.is_err(), "each once, live or read back");
 
     remove(&h_js, &m1).await.unwrap();
-    for name in [STREAM.to_owned(), format!("KV_{LINKS_BUCKET}"), format!("KV_{OWNERS_BUCKET}")] {
+    for name in
+        [STREAM.to_owned(), format!("KV_{LINKS_BUCKET}"), format!("KV_{OWNERS_BUCKET}"), FILES_STREAM.to_owned()]
+    {
         let info = h_js.get_stream(name).await.unwrap().info().await.unwrap().config.clone();
         assert!(info.sources.unwrap_or_default().is_empty());
     }
@@ -513,5 +539,34 @@ fn with_humans_on_a_machine_no_two_admissions_overlap() {
             "ants.in.m1.ants.out.notes.*.human",
             "ants.in.m1.ants.out.chan.*.human",
         ]
+    );
+}
+
+#[test]
+fn the_attachments_store_takes_the_chunks_of_every_sender_for_one_human_else_each_ants_own() {
+    let m1: Machine = "m1".parse().unwrap();
+    let (dev_a, dev_b): (UserId, UserId) = ("dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+    let transforms = |members: &[(UserId, Role)]| -> Vec<(UserId, String, String)> {
+        file_admissions(&m1, members, 7)
+            .into_iter()
+            .inspect(|(_, source)| assert!(source.start_sequence == Some(7) && from_machine(source, &m1)))
+            .flat_map(|(user, source)| {
+                source.subject_transforms.into_iter().map(move |t| (user.clone(), t.source, t.destination))
+            })
+            .collect()
+    };
+    let ants = auth::members(&[dev_b.clone(), dev_a.clone(), dev_a.clone()], &[]);
+    assert_eq!(
+        transforms(&ants),
+        [
+            (dev_a.clone(), "ants.in.m1.ants.out.files.dev-a.>".to_owned(), "$O.ants_files.C.dev-a.>".to_owned()),
+            (dev_b, "ants.in.m1.ants.out.files.dev-b.>".to_owned(), "$O.ants_files.C.dev-b.>".to_owned()),
+        ]
+    );
+    let alice: UserId = "alice".parse().unwrap();
+    let with_humans = auth::members(&[dev_a, UserId::human()], std::slice::from_ref(&alice));
+    assert_eq!(
+        transforms(&with_humans),
+        [(alice, "ants.in.m1.ants.out.files.>".to_owned(), "$O.ants_files.C.>".to_owned())]
     );
 }

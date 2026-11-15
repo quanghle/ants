@@ -266,6 +266,8 @@ fn kv_entries() {
         snap(&format!("reactions_reply_{kind}"), &reply);
     }
     snap("read_marker", &ReadMarker { below: 4200, read: BTreeSet::from([4203, 4207]) });
+    let marker = ReadMarker { below: 4200, read: BTreeSet::from([4207]) };
+    snap("channel_read_markers", &ChannelReadMarkers { channels: BTreeMap::from([(channel(), marker)]) });
     snap(
         "thread_title",
         &ThreadTitle {
@@ -615,13 +617,10 @@ fn enrollment() {
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );
+    snap("renew_reply", &RenewReply::signed("dev-a", "UDEF", "eyJ0eXAiOiJKV1QifQ.renewed".to_owned()));
     snap(
-        "renew_reply",
-        &RenewReply {
-            name: "dev-a".to_owned(),
-            public_key: "UDEF".to_owned(),
-            jwt: "eyJ0eXAiOiJKV1QifQ.renewed".to_owned(),
-        },
+        "renew_reply_refused",
+        &RenewReply::refused("alice", "UDEF", "GitHub user octocat is no member of acme any more".to_owned()),
     );
 }
 

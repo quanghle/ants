@@ -1,5 +1,5 @@
 //! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view,
-//! a footer with the view's keys or the latest notice, and the help over it all. Also the styles the views share.
+//! a footer with the view's keys, the latest notice or the search prompt, and the help over it all. Also the styles the views share.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::model::{Focus, Level, Model, Page};
-use super::{channel, home, nav, thread, work};
+use super::{channel, home, nav, search, thread, work};
 use crate::live::Link;
 use crate::roster;
 
@@ -36,18 +36,6 @@ pub fn highlight(focused: bool) -> Style {
     if focused { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new().add_modifier(Modifier::BOLD) }
 }
 
-/// `line` cut into lines of at most `width` characters, those after the first indented.
-pub fn wrap(line: &str, width: usize) -> Vec<String> {
-    const INDENT: &str = "    ";
-    let mut chars = line.chars().peekable();
-    let mut out = vec![chars.by_ref().take(width.max(1)).collect::<String>()];
-    while chars.peek().is_some() {
-        let rest: String = chars.by_ref().take(width.saturating_sub(INDENT.len()).max(1)).collect();
-        out.push(format!("{INDENT}{rest}"));
-    }
-    out
-}
-
 pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
@@ -61,6 +49,8 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Work(page) => page.draw(frame, right, data, now, focused),
         Page::Channel(page) => page.draw(frame, right, data, now, focused),
         Page::Thread(page) => page.draw(frame, right, data, now, focused),
+        Page::Dm(page) => page.draw(frame, right, data, now, focused),
+        Page::Search(page) => page.draw(frame, right, data, now, focused),
     }
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
@@ -86,6 +76,9 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
+    if let Some(prompt) = &model.prompt {
+        return prompt.line();
+    }
     if let Some(notice) = model.notice_at(now) {
         let style = match notice.level {
             Level::Error => Style::new().fg(Color::Red),
@@ -99,8 +92,10 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         (Focus::View, Page::Work(_)) => work::Page::KEYS,
         (Focus::View, Page::Channel(_)) => channel::Page::KEYS,
         (Focus::View, Page::Thread(_)) => thread::Page::KEYS,
+        (Focus::View, Page::Dm(page)) => page.keys(),
+        (Focus::View, Page::Search(_)) => search::Page::KEYS,
     };
-    Line::styled(format!(" {keys} · Tab nav/view · ? help · q quit"), dim())
+    Line::styled(format!(" {keys} · Tab nav/view · / search · ? help · q quit"), dim())
 }
 
 /// The keys, over the middle of the screen.
@@ -111,6 +106,10 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "open the selection"),
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
+    ("y", "in a thread: copy the selected message"),
+    ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("n", "with a person: write a message, starting a thread"),
+    ("/", "search messages, as in: deploy from:dev-a"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -142,10 +141,11 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::live::tests::{at, message};
+    use crate::live::tests::{at, message, user};
     use crate::roster::tests::entry;
     use crate::tui::model::Key;
     use crate::tui::model::tests::model;
+    use crate::tui::people;
 
     fn screen(m: &Model, now: DateTime<Utc>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -168,7 +168,7 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        assert!(shown.contains("Enter open its thread · Tab nav/view · ? help · q quit"), "{shown}");
+        assert!(shown.contains("Enter open its thread · Tab nav/view · / search · ? help · q quit"), "{shown}");
 
         m.select(nav::Item::Work(None));
         m.key(Key::Enter, at(2));
@@ -181,5 +181,20 @@ mod tests {
         let shown = screen(&m, at(30));
         assert!(shown.contains("○ disconnected 27s, reconnecting"), "{shown}");
         assert!(shown.contains("any key closes this help"), "{shown}");
+    }
+
+    #[test]
+    fn a_person_shows_online_and_opens_the_dm_with_its_keys() {
+        let mut m = model();
+        let bob = user("bob");
+        m.stored(vec![message(1, &ThreadId::generate(), "alice", "dev-a", "deploy the site")], at(0));
+        m.people(people::Event::Online(Ok([bob.clone()].into())), at(0));
+        assert!(screen(&m, at(1)).contains("● bob"));
+
+        m.select(nav::Item::Person(bob));
+        let shown = screen(&m, at(1));
+        assert!(shown.contains(" bob · online "), "{shown}");
+        assert!(shown.contains("no messages with bob yet: n writes one"), "{shown}");
+        assert!(shown.contains("Enter open · n new message"), "{shown}");
     }
 }

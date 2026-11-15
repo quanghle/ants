@@ -114,6 +114,9 @@ pub struct Entry {
     /// The channel of a post or of the post a mention tells of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
+    /// The users a channel post @mentions.
+    #[serde(skip)]
+    pub mentions: Vec<UserId>,
     /// The thread's owner as the message names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
@@ -154,6 +157,12 @@ pub struct Entry {
     /// A tool call's details, its title the text and its ant the sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolCall>,
+    /// The ant-to-ant turns an inbox message, channel post or notes post leaves on its thread.
+    #[serde(skip)]
+    pub turns: Option<u32>,
+    /// An inbox message a webhook or schedule sent ([`Envelope::webhook`]).
+    #[serde(skip)]
+    pub webhook: bool,
 }
 
 /// A tool call an ant stored on its timeline, as a [`Kind::Tool`] entry has it.
@@ -184,6 +193,7 @@ impl Entry {
             from: None,
             to: None,
             channel: None,
+            mentions: Vec::new(),
             owner: None,
             note: None,
             text: String::new(),
@@ -197,6 +207,8 @@ impl Entry {
             question: None,
             answer: None,
             tool: None,
+            turns: None,
+            webhook: false,
         }
     }
 
@@ -320,6 +332,8 @@ impl Parser {
             summary: e.summary.filter(|_| !forged),
             question,
             answer,
+            turns: Some(e.turn_budget),
+            webhook: e.webhook,
             ..entry(kind, e.thread_id)
         })
     }
@@ -339,11 +353,13 @@ impl Parser {
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
+                mentions: post.mentions,
                 owner: post.owner,
                 note,
                 text: post.text,
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
+                turns: Some(post.turn_budget),
                 ..entry(Kind::Post, post.thread_id)
             });
         }
@@ -359,6 +375,7 @@ impl Parser {
                 text: post.text,
                 forged,
                 suggested_title: post.title.filter(|_| !forged),
+                turns: Some(post.turn_budget),
                 ..entry(Kind::Note, post.thread_id)
             });
         }
@@ -695,24 +712,10 @@ fn state(thread: &Summary) -> Option<&'static str> {
 pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
-        let forged = if e.forged { " (forged)" } else { "" };
-        let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
-        let answering = e.answer.as_ref().map_or_default(|a| match a.option {
-            Some(n) => format!(" [answers {} with option {n}]", a.question),
-            None => format!(" [answers {} as typed]", a.question),
-        });
-        let text = match (&e.question, e.id) {
-            (Some(question), Some(id)) => {
-                let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
-                crate::inbox::render_question(id, question, answers)
-            }
-            _ => e.text.clone(),
-        };
+        let text = body(e, entries);
         let mut lines = text.lines();
         let first = lines.next().unwrap_or("");
-        let kind = e.kind.as_str();
-        let id = e.id.map_or_default(|id| format!(" (message {id})"));
-        let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{answering}{id}: {first}", time(e.stored_at), e.route());
+        let _ = writeln!(out, "{}: {first}", heading(e));
         for line in lines {
             let _ = writeln!(out, "    {line}");
         }
@@ -723,11 +726,36 @@ pub fn render(entries: &[Entry]) -> String {
 }
 
 /// How long a tool call took: `840ms`, `2.1s`, `3m`.
-fn took(ms: u64) -> String {
+pub(crate) fn took(ms: u64) -> String {
     match ms {
         0..1000 => format!("{ms}ms"),
         1000..60_000 => format!("{:.1}s", Duration::from_millis(ms).as_secs_f64()),
         _ => ants_proto::duration::format(Duration::from_millis(ms)),
+    }
+}
+
+/// What [`render`] shows of an entry before its text: time, kind, route, note, answer and id.
+pub fn heading(e: &Entry) -> String {
+    let forged = if e.forged { " (forged)" } else { "" };
+    let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
+    let answering = e.answer.as_ref().map_or_default(|a| match a.option {
+        Some(n) => format!(" [answers {} with option {n}]", a.question),
+        None => format!(" [answers {} as typed]", a.question),
+    });
+    let kind = e.kind.as_str();
+    let id = e.id.map_or_default(|id| format!(" (message {id})"));
+    format!("{}  {kind:<10}  {}{forged}{note}{answering}{id}", time(e.stored_at), e.route())
+}
+
+/// The text [`render`] shows of an entry among `entries`: a question with its options and its answers among them, else
+/// the entry's text.
+pub fn body(e: &Entry, entries: &[Entry]) -> String {
+    match (&e.question, e.id) {
+        (Some(question), Some(id)) => {
+            let answers = answers_to(e, entries).map(|(by, answered)| answer_line(by, answered)).collect();
+            crate::inbox::render_question(id, question, answers)
+        }
+        _ => e.text.clone(),
     }
 }
 
@@ -738,7 +766,7 @@ pub fn answers_to<'a>(question: &'a Entry, entries: &'a [Entry]) -> impl Iterato
 }
 
 /// How a question's answer is shown beneath it: who answered with which option, or typed what.
-fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
+pub(crate) fn answer_line(by: &Entry, answered: Answered<'_>) -> String {
     let from = by.from.as_ref().map_or("(a human)", UserId::as_str);
     match answered {
         Answered::Option(n, option) => format!("answered by {from}: option {n}, {option}"),
@@ -1226,6 +1254,17 @@ pub async fn history(
         }
     }
     Ok(entries)
+}
+
+/// The tool calls of the timeline record stored at `seq` on `subject`, each an entry of kind tool as that record has
+/// it; none for a record that does not parse or that its subject does not name.
+pub fn tool_entries(seq: u64, subject: &str, payload: &[u8]) -> Vec<Entry> {
+    let mut timelines = Timelines::default();
+    let Ok(record) = serde_json::from_slice::<Timeline>(payload) else { return Vec::new() };
+    if !timelines.add(subject, record) {
+        return Vec::new();
+    }
+    timelines.calls().iter().map(|c| Entry::tool(seq, c)).collect()
 }
 
 /// Merge the timeline record stored at `seq` on `subject`, noting it as the last of each call it holds.
