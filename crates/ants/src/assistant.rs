@@ -529,7 +529,7 @@ mod tests {
         let messenger = Recipient::from(UserId::messenger());
 
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "no grant");
-        put(&js, &creds, &alice, Some(p("pa"))).await.unwrap();
+        put(&js, &creds, &alice, Some(p("pa")), Sealing::Keep).await.unwrap();
         let assistant = unaddressed(&js, &me, account.as_deref()).await;
         assert_eq!(assistant, Recipient { to: p("pa"), assistant_of: Some(alice.clone()) });
         assert_eq!(assistant.to_string(), "pa (assistant of alice)");
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(unaddressed(&js, &me, foreign).await, messenger, "signed for another team");
         let ant = humans::Me { id: alice.clone(), role: Role::Ant };
         assert_eq!(unaddressed(&js, &ant, account.as_deref()).await, messenger, "an ant has no assistant");
-        put(&js, &creds, &alice, None).await.unwrap();
+        put(&js, &creds, &alice, None, Sealing::Off).await.unwrap();
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "withdrawn");
     }
 
