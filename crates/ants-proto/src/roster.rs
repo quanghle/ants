@@ -16,7 +16,7 @@ use crate::{Error, PermissionsVersion, UserId};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
     pub ant: UserId,
-    /// Host name of the machine the daemon runs on.
+    /// The machine the daemon runs on: its config file's `machine`, else its host name.
     pub machine: String,
     /// The daemon run that put the entry, unique to it, so two daemons on one machine tell their entries apart.
     pub instance: String,

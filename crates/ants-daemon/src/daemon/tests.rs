@@ -178,6 +178,7 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
+            machine: "test-machine",
             pool,
             cancels: Cancels::default(),
             attempts: &self.attempts,
