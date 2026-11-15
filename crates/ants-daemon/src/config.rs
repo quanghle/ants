@@ -129,7 +129,7 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(home_dir()?.join(".ants").join("config.toml"))
 }
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     std::env::home_dir().context("no home directory")
 }
 
@@ -980,7 +980,7 @@ fn read_dropin(path: &Path) -> Result<BTreeMap<String, Harness>> {
     Ok(file.harnesses)
 }
 
-fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path, base: &Path, home: &Path) -> PathBuf {
     match path.strip_prefix("~") {
         Ok(rest) => home.join(rest),
         Err(_) => base.join(path),
@@ -1515,6 +1515,9 @@ pub fn entry(ant: &Ant) -> Result<String> {
     }
     if let Some(harness) = &ant.harness {
         set("harness", toml_string(harness));
+    }
+    if !ant.fallback.is_empty() {
+        set("fallback", strings(&mut ant.fallback.iter().map(String::as_str)));
     }
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());

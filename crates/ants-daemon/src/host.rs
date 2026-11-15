@@ -35,6 +35,8 @@ pub struct Host {
     pub config: Option<admin::ConfigFile>,
     /// The ants the process serves, which restart their harnesses on an admin order.
     pub restarts: admin::restart::Restarts,
+    /// The machine's leaf node, whose uplink an add order renews to carry the ant added.
+    pub leaf: Option<admin::LeafNode>,
 }
 
 static OFF_TOLD: AtomicBool = AtomicBool::new(false);
@@ -67,6 +69,7 @@ impl Host {
             remote_admin: true,
             config: None,
             restarts: admin::restart::Restarts::default(),
+            leaf: None,
         })
     }
 }
@@ -118,7 +121,10 @@ pub async fn run(host: Host, ants: watch::Receiver<Vec<UserId>>) -> Result<()> {
         remote: host.remote_admin,
         accounts,
         config: host.config.clone(),
+        creds: host.creds.clone(),
+        js_domain: host.js_domain.clone(),
         restarts: host.restarts.clone(),
+        leaf: host.leaf.clone(),
     };
     tokio::select! {
         recorded = keep_record(&js, &host, &machine, &hostname, ants) => recorded,

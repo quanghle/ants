@@ -8,9 +8,10 @@
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them;
 //! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
-//! [`memories`] reads the ant's memories, only while online.
+//! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
+//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,23 +30,29 @@ use tokio::sync::Notify;
 use crate::bus;
 use crate::direct_kv::{DirectKv, Lookup};
 
+mod add;
+mod ask;
 mod memories;
+pub use memories::files_under;
 mod pause;
 pub mod restart;
+mod retire;
 mod set;
 mod settings;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
+/// How often an order in hand for long tells the stream so ([`in_progress`]).
+const PROGRESS: Duration = Duration::from_secs(20);
 /// How long before the stream delivers again an order whose outcome could not be stored.
 const RETRY_ORDER: Duration = Duration::from_secs(5);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
+/// How long recording a decided order's outcome is tried before the order is left to be delivered again.
+const RECORD_FOR: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Why every order is refused while the config sets `[admin] remote = false` (requirement: a machine may opt out).
 pub const REMOTE_OFF: &str = "this machine's config sets [admin] remote = false";
-/// Why an order is refused that the daemon cannot carry out yet.
-pub const NOT_SUPPORTED: &str = "not supported yet";
 
 /// Why an order to edit the config is refused by a daemon serving no config file.
 pub const NO_CONFIG: &str = "the daemon serves no config file to edit";
@@ -61,9 +68,45 @@ pub struct Orders {
     pub accounts: Vec<String>,
     /// The config file the daemon serves whole, which orders edit; none refuses those.
     pub config: Option<ConfigFile>,
+    /// The host credentials, which ask `ants signer` to sign an added ant's key or revoke a retired one's, and beside
+    /// which an added ant's credentials go; none refuses those orders.
+    pub creds: Option<PathBuf>,
+    /// The hub's JetStream domain, where a retirement reads the roster.
+    pub js_domain: Option<JsDomain>,
     /// The ants the process serves, which restart their harnesses on an order.
     pub restarts: restart::Restarts,
+    /// The machine's leaf node, whose uplink an added ant needs to reach the hub; none on a machine without one.
+    pub leaf: Option<LeafNode>,
 }
+
+/// A machine's leaf node, as an add order needs it: the uplink credentials sign the order's enrollment request with the
+/// host credentials, and the signer's answer renews them to carry the added ant.
+#[derive(Clone)]
+pub struct LeafNode {
+    /// The leaf node's configuration (`leaf.conf`); while it does not exist, the machine runs no leaf node.
+    pub conf: PathBuf,
+    /// The machine name and the path of the uplink credentials the configuration names.
+    pub uplink: fn(&Path) -> Result<(Machine, PathBuf)>,
+    /// Put a renewed uplink JWT into the credentials of the leaf node of the configuration and have the node connect
+    /// its uplink again: what came of it; none when the credentials changed so that the JWT would drop something they
+    /// allow, and were left as they are.
+    pub renew: fn(&Path, &str) -> Result<Option<String>>,
+}
+
+impl std::fmt::Debug for LeafNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafNode").field("conf", &self.conf).finish_non_exhaustive()
+    }
+}
+
+/// Two leaf nodes are the same when their configurations are: a daemon builds its hooks from the same functions.
+impl PartialEq for LeafNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.conf == other.conf
+    }
+}
+
+impl Eq for LeafNode {}
 
 /// The config file a daemon serves whole, as the orders to its machine's ants edit it, and how to have the daemon
 /// reload it at once after an edit rather than at its next check of the file.
@@ -166,14 +209,15 @@ async fn handle(
                 let outcome = match taken {
                     Taken::Order { order, machine, ant } => {
                         let stored_at = stored_at.unwrap_or_else(|_| Utc::now());
-                        let mut outcome = decide(devices, orders, &msg.subject, &order, stored_at).await?;
+                        let deciding = decide(js, devices, orders, &msg.subject, &order, stored_at);
+                        let mut outcome = in_progress(msg, deciding).await?;
                         (outcome.machine, outcome.ant) = (machine, ant);
                         outcome
                     }
                     Taken::Unreadable(outcome) => *outcome,
                     Taken::Unnamed(_) => unreachable!("handled above"),
                 };
-                let recorded = outcomes.create(&key, serde_json::to_vec(&outcome)?).await?;
+                let recorded = record(outcomes, &key, &outcome).await?;
                 tracing::info!(
                     key,
                     recorded,
@@ -186,6 +230,40 @@ async fn handle(
         }
     }
     bus::double_ack(&js.client(), msg).await
+}
+
+/// Store `outcome` under `key`, trying again for up to [`RECORD_FOR`]: an order delivered again would be decided again,
+/// redoing its effects, while the hub may be out of reach only for a moment, as when the machine's leaf node reconnects
+/// its uplink after an add order renewed it. Whether this stored it, not some earlier try or another daemon.
+async fn record(outcomes: &DirectKv, key: &str, outcome: &AdminOutcome) -> Result<bool> {
+    let value = serde_json::to_vec(outcome)?;
+    let until = tokio::time::Instant::now() + RECORD_FOR;
+    loop {
+        match outcomes.create(key, value.clone()).await {
+            Err(e) if tokio::time::Instant::now() < until => {
+                tracing::debug!(key, error = format!("{e:#}"), "recording an admin order's outcome; trying again");
+                tokio::time::sleep(RETRY_FIRST).await;
+            }
+            recorded => return recorded,
+        }
+    }
+}
+
+/// `work` on the order in `msg`, telling the stream every [`PROGRESS`] that it is in hand, so that an order taking
+/// longer than [`ACK_WAIT`] (an ant to stop, the signer to answer) is not delivered again meanwhile.
+async fn in_progress<T>(msg: &jetstream::Message, work: impl Future<Output = T>) -> T {
+    tokio::pin!(work);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
+    loop {
+        tokio::select! {
+            done = &mut work => return done,
+            _ = ticks.tick() => {
+                if let Err(e) = msg.ack_with(AckKind::Progress).await {
+                    tracing::debug!(error = %e, "telling the stream the order is in hand");
+                }
+            }
+        }
+    }
 }
 
 /// What a message of the machine's consumer holds.
@@ -236,6 +314,7 @@ fn read(subject: &str, payload: &[u8], msg_id: Option<&str>, machine: &Machine) 
 /// administration and an admin of the team signed it with credentials not revoked, as [`devices`] records them;
 /// else what carrying it out ([`apply`]) gave.
 async fn decide(
+    js: &jetstream::Context,
     devices: &DirectKv,
     orders: &Orders,
     subject: &str,
@@ -259,20 +338,20 @@ async fn decide(
     let accounts = orders.accounts.iter().map(String::as_str);
     match order.verify(subject, accounts, |_| revoked, stored_at) {
         Err(e) => Ok(refused(&e.to_string())),
-        Ok(_) => Ok(apply(orders, order, stored_at).await),
+        Ok(_) => Ok(apply(js, orders, order, stored_at).await),
     }
 }
 
 /// Carry out `order`, which an admin signed and the stream stored at `stored_at`, with the module of its op, which
 /// refuses it when it cannot.
-async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
+async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder, stored_at: DateTime<Utc>) -> AdminOutcome {
     match &order.op {
         AdminOp::Set { changes } => set::apply(orders, order, changes),
         AdminOp::Pause => pause::apply(orders, order, true),
         AdminOp::Resume => pause::apply(orders, order, false),
         AdminOp::Restart { now } => restart::apply(orders, order, *now).await,
-        AdminOp::Add { .. } => refused(order, NOT_SUPPORTED),
-        AdminOp::Retire => refused(order, NOT_SUPPORTED),
+        AdminOp::Add { settings } => Box::pin(add::apply(js, orders, order, settings)).await,
+        AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
     }

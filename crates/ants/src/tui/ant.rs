@@ -91,9 +91,9 @@ pub struct Page {
 
 impl Page {
     pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask \
-                                    · w work · r restart · p pause/resume · Esc back";
+                                    · w work · r restart · p (un)pause · X retire · Esc back";
     pub const QUEUE_KEYS: &str =
-        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p pause/resume · Esc back";
+        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · r restart · p (un)pause · X retire · Esc back";
     pub const ARMED_KEYS: &str = "y restart the ant's harnesses after their prompts · ! restart now, cancelling the \
                                   prompts · any other key keeps them";
 
@@ -163,6 +163,7 @@ impl Page {
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('X') => return Some(To::Bar(format!("/retire {}", self.ant))),
             Key::Char('p') => {
                 let paused = data.live.roster.iter().any(|e| e.ant == self.ant && e.paused.is_some());
                 let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
@@ -212,16 +213,17 @@ impl Page {
         let head_width = u16::try_from(head_width).unwrap_or(u16::MAX);
         let [face, left, right] =
             Layout::horizontal([Constraint::Length(head_width), Constraint::Fill(1), Constraint::Fill(1)]).areas(top);
+        let moved = data.looks.identity(&self.ant).and_then(|i| i.moved.as_ref());
         let title = match head {
             Some(head) => {
                 frame.render_widget(Paragraph::new(head).block(frame::block(String::new(), false)), face);
-                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, now))
+                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, moved, now))
             }
             None => format!(
                 " {mark} {} {} · {} ",
                 data.looks.face(&self.ant).content,
                 self.ant,
-                crate::ant::state(entry, now)
+                crate::ant::state(entry, moved, now)
             ),
         };
 
@@ -323,7 +325,8 @@ fn about(entry: Option<&RosterEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
 /// What holds the ant back, what it does now on each thread, and what it spent that UTC day.
 fn status(ant: &UserId, entry: Option<&RosterEntry>, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let holds = crate::ant::holds(ant, entry, now);
+    let moved = data.looks.identity(ant).and_then(|i| i.moved.as_ref());
+    let holds = crate::ant::holds(ant, entry, moved, now);
     if holds.is_empty() {
         lines.push(Line::styled(format!("nothing holds {ant} back"), frame::dim()));
     }
