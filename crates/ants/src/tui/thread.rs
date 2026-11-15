@@ -891,7 +891,7 @@ mod tests {
         ];
         let mut page = Page::new(thread.clone());
         page.history.loaded(&thread, Ok(entries)).unwrap();
-        let shown = screen(&page, &m.data, 80, at(40));
+        let shown = screen(&page, &m, 80, at(40));
         let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
         let from = shown.iter().position(|l| l.contains("alice → bob")).unwrap();
         assert!(shown[from].ends_with("🔒"), "{shown:#?}");
