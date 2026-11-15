@@ -38,7 +38,8 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
     let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
     let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
-    let behalf = crate::behalf::Checker::new(nats, &js);
+    let behalf = std::sync::Arc::new(crate::behalf::Checker::new(nats, &js));
+    let _following = behalf.follow();
     loop {
         let msg = tokio::select! {
             msg = sub.next() => match msg {

@@ -42,7 +42,8 @@ pub(crate) async fn show(
     let select = &select;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
     let keyring = sealed::Keyring::load(nats, &js).await;
-    let behalf = Checker::new(nats, &js);
+    let behalf = std::sync::Arc::new(Checker::new(nats, &js));
+    let _following = follow.then(|| behalf.follow());
     let shown = reacted::Shown::default();
     let faces = Faces::stdout(crate::avatars::read_or_none(&js).await);
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {

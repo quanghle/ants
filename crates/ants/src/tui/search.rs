@@ -24,7 +24,7 @@ use super::model::{Data, Key, To};
 use crate::live::maybe;
 use crate::sealed::Keyring;
 use crate::search::{self, Search};
-use crate::thread::{Entry, Kind};
+use crate::thread::{Entry, Kind, Parser};
 
 /// How many matches a search lists, the latest.
 pub const LIMIT: usize = 50;
@@ -180,18 +180,24 @@ pub struct Searches {
     js: jetstream::Context,
     /// What opens the sealed messages searched, so their text is matched and shown.
     keyring: Option<Arc<Keyring>>,
+    /// What checks the claims of the messages searched that an assistant sent for its human.
+    behalf: Option<Arc<crate::behalf::Checker>>,
     running: Option<LocalBoxFuture<'static, Found>>,
 }
 
 impl Searches {
-    pub fn new(js: jetstream::Context, keyring: Option<Arc<Keyring>>) -> Self {
-        Self { js, keyring, running: None }
+    pub fn new(
+        js: jetstream::Context,
+        keyring: Option<Arc<Keyring>>,
+        behalf: Option<Arc<crate::behalf::Checker>>,
+    ) -> Self {
+        Self { js, keyring, behalf, running: None }
     }
 
     /// Run `search`, dropping the one running.
     pub fn start(&mut self, search: Search) {
-        let (js, keyring) = (self.js.clone(), self.keyring.clone());
-        self.running = Some(async move { search.run(&js, keyring).await }.boxed_local());
+        let (js, parser) = (self.js.clone(), Parser::opening(self.keyring.clone()).checking(self.behalf.clone()));
+        self.running = Some(async move { search.run(&js, parser).await }.boxed_local());
     }
 
     /// The matches of the search running, once found. Cancel-safe.

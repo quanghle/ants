@@ -774,6 +774,49 @@ mod tests {
         assert_eq!(Acting::For(alice.clone()).label("pa"), "alice via pa");
     }
 
+    /// A long-running reader's checker takes a grant withdrawn, or granted again, and credentials revoked, as its
+    /// watches deliver them, without checking anew.
+    #[tokio::test]
+    async fn a_following_checker_takes_withdrawals_and_revocations() {
+        let Some(server) = Server::start() else { return };
+        let (alice, pa) = (p("alice"), p("pa"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
+        let assistant = server.dir().join("pa-assistant.creds");
+        let new = auth::NewDevice { assistant_of: Some(alice.clone()), ..auth::NewDevice::default() };
+        let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+        let team = server.dir().join("auth");
+        auth::issue_device_with(&team, &pa, revoke::Kind::Assistant, rights, &new, &assistant).unwrap();
+        let (_, pa_js) = bus::connect(&server.url, Some(&assistant), None, &pa, "test").await.unwrap();
+        ants_daemon::behalf::keep_record(&pa_js, None, &pa, &assistant).await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        let checker = std::sync::Arc::new(crate::behalf::Checker::new(&nats, &js));
+        assert_eq!(checker.check(&pa, Some(&alice)).await, Acting::For(alice.clone()));
+        let _following = checker.follow();
+        let comes_to = async |expected: Acting| {
+            for _ in 0..100 {
+                if checker.acting(&pa, Some(&alice)) == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("still {:?}, not {expected:?}", checker.acting(&pa, Some(&alice)));
+        };
+        // The watches start in the background: a change made before them is missed until the next refresh.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
+        comes_to(Acting::Forged(alice.clone())).await;
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        comes_to(Acting::For(alice.clone())).await;
+        revoke::revoke(&team, Some("pa"), &[]).unwrap();
+        crate::devices::record_revocations(&server.url, None, &team).await.unwrap();
+        comes_to(Acting::Forged(alice.clone())).await;
+    }
+
     /// The store the daemon's tools act for a human through reads and writes with its assistant's own credentials:
     /// the human's messages and the tool requests waiting for it, its read marker, its threads' titles and done marks,
     /// the assistant's reactions, and the directory its sealing reads device keys from.
