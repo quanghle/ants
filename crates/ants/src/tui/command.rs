@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use ants_proto::{ApprovalRequest, ChannelId, Choice, Reaction, ThreadId, UserId, Verdict};
+use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
@@ -435,7 +436,7 @@ fn draw_list(frame: &mut Frame, bar: Rect) {
 impl Model {
     /// Take `key` for the bar when it is focused or `key` focuses it: Ctrl-K, or @ or # in a view. Returns None when
     /// the key is not the bar's.
-    pub fn bar_key(&mut self, key: Key) -> Option<Option<Action>> {
+    pub fn bar_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Option<Action>> {
         if !self.bar.focused {
             match key {
                 Key::Ctrl('k') => {}
@@ -455,16 +456,16 @@ impl Model {
         }
         Some(match edited {
             Edited::Done => None,
-            Edited::Submit(text) => self.submit(text),
+            Edited::Submit(text) => self.submit(text, now),
             Edited::Editor(text) => Some(Action::Edit(text)),
         })
     }
 
     /// Do what the bar's `text` says, emptying the bar; else keep it and tell why on its status line.
-    fn submit(&mut self, text: String) -> Option<Action> {
+    fn submit(&mut self, text: String, now: DateTime<Utc>) -> Option<Action> {
         let command = parse(&text);
         let slash = matches!(command, Ok(Command::Slash(_)));
-        let done = command.and_then(|command| self.command(command));
+        let done = command.and_then(|command| self.command(command, now));
         let action = match done {
             Ok(action) => action,
             Err(why) => {
@@ -493,7 +494,7 @@ impl Model {
     }
 
     /// The action `command` takes, or why it cannot be taken.
-    fn command(&mut self, command: Command) -> Result<Option<Action>, String> {
+    fn command(&mut self, command: Command, now: DateTime<Utc>) -> Result<Option<Action>, String> {
         let run = |job| Ok(Some(Action::Run(job, String::new())));
         let slash = match command {
             Command::Ask { to, text } => return run(Job::Ask { to, thread: None, text, steer: false }),
@@ -539,7 +540,7 @@ impl Model {
                 run(Job::React { thread: self.target()?, message, reaction })
             }
             Slash::Goto(to) => self.goto(to),
-            Slash::Search(_) => Err("/search is not in ants chat yet: `ants thread search` searches".to_owned()),
+            Slash::Search(query) => self.search(query, now).map(Some),
             Slash::Digest(_) => Err("/digest is not in ants chat yet".to_owned()),
             Slash::Tldr => Err("/tldr is not in ants chat yet".to_owned()),
             Slash::Tree => Err("/tree is not in ants chat yet".to_owned()),

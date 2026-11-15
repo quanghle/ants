@@ -1,5 +1,6 @@
-//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view,
-//! a footer with the view's keys, the latest notice or the search prompt, and the help over it all. Also the styles the views share.
+//! The frame around the views: a header with the human, the server and the connection, the nav beside the shown view
+//! with the command bar under it, a footer with the view's keys, the latest notice or the command bar's keys, and the
+//! help over it all. Also the styles the views share.
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -91,9 +92,6 @@ fn header_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 }
 
 fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
-    if let Some(prompt) = &model.prompt {
-        return prompt.line();
-    }
     if let Some(notice) = model.notice_at(now) {
         let style = match notice.level {
             Level::Error => Style::new().fg(Color::Red),
@@ -128,11 +126,11 @@ const HELP: &[(&str, &str)] = &[
     ("Esc", "back to the previous view, else to the nav"),
     ("w", "in a channel: its threads in work"),
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
-    ("/", "in the bar: a command on the selection (Ctrl-K lists them)"),
+    ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("n", "with a person: write a message, starting a thread"),
-    ("/", "search messages, as in: deploy from:dev-a"),
+    ("/", "the bar on /search, as in: /search deploy from:dev-a"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),

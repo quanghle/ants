@@ -1,5 +1,6 @@
-//! Search from `ants chat`: `/` opens a prompt whose words `from:`, `to:`, `channel:`, `type:`, `since:` and `until:`
-//! are the filters of `ants thread search` and whose other words its text; Enter runs it as `ants thread search` does
+//! Search from `ants chat`: `/search` in the command bar (`/` opens it on that) takes words `from:`, `to:`, `channel:`,
+//! `type:`, `since:` and `until:` as the filters of `ants thread search` and the other words as its text; it runs as
+//! `ants thread search` does
 //! ([`crate::search::Search`]) and lists the latest matches newest first, each with where, who, how long ago and its
 //! matching line. Enter on a match opens its thread at it; Esc closes the list.
 
@@ -68,60 +69,6 @@ fn unknown_type(kind: &str) -> String {
     let kinds: Vec<String> =
         Kind::value_variants().iter().filter_map(|k| Some(k.to_possible_value()?.get_name().to_owned())).collect();
     format!("type:{kind} is none of {}", kinds.join(", "))
-}
-
-/// The search prompt being typed.
-#[derive(Debug, Default)]
-pub struct Prompt {
-    pub text: String,
-    /// Why the query typed was refused.
-    pub error: Option<String>,
-}
-
-/// What a key does to the prompt.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Edit {
-    Typing,
-    Close,
-    Run(String),
-}
-
-impl Prompt {
-    pub fn key(&mut self, key: Key) -> Edit {
-        self.error = None;
-        match key {
-            Key::Esc => return Edit::Close,
-            Key::Enter => return Edit::Run(self.text.clone()),
-            Key::Char(c) => self.text.push(c),
-            Key::Backspace => {
-                self.text.pop();
-            }
-            Key::Ctrl('u') => self.text.clear(),
-            Key::Ctrl('w') => {
-                let kept = self.text.trim_end().rfind(' ').map_or(0, |at| at + 1);
-                self.text.truncate(kept);
-            }
-            _ => {}
-        }
-        Edit::Typing
-    }
-
-    /// The prompt as the footer shows it, with why the query was refused.
-    pub fn line(&self) -> Line<'static> {
-        let mut spans = vec![
-            Span::styled(" /search ", Style::new().fg(Color::Cyan).bold()),
-            Span::raw(self.text.clone()),
-            Span::raw("▏"),
-        ];
-        match &self.error {
-            Some(error) => spans.push(Span::styled(format!("  {error}"), Style::new().fg(Color::Red))),
-            None => spans.push(Span::styled(
-                "  from: to: channel: type: since: until: and text · Enter search · Esc close",
-                frame::dim(),
-            )),
-        }
-        Line::from(spans)
-    }
 }
 
 /// A search's matches, as listed.
@@ -281,22 +228,6 @@ mod tests {
             parse("since:1h until:2h", now).unwrap_err(),
             "since: 2026-11-15 11:00:00 is not before until: 2026-11-15 10:00:00"
         );
-    }
-
-    #[test]
-    fn the_prompt_edits_and_runs_its_text() {
-        let mut prompt = Prompt::default();
-        for c in "from:dev-a deploy".chars() {
-            assert_eq!(prompt.key(Key::Char(c)), Edit::Typing);
-        }
-        prompt.key(Key::Ctrl('w'));
-        assert_eq!(prompt.text, "from:dev-a ");
-        prompt.key(Key::Backspace);
-        prompt.key(Key::Char('q'));
-        assert_eq!(prompt.key(Key::Enter), Edit::Run("from:dev-aq".to_owned()));
-        prompt.key(Key::Ctrl('u'));
-        assert_eq!(prompt.text, "");
-        assert_eq!(prompt.key(Key::Esc), Edit::Close);
     }
 
     #[test]
