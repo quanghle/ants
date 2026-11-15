@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ants_proto::{
-    CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope, Error as ProtoError, EscalationReason,
-    Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate, TIMELINE_EVERY, ThreadId, ThreadOrigin,
-    UserId, Uuid, WEBHOOK_ALLOW, subject,
+    Attachment, AttachmentHandle, CancelRequest, ChannelEntry, ChannelId, ChannelPost, DeadLetter, Envelope,
+    Error as ProtoError, EscalationReason, Humans, JsDomain, QueueRequest, QueuedMessage, Role, State, StatusUpdate,
+    TIMELINE_EVERY, ThreadId, ThreadOrigin, UserId, Uuid, WEBHOOK_ALLOW, subject,
 };
 use anyhow::Result;
 use async_nats::jetstream::{self, AckKind};
@@ -28,6 +28,7 @@ use crate::channel::{self, Channels, Context, Earlier, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
 use crate::fallback::{Failover, OnFallback};
+use crate::files::Attached;
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
@@ -710,6 +711,23 @@ enum Steered {
     Interrupted,
     /// It arrived behind another steer that cancelled the running prompt already.
     Ahead,
+}
+
+impl Incoming {
+    /// The files attached to the message, each with its handle: a channel post's under the post's channel, as the
+    /// envelope made of it carries none ([`channel::as_envelope`]).
+    fn attached(&self) -> Vec<(AttachmentHandle, Attachment)> {
+        match &self.post {
+            Some(posted) => {
+                let post = &posted.post;
+                post.attachments.iter().map(|a| (post.attachment_handle(a.id), a.clone())).collect()
+            }
+            None => {
+                let envelope = &self.envelope;
+                envelope.attachments.iter().map(|a| (envelope.attachment_handle(a.id), a.clone())).collect()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2340,6 +2358,7 @@ impl Inbox<'_> {
             stop: Some(stop),
             progress: Some(progress_tx),
             history: Some(history.history()),
+            attachments: Attached::new(self.js.clone(), incoming.attached()),
         };
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
