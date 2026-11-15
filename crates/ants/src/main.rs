@@ -73,7 +73,7 @@ use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, Escalation, JsDomain, UserId};
 use anyhow::{Context as _, Result};
 
-use crate::cli::{AssistantCommand, Cli, Command, HookCommand, NotifyCommand};
+use crate::cli::{Cli, Command, HookCommand, NotifyCommand};
 use crate::cmd::channel::ChannelCommand;
 use crate::cmd::send;
 
@@ -133,9 +133,7 @@ async fn run() -> Result<()> {
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
-        Command::Assistant(AssistantCommand::Set { ant }) => assistant::set(&nats()?, &ant).await,
-        Command::Assistant(AssistantCommand::Clear) => assistant::clear(&nats()?).await,
-        Command::Assistant(AssistantCommand::Show { human }) => assistant::show(&nats()?, human).await,
+        Command::Assistant(command) => assistant::run(command, nats).await,
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
         Command::Chat { since, compact } => Box::pin(tui::run(&nats()?, since, compact)).await,
         Command::Status { tmux, json } => Box::pin(tui::status(&nats()?, tmux, json)).await,

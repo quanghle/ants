@@ -231,8 +231,9 @@ pub(crate) enum Command {
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]
     Notify(NotifyCommand),
-    /// Designate the ant that acts for the CLI's human as its assistant, withdraw it, or show a human's. The human's
-    /// device signs the designation. Needs a human device's credentials, but for `show`.
+    /// Designate the ant that acts for the CLI's human as its assistant, withdraw it, show a human's, or enroll it as a
+    /// device of the human for sealed messages. The human's device signs the designation. Needs a human device's
+    /// credentials, but for `show` and `key`.
     #[command(subcommand)]
     Assistant(AssistantCommand),
     /// Print ants traffic as it happens, escalations with their level, leader and ants visited, or the live
@@ -598,11 +599,34 @@ pub(crate) enum AssistantCommand {
     },
     /// Withdraw the human's assistant, at once for every reader.
     Clear,
-    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies.
+    /// Show the assistant of HUMAN, by default the CLI's human, if its grant verifies, and whether it is enrolled as a
+    /// device of the human.
     Show {
         #[arg(value_name = "HUMAN")]
         human: Option<UserId>,
     },
+    /// Enroll the human's assistant as one of its devices (`on`), so messages sealed for the human are sealed for it
+    /// too and it seals those it sends for the human, or end that (`off`). Off unless enrolled; `clear` ends it too.
+    #[command(subcommand)]
+    Seal(SealCommand),
+    /// Print the encryption key ANT, an ant of this machine's config file, is enrolled with, making it if it has none:
+    /// for `ants assistant seal on --key` on the human's machine. Its seed waits beside its credentials, as `ANT.xk`.
+    Key {
+        #[arg(value_name = "ANT", add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SealCommand {
+    /// Enroll the assistant, with the key of the assistant on this machine, made if it has none, unless `--key`.
+    On {
+        /// The encryption key `ants assistant key ANT` printed on the machine running the assistant.
+        #[arg(long, value_name = "KEY")]
+        key: Option<ants_proto::DeviceKey>,
+    },
+    /// End the enrollment: nothing is sealed for the assistant any more, and it opens nothing.
+    Off,
 }
 
 #[cfg(test)]
