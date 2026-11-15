@@ -156,7 +156,8 @@ pub const REACTIONS_REPEAT: Duration = Duration::from_secs(2);
 /// How long an ant waits for the answer to a [`ReactionsRequest`] in all.
 pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// KV bucket of what humans make of threads: the title of each thread ([`ThreadTitle`], keyed by [`title_key`]), one
-/// for every human, which any human sets, renames or clears, and each human's pinned and archived threads
+/// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
+/// one for every human too, which any human sets or clears, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
 /// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`]) gets
 /// there through a human's CLI. Entries never expire.

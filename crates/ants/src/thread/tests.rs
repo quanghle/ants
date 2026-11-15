@@ -219,6 +219,32 @@ fn pinned_threads_list_last_and_archived_ones_only_with_a_message_since() {
 }
 
 #[test]
+fn only_messages_posts_and_notes_reopen_a_thread_and_done_ones_list_so() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let ask = Envelope::on_thread(t("t1"), alice.clone(), dev_a.clone(), "build it");
+    let tool = ToolCall { kind: "execute".into(), title: "cargo build".into(), ..Default::default() };
+    let request = ApprovalRequest::new(dev_a, t("t1"), tool, vec![Verdict::AllowOnce], Duration::from_secs(60));
+    let read = entries(&[(ask.subject(), json(&ask)), (request.subject(), json(&request))]);
+    assert_eq!(read.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(last_reopening(&read), 1, "a tool request reopens nothing");
+    assert_eq!(last_reopening(&read[1..]), 0);
+
+    let mut threads = Threads::new(None);
+    read.iter().for_each(|e| threads.add(e));
+    let (mut listed, _) = threads.finish(&Select::default(), &ThreadMarks::default());
+    assert_eq!(listed[0].last_reopening, 1);
+    listed[0].done = Some(Done { by: alice, at: at(0) });
+    let mut pinned = listed[0].clone();
+    pinned.pinned = true;
+    let table = table(&[listed[0].clone(), pinned]);
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(lines[0].contains("MSGS  STATE"), "{table}");
+    assert!(lines[1].contains("  done  ") && lines[2].contains("  pinned,done  "), "{table}");
+    let json = serde_json::to_value(&listed[0]).unwrap();
+    assert_eq!(json["done"]["by"], "alice", "{json}");
+}
+
+#[test]
 fn threads_idle_since_the_cutoff_list_only_as_auto_archived() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let on = |thread: &str| Envelope::on_thread(t(thread), alice.clone(), dev_a.clone(), thread);

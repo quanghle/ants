@@ -1105,6 +1105,10 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
     assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
     assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+    assert!(alice_meta.set_done(&thread, 1).await.unwrap());
+    assert!(bob_meta.clear_done(&thread).await.unwrap().is_some_and(|d| d.by == alice), "bob clears alice's done");
+    assert!(ant.done(&thread).await.is_err(), "an ant reads no done state");
+    assert!(ant.set_done(&thread, 1).await.is_err(), "nor marks a thread done");
 
     assert!(alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap());
     assert!(!alice_meta.change_marks(|m| m.pin(&thread)).await.unwrap(), "pinned already");
@@ -1124,6 +1128,9 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (raw, mut errors) = server.watched(&dev_a).await;
     raw.publish(title.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+    let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
+    raw.publish(done.clone(), "{}".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
 }
 
 #[tokio::test]

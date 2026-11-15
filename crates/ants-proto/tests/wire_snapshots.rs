@@ -225,6 +225,7 @@ fn kv_entries() {
         "thread_title",
         &ThreadTitle { thread_id: thread(), title: "Release 0.2".to_owned(), by: user("alice"), at: at(0) },
     );
+    snap("thread_done", &ThreadDone { thread_id: thread(), by: user("alice"), at: at(0), after: 4211 });
     snap(
         "thread_marks",
         &ThreadMarks {

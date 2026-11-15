@@ -281,6 +281,7 @@ proptest! {
             (ants_proto::owner_key(&thread, &other), vec![t, o]),
             (ants_proto::owner_outbox(&thread, &other), vec!["ants", "out", "owners", t, o]),
             (ants_proto::title_key(&thread), vec!["title", t]),
+            (ants_proto::done_key(&thread), vec!["done", t]),
             (ants_proto::marks_key(&ant), vec!["marks", a]),
             (ants_proto::webhook_marker_key(&ant), vec![a, "webhook"]),
             (ants_proto::webhook_marker_subject(&ant), vec!["$KV", ants_proto::WEBHOOKS_BUCKET, a, "webhook"]),
