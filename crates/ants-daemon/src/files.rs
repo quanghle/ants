@@ -232,7 +232,7 @@ async fn read(
 
 /// The media types of attachments a harness taking images is handed as images: those every model reading images
 /// reads.
-pub const PROMPT_IMAGES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+pub const PROMPT_IMAGES: [&str; 4] = ants_proto::IMAGE_MIMES;
 
 /// The files attached to the message a prompt hands the harness, each with the handle the subject of that message
 /// gives it. Their bytes are read only as the prompt runs, once it is known whether the harness takes images.

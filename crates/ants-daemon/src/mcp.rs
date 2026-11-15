@@ -14,6 +14,8 @@
 //! [`ants_proto::ChannelPost::title`], [`ants_proto::NotesPost::title`]).
 //! `ask_human` asks the thread's owner, else the default human, a question with options ([`Envelope::question`]) and
 //! returns at once; the answer arrives as a later message ([`Envelope::answer`]).
+//! `send_message`, `ask_ant`, `route`, `post_channel` and `post_notes` attach files from the directory the thread's
+//! session works in, and `read_attachment` reads an attachment of a message the ant reads (see [`attach`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -31,10 +33,10 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::{
-    ApprovalDecision, CHANADM_WAIT, CHANNELS_BUCKET, ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId,
-    ChannelOp, ChannelPost, Envelope, EscalationReason, JsDomain, NotesPost, Question, ROSTER_BUCKET, Reaction,
-    ReactionChange, ReactionsOutcome, ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid,
-    Verdict,
+    ApprovalDecision, Attachment, AttachmentHandle, AttachmentScope, CHANADM_WAIT, CHANNELS_BUCKET,
+    ChannelAdminOutcome, ChannelAdminRequest, ChannelEntry, ChannelId, ChannelOp, ChannelPost, Envelope,
+    EscalationReason, JsDomain, NotesPost, Question, ROSTER_BUCKET, Reaction, ReactionChange, ReactionsOutcome,
+    ReactionsRequest, Role, RosterEntry, ThreadId, ThreadTitle, UserId, Uuid, Verdict,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -63,6 +65,10 @@ use crate::humans::Registry;
 use crate::notes::NotesStore;
 use crate::sync::MutexExt as _;
 use crate::{bus, ipc, links, reactions, roster};
+
+mod attach;
+
+pub use attach::{FileAccess, jetstream_files};
 
 /// Environment variable carrying the session's token to `ants mcp`.
 pub const TOKEN_ENV: &str = "ANTS_MCP_TOKEN";
@@ -296,6 +302,7 @@ impl Mcp {
             admin: OnceLock::new(),
             requester: OnceLock::new(),
             reaction_asker: OnceLock::new(),
+            files: OnceLock::new(),
             state_path,
             sessions: Mutex::default(),
             asks: tokio::sync::Mutex::new(Asks { stored, waiting: HashMap::new() }),
@@ -342,11 +349,20 @@ impl Mcp {
         let _ = self.hub.reaction_asker.set(asker);
     }
 
+    /// Store and read attachments through `files`, attaching and saving files in `workdir`, or the directory a
+    /// thread's sessions work in when they were given one ([`Mcp::servers`]); without it `attach` and
+    /// `read_attachment` are refused.
+    pub fn with_files(&self, files: FileAccess, workdir: PathBuf) {
+        let _ = self.hub.files.set((files, workdir));
+    }
+
     /// The MCP servers each harness session gets: HTTP where the harness takes it, else `ants mcp` over the socket.
+    /// The directory the session works in is where its tools attach and save files.
     pub fn servers(&self) -> McpServers {
         let (hub, url, socket) = (self.hub.clone(), self.url.clone(), self.socket.clone());
         let exe = std::env::current_exe().ok();
-        Arc::new(move |thread, http| {
+        Arc::new(move |thread, dir, http| {
+            hub.sessions.locked().dirs.insert(thread.clone(), dir.to_owned());
             let token = hub.token(thread);
             if http {
                 let auth = HttpHeader::new(header::AUTHORIZATION.as_str(), format!("Bearer {token}"));
@@ -456,6 +472,8 @@ struct Sessions {
     current: HashMap<ThreadId, Envelope>,
     /// The title each thread's session suggested during its turn, until a message on the thread carries it.
     titles: HashMap<ThreadId, String>,
+    /// The directory each thread's sessions work in.
+    dirs: HashMap<ThreadId, PathBuf>,
 }
 
 /// What `<home>/mcp.json` keeps.
@@ -498,6 +516,8 @@ struct Hub {
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,
     reaction_asker: OnceLock<ReactionAsker>,
+    /// The attachments' store and the ant's workdir.
+    files: OnceLock<(FileAccess, PathBuf)>,
     state_path: PathBuf,
     sessions: Mutex<Sessions>,
     asks: tokio::sync::Mutex<Asks>,
@@ -518,6 +538,60 @@ impl Hub {
 
     fn caller(&self, token: &str) -> Option<ThreadId> {
         self.sessions.locked().tokens.get(token).cloned()
+    }
+
+    /// The attachments' store, and the directory the sessions of `thread` work in: its worktree, else the ant's
+    /// workdir.
+    fn files(&self, thread: &ThreadId) -> Result<(&FileAccess, PathBuf), String> {
+        let (files, workdir) = self.files.get().ok_or("attachments are not available here")?;
+        let dir = self.sessions.locked().dirs.get(thread).cloned();
+        Ok((files, dir.unwrap_or_else(|| workdir.clone())))
+    }
+
+    /// Read the files at `paths` in the directory `thread` works in, to attach them: none for no paths.
+    async fn load(&self, thread: &ThreadId, paths: &[String]) -> Result<Vec<attach::Loaded>, String> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (_, dir) = self.files(thread).map_err(|e| format!("{e}; nothing sent"))?;
+        attach::load(&dir, paths).await
+    }
+
+    /// Store `loaded` under the handles `handle_of` gives, returning the references for the message to carry.
+    async fn store(
+        &self,
+        loaded: Vec<attach::Loaded>,
+        handle_of: impl Fn(Uuid) -> AttachmentHandle,
+    ) -> Result<Vec<Attachment>, String> {
+        if loaded.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (files, _) = self.files.get().ok_or("attachments are not available here; nothing sent")?;
+        attach::store(files, loaded, handle_of).await
+    }
+
+    /// The attachment `handle` names, if on a message the ant reads: an image as image content, a short text as text,
+    /// and any other saved into the directory `thread` works in.
+    async fn read_attachment(&self, thread: &ThreadId, handle: &str) -> Result<Vec<ContentBlock>, String> {
+        let (files, dir) = self.files(thread)?;
+        let handle: AttachmentHandle = handle.trim().trim_matches('`').parse().map_err(|e| format!("{e}"))?;
+        if !handle.readable_by(&self.ant) {
+            return Err(format!("attachment {handle} is on a message {} does not read", self.ant));
+        }
+        let (attachment, bytes) = (files.get)(handle.clone()).await.map_err(|e| format!("{e:#}"))?;
+        let about = attach::describe(&attachment);
+        if attachment.is_image() {
+            let image = ContentBlock::image(data_encoding::BASE64.encode(&bytes), attachment.mime.clone());
+            return Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}")), image]);
+        }
+        if attach::is_text(&attachment)
+            && bytes.len() <= attach::MAX_TEXT
+            && let Ok(text) = std::str::from_utf8(&bytes)
+        {
+            return Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}\n{text}"))]);
+        }
+        let path = attach::save(&dir, &attachment, &bytes).await?;
+        Ok(vec![ContentBlock::text(format!("Attachment {handle}: {about}, saved as {}", path.display()))])
     }
 
     /// A message from the ant, following on from the one `thread` is handling and keeping its owner: on the same
@@ -559,7 +633,7 @@ impl Hub {
 
     /// Post `text` to the notes of `thread`, spending one of its turns. The post that spends the last one escalates
     /// the thread up its origin chain, in the end to its owner, else the default human.
-    async fn post_notes(&self, thread: &ThreadId, text: String) -> Result<String, String> {
+    async fn post_notes(&self, thread: &ThreadId, text: String, attach: &[String]) -> Result<String, String> {
         let current = self.sessions.locked().current.get(thread).map(|e| {
             let carried = e.escalation.as_deref().cloned();
             let owner = (self.humans.human_owner(e.owner.as_ref()), e.creator.clone(), e.origin_thread.clone());
@@ -567,11 +641,22 @@ impl Hub {
         });
         let (budget, (owner, creator, origin_thread), human, carried, allow) =
             current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
+        let mut loaded = self.load(thread, attach).await?;
+        let mut attachments = None;
         for _ in 0..POST_TRIES {
             let notes = self.notes.read(thread).await.map_err(|e| format!("cannot read the thread notes: {e:#}"))?;
-            let post = NotesPost::spend(thread.clone(), self.ant.clone(), text.clone(), budget, notes.last()).map_err(
-                |_| format!("the notes of thread {thread} have no turns left; the thread is {human}'s to decide"),
-            )?;
+            let mut post = NotesPost::spend(thread.clone(), self.ant.clone(), text.clone(), budget, notes.last())
+                .map_err(|_| {
+                    format!("the notes of thread {thread} have no turns left; the thread is {human}'s to decide")
+                })?;
+            // Stored once, before the first try: the handles name the thread, not the post.
+            if attachments.is_none() {
+                let ant = self.ant.clone();
+                let handle_of =
+                    |id| AttachmentHandle { from: ant.clone(), scope: AttachmentScope::Notes(thread.clone()), id };
+                attachments = Some(self.store(std::mem::take(&mut loaded), handle_of).await?);
+            }
+            post.attachments = attachments.clone().unwrap_or_default();
             if !self.notes.post(&post, notes.last_seq).await.map_err(|e| format!("not posted: {e:#}"))? {
                 continue;
             }
@@ -743,7 +828,13 @@ impl Hub {
     /// Post `text` to `channel` as the ant, a member or the channel's messenger: a top-level post starting a thread
     /// the ant creates, with no owner and the turns the message `thread` is handling leaves, as `send_message` spends
     /// them. Returns the new thread and whom the post wakes or notifies (its daemon sends the notices).
-    async fn post_channel(&self, thread: &ThreadId, channel: &str, text: String) -> Result<String, String> {
+    async fn post_channel(
+        &self,
+        thread: &ThreadId,
+        channel: &str,
+        text: String,
+        attach: &[String],
+    ) -> Result<String, String> {
         let current = self.sessions.locked().current.get(thread).cloned();
         let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         let channel: ChannelId = channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
@@ -763,10 +854,13 @@ impl Hub {
             .reply(self.ant.clone(), "", self.humans.sender_role(&current))
             .map_err(|_| format!("thread {thread} has no turns left; answer {} in the reply instead", current.from))?
             .turn_budget;
+        let loaded = self.load(thread, attach).await?;
         let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text)
             .with_creator(Some(self.ant.clone()))
             .with_allow(current.allow.clone());
         post.turn_budget = left;
+        let attachments = self.store(loaded, |id| post.attachment_handle(id)).await?;
+        post.attachments = attachments;
         (access.post)(post.clone()).await.map_err(|e| format!("not posted: {e:#}"))?;
         let humans = self.humans.humans();
         let names = |users: Vec<UserId>| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
@@ -1200,6 +1294,9 @@ struct SendMessage {
     /// Thread to send on: omitted for the current one, `new` for a fresh one, or a thread id.
     #[serde(default)]
     thread: Option<String>,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    #[serde(default)]
+    attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1211,6 +1308,9 @@ struct AskAnt {
     /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
     timeout: Option<String>,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    #[serde(default)]
+    attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1267,6 +1367,9 @@ struct DecideApproval {
 struct PostNotes {
     /// The post.
     text: String,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    #[serde(default)]
+    attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1275,6 +1378,9 @@ struct PostChannel {
     channel: String,
     /// The post; an @mention in it wakes that member of the channel, or notifies it if a human.
     text: String,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    #[serde(default)]
+    attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1309,6 +1415,15 @@ struct Route {
     /// How long to wait for the reply, such as `90s` or `10m` (default 5m, at most 30m).
     #[serde(default)]
     timeout: Option<String>,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each.
+    #[serde(default)]
+    attach: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadAttachment {
+    /// The attachment's handle, as listed with its message: `<from>.<inbox|notes|chan>.<target>.<id>`.
+    handle: String,
 }
 
 fn default_wait() -> bool {
@@ -1389,9 +1504,19 @@ impl Tools {
     }
 
     /// Send `text` to `to` as `send_message` does, noting when no daemon serves `to` now: the message waits for one.
-    async fn send_to(&self, thread: &ThreadId, to: &str, text: String, on: Option<&str>) -> Result<String, String> {
-        let envelope = self.hub.outgoing(thread, to, text, on)?;
+    async fn send_to(
+        &self,
+        thread: &ThreadId,
+        to: &str,
+        text: String,
+        on: Option<&str>,
+        attach: &[String],
+    ) -> Result<String, String> {
+        let mut envelope = self.hub.outgoing(thread, to, text, on)?;
+        let loaded = self.hub.load(thread, attach).await?;
         let unserved = self.hub.unserved(&envelope.to, Duration::ZERO).await;
+        let attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
+        envelope.attachments = attachments;
         self.hub.send(&envelope).await?;
         let sent = format!(
             "Sent to {} on thread {} as message {} ({} turns left).",
@@ -1410,10 +1535,11 @@ impl Tools {
         thread: &ThreadId,
         to: &str,
         text: String,
+        attach: &[String],
         wait: Duration,
         cx: &RequestContext<RoleServer>,
     ) -> Result<Envelope, String> {
-        let envelope = self.hub.outgoing(thread, to, text, None)?;
+        let mut envelope = self.hub.outgoing(thread, to, text, None)?;
         if self.hub.humans.is_human(&envelope.to) {
             return Err(format!("ask_ant is for ants; send_message reaches {}", envelope.to));
         }
@@ -1426,6 +1552,9 @@ impl Tools {
                 envelope.to
             ));
         }
+        let loaded = self.hub.load(thread, attach).await?;
+        let attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
+        envelope.attachments = attachments;
         self.hub.ask(envelope, wait, cx.ct.cancelled()).await
     }
 }
@@ -1668,9 +1797,15 @@ fn describe_notes(thread: &ThreadId, posts: &[NotesPost]) -> String {
     }
     let _ = write!(text, "; {} turns left.", last.turn_budget);
     for post in shown {
-        let _ = write!(text, "\n\n{} at {}:\n{}", post.from, post.sent_at.to_rfc3339(), post.text);
+        let attachments = attach::listing(&post.attachments, |id| post.attachment_handle(id));
+        let _ = write!(text, "\n\n{} at {}:\n{}{attachments}", post.from, post.sent_at.to_rfc3339(), post.text);
     }
     text
+}
+
+/// A message's text, with its attachments listed for `read_attachment`.
+fn shown(envelope: &Envelope) -> String {
+    format!("{}{}", envelope.text, attach::listing(&envelope.attachments, |id| envelope.attachment_handle(id)))
 }
 
 fn text(result: Result<String, String>) -> CallToolResult {
@@ -1686,14 +1821,16 @@ impl Tools {
         current thread unless `thread` says otherwise. A message between ants spends one turn of the thread's \
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
         message. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
-        message still goes and waits, and the result warns so, naming ants from the roster to message instead.")]
+        message still goes and waits, and the result warns so, naming ants from the roster to message instead. \
+        `attach` lists files in the working directory to attach (at most 8 of up to 8 MiB each); one that cannot \
+        be attached fails the call with nothing sent.")]
     async fn send_message(
         &self,
         Parameters(args): Parameters<SendMessage>,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        Ok(text(self.send_to(&thread, &args.to, args.text, args.thread.as_deref()).await))
+        Ok(text(self.send_to(&thread, &args.to, args.text, args.thread.as_deref(), &args.attach).await))
     }
 
     #[tool(description = "Ask the thread's owner, else the default human, a question with 2-9 options to pick from \
@@ -1712,7 +1849,8 @@ impl Tools {
     #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
         check_inbox. When no daemon serves the ant now (no roster entry, a stale one, or a harness signed out) the \
-        call is refused at once with nothing sent, saying why and naming ants from the roster to ask instead.")]
+        call is refused at once with nothing sent, saying why and naming ants from the roster to ask instead. \
+        `attach` lists files in the working directory to attach, as for send_message.")]
     async fn ask_ant(
         &self,
         Parameters(args): Parameters<AskAnt>,
@@ -1720,10 +1858,10 @@ impl Tools {
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
         let result = match ask_wait(args.timeout.as_deref()) {
-            Ok(wait) => self.ask(&thread, &args.to, args.text, wait, &cx).await,
+            Ok(wait) => self.ask(&thread, &args.to, args.text, &args.attach, wait, &cx).await,
             Err(e) => Err(e),
         };
-        Ok(text(result.map(|reply| format!("{} replied (message {}):\n{}", reply.from, reply.id, reply.text))))
+        Ok(text(result.map(|reply| format!("{} replied (message {}):\n{}", reply.from, reply.id, shown(&reply)))))
     }
 
     #[tool(description = "Take the messages kept for this ant outside of any prompt: replies to ask_ant calls \
@@ -1745,7 +1883,7 @@ impl Tools {
             .iter()
             .map(|e| {
                 let at = e.sent_at.to_rfc3339();
-                format!("From {} on thread {} at {at} (message {}):\n{}", e.from, e.thread_id, e.id, e.text)
+                format!("From {} on thread {} at {at} (message {}):\n{}", e.from, e.thread_id, e.id, shown(e))
             })
             .collect();
         Ok(text(Ok(shown.join("\n\n"))))
@@ -1828,7 +1966,7 @@ impl Tools {
         an idle ant before a busy one, then the one with the fewest messages in hand, then the first by name. By \
         default it waits for the reply and returns it, like ask_ant; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
-        and follows its turn budget, as those do.")]
+        and follows its turn budget, as those do, and `attach` attaches files as they do.")]
     async fn route(
         &self,
         Parameters(args): Parameters<Route>,
@@ -1844,13 +1982,15 @@ impl Tools {
                 .ant
                 .to_string();
             if !args.wait {
-                let sent = self.send_to(&thread, &to, args.text, None).await?;
+                let sent = self.send_to(&thread, &to, args.text, None, &args.attach).await?;
                 return Ok(format!("Routed to {to} for {capability}. {sent}"));
             }
-            let reply = self.ask(&thread, &to, args.text, wait, &cx).await?;
+            let reply = self.ask(&thread, &to, args.text, &args.attach, wait, &cx).await?;
             Ok(format!(
                 "Routed to {to} for {capability}. {} replied (message {}):\n{}",
-                reply.from, reply.id, reply.text
+                reply.from,
+                reply.id,
+                shown(&reply)
             ))
         }
         .await;
@@ -1861,14 +2001,15 @@ impl Tools {
         it coordinate. A post notifies and wakes nobody; the others see it only when they call read_notes, so use \
         send_message or ask_ant to ask a named ant to read it. A post spends one turn of the thread's budget, \
         and the post that spends the last one escalates the thread: the notes then take no more ant posts until a \
-        human posts there or the escalation goes up a level.")]
+        human posts there or the escalation goes up a level. `attach` lists files in the working directory to \
+        attach, as for send_message.")]
     async fn post_notes(
         &self,
         Parameters(args): Parameters<PostNotes>,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        Ok(text(self.hub.post_notes(&thread, args.text).await))
+        Ok(text(self.hub.post_notes(&thread, args.text, &args.attach).await))
     }
 
     #[tool(description = "Read the notes of the current thread, or of `thread`: who posted what, oldest first, and \
@@ -1893,18 +2034,36 @@ impl Tools {
         Ok(text(result))
     }
 
+    #[tool(description = "Read a file attached to a message this ant reads (one sent to it or by it, a notes \
+        post or a channel post) by the handle listed with the message, `<from>.<inbox|notes|chan>.<target>.<id>`. \
+        A PNG, JPEG, GIF or WebP image comes back as an image, a text or JSON file of up to 128 KiB as text, and \
+        any other file is saved into the working directory under its name (numbered beside a different file of \
+        that name) and its path returned. Reading spends no turn.")]
+    async fn read_attachment(
+        &self,
+        Parameters(args): Parameters<ReadAttachment>,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let thread = self.thread(&cx)?;
+        Ok(match self.hub.read_attachment(&thread, &args.handle).await {
+            Ok(content) => CallToolResult::success(content),
+            Err(e) => text(Err(e)),
+        })
+    }
+
     #[tool(description = "Start a thread in `channel` with a top-level post, as its creator: the @mentioned \
         members of the channel wake and answer on the thread, and an escalation on the thread goes up this ant's \
         escalation chain, whichever ant gets stuck. Only a member or the messenger of the channel may post. The \
         thread has no owner and gets the turns the current message leaves, one fewer unless it is a human's; with \
-        none left it is refused. Returns the thread id.")]
+        none left it is refused. `attach` lists files in the working directory to attach, as for send_message. \
+        Returns the thread id.")]
     async fn post_channel(
         &self,
         Parameters(args): Parameters<PostChannel>,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        Ok(text(self.hub.post_channel(&thread, &args.channel, args.text).await))
+        Ok(text(self.hub.post_channel(&thread, &args.channel, args.text, &args.attach).await))
     }
 
     #[tool(description = "Escalate the current thread when stuck on it: `issue` says what blocks it and what is \
@@ -1995,7 +2154,9 @@ fn instructions(ant: &UserId, manager: bool) -> String {
          reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \
          title for the thread, which the reply carries and which becomes its title unless it ever had one. ask_human \
          asks the thread's owner a question with numbered options and returns at once; the answer arrives later as a \
-         message, prefixed with an [ants] line naming the question and the option picked. Memory and task \
+         message, prefixed with an [ants] line naming the question and the option picked. send_message, \
+         ask_ant, route, post_channel and post_notes attach files from the working directory (attach); \
+         read_attachment reads a file attached to a message by the handle listed with it. Memory and task \
          tools follow the ant's configured instructions."
     );
     if manager {
