@@ -17,7 +17,7 @@ use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, snooze, thread, timeline, tree, work};
+use super::{cards, catchup, channel, dm, home, nav, people, search, snooze, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -77,6 +77,8 @@ pub enum Action {
     Search(crate::search::Search),
     /// Cancel the prompt each ant runs on its thread, as `ants cancel` does.
     CancelSubtree(Vec<(UserId, ThreadId)>),
+    /// Ask for a catch-up summary.
+    Summarise(catchup::Ask),
     Quit,
 }
 
@@ -225,6 +227,10 @@ pub enum To {
     Snooze(ThreadId),
     /// The command bar, open on this text.
     Bar(String),
+    /// Ask for a new TL;DR of the thread.
+    Tldr(ThreadId),
+    /// The digest of what changed since the last `ants chat` on the device ended.
+    Digest,
     /// Not another view: something to do.
     Do(Action),
 }
@@ -247,6 +253,8 @@ pub struct Model {
     pub interrupting: Option<Confirm>,
     /// How long to snooze a thread from home, being asked.
     pub snoozing: Option<snooze::Prompt>,
+    /// The catch-up summaries: the span home's first line counts, the TL;DRs asked for, the digest.
+    pub catchup: catchup::Catchup,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -282,6 +290,7 @@ impl Model {
             picking: None,
             interrupting: None,
             snoozing: None,
+            catchup: catchup::Catchup::default(),
             compact: false,
         }
     }
@@ -604,6 +613,9 @@ impl Model {
             self.help = false;
             return None;
         }
+        if self.catchup.shown() {
+            return self.digest_key(key);
+        }
         if self.interrupting.is_some() {
             return self.confirm_key(key);
         }
@@ -784,6 +796,8 @@ impl Model {
                 self.bar.focused = true;
                 None
             }
+            To::Tldr(thread) => self.tldr(thread),
+            To::Digest => self.home_digest(now),
             To::Do(action @ Action::Run(..)) => {
                 self.bar.set_status("running…", Tone::Busy);
                 Some(action)

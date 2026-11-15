@@ -26,6 +26,8 @@ pub struct Cards {
     /// Each thread's done state, whether or not a message since reopened it.
     pub done: HashMap<ThreadId, ThreadDone>,
     pub tldr: HashMap<ThreadId, ThreadSummary>,
+    /// Whether the TL;DRs were read once.
+    pub tldr_read: bool,
     /// What each ant spent on each thread since a human's last message there.
     pub spend: HashMap<ThreadId, Vec<(UserId, Spent)>>,
     /// What each ant spent that UTC day, once read.
@@ -61,7 +63,7 @@ impl Cards {
     pub fn take(&mut self, read: Read) -> Option<String> {
         let mut failed = Vec::new();
         match read.meta {
-            Ok((done, tldr)) => (self.done, self.tldr) = (done, tldr),
+            Ok((done, tldr)) => (self.done, self.tldr, self.tldr_read) = (done, tldr, true),
             Err(e) => failed.push(format!("reading the done states and TL;DRs: {e:#}")),
         }
         match read.spend {

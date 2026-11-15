@@ -7,7 +7,7 @@
 use ants_proto::{ApprovalRequest, Question, ThreadId, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
@@ -19,7 +19,7 @@ use super::exec::Job;
 use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
-use super::question;
+use super::{catchup, question};
 use crate::thread::Kind;
 use crate::tools::State;
 
@@ -159,7 +159,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree";
+    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree · s digest";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -205,6 +205,7 @@ impl Page {
             }
             Key::Char('z') => return thread().map(To::Snooze),
             Key::Char('t') => return thread().map(To::Tree),
+            Key::Char('s') => return Some(To::Digest),
             Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
             Key::Down | Key::Char('j') => self.selected + 1,
             Key::Home => 0,
@@ -219,13 +220,18 @@ impl Page {
         let data = &model.data;
         let items = items(data, now);
         let block = frame::block(format!(" Home ({}) ", items.len()), focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [first, area] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let rule = Line::styled("─".repeat(usize::from(first.width)), frame::dim());
+        frame.render_widget(Paragraph::new(vec![catchup::since_line(model, now), rule]), first);
         if items.is_empty() {
             let text = if data.live.stored_at.is_some() { "nothing waits on a human" } else { "reading the stream…" };
-            frame.render_widget(Paragraph::new(text).block(block), area);
+            frame.render_widget(Paragraph::new(text), area);
             return;
         }
         let selected = self.selected.min(items.len() - 1);
-        let width = usize::from(area.width.saturating_sub(11));
+        let width = usize::from(area.width.saturating_sub(9));
         let rows: Vec<ListItem> = items
             .iter()
             .enumerate()
@@ -257,7 +263,7 @@ impl Page {
                 ListItem::new(lines)
             })
             .collect();
-        let list = List::new(rows).block(block).highlight_style(frame::highlight(focused));
+        let list = List::new(rows).highlight_style(frame::highlight(focused));
         frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(selected)));
     }
 }

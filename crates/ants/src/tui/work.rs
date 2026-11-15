@@ -346,6 +346,7 @@ impl Page {
         let to = match key {
             Key::Enter => return rows.get(at).map(|(t, _)| To::Thread(t.clone())),
             Key::Char('s') => return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Steer, t.clone())),
+            Key::Char('S') => return rows.get(at).map(|(t, _)| To::Tldr(t.clone())),
             Key::Char('x') | Key::Ctrl('x') => {
                 return rows.get(at).map(|(t, _)| To::Interrupt(Intent::Cancel, t.clone()));
             }
@@ -361,7 +362,7 @@ impl Page {
         None
     }
 
-    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · Esc back";
+    pub const KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · S TL;DR · Esc back";
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, data: &Data, now: DateTime<Utc>, focused: bool) {
         let rows = self.rows(data);
@@ -456,7 +457,7 @@ fn card(data: &Data, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec
             let text = crate::excerpt(&t.text, (width * 3).saturating_sub(about.len() + 8));
             vec![Span::raw(text), Span::styled(about, frame::dim())]
         }
-        None => vec![Span::styled("none kept: `ants thread tldr` asks for one", frame::dim())],
+        None => vec![Span::styled("none kept: S or /tldr asks for one", frame::dim())],
     };
     let chain = chain(data, thread)
         .into_iter()

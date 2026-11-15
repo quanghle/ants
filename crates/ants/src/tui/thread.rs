@@ -28,7 +28,7 @@ use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
-use super::{approvals, markdown, question, react, work};
+use super::{approvals, catchup, markdown, question, react, work};
 use crate::live::History;
 use crate::thread::{Entry, Kind};
 
@@ -70,7 +70,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · t tree · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · + react · p pin · m mute · e archive · d done · t tree · S TL;DR · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -168,6 +168,7 @@ impl Page {
                 return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
+            Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
             Key::Char('s') => return Some(To::Interrupt(Intent::Steer, self.history.thread.clone())),
             Key::Char('x') | Key::Ctrl('x') => return Some(To::Interrupt(Intent::Cancel, self.history.thread.clone())),
             _ => {}
@@ -191,7 +192,11 @@ impl Page {
             (area, None)
         };
         let area = draw_cards(frame, area, model, thread, &self.history.entries, now);
-        let width = usize::from(area.width.saturating_sub(2));
+        let block = frame::block(title, focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let area = catchup::draw_tldr(frame, inner, model, thread, now);
+        let width = usize::from(area.width);
         let mut lines = vec![work::why(data, thread)];
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
             lines.push(Line::styled(format!("▶ {line} ({})", ago(at, now)), Style::new().fg(Color::Green)));
@@ -220,7 +225,7 @@ impl Page {
                 range = Some((start, lines.len()));
             }
         }
-        let height = usize::from(area.height.saturating_sub(2));
+        let height = usize::from(area.height);
         let bottom = lines.len().saturating_sub(height);
         let top = match range {
             None => bottom,
@@ -237,9 +242,7 @@ impl Page {
             }
         };
         self.top.set(top);
-        let paragraph = Paragraph::new(lines)
-            .block(frame::block(title, focused))
-            .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
+        let paragraph = Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, area);
         if let Some(panel) = panel {
             let lines = self.panel(data, calls, now, usize::from(PANEL_WIDTH.saturating_sub(4)));

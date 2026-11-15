@@ -9,6 +9,7 @@
 mod acts;
 mod approvals;
 mod cards;
+mod catchup;
 mod channel;
 mod command;
 mod compact;
@@ -147,6 +148,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
     let ctx =
         exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
+    let summaries = catchup::Io::open(nats, client.clone(), js.clone()).await;
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
@@ -158,11 +160,19 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
     model.compact = compact;
+    let chat_state = catchup::state_path();
+    model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
+    model.catchup.ahead = summaries.ahead();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        let chat = Chat { feed, reads, acts, people, searches, trees, cards, exec: Exec::new(ctx), model, edit: None };
-        Box::pin(chat.run(&mut screen.terminal)).await
+        let exec = Exec::new(ctx);
+        let chat = Chat { feed, reads, acts, people, searches, trees, cards, summaries, exec, model, edit: None };
+        let ran = Box::pin(chat.run(&mut screen.terminal)).await;
+        if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
+            tracing::debug!("not keeping when ants chat ended: {e:#}");
+        }
+        ran
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -210,6 +220,7 @@ struct Chat {
     searches: Searches,
     trees: tree::Io,
     cards: cards::Io,
+    summaries: catchup::Io,
     model: Model,
     /// The command bar's text to edit in the editor.
     edit: Option<String>,
@@ -281,7 +292,13 @@ impl Chat {
                 read = self.cards.next() => {
                     dirty = true;
                     self.model.cards(read, Utc::now());
-                    Vec::new()
+                    // TL;DRs ahead of time follow what was read.
+                    self.model.ahead(Utc::now()).into_iter().collect()
+                }
+                summarised = self.summaries.next() => {
+                    dirty = true;
+                    self.model.summarised(summarised, Utc::now());
+                    self.model.ahead(Utc::now()).into_iter().collect()
                 }
                 event = self.trees.next() => {
                     dirty = true;
@@ -348,6 +365,7 @@ impl Chat {
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
             Action::Search(search) => self.searches.start(search),
+            Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {
                 let text = format!("asking {} ants to cancel their prompts…", prompts.len());
                 self.model.notify(text, Level::Info, Utc::now());
