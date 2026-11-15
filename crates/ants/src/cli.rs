@@ -323,7 +323,8 @@ pub(crate) enum Command {
     /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
     /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
     /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
-    /// renewing them while their grant holds.
+    /// renewing them while their grant holds; every [registration] sweep, revokes those whose GitHub users left the
+    /// policy's organizations and teams.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).

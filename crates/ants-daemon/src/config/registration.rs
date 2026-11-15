@@ -8,6 +8,7 @@
 //! teams = ["acme/core"]               # ... and of these teams, as org/team
 //! email_domains = ["acme.example"]    # ... and users with a verified email address in these domains
 //! ttl = "30d"                         # how long the credentials of a registered device stay valid
+//! sweep = "6h"                        # how often memberships are checked again; "0": never
 //! token_file = "~/.config/ants/github-token"   # the signer's GitHub token, mode 0600; or:
 //! token_store = "github-token"        # its entry in the OS credential store (service "ants")
 //! ```
@@ -20,6 +21,10 @@ use serde::{Deserialize, Serialize};
 
 /// How long the credentials of a registered device stay valid by default.
 pub const DEFAULT_REGISTRATION_TTL: Duration = Duration::from_hours(30 * 24);
+
+/// How often the signer checks again by default whether the GitHub users of registered devices still fall under the
+/// policy.
+pub const DEFAULT_SWEEP: Duration = Duration::from_hours(6);
 
 /// Where GitHub signs users in, unless `github_url` says otherwise.
 pub const GITHUB_URL: &str = "https://github.com";
@@ -44,6 +49,10 @@ pub struct Registration {
     /// How long the credentials of a registered device stay valid.
     #[serde(default = "default_ttl", deserialize_with = "ants_proto::duration::deserialize")]
     pub ttl: Duration,
+    /// How often the signer checks again, with its token, whether the GitHub users of the devices an organization or
+    /// team registered still fall under the policy, revoking the names of those who left; zero: never.
+    #[serde(default = "default_sweep", deserialize_with = "ants_proto::duration::deserialize")]
+    pub sweep: Duration,
     /// A file holding the signer's GitHub token, of mode 0600, used to check memberships and look users up.
     pub token_file: Option<PathBuf>,
     /// The entry of the OS credential store, under service `ants`, holding the signer's GitHub token.
@@ -58,6 +67,10 @@ pub struct Registration {
 
 fn default_ttl() -> Duration {
     DEFAULT_REGISTRATION_TTL
+}
+
+fn default_sweep() -> Duration {
+    DEFAULT_SWEEP
 }
 
 fn default_github_url() -> String {
@@ -299,6 +312,7 @@ mod tests {
         let daemon = format!("harness = \"copilot\"\n{table}\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n");
         super::super::parse(&daemon, &path, &dir).expect("the daemon skips the table");
         assert_eq!((registration.ttl, registration.github_url.as_str()), (DEFAULT_REGISTRATION_TTL, GITHUB_URL));
+        assert_eq!(registration.sweep, DEFAULT_SWEEP);
         assert_eq!(
             (registration.api_url.as_str(), registration.token_file.as_deref()),
             ("http://127.0.0.1:1", Some(dir.join("github-token").as_path()))
@@ -329,6 +343,7 @@ mod tests {
             ("client_id = \"\"", "client_id is empty"),
             ("client_id = \"x\"\nteams = [\"core\"]", "is not org/team"),
             ("client_id = \"x\"\nttl = \"10s\"", "under a minute"),
+            ("client_id = \"x\"\nsweep = \"6\"", "sweep"),
             ("client_id = \"x\"\ntoken_file = \"f\"\ntoken_store = \"s\"", "keep one"),
             ("client_id = \"x\"\nscope = \"all\"", "unknown field"),
         ] {
