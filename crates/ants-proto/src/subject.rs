@@ -342,6 +342,18 @@ pub fn presence_of(human: &UserId) -> String {
     format!("$KV.{}.{human}.>", super::PRESENCE_BUCKET)
 }
 
+/// Every entry of a human's devices in [`super::DEVICES_BUCKET`]: the subjects only that human puts its device user
+/// JWTs on.
+pub fn devices_of(human: &UserId) -> String {
+    format!("$KV.{}.{human}.>", super::DEVICES_BUCKET)
+}
+
+/// Every [`super::DeviceRevocation`] in [`super::DEVICES_BUCKET`]: the subjects only the credentials `ants auth revoke`
+/// and `ants auth push` issue put records on.
+pub fn revoked_devices() -> String {
+    format!("$KV.{}.{}.*", super::DEVICES_BUCKET, super::REVOKED_DEVICES)
+}
+
 /// The entry of a channel in [`super::CHANNELS_BUCKET`]: the subject a human, or the channel manager, puts
 /// [`super::ChannelEntry`] on.
 pub fn channel_entry(channel: &ChannelId) -> String {

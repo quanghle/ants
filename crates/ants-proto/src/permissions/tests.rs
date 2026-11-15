@@ -598,6 +598,42 @@ fn humans_write_only_their_own_reactions_ants_ask_and_only_the_responder_writes_
 }
 
 #[test]
+fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_revocations() {
+    let devices = |perms: &Permissions| -> Vec<String> {
+        perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_devices")).cloned().collect()
+    };
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    for s in [
+        "$JS.API.STREAM.INFO.KV_ants_devices",
+        "$JS.API.STREAM.CREATE.KV_ants_devices",
+        "$JS.API.DIRECT.GET.KV_ants_devices.>",
+        "$JS.API.CONSUMER.CREATE.KV_ants_devices",
+        "$KV.ants_devices.alice.>",
+    ] {
+        assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
+    }
+    let puts: Vec<String> = devices(&human).into_iter().filter(|s| s.starts_with("$KV.")).collect();
+    assert_eq!(puts, ["$KV.ants_devices.alice.>"], "only its own devices, no revocation record");
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&p("alice"), Role::Human), (&p("dev-a"), Role::Ant)]);
+    assert!(leaf.publish.iter().any(|s| s == "$KV.ants_devices.alice.>"), "a human on a leaf puts its own");
+
+    let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+    let observer = Permissions::for_observer(&p("watcher"));
+    let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    for none in [ant, observer, webhook, Permissions::for_channel_manager(), Permissions::for_reactions_responder()] {
+        assert_eq!(devices(&none), Vec::<String>::new());
+    }
+
+    let revoker = Permissions::for_device_revoker();
+    let puts: Vec<&String> = revoker.publish.iter().filter(|s| s.starts_with("$KV.")).collect();
+    assert_eq!(puts, ["$KV.ants_devices.revoked.*"]);
+    assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
+    assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
+    assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
+}
+
+#[test]
 fn ants_write_only_their_own_chain_and_read_every_one() {
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);
     for s in ["$KV.ants_chains.dev-a", "$JS.API.DIRECT.GET.KV_ants_chains.>", "$JS.API.STREAM.INFO.KV_ants_chains"] {

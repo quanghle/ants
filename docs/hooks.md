@@ -28,7 +28,7 @@ They publish no message, answer no tool request, cancel no prompt and write no b
 credentials file lets no one act for an ant or a human. They read no inbox, notes or channel subject, nor `STREAM.INFO`
 or `STREAM.MSG.GET` on `ANTS`. Every KV bucket other than `ants_roster` is denied too: `ants_sessions`, `ants_attempts`,
 `ants_owners`, `ants_links`, `ants_chains`, `ants_humans`, `ants_channels`, `ants_webhooks`, `ants_read`,
-`ants_presence`, `ants_notify`, `ants_reactions` and `ants_threads`.
+`ants_presence`, `ants_notify`, `ants_reactions`, `ants_threads` and `ants_devices`.
 
 Event payloads can still contain prompt or tool text:
 

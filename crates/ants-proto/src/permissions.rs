@@ -3,11 +3,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, ENROLL_INBOX, Feed, HUMANS_BUCKET, INTAKE_STREAM,
-    JsDomain, LINKS_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET, REACTIONS_BUCKET,
-    READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM, THREADS_BUCKET, UserId,
-    WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader, channel_manager_serving_subject, dead_reader,
-    inbox_consumer, inbox_prefix, marks_key, notes_consumer, notify_consumer, sent_reader, spare_readers, subject,
+    ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, ChannelId, DEVICES_BUCKET, ENROLL_INBOX, Feed, HUMANS_BUCKET,
+    INTAKE_STREAM, JsDomain, LINKS_BUCKET, Machine, NOTIFY_BUCKET, OUTBOX_STREAM, OWNERS_BUCKET, PRESENCE_BUCKET,
+    REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, Role, SESSIONS_BUCKET, STORAGE_WARNING_PREFIX, STREAM,
+    THREADS_BUCKET, UserId, WEBHOOK_MARKER, WEBHOOKS_BUCKET, chan_consumer, chan_reader,
+    channel_manager_serving_subject, dead_reader, inbox_consumer, inbox_prefix, marks_key, notes_consumer,
+    notify_consumer, sent_reader, spare_readers, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -56,6 +57,24 @@ fn presence_rights(human: &UserId) -> [String; 3] {
     let presence = kv_stream(PRESENCE_BUCKET);
     let own = subject::presence_of(human);
     [format!("$JS.API.STREAM.CREATE.{presence}"), format!("$JS.API.DIRECT.GET.{presence}.{own}"), own]
+}
+
+/// What a human's credentials need for the directory of human devices' encryption keys ([`DEVICES_BUCKET`]): creating
+/// the bucket; reading all of it, singly and through the ordered consumers behind listing its keys, since a sender
+/// seals for every device of every human it writes to; and putting its own devices' entries only
+/// ([`subject::devices_of`]), so no human puts a key for another's device. The revocation records
+/// ([`subject::revoked_devices`]) only [`Permissions::for_device_revoker`] puts.
+fn device_directory_rights(human: &UserId) -> Vec<String> {
+    let devices = kv_stream(DEVICES_BUCKET);
+    let mut rights = vec![
+        format!("$JS.API.STREAM.INFO.{devices}"),
+        format!("$JS.API.STREAM.CREATE.{devices}"),
+        format!("$JS.API.DIRECT.GET.{devices}.>"),
+        format!("$JS.API.CONSUMER.CREATE.{devices}"),
+        subject::devices_of(human),
+    ];
+    rights.extend(flow_control_subjects("*", &devices));
+    rights
 }
 
 /// What a human's credentials need to hold back its notifications ([`NOTIFY_BUCKET`]): creating the bucket and reading
@@ -178,7 +197,8 @@ impl Permissions {
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title and its own pinned and
-    /// archived threads, no other human's ([`thread_rights`]). A human may send under
+    /// archived threads, no other human's ([`thread_rights`]); it reads every device's encryption key in
+    /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it
     /// would expose every inbox. So only a human hears the max-deliveries advisories of the stream's consumers and
     /// stores the dead letters of the messages they name, on any ant's dead letter subject.
@@ -374,6 +394,7 @@ impl Permissions {
         publish.extend(thread_rights(user));
         publish.extend(notify_prefs_rights(user));
         publish.extend(human_reaction_rights(user));
+        publish.extend(device_directory_rights(user));
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }
 
@@ -651,8 +672,8 @@ impl Permissions {
     ///
     /// Nothing else: it publishes no message, decides no approval, cancels nothing and writes no bucket, so it can
     /// neither act for an ant or a human nor change what they see. It reads no inbox, notes or channel, so no
-    /// conversation as stored, nor the sessions, attempts, owners, links, chains, humans, channels, webhooks, read or
-    /// presence buckets: where the devices of humans are is not even for other humans to see. It gets no stream info,
+    /// conversation as stored, nor the sessions, attempts, owners, links, chains, humans, channels, webhooks, read,
+    /// devices or presence buckets: where the devices of humans are is not even for other humans to see. It gets no stream info,
     /// which lists every subject stored, so who messages whom, nor message gets, which take any sequence: it finds the
     /// stream through the info of a consumer named after it, as a webhook does.
     pub fn for_observer(observer: &UserId) -> Self {
@@ -745,6 +766,25 @@ impl Permissions {
             ],
         }
     }
+
+    /// What the short-lived credentials `ants auth revoke` and `ants auth push` issue themselves from the account key
+    /// allow, to say in [`DEVICES_BUCKET`] which keys of humans' credentials are revoked: creating the bucket, reading
+    /// and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the replies of
+    /// its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record.
+    pub fn for_device_revoker() -> Self {
+        let devices = kv_stream(DEVICES_BUCKET);
+        let revoked = subject::revoked_devices();
+        Self {
+            publish: vec![
+                "$JS.API.INFO".to_owned(),
+                format!("$JS.API.STREAM.INFO.{devices}"),
+                format!("$JS.API.STREAM.CREATE.{devices}"),
+                format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
+                revoked,
+            ],
+            subscribe: vec![format!("{ENROLL_INBOX}.>")],
+        }
+    }
 }
 
 /// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
@@ -754,7 +794,8 @@ impl Permissions {
 ///
 /// Bump it whenever the permissions of any role change: [`Permissions::for_user`], [`Permissions::for_leaf`],
 /// [`Permissions::for_webhook`], [`Permissions::for_channel_manager`], [`Permissions::for_enrollment`],
-/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`] or [`Permissions::with_js_domain`], or
+/// [`Permissions::for_enroll_approver`], [`Permissions::for_reactions_responder`], [`Permissions::for_device_revoker`]
+/// or [`Permissions::with_js_domain`], or
 /// the other claims `ants auth` puts in a
 /// user JWT.
 pub const PERMISSIONS_VERSION: PermissionsVersion = PermissionsVersion(2);

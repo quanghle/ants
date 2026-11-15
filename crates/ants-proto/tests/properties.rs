@@ -299,6 +299,8 @@ proptest! {
             (subject::cancel_of(&ant), vec!["ants", "cancel", a, "*"]),
             (subject::cancelled_of(&ant), vec!["ants", "cancelled", a, "*"]),
             (subject::presence_of(&ant), vec!["$KV", ants_proto::PRESENCE_BUCKET, a, ">"]),
+            (subject::devices_of(&ant), vec!["$KV", ants_proto::DEVICES_BUCKET, a, ">"]),
+            (subject::revoked_devices(), vec!["$KV", ants_proto::DEVICES_BUCKET, "revoked", "*"]),
             (ants_proto::reactions_to(&message), vec!["*", &m, "*"]),
             (ants_proto::links_to(&thread), vec!["*", t, "*"]),
         ];

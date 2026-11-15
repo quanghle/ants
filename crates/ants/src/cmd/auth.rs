@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::{ChannelId, Destination, DeviceKey, JsDomain, Machine, Permissions, UserId};
+use ants_proto::{ChannelId, DEVICES_BUCKET, Destination, DeviceKey, JsDomain, Machine, Permissions, UserId};
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
 use crate::members::EnrollApprover;
-use crate::{Connection, auth, backup, channel, keys, members, revoke, team_dir};
+use crate::{Connection, auth, backup, channel, devices, keys, members, revoke, team_dir};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
@@ -290,7 +290,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         }
         AuthCommand::Leaf { machine, members, dir, out } => leaf_creds(machine, members, dir, out, domain),
         AuthCommand::Revoke { name, keys, devices, no_push, dir } => {
-            revoke_credentials(name, keys, devices, no_push, dir, conn.nats).await
+            revoke_credentials(name, keys, devices, no_push, dir, conn.nats, domain).await
         }
         AuthCommand::Revoked { dir } => revoke::list(&team_dir(dir)?),
         AuthCommand::Issued { json, dir } => revoke::list_issued(&team_dir(dir)?, json),
@@ -300,7 +300,7 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
             println!("{} of {human} is now labelled {label:?}", renamed.device);
             Ok(())
         }
-        AuthCommand::Push { dir } => push(conn.nats, &team_dir(dir)?).await,
+        AuthCommand::Push { dir } => push(conn.nats, domain, &team_dir(dir)?).await,
         AuthCommand::Backup { file, passphrase_file, dir } => {
             backup::run_backup(&team_dir(dir)?, &file, passphrase_file.as_deref())
         }
@@ -410,6 +410,7 @@ async fn revoke_credentials(
     no_push: bool,
     dir: Option<PathBuf>,
     url: &str,
+    domain: Option<&JsDomain>,
 ) -> Result<()> {
     let dir = team_dir(dir)?;
     let now = auth::now()?;
@@ -430,12 +431,14 @@ async fn revoke_credentials(
         );
         return Ok(());
     }
-    push(url, &dir).await
+    push(url, domain, &dir).await
 }
 
-/// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure.
-pub(crate) async fn push(url: &str, dir: &Path) -> Result<()> {
-    match revoke::push(url, dir).await {
+/// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure;
+/// once it is applied, record in the hub's directory of encryption keys, in JetStream domain `domain` if it has one,
+/// the revoked keys of humans' credentials not recorded yet ([`devices::record_revocations`]).
+pub(crate) async fn push(url: &str, domain: Option<&JsDomain>, dir: &Path) -> Result<()> {
+    let pushed = match revoke::push(url, dir).await {
         Ok(pushed) => {
             println!(
                 "account pushed to server {} ({url}); connections of revoked credentials are closed",
@@ -485,6 +488,22 @@ pub(crate) async fn push(url: &str, dir: &Path) -> Result<()> {
             "the account was not pushed to {url}; the revocations stay in {}: push them with `ants auth push \
              --nats URL` once the hub is in reach, or copy server.conf to the hub and reload it (SIGHUP)",
             dir.display()
+        ))),
+    };
+    pushed?;
+    match devices::record_revocations(url, domain, dir).await {
+        Ok(recorded) => {
+            if !recorded.is_empty() {
+                println!(
+                    "recorded in {DEVICES_BUCKET} as revoked, so no message is sealed for their devices any more: {}",
+                    recorded.join(", ")
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.context(format!(
+            "the account was pushed, but the revoked keys of humans' credentials are not all recorded in \
+             {DEVICES_BUCKET}, so messages may still be sealed for their devices: run `ants auth push --nats URL` again"
         ))),
     }
 }
