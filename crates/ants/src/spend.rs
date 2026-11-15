@@ -3,7 +3,7 @@
 //! it under `<ant>.<thread>.spend`. Caps come from the local config file, for the ants it lists: the CLI has no other
 //! way to know the caps of ants served elsewhere.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use ants_daemon::caps::{self, Caps, Spent};
 use ants_daemon::direct_kv::DirectKv;
@@ -11,9 +11,11 @@ use ants_proto::{SESSIONS_BUCKET, ThreadId, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use chrono::{Days, NaiveDate, Utc};
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use serde::Serialize;
 
+/// How many spend entries are read at once.
+const CONCURRENT: usize = 16;
 /// UTC days reported by default, today included.
 pub const DEFAULT_DAYS: u32 = 7;
 
@@ -204,6 +206,34 @@ fn cost(cost: f64, cap: Option<f64>) -> String {
         Some(cap) => format!("{cost:.2}/{cap:.2}"),
         None => format!("{cost:.2}"),
     }
+}
+
+/// What each ant spent on each of `threads` since a human's last message there, for the threads it spent anything on.
+pub async fn on_threads(
+    js: &jetstream::Context,
+    kv: &DirectKv,
+    threads: &HashSet<ThreadId>,
+) -> Result<HashMap<ThreadId, Vec<(UserId, Spent)>>> {
+    let found = keys(js, "*.*.spend").await?.into_iter().filter_map(|key| parse_thread_key(&key));
+    let reads = futures::stream::iter(found.filter(|(_, thread)| threads.contains(thread)))
+        .map(async |(ant, thread)| Ok::<_, anyhow::Error>((caps::thread_spent(kv, &ant, &thread).await?, ant, thread)))
+        .buffer_unordered(CONCURRENT);
+    let read: Vec<Result<_>> = reads.collect().await;
+    let mut spent: HashMap<ThreadId, Vec<(UserId, Spent)>> = HashMap::new();
+    for read in read {
+        if let (Some(s), ant, thread) = read? {
+            spent.entry(thread).or_default().push((ant, s));
+        }
+    }
+    spent.values_mut().for_each(|by| by.sort_by(|a, b| a.0.cmp(&b.0)));
+    Ok(spent)
+}
+
+/// What each ant that spent anything that UTC day spent in it.
+pub async fn today(js: &jetstream::Context, kv: &DirectKv) -> Result<Vec<(UserId, Spent)>> {
+    let days = window(Utc::now().date_naive(), 1);
+    let reports = ants(js, kv, None, &days, &BTreeMap::new()).await?;
+    Ok(reports.into_iter().map(|r| (r.ant, r.total)).collect())
 }
 
 /// `rows` under `header`, columns padded to line up.

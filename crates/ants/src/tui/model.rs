@@ -9,7 +9,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use super::acts::{Acted, Change};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{channel, dm, home, nav, people, search, thread, timeline, work};
+use super::{cards, channel, dm, home, nav, people, search, thread, timeline, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 
@@ -97,6 +97,8 @@ pub struct Data {
     pub calls: timeline::Threads,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
+    /// The threads' done states, TL;DRs and spend.
+    pub cards: cards::Cards,
 }
 
 impl Data {
@@ -194,6 +196,8 @@ pub struct Model {
     pub notice: Option<Notice>,
     /// The search prompt, while open.
     pub prompt: Option<search::Prompt>,
+    /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
+    pub compact: bool,
 }
 
 impl Model {
@@ -210,9 +214,19 @@ impl Model {
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
             people: people::People::default(),
+            cards: cards::Cards::default(),
         };
         let nav = nav::Item::Home;
-        Self { data, pages: vec![Page::of(&nav)], nav, focus: Focus::View, help: false, notice: None, prompt: None }
+        Self {
+            data,
+            pages: vec![Page::of(&nav)],
+            nav,
+            focus: Focus::View,
+            help: false,
+            notice: None,
+            prompt: None,
+            compact: false,
+        }
     }
 
     pub fn page(&self) -> &Page {
@@ -315,6 +329,10 @@ impl Model {
                     self.data.live.marks.clone_from(&about.marks);
                     self.data.live.reorder(now);
                 }
+                match &about.done {
+                    Some(done) => self.data.cards.done.insert(thread.clone(), done.clone()),
+                    None => self.data.cards.done.remove(&thread),
+                };
                 for page in &mut self.pages {
                     if let Page::Thread(page) = page
                         && page.history.thread == thread
@@ -361,6 +379,13 @@ impl Model {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
             Read::Reactions(reactions) => data.reactions = reactions,
+        }
+    }
+
+    /// Take what was read of the threads besides their messages.
+    pub fn cards(&mut self, read: cards::Read, now: DateTime<Utc>) {
+        if let Some(failed) = self.data.cards.take(read) {
+            self.notify(failed, Level::Error, now);
         }
     }
 
@@ -426,6 +451,9 @@ impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Interrupt {
             return Some(Action::Quit);
+        }
+        if self.compact {
+            return self.compact_key(key, now);
         }
         if self.help {
             self.help = false;
@@ -537,7 +565,7 @@ impl Model {
         }
     }
 
-    fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
+    pub(super) fn view_key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
         if key == Key::Esc {
             if self.pages.len() > 1 {
                 self.pages.pop();
