@@ -64,7 +64,7 @@ pub fn draw(frame: &mut Frame, model: &Model, now: DateTime<Utc>) {
         Page::Channel(page) => page.draw(frame, view, data, now, focused),
         Page::Thread(page) => page.draw(frame, view, data, now, focused),
     }
-    model.bar.draw(frame, bar);
+    model.bar.draw(frame, bar, &model.completions());
     frame.render_widget(Paragraph::new(footer_line(model, now)), footer);
     if model.help {
         draw_help(frame);
@@ -96,6 +96,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
         };
         return Line::styled(format!(" {}", notice.text), style);
     }
+    if model.bar.focused && !model.completions().is_empty() {
+        return Line::styled(" ↑↓ select · Tab/Enter complete · Esc close the list", dim());
+    }
     if model.bar.focused {
         return Line::styled(" Enter send · Alt-Enter new line · Ctrl-E editor · Ctrl-K commands · Esc leave", dim());
     }
@@ -120,6 +123,7 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl-K @ #", "the command bar: @ant asks, #channel posts, else reply"),
     ("/", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
+    ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
     ("R", "read everything again"),
     ("?", "this help"),
     ("q Ctrl-C", "quit"),
@@ -198,6 +202,9 @@ mod tests {
         let shown = screen(&m, at(0));
         assert!(shown.contains("Ctrl-K commands · @ ant · # channel"), "{shown}");
         m.key(Key::Char('@'), at(0));
+        let shown = screen(&m, at(0));
+        assert!(shown.contains("@bob") && shown.contains("human"), "{shown}");
+        assert!(shown.contains("↑↓ select · Tab/Enter complete · Esc close the list"), "{shown}");
         for c in "dev-a".chars() {
             m.key(Key::Char(c), at(0));
         }

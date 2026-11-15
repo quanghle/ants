@@ -16,7 +16,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::exec::{Job, Outcome};
 use super::frame;
 use super::model::{Action, Focus, Key, Model, Page};
-use super::{nav, thread};
+use super::{complete, nav, thread};
 use crate::thread_meta::Marking;
 use crate::{live, quiet, tools};
 
@@ -243,6 +243,8 @@ pub struct Bar {
     pub status: Option<Status>,
     /// Whether the list of commands shows above the bar.
     pub list: bool,
+    /// The completion selected in the list of those of the word at the cursor.
+    pub pick: complete::Pick,
 }
 
 impl Bar {
@@ -263,6 +265,29 @@ impl Bar {
     pub fn insert(&mut self, c: char) {
         self.chars.insert(self.cursor, c);
         self.cursor += 1;
+    }
+
+    /// Where the word at the cursor starts, and its text up to the cursor.
+    pub fn word(&self) -> (usize, String) {
+        let start = self.chars[..self.cursor].iter().rposition(|c| c.is_whitespace()).map_or(0, |at| at + 1);
+        (start, self.chars[start..self.cursor].iter().collect())
+    }
+
+    /// Put `word` and a space in place of the word at the cursor, the cursor after them.
+    pub fn complete(&mut self, word: &str) {
+        let (start, _) = self.word();
+        let end = self.chars[self.cursor..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(self.chars.len(), |at| self.cursor + at);
+        let spaced = self.chars.get(end).is_some_and(|c| *c == ' ');
+        let mut put: Vec<char> = word.chars().collect();
+        if !spaced {
+            put.push(' ');
+        }
+        self.cursor = start + put.len() + usize::from(spaced);
+        self.chars.splice(start..end, put);
+        self.pick = complete::Pick::default();
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, tone: Tone) {
@@ -350,8 +375,9 @@ impl Bar {
         u16::try_from(lines.len().min(MAX_LINES)).unwrap_or(1) + 2
     }
 
-    /// Draw the bar in `area`, and the list of commands above it when shown.
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    /// Draw the bar in `area`, and above it the `completions` of the word at the cursor, else the list of commands
+    /// when shown.
+    pub fn draw(&self, frame: &mut Frame, area: Rect, completions: &[complete::Candidate]) {
         let width = usize::from(area.width.saturating_sub(2));
         let (lines, (row, column)) = self.lines(width);
         let top = (row + 1).saturating_sub(MAX_LINES);
@@ -380,7 +406,9 @@ impl Bar {
             let y = inner.y.saturating_add(u16::try_from(row - top).unwrap_or(u16::MAX));
             frame.set_cursor_position(Position { x: x.min(inner.right().saturating_sub(1)), y });
         }
-        if self.list {
+        if !completions.is_empty() {
+            complete::draw(frame, area, completions, self.pick.selected);
+        } else if self.list {
             draw_list(frame, area);
         }
     }
@@ -417,7 +445,15 @@ impl Model {
             self.bar.focused = true;
             return Some(None);
         }
-        Some(match self.bar.key(key) {
+        if self.complete_key(key) {
+            return Some(None);
+        }
+        let before = self.bar.text();
+        let edited = self.bar.key(key);
+        if self.bar.text() != before {
+            self.bar.pick = complete::Pick::default();
+        }
+        Some(match edited {
             Edited::Done => None,
             Edited::Submit(text) => self.submit(text),
             Edited::Editor(text) => Some(Action::Edit(text)),

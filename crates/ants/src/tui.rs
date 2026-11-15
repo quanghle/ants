@@ -7,6 +7,7 @@
 
 mod channel;
 mod command;
+mod complete;
 mod exec;
 mod frame;
 mod home;
