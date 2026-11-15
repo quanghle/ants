@@ -1,26 +1,32 @@
 //! Messages between two humans sealed so only their devices read them ([`Sealed`]): `ants ask @HUMAN` seals one for
 //! every device of both humans whose encryption key the directory holds verified ([`Sealer`]), and a human's CLI opens
 //! one through the entry of its own device, checked against the verified key of the sending device ([`Keyring`]). The
-//! title of a thread between them is sealed the same way ([`SealedTitle`]).
+//! title of a thread between them is sealed the same way ([`SealedTitle`]), and the bytes of the files attached under
+//! the message's content key ([`SealedAttachment`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use ants_daemon::creds;
 use ants_daemon::keystore::{self, Store};
+use std::ops::ControlFlow;
+
+use ants_daemon::reading::{self, Reading};
+use ants_daemon::{creds, files};
 use ants_proto::{
-    DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, SealedTitle,
-    ThreadTitle, UserId,
+    Attachment, AttachmentHandle, DEVICES_BUCKET, DeviceId, DeviceKey, Envelope, MAX_ATTACHMENT_SIZE, SEALED_VERSION,
+    Sealed, SealedAttachment, SealedBody, SealedKey, SealedTitle, ThreadTitle, UserId,
 };
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_nats::jetstream;
+use async_nats::jetstream::consumer::DeliverPolicy;
 use crypto_secretbox::aead::{Aead as _, AeadCore as _, KeyInit as _, OsRng};
-use crypto_secretbox::{Nonce, XSalsa20Poly1305};
+use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 use data_encoding::BASE64;
 use nkeys::XKey;
 use serde::Serialize;
 
+use crate::attachments::{self, File};
 use crate::devices::{self, Devices, Directory, Lookup, VerifiedDevice};
 
 /// What `ants ask` may do instead of sealing.
@@ -87,13 +93,26 @@ pub fn size_note(sealed: &Sealed) -> String {
 }
 
 /// Seal the text, suggested title and attachments of `envelope` for `recipients`, each a device and its key, from the
-/// sending device `device` whose key is `xkey`, leaving its text empty, and its title and attachments none.
+/// sending device `device` whose key is `xkey`, leaving its text empty, and its title and attachments none. `files`,
+/// those the envelope carries, are sealed under the message's content key ([`seal_file`]), each becoming the file to
+/// store, while their references go into the sealed body.
 pub fn seal(
     envelope: &mut Envelope,
+    files: &mut [File],
     device: DeviceId,
     xkey: &XKey,
     recipients: &[(DeviceId, &DeviceKey)],
 ) -> Result<()> {
+    let key = XSalsa20Poly1305::generate_key(&mut OsRng);
+    let mut attachments = std::mem::take(&mut envelope.attachments);
+    for file in files.iter_mut() {
+        let (reference, stored) = seal_file(&key, file)?;
+        match attachments.iter_mut().find(|a| a.id == reference.id) {
+            Some(attachment) => *attachment = reference,
+            None => attachments.push(reference),
+        }
+        *file = stored;
+    }
     let body = SealedBody {
         from: envelope.from.clone(),
         to: envelope.to.clone(),
@@ -101,23 +120,73 @@ pub fn seal(
         id: envelope.id,
         text: std::mem::take(&mut envelope.text),
         title: envelope.title.take(),
-        attachments: std::mem::take(&mut envelope.attachments),
+        attachments,
     };
-    envelope.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, device, xkey, recipients)?));
+    envelope.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, &key, device, xkey, recipients)?));
     Ok(())
 }
 
-/// Seal `plain` for `recipients` from the sending device `device` whose key is `xkey`.
-fn seal_plain(plain: &[u8], device: DeviceId, xkey: &XKey, recipients: &[(DeviceId, &DeviceKey)]) -> Result<Sealed> {
-    let key = XSalsa20Poly1305::generate_key(&mut OsRng);
+/// Seal the bytes of `file` under `key`, the content key of the message carrying it, with a nonce of their own: the
+/// reference the message's sealed body carries ([`SealedAttachment`]), and the file to store, named
+/// [`SealedAttachment::STORED_NAME`] of an unknown type, both with the size and SHA-256 of the ciphertext.
+fn seal_file(key: &Key, file: &File) -> Result<(Attachment, File)> {
+    let name = &file.attachment.name;
     let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext = XSalsa20Poly1305::new(&key).encrypt(&nonce, plain).map_err(|_| anyhow!("sealing"))?;
+    let bytes = XSalsa20Poly1305::new(key)
+        .encrypt(&nonce, file.bytes.as_slice())
+        .map_err(|_| anyhow!("sealing attachment {name}"))?;
+    ensure!(
+        bytes.len() as u64 <= MAX_ATTACHMENT_SIZE,
+        "{name} is {}: sealed, an attachment is at most {} less {} bytes; {PLAINTEXT}",
+        attachments::size(file.bytes.len() as u64),
+        attachments::size(MAX_ATTACHMENT_SIZE),
+        SealedAttachment::OVERHEAD
+    );
+    let stored = Attachment {
+        id: file.attachment.id,
+        ..files::reference(SealedAttachment::STORED_NAME, Attachment::UNKNOWN_MIME, &bytes)?
+    };
+    let reference = Attachment {
+        size: stored.size,
+        sha256: stored.sha256.clone(),
+        sealed: Some(SealedAttachment { nonce: BASE64.encode(&nonce) }),
+        ..file.attachment.clone()
+    };
+    Ok((reference, File { attachment: stored, bytes }))
+}
+
+/// The bytes of the attachment `reference` names, sealed under `key`, the content key of the message carrying it, from
+/// `stored`, those its store holds, which must match the reference's size and SHA-256.
+pub fn open_attachment(key: &Key, reference: &Attachment, stored: &[u8]) -> Result<Vec<u8>> {
+    let name = &reference.name;
+    let sealing = reference.sealed.as_ref().with_context(|| format!("attachment {name} is not sealed"))?;
+    ensure!(
+        stored.len() as u64 == reference.size && files::sha256(stored) == reference.sha256,
+        "attachment {name} does not match its reference: it changed or is incomplete"
+    );
+    let nonce = BASE64.decode(sealing.nonce.as_bytes()).ok().filter(|n| n.len() == NONCE_LEN);
+    let nonce = nonce.with_context(|| format!("attachment {name} has no valid nonce: forged"))?;
+    XSalsa20Poly1305::new(key)
+        .decrypt(Nonce::from_slice(&nonce), stored)
+        .map_err(|_| anyhow!("attachment {name} does not open: forged"))
+}
+
+/// Seal `plain` under `key` for `recipients` from the sending device `device` whose key is `xkey`.
+fn seal_plain(
+    plain: &[u8],
+    key: &Key,
+    device: DeviceId,
+    xkey: &XKey,
+    recipients: &[(DeviceId, &DeviceKey)],
+) -> Result<Sealed> {
+    let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = XSalsa20Poly1305::new(key).encrypt(&nonce, plain).map_err(|_| anyhow!("sealing"))?;
     let keys = recipients
         .iter()
         .map(|(to, public)| {
             let recipient = XKey::from_public_key(public.as_str())
                 .map_err(|e| anyhow!("the encryption key {public} of device {to}: {e}"))?;
-            let sealed = xkey.seal(&key, &recipient).map_err(|e| anyhow!("sealing the key for device {to}: {e}"))?;
+            let sealed = xkey.seal(key, &recipient).map_err(|e| anyhow!("sealing the key for device {to}: {e}"))?;
             Ok(SealedKey { device: *to, key: BASE64.encode(&sealed) })
         })
         .collect::<Result<_>>()?;
@@ -137,29 +206,35 @@ pub fn seal_title(
         by: title.by.clone(),
         title: std::mem::take(&mut title.title),
     };
-    title.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, device, xkey, recipients)?));
+    let key = XSalsa20Poly1305::generate_key(&mut OsRng);
+    title.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, &key, device, xkey, recipients)?));
     Ok(())
 }
 
 /// Open the sealed part of `envelope` as device `device` whose key is `xkey`, with `sender`, the verified key of the
-/// sending device it names, if any.
-pub fn open(envelope: &Envelope, device: &DeviceId, xkey: &XKey, sender: Option<&DeviceKey>) -> Opening {
+/// sending device it names, if any: its body, and its content key, which opens its attachments ([`open_attachment`]).
+pub fn open_keyed(
+    envelope: &Envelope,
+    device: &DeviceId,
+    xkey: &XKey,
+    sender: Option<&DeviceKey>,
+) -> Opening<(Key, SealedBody)> {
     let Some(sealed) = &envelope.sealed else { return Opening::Unreadable };
-    open_plain(sealed, &envelope.from, device, xkey, sender).then(|plain| {
+    open_plain(sealed, &envelope.from, device, xkey, sender).then(|(key, plain)| {
         let body: SealedBody = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
         if (&body.from, &body.to, &body.thread_id, body.id)
             != (&envelope.from, &envelope.to, &envelope.thread_id, envelope.id)
         {
             return Err("its body names another message".to_owned());
         }
-        Ok(body)
+        Ok((key, body))
     })
 }
 
-/// Open the sealed part of `title` as [`open`] does a message's, giving its title.
+/// Open the sealed part of `title` as [`open_keyed`] does a message's, giving its title.
 pub fn open_title(title: &ThreadTitle, device: &DeviceId, xkey: &XKey, sender: Option<&DeviceKey>) -> Opening<String> {
     let Some(sealed) = &title.sealed else { return Opening::Unreadable };
-    open_plain(sealed, &title.by, device, xkey, sender).then(|plain| {
+    open_plain(sealed, &title.by, device, xkey, sender).then(|(_, plain)| {
         let body: SealedTitle = serde_json::from_slice(&plain).map_err(|_| "its body does not parse".to_owned())?;
         if (&body.thread_id, &body.by) != (&title.thread_id, &title.by) {
             return Err("its body names another title".to_owned());
@@ -168,14 +243,14 @@ pub fn open_title(title: &ThreadTitle, device: &DeviceId, xkey: &XKey, sender: O
     })
 }
 
-/// The plaintext of `sealed`, sent by `from`, as device `device` opens it.
+/// The content key and plaintext of `sealed`, sent by `from`, as device `device` opens it.
 fn open_plain(
     sealed: &Sealed,
     from: &UserId,
     device: &DeviceId,
     xkey: &XKey,
     sender: Option<&DeviceKey>,
-) -> Opening<Vec<u8>> {
+) -> Opening<(Key, Vec<u8>)> {
     if sealed.v != SEALED_VERSION {
         return Opening::Unreadable;
     }
@@ -189,7 +264,7 @@ fn open_body(
     key: &str,
     xkey: &XKey,
     sender: Option<&DeviceKey>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Key, Vec<u8>), String> {
     let Some(sender) = sender else {
         return Err(format!("the sending device {} of {from} has no verified encryption key", sealed.device));
     };
@@ -204,8 +279,11 @@ fn open_body(
         return Err("its body does not open".to_owned());
     }
     let (nonce, ciphertext) = body.split_at(NONCE_LEN);
-    let cipher = XSalsa20Poly1305::new_from_slice(&key).map_err(|_| "its key does not open".to_owned())?;
-    cipher.decrypt(Nonce::from_slice(nonce), ciphertext).map_err(|_| "its body does not open".to_owned())
+    let key = *Key::from_slice(&key);
+    let plain = XSalsa20Poly1305::new(&key)
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|_| "its body does not open".to_owned())?;
+    Ok((key, plain))
 }
 
 /// What a human's device opens sealed messages and titles with: its own key, and the verified keys of the sending
@@ -353,9 +431,14 @@ impl Keyring {
 
     /// Open the sealed part of `envelope`, if any.
     pub fn open(&self, envelope: &Envelope) -> Option<Opening> {
+        Some(self.open_keyed(envelope)?.then(|(_, body)| Ok(body)))
+    }
+
+    /// [`Keyring::open`], giving the message's content key too ([`open_keyed`]).
+    pub fn open_keyed(&self, envelope: &Envelope) -> Option<Opening<(Key, SealedBody)>> {
         let sealed = envelope.sealed.as_ref()?;
         let Some((xkey, sender)) = self.keys_for(&envelope.from, sealed) else { return Some(Opening::Unreadable) };
-        let opening = open(envelope, &self.device, xkey, sender.as_ref());
+        let opening = open_keyed(envelope, &self.device, xkey, sender.as_ref());
         if let Opening::Forged(why) = &opening {
             tracing::warn!(message = %envelope.id, from = %envelope.from, "a forged sealed message: {why}");
         }
@@ -421,6 +504,49 @@ pub fn read(mut envelope: Envelope, keyring: Option<&Keyring>) -> (Envelope, Opt
         _ => envelope.text = state.placeholder().to_owned(),
     }
     (envelope, Some(state))
+}
+
+/// What reading back the messages that may carry a sealed attachment finds ([`carrier`]).
+pub enum Carrier {
+    /// The message carrying it opened: its content key and the attachment's reference.
+    Opened(Key, Attachment),
+    /// No message opened carries it, but a sealed one that may does not open on this device: how the last such does not.
+    Unopened(State),
+    /// No sealed message carries it.
+    None,
+}
+
+/// Look for the sealed message carrying the attachment under `handle` among those stored on the subject of its message
+/// from the time in its id on, less the clocks' skew, as its bytes are stored before the message: opened with
+/// `keyring`, every sealed message unopened without one.
+pub async fn carrier(js: &jetstream::Context, keyring: Option<&Keyring>, handle: &AttachmentHandle) -> Result<Carrier> {
+    let made = handle.id.get_timestamp().map(|t| {
+        let (secs, nanos) = t.to_unix();
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, nanos)
+    });
+    let start = made
+        .and_then(|t| t.checked_sub(ants_daemon::channel::CLOCK_SLACK))
+        .map_or(DeliverPolicy::All, |t| DeliverPolicy::ByStartTime { start_time: t.into() });
+    let mut found = Carrier::None;
+    reading::read_back(js, "", Reading::Gets, &handle.message_subject(), start, |_, _, subject, payload| {
+        let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) else { return ControlFlow::Continue(()) };
+        if envelope.sealed.is_none() || envelope.check_subject(subject).is_err() {
+            return ControlFlow::Continue(());
+        }
+        match keyring.and_then(|k| k.open_keyed(&envelope)).unwrap_or(Opening::Unreadable) {
+            Opening::Opened((key, body)) => {
+                if let Some(reference) = body.attachments.into_iter().find(|a| a.id == handle.id) {
+                    found = Carrier::Opened(key, reference);
+                    return ControlFlow::Break(());
+                }
+            }
+            unopened => found = Carrier::Unopened(unopened.state()),
+        }
+        ControlFlow::Continue(())
+    })
+    .await
+    .with_context(|| format!("reading the messages that may carry attachment {handle}"))?;
+    Ok(found)
 }
 
 /// What `ants ask` seals a message to another human with, and `ants thread title` the title of a thread between them:
@@ -489,9 +615,9 @@ impl Sealer {
         self.recipients.iter().map(|d| (d.device, &d.key)).collect()
     }
 
-    /// Seal `envelope` ([`seal`]).
-    pub fn seal(&self, envelope: &mut Envelope) -> Result<()> {
-        seal(envelope, self.device, &self.xkey, &self.recipients())
+    /// Seal `envelope` and `files`, those it carries ([`seal`]).
+    pub fn seal(&self, envelope: &mut Envelope, files: &mut [File]) -> Result<()> {
+        seal(envelope, files, self.device, &self.xkey, &self.recipients())
     }
 
     /// Seal `title` ([`seal_title`]).
@@ -546,7 +672,7 @@ mod tests {
         let mut e = e.clone();
         let keys: Vec<_> = to.iter().map(|d| d.key()).collect();
         let recipients: Vec<_> = to.iter().zip(&keys).map(|(d, k)| (d.id, k)).collect();
-        seal(&mut e, from.id, &from.xkey, &recipients).unwrap();
+        seal(&mut e, &mut [], from.id, &from.xkey, &recipients).unwrap();
         e
     }
 
@@ -662,7 +788,7 @@ mod tests {
 
         let sealer = Sealer::new(&nats[0], &js[0], &bob, PLAINTEXT).await.unwrap();
         let mut e = Envelope::new(alice.clone(), bob.clone(), "the launch slips a week".to_owned());
-        sealer.seal(&mut e).unwrap();
+        sealer.seal(&mut e, &mut []).unwrap();
         let sealing = e.sealed.as_ref().unwrap();
         let mut sealed_for: Vec<_> = sealing.keys.iter().map(|k| k.device).collect();
         sealed_for.sort();
@@ -697,6 +823,110 @@ mod tests {
         };
         let refused = refused.to_string();
         assert!(refused.contains("dave has no device") && refused.contains("--plaintext"), "{refused}");
+    }
+
+    #[test]
+    fn attachments_are_sealed_under_the_content_key_and_open_only_with_it() {
+        let (alice, bob) = (Device::new("alice"), Device::new("bob"));
+        let plain = b"quarterly numbers, not for the hub".to_vec();
+        let file =
+            File { attachment: files::reference("numbers.csv", "text/csv", &plain).unwrap(), bytes: plain.clone() };
+        let mut e = message(&alice, &bob);
+        e.attachments = vec![file.attachment.clone()];
+        let mut sealed_files = vec![file.clone()];
+        let keys = [alice.key(), bob.key()];
+        seal(&mut e, &mut sealed_files, alice.id, &alice.xkey, &[(alice.id, &keys[0]), (bob.id, &keys[1])]).unwrap();
+
+        let [stored] = sealed_files.as_slice() else { panic!("not one file: {sealed_files:?}") };
+        let a = &stored.attachment;
+        assert_eq!((a.id, a.name.as_str(), a.mime.as_str()), (file.attachment.id, "sealed", Attachment::UNKNOWN_MIME));
+        assert_eq!((a.size, a.sha256.as_str()), (plain.len() as u64 + 16, files::sha256(&stored.bytes).as_str()));
+        assert!(a.sealed.is_none(), "the store holds no nonce");
+        assert!(!stored.bytes.windows(plain.len()).any(|w| w == plain.as_slice()));
+        assert!(e.attachments.is_empty());
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("numbers") && !json.contains(&file.attachment.sha256), "{json}");
+
+        let reader = bob.keyring(&[&alice, &bob]);
+        let Some(Opening::Opened((key, body))) = reader.open_keyed(&e) else { panic!("does not open") };
+        let [reference] = body.attachments.as_slice() else { panic!("not one reference: {body:?}") };
+        assert_eq!((reference.id, reference.name.as_str(), reference.mime.as_str()), (a.id, "numbers.csv", "text/csv"));
+        assert_eq!((reference.size, &reference.sha256), (a.size, &a.sha256), "describing the bytes as stored");
+        assert!(reference.sealed.is_some());
+        assert_eq!(open_attachment(&key, reference, &stored.bytes).unwrap(), plain);
+        assert_eq!(read(e, Some(&reader)).0.attachments, body.attachments);
+
+        let mut tampered = stored.bytes.clone();
+        tampered[0] ^= 1;
+        let changed = open_attachment(&key, reference, &tampered).unwrap_err().to_string();
+        assert!(changed.contains("does not match its reference"), "{changed}");
+        let lying = Attachment { sha256: files::sha256(&tampered), ..reference.clone() };
+        assert!(open_attachment(&key, &lying, &tampered).unwrap_err().to_string().contains("forged"));
+        let other = XSalsa20Poly1305::generate_key(&mut OsRng);
+        assert!(open_attachment(&other, reference, &stored.bytes).unwrap_err().to_string().contains("forged"));
+    }
+
+    #[test]
+    fn a_file_too_big_once_sealed_is_refused() {
+        let (alice, bob) = (Device::new("alice"), Device::new("bob"));
+        let bytes = vec![0; usize::try_from(MAX_ATTACHMENT_SIZE).unwrap()];
+        let file = File { attachment: files::reference("big.bin", Attachment::UNKNOWN_MIME, &bytes).unwrap(), bytes };
+        let mut e = message(&alice, &bob);
+        let key = bob.key();
+        let refused = seal(&mut e, &mut [file], alice.id, &alice.xkey, &[(bob.id, &key)]).unwrap_err().to_string();
+        assert!(refused.contains("big.bin is 8.0 MiB: sealed, an attachment is at most 8.0 MiB less 16"), "{refused}");
+    }
+
+    /// `ants ask --attach` from Alice to Bob seals the file with the message: the store holds only its ciphertext,
+    /// named `sealed`, Bob's inbox lists it by its name, and `ants attachment get` saves it as attached on both
+    /// humans' devices, while a third human's device writes nothing.
+    #[tokio::test]
+    async fn a_file_attached_to_a_sealed_message_is_saved_only_on_their_devices() {
+        use ants_proto::Role;
+
+        use crate::auth::tests::Server;
+
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, carol): (UserId, UserId, UserId) =
+            ("alice".parse().unwrap(), "bob".parse().unwrap(), "carol".parse().unwrap());
+        let creds: Vec<_> = [&alice, &bob, &carol].iter().map(|h| server.creds_as(h, Role::Human)).collect();
+        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let mut js = Vec::new();
+        for n in &nats {
+            js.push(n.connect("test").await.unwrap().1);
+        }
+        js[0].create_stream(ants_daemon::hub::files_config()).await.unwrap();
+        let dir = server.dir().join("sealed-files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = b"# Plan\nship on Friday\n".to_vec();
+        std::fs::write(dir.join("plan.md"), &plain).unwrap();
+
+        let attach = attachments::Attach { paths: vec![dir.join("plan.md")] };
+        let words = vec!["@bob".to_owned(), "the plan".to_owned()];
+        let (sending, replies, input) = (Default::default(), Default::default(), Default::default());
+        Box::pin(crate::cmd::send::ask(&nats[0], None, sending, &replies, &input, &attach, words)).await.unwrap();
+
+        let unread = crate::inbox::Inbox::open(&js[1], &bob).await.unwrap().unread(&Default::default()).await.unwrap();
+        let [got] = unread.as_slice() else { panic!("not one message: {unread:?}") };
+        assert!(got.attachments.is_empty() && got.sealed.is_some());
+        let keyring = Keyring::load(&nats[1], &js[1]).await.unwrap();
+        let (opened, _) = read(got.clone(), Some(&keyring));
+        let [listed] = attachments::listed_on(&opened.subject(), &opened.attachments).try_into().unwrap();
+        let handle = listed.handle.clone();
+        assert_eq!(listed.line(), format!("📎 plan.md ({} B) {handle}", plain.len()));
+        let (stored, bytes) = files::get(&js[2], &handle, None).await.unwrap();
+        assert_eq!((stored.name.as_str(), stored.mime.as_str()), ("sealed", Attachment::UNKNOWN_MIME));
+        assert_ne!(bytes, plain);
+
+        let out = dir.join("bob");
+        std::fs::create_dir(&out).unwrap();
+        attachments::get(&nats[1], &handle, Some(&out)).await.unwrap();
+        assert_eq!(std::fs::read(out.join("plan.md")).unwrap(), plain);
+        attachments::get(&nats[0], &handle, Some(&dir.join("alice.md"))).await.unwrap();
+        assert_eq!(std::fs::read(dir.join("alice.md")).unwrap(), plain);
+        let refused = attachments::get(&nats[2], &handle, Some(&dir.join("carol.md"))).await.unwrap_err().to_string();
+        assert!(refused.contains("is sealed with a message this device does not open ([sealed])"), "{refused}");
+        assert!(!dir.join("carol.md").exists());
     }
 
     #[test]

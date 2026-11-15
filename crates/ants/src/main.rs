@@ -124,7 +124,7 @@ async fn run() -> Result<()> {
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => cmd::thread::run(&nats()?, command).await,
         Command::Digest { since } => summary::digest(&nats()?, since).await,
-        Command::Attachment(command) => cmd::attachment::run(&nats()?, command).await,
+        Command::Attachment(command) => Box::pin(cmd::attachment::run(&nats()?, command)).await,
         Command::Notify(NotifyCommand::Snooze { duration }) => quiet::snooze(&nats()?, duration).await,
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,

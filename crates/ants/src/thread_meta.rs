@@ -853,7 +853,7 @@ mod tests {
         }
         let _ = js[0].create_stream(ants_daemon::hub::threads_config()).await;
         let mut ask = Envelope::new(humans[0].clone(), humans[1].clone(), "lunch?");
-        Sealer::new(&nats[0], &js[0], &humans[1], "").await.unwrap().seal(&mut ask).unwrap();
+        Sealer::new(&nats[0], &js[0], &humans[1], "").await.unwrap().seal(&mut ask, &mut []).unwrap();
         ants_daemon::bus::publish(&js[0], &ask).await.unwrap();
         let thread = &ask.thread_id;
         let dev_a: UserId = "dev-a".parse().unwrap();

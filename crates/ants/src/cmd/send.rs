@@ -41,7 +41,7 @@ pub(crate) async fn ask(
     }
     // Refuse a message with nothing to send, or a file that cannot be attached, before connecting.
     let (to, text) = recipient(words, input)?;
-    let files = attach.read()?;
+    let mut files = attach.read()?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let mut envelope = ask_envelope(&nats.me, thread, to, text);
@@ -49,8 +49,8 @@ pub(crate) async fn ask(
     let mut envelope = if steer { envelope.steering() } else { envelope };
     let to_human = nats.me.role.is_human() && humans::load(&js, &nats.me).await.contains(&envelope.to);
     let text = envelope.text.clone();
-    let sealer = sealing(nats, &js, &mut envelope, to_human && !plaintext, !files.is_empty()).await?;
-    let envelope = envelope;
+    let sealer = sealing(nats, &js, &mut envelope, &mut files, to_human && !plaintext).await?;
+    let (envelope, files) = (envelope, files);
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
@@ -137,23 +137,20 @@ pub(crate) async fn ask(
     Box::pin(with_reactions(shown_replies, &shown, changes)).await
 }
 
-/// Seal `envelope` to another human if `seal`, returning what sealed it, which opens the replies too; refused for a
-/// message with files attached.
+/// Seal `envelope` to another human if `seal`, with `files`, those it carries, which become what to store, returning
+/// what sealed it, which opens the replies too.
 async fn sealing(
     nats: &Nats<'_>,
     js: &jetstream::Context,
     envelope: &mut Envelope,
+    files: &mut [attachments::File],
     seal: bool,
-    attached: bool,
 ) -> Result<Option<sealed::Sealer>> {
     if !seal {
         return Ok(None);
     }
-    if attached {
-        bail!("files are not attached to a sealed message yet: `--plaintext` sends the message in the clear");
-    }
     let sealer = sealed::Sealer::new(nats, js, &envelope.to, sealed::PLAINTEXT).await?;
-    sealer.seal(envelope)?;
+    sealer.seal(envelope, files)?;
     Ok(Some(sealer))
 }
 
