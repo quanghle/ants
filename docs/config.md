@@ -20,6 +20,7 @@ auto_archive = "14d"                       # hide threads idle this long from th
 summary_ant = "messenger"                  # ant asked for TL;DRs and digests (default: the messenger; see Catch-up summaries)
 summaries = "on-demand"                    # default; "ahead" also allows asking for TL;DRs ahead of time (needs the next key)
 summary_daily_tokens = 50000               # most tokens summaries asked ahead of time spend per human and UTC day (default 0)
+inline_images = true                       # draw image attachments in ants chat's thread view (default false; README.md)
 
 [storage]                                  # JetStream capacity warnings (see README.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)

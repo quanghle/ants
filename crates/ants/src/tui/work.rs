@@ -185,7 +185,7 @@ impl Facts {
                 kind: entry.kind,
                 from: from.clone(),
                 channel: entry.channel.clone(),
-                text: entry.text.clone(),
+                text: super::dm::unopened(entry.sealed).map_or_else(|| entry.text.clone(), str::to_owned),
             });
         }
     }

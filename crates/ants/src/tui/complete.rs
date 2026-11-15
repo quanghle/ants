@@ -1,5 +1,5 @@
 //! Completion in the command bar: `@` lists users, `#` channels and `/` at the start the slash commands, narrowed by
-//! what follows them up to the cursor.
+//! what follows them up to the cursor; after `/attach`, the paths of the directory typed.
 
 use std::collections::BTreeSet;
 
@@ -80,6 +80,9 @@ impl Model {
             return Vec::new();
         }
         let (start, typed) = self.bar.word();
+        if self.bar.text().chars().take(start).eq("/attach ".chars()) {
+            return super::attach::paths(&typed);
+        }
         let Some(word) = Word::of(&typed, start == 0) else {
             return Vec::new();
         };

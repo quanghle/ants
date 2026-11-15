@@ -8,6 +8,7 @@
 
 mod acts;
 mod approvals;
+mod attach;
 mod cards;
 mod catchup;
 mod channel;
@@ -18,6 +19,7 @@ mod dm;
 mod exec;
 mod frame;
 mod home;
+mod images;
 mod interrupt;
 mod markdown;
 mod model;
@@ -53,7 +55,7 @@ use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
 use self::search::Searches;
 use crate::live::{self, Feed, Screen};
-use crate::{compose, presence, progress, thread_meta};
+use crate::{compose, presence, progress, sealed, thread_meta};
 
 pub use self::status::run as status;
 
@@ -146,16 +148,24 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     };
     nats.prepare(&js).await;
     let meta = thread_meta::open(nats, &js).await.map_err(|e| format!("{e:#}"));
-    let ctx =
-        exec::Ctx { client: client.clone(), js: js.clone(), me: nats.me.clone(), domain: nats.domain.cloned(), meta };
+    let sealing = sealed::Sealing::of(nats);
     let summaries = catchup::Io::open(nats, client.clone(), js.clone()).await;
-    let (feed, state) = live::start(nats, client, js.clone(), since).await?;
+    let (feed, state) = live::start(nats, client.clone(), js.clone(), since).await?;
+    let ctx = exec::Ctx {
+        client,
+        js: js.clone(),
+        me: nats.me.clone(),
+        domain: nats.domain.cloned(),
+        meta,
+        sealing: sealing.clone(),
+        keyring: feed.keyring(),
+    };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
-    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
-    let searches = Searches::new(js.clone());
+    let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), sealing, may_read);
+    let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
     let mut model = Model::new(state, host(nats.url).to_owned());
@@ -163,11 +173,15 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let chat_state = catchup::state_path();
     model.catchup.since = chat_state.as_deref().ok().and_then(catchup::ended);
     model.catchup.ahead = summaries.ahead();
+    let inline_images = crate::defaults::inline_images()?;
+    model.data.images = images::Images::new(inline_images);
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
+        let images = inline_images.then(|| images::Io::new(images::picker(), js.clone(), feed.keyring()));
         let exec = Exec::new(ctx);
-        let chat = Chat { feed, reads, acts, people, searches, trees, cards, summaries, exec, model, edit: None };
+        let chat =
+            Chat { feed, reads, acts, people, searches, trees, cards, summaries, images, exec, model, edit: None };
         let ran = Box::pin(chat.run(&mut screen.terminal)).await;
         if let Err(e) = chat_state.and_then(|path| catchup::end(&path, Utc::now())) {
             tracing::debug!("not keeping when ants chat ended: {e:#}");
@@ -221,6 +235,8 @@ struct Chat {
     trees: tree::Io,
     cards: cards::Io,
     summaries: catchup::Io,
+    /// The images drawn, with `[cli]` `inline_images` on.
+    images: Option<images::Io>,
     model: Model,
     /// The command bar's text to edit in the editor.
     edit: Option<String>,
@@ -305,6 +321,11 @@ impl Chat {
                     self.model.tree_event(event, Utc::now());
                     Vec::new()
                 }
+                (handle, image) = next_image(self.images.as_mut()) => {
+                    dirty = true;
+                    self.model.data.images.insert(handle, image);
+                    Vec::new()
+                }
             };
             for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
@@ -314,9 +335,23 @@ impl Chat {
             if let Some(text) = self.edit.take() {
                 self.model.edited(edit(terminal, text).await);
                 dirty = true;
+                if let Some(images) = &mut self.images {
+                    images.reset();
+                    self.model.data.images.clear();
+                }
             }
-            self.acts.watch(self.model.open().cloned());
-            self.trees.watch(self.model.tree_shown());
+            self.watch();
+        }
+    }
+
+    /// Follow what the views show: the open thread's state, the delegation tree's links and spend, the images.
+    fn watch(&mut self) {
+        self.acts.watch(self.model.open().cloned());
+        self.trees.watch(self.model.tree_shown());
+        if let Some(images) = &mut self.images {
+            let wanted = images::wanted(&self.model);
+            images.want(&wanted);
+            self.model.data.images.retain(&wanted);
         }
     }
 
@@ -389,6 +424,16 @@ impl Chat {
             }
         }
         ControlFlow::Continue(())
+    }
+}
+
+/// The next image encoded, when images are drawn; pending otherwise.
+async fn next_image(
+    images: Option<&mut images::Io>,
+) -> (ants_proto::AttachmentHandle, Option<ratatui_image::protocol::Protocol>) {
+    match images {
+        Some(images) => images.next().await,
+        None => std::future::pending().await,
     }
 }
 

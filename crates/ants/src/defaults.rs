@@ -41,6 +41,11 @@ pub fn summaries() -> Result<config::SummaryConfig> {
     Ok(CliDefaults::load(&path()?)?.summaries)
 }
 
+/// Whether `ants chat` draws image attachments in the terminal: `inline_images` of the config file's `[cli]`.
+pub fn inline_images() -> Result<bool> {
+    Ok(CliDefaults::load(&path()?)?.inline_images)
+}
+
 /// Set the global connection flags that neither the command line nor the environment set from the file at `path`,
 /// if it exists, except for `ants daemon` and `ants add`: their flags describe ants, and they read the file's
 /// top-level keys themselves.

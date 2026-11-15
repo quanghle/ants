@@ -138,13 +138,13 @@ const HELP: &[(&str, &str)] = &[
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
-    ("y", "in a thread: copy the selected message"),
-    ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
+    ("y p m e d", "in a thread: copy, pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
     ("g r f x d z s", "on home: grant, reply, follow up, cancel, done, snooze, digest"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
-    ("t S", "in a thread: its delegation tree, a new TL;DR (S in work too)"),
+    ("i t S", "in a thread: the bar to reply, its delegation tree, a new TL;DR"),
+    ("o ]", "in a thread or channel: open the marked attachment, mark the next"),
     ("s", "in a thread or work: the bar on /steer for the ant at work"),
     ("x Ctrl-X", "in a thread or work: cancel the prompt running there"),
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
@@ -162,7 +162,7 @@ fn draw_help(frame: &mut Frame) {
         })
         .chain([Line::raw(""), Line::styled("any key closes this help", dim())])
         .collect();
-    let area = centered(frame.area(), 84, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
+    let area = centered(frame.area(), 90, u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block(" Keys ".to_owned(), true)), area);
 }
@@ -260,7 +260,7 @@ mod tests {
         assert!(shown.contains("Enter send · Alt-Enter new line"), "{shown}");
         m.key(Key::Ctrl('k'), at(0));
         let shown = screen(&m, at(0));
-        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/quit"), "{shown}");
+        assert!(shown.contains("/approve   [ID] [--always]   ") && shown.contains("/reject"), "{shown}");
     }
 
     #[test]
