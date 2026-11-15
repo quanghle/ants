@@ -208,6 +208,20 @@ enum Served {
     HandedOver,
 }
 
+/// For an assistant's credentials, keeps their record for readers of what it does for its human and lets its tools
+/// act for the human ([`Mcp::with_assisting`]).
+async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context) {
+    let Some(creds) = &config.creds else { return };
+    match crate::behalf::keep_record(js, config.js_domain.as_ref(), &config.ant, creds).await {
+        Ok(Some(human)) => mcp.with_assisting(human),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            error = format!("{e:#}"),
+            "keeping the record of an assistant; nothing it does counts for its human"
+        ),
+    }
+}
+
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
 async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
@@ -251,16 +265,6 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     )
     .await?;
     connect_mcp(&mut mcp, config, &client, &js, &redactor).await?;
-    if let Some(creds) = &config.creds {
-        match crate::behalf::keep_record(&js, config.js_domain.as_ref(), &config.ant, creds).await {
-            Ok(Some(human)) => mcp.with_assisting(human),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(
-                error = format!("{e:#}"),
-                "keeping the record of an assistant; nothing it does counts for its human"
-            ),
-        }
-    }
     let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
     let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
@@ -437,7 +441,7 @@ fn escalator(
     std::sync::Arc::new(escalator)
 }
 
-/// Give the ant's MCP server its live inbox and its ways to the bus.
+/// Give the ant's MCP server its live inbox and its ways to the bus, and an assistant's the human it acts for.
 async fn connect_mcp(
     mcp: &mut Mcp,
     config: &Config,
@@ -459,6 +463,7 @@ async fn connect_mcp(
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
+    assist(mcp, config, js).await;
     Ok(())
 }
 

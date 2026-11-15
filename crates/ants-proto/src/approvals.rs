@@ -233,7 +233,7 @@ mod tests {
         let foreign = Envelope { to: p("dev-a"), ..Envelope::decision(request.thread_id.clone(), p("lead"), foreign) };
         assert_eq!(foreign.chain_decision(&request, &chain), None, "a decision on another ant's request");
         assert_eq!(Envelope::new(p("lead"), p("dev-a"), "hi").chain_decision(&request, &chain), None);
-        let held = Envelope { on_behalf_of: Some(p("alice")), ..msg.clone() };
+        let held = Envelope { on_behalf_of: Some(p("alice")), ..msg };
         assert_eq!(held.chain_decision(&request, &chain), None, "a decision for a human waits for the human");
 
         let always = ApprovalDecision::new(request.id, request.ant.clone(), Verdict::AllowAlways);

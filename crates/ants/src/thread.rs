@@ -269,7 +269,7 @@ impl Entry {
             (Kind::Note, ..) => format!("{from} -> notes"),
             (Kind::Approval, ..) => format!("{from} -> humans"),
             (_, Some(to), _) => format!("{from} -> {to}"),
-            (_, None, _) => from.to_owned(),
+            (_, None, _) => from,
         }
     }
 

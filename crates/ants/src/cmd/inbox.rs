@@ -8,6 +8,22 @@ use futures::StreamExt as _;
 use crate::behalf::Checker;
 use crate::{Listing, Nats, inbox, presence, reacted, sealed, thread, tools};
 
+/// Prints a message of the inbox, opened as `state` says, from `acting` for its human or not.
+fn print(
+    e: &Envelope,
+    state: Option<sealed::State>,
+    acting: ants_proto::Acting,
+    reactions: &[reactions::Reacted],
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&inbox::Shown::new(e, reactions).sealed(state).acting(acting))?);
+    } else {
+        println!("{}", inbox::render(e, &acting, reactions));
+    }
+    Ok(())
+}
+
 pub(crate) async fn show(
     nats: &Nats<'_>,
     mut select: inbox::Select,
@@ -28,14 +44,8 @@ pub(crate) async fn show(
     let shown = reacted::Shown::default();
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
         let (e, state) = sealed::read(e.clone(), keyring.as_ref());
-        let acting = behalf.acting(&e.from, e.on_behalf_of.as_ref());
         shown.add(e.id, &e.from, &e.text);
-        if json {
-            println!("{}", serde_json::to_string(&inbox::Shown::new(&e, reactions).sealed(state).acting(acting))?);
-        } else {
-            println!("{}", inbox::render(&e, &acting, reactions));
-        }
-        Ok(())
+        print(&e, state, behalf.acting(&e.from, e.on_behalf_of.as_ref()), reactions, json)
     };
     // Watched before reading, so no reaction to a message shown is missed.
     let changes = if follow { reacted::changes(nats, &js).await } else { futures::stream::pending().boxed() };
@@ -57,7 +67,7 @@ pub(crate) async fn show(
         // A dead letter stored here tells the human through the inbox, like one the daemon stores.
         let watch = async {
             let dead = async {
-                if let Err(e) = dead::watch(&client, &js, me, |_, _| {}).await {
+                if let Err(e) = Box::pin(dead::watch(&client, &js, me, |_, _| {})).await {
                     tracing::warn!("not watching for messages JetStream stopped delivering: {e:#}");
                 }
             };
@@ -70,8 +80,8 @@ pub(crate) async fn show(
             tokio::join!(dead, unserved);
             std::future::pending::<()>().await;
         };
-        let followed =
-            inbox.follow(select, keyring.as_ref(), Some(&behalf), show, async { _ = tokio::signal::ctrl_c().await });
+        let ctrl_c = async { _ = tokio::signal::ctrl_c().await };
+        let followed = Box::pin(inbox.follow(select, keyring.as_ref(), Some(&behalf), show, ctrl_c));
         // Following one thread shows no escalation on the others, so only following them all counts as reading.
         let followed = async {
             match select.thread {

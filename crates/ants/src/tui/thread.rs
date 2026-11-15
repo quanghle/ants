@@ -690,7 +690,7 @@ fn origin(first: &Entry, data: &Data) -> String {
         (Some(channel), Kind::Post | Kind::Mention) => format!("#{channel} post"),
         _ if first.webhook => format!("webhook {from}"),
         _ if first.from.as_ref().is_none_or(|u| data.is_human(u)) => format!("ask by {from}"),
-        _ => from.to_owned(),
+        _ => from,
     }
 }
 

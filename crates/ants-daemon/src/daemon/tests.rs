@@ -2883,7 +2883,7 @@ async fn a_claim_to_send_for_a_human_without_its_grant_is_forged() {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [pa] = ants(["pa"]);
-    let [mut to_pa] = inboxes(&bus, &[pa.clone()]).await;
+    let [mut to_pa] = inboxes(&bus, std::array::from_ref(&pa)).await;
     let claimed = Envelope::new(pa.clone(), bus.dev.clone(), "for the human").on_behalf(Some(UserId::human()));
     let seq = bus::publish_json(&bus.js, claimed.subject(), &claimed, None).await.unwrap();
 
