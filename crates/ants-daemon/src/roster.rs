@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ANTS_VERSION, Activity, AntModel, HarnessAgent, HarnessFailing, HarnessLimit, MemoryLow, PERMISSIONS_VERSION,
-    ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, ServingFallback, SignInNeeded, UserId,
+    Paused, ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, ServingFallback, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -31,7 +31,7 @@ pub struct Registration {
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
 /// harnesses, the agent the latest harness start named, whether the harness is signed out, held back by a provider
-/// limit or failing to start, the fallback answering meanwhile, and whether memory is low.
+/// limit or failing to start, the fallback answering meanwhile, whether memory is low, and whether the ant is paused.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
@@ -42,9 +42,11 @@ pub struct Workload {
     failing: Mutex<Option<HarnessFailing>>,
     fallback: Mutex<Option<ServingFallback>>,
     memory_low: Mutex<Option<MemoryLow>>,
+    paused: Mutex<Option<Paused>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
     /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, a fallback
-    /// starts or stops answering, or memory turns low or recovers, so the roster shows it before the next beat.
+    /// starts or stops answering, memory turns low or recovers, or the ant is paused or resumed, so the roster shows
+    /// it before the next beat.
     changed: Notify,
 }
 
@@ -136,6 +138,19 @@ impl Workload {
         self.fallback.locked().clone()
     }
 
+    /// Note the ant as paused, or with `None` as resumed.
+    pub fn set_paused(&self, paused: Option<Paused>) {
+        let mut current = self.paused.locked();
+        if *current != paused {
+            *current = paused;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn paused(&self) -> Option<Paused> {
+        self.paused.locked().clone()
+    }
+
     pub fn memory_low(&self) -> Option<MemoryLow> {
         self.memory_low.locked().clone()
     }
@@ -164,6 +179,7 @@ impl Workload {
         entry.failing = self.failing();
         entry.fallback = self.fallback();
         entry.memory_low = self.memory_low();
+        entry.paused = self.paused();
     }
 }
 
@@ -203,6 +219,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         failing: None,
         fallback: None,
         memory_low: None,
+        paused: config.pause.get(),
         model: AntModel::of(
             config.model_settings.model.clone(),
             config.model_settings.reasoning_effort.clone(),
@@ -375,6 +392,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.limited == workload.limited()
                 && entry.failing == workload.failing()
                 && entry.fallback == workload.fallback()
+                && entry.paused == workload.paused()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
@@ -585,12 +603,12 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
     (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
 }
 
-/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
-/// harness is signed in and starting before those signed out or failing to start, then those held back by no provider
-/// limit before limited ones, unless a fallback answers for them, then those answered by their own harness before
-/// those answered by a fallback, then live entries before stale ones, then idle ants before those of an activity unknown
-/// to this daemon (newer daemons) and those working, then the fewest messages in hand, then the first by id. The same roster at the
-/// same time always gives the same answer.
+/// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants not
+/// paused before paused ones, then ants whose harness is signed in and starting before those signed out or failing to
+/// start, then those held back by no provider limit before limited ones, unless a fallback answers for them, then
+/// those answered by their own harness before those answered by a fallback, then live entries before stale ones, then
+/// idle ants before those of an activity unknown to this daemon (newer daemons) and those working, then the fewest
+/// messages in hand, then the first by id. The same roster at the same time always gives the same answer.
 pub fn pick<'a>(
     entries: &'a [RosterEntry],
     capability: &str,
@@ -604,6 +622,7 @@ pub fn pick<'a>(
             Activity::Working => 2,
         };
         (
+            e.paused.is_some(),
             (e.signed_out.is_some() || e.failing.is_some()) && e.fallback.is_none(),
             e.limited.is_some() && e.fallback.is_none(),
             e.fallback.is_some(),
@@ -668,6 +687,7 @@ mod tests {
             fallback: None,
             memory_low: None,
             model: None,
+            paused: None,
         }
     }
 
@@ -803,6 +823,12 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "an ant a fallback answers for before a limited one");
         entries[1].limited = None;
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "its own harness before a fallback");
+        entries[0].fallback = None;
+        entries[0].failing = None;
+        entries[0].paused = Some(ants_proto::Paused { since: now, by: None });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "an ant not paused, even stale, before a paused one");
+        entries[1].signed_out = Some(SignInNeeded { since: now, sign_in: None });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a signed-out ant before a paused one");
     }
 
     #[test]

@@ -109,6 +109,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         fallback: None,
         memory_low: None,
         model: None,
+        paused: None,
     }
 }
 
@@ -695,6 +696,14 @@ fn a_provider_limit_counts_only_while_it_outlasts_the_wait() {
         "{}",
         describe(&[&entry])
     );
+    entry.paused = Some(ants_proto::Paused { since, by: None });
+    let why = why_unserved(&ant, Some(&entry), now, Duration::ZERO).expect("a fallback answers no paused ant");
+    assert_eq!(
+        why,
+        "dev-q is paused since 2026-01-01T00:00:00Z: messages to dev-q wait queued, unanswered until a human resumes it"
+    );
+    let described = describe(&[&entry]);
+    assert!(described.contains(", failing, paused)\n  paused since 2026-01-01T00:00:00Z: dev-q takes"), "{described}");
 }
 
 #[tokio::test]

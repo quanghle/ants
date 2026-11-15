@@ -46,7 +46,7 @@ use crate::status::{self, Status};
 use crate::sync::MutexExt as _;
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
-use crate::{bus, roster, unserved};
+use crate::{bus, pause, roster, unserved};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
 /// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
@@ -142,6 +142,9 @@ pub struct Config {
     pub redact: bool,
     /// What becomes of a thread's worktree branch holding new commits ([`crate::publish`]).
     pub publish: crate::publish::Publish,
+    /// Whether the ant is paused, and since when and by whom; equal to any other, so that pausing or resuming alone
+    /// restarts no harness ([`crate::pause::Pause::replace`]).
+    pub pause: crate::pause::Pause,
 }
 
 /// Serve the ant's inbox until Ctrl-C. Prompts in flight are finished first; a second Ctrl-C stops at once. Until
@@ -223,6 +226,7 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context)
 }
 
 /// Serve the ant's inbox until Ctrl-C or `stop`, or until another daemon takes over its roster entry.
+#[allow(clippy::too_many_lines)]
 async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     let allow = Allowlist::parse(&config.allow)?;
     let Some((client, js)) = connect(config, stop).await? else {
@@ -231,6 +235,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
     };
     let metrics = crate::metrics::ant(&config.ant);
     let workload = std::sync::Arc::new(roster::Workload::default());
+    workload.set_paused(config.pause.get());
     let _connected = metrics.connected(client.clone(), workload.clone());
     let mut entry = roster::entry(config).await;
     let mut claimed = None;
@@ -294,6 +299,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         publisher: publisher.as_ref(),
         redactor: &redactor,
         workload: &workload,
+        pause: &config.pause,
         metrics,
         limits: config.limits,
         ledger: &ledger,
@@ -556,23 +562,51 @@ async fn publisher(
 }
 
 /// The messages to the ant, from its inbox and the posts to its channels, and the channels; the inbox alone when the
-/// channels fail.
+/// channels fail. While the ant is paused ([`Config::pause`]) the consumers are not pulled from ([`pause::pausable`]).
 async fn inbox_messages(
     js: &jetstream::Context,
     stream: &jetstream::stream::Stream<()>,
     config: &Config,
-) -> Result<(impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin, Channels)> {
+) -> Result<(impl Stream<Item = Result<jetstream::Message, anyhow::Error>> + Unpin, Channels)> {
     let in_hand = i64::try_from(config.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
-    let messages = bus::inbox_consumer(stream, &config.ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let (channels, posts) = match channels(js, stream, &config.ant, in_hand).await {
-        Ok((channels, posts)) => (channels, Some(posts)),
+    let channels = match async { Channels::watch(bus::ensure_channels(js).await?).await }.await {
+        Ok(channels) => Some(channels),
         Err(e) => {
             tracing::warn!(error = format!("{e:#}"), "serving the inbox without channels");
-            (Channels::default(), None)
+            None
         }
     };
-    let messages = futures::stream::select(messages, futures::stream::iter(posts).flatten());
-    Ok((messages, channels))
+    let posts = channels.is_some();
+    let paused = config.pause.subscribe();
+    let current = match *paused.borrow() {
+        Some(_) => None,
+        None => Some(open_messages(stream, &config.ant, in_hand, posts).await?),
+    };
+    let (stream, ant) = (stream.clone(), config.ant.clone());
+    let messages = pause::pausable(paused, current, async move || open_messages(&stream, &ant, in_hand, posts).await);
+    Ok((Box::pin(messages), channels.unwrap_or_default()))
+}
+
+/// The ant's inbox consumer, with its channel consumer if `posts`, as one stream.
+async fn open_messages(
+    stream: &jetstream::stream::Stream<()>,
+    ant: &UserId,
+    in_hand: i64,
+    posts: bool,
+) -> Result<impl Stream<Item = <jetstream::consumer::pull::Stream as Stream>::Item> + Unpin + use<>> {
+    let messages = bus::inbox_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
+    let posts = if posts {
+        match bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await {
+            Ok(posts) => Some(posts),
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "serving the inbox without channel posts");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(futures::stream::select(messages, futures::stream::iter(posts).flatten()))
 }
 
 /// Put the ant on the roster, holding its entry from the revision claimed, if any.
@@ -654,18 +688,6 @@ where
         () = tell_unserved(inbox.js, inbox.humans, &mut unserved) => {}
     }
     Ok(registration.is_lost() && !stopping.get())
-}
-
-/// The channels, and the posts to them through the ant's channel consumer.
-async fn channels<I>(
-    js: &jetstream::Context,
-    stream: &jetstream::stream::Stream<I>,
-    ant: &UserId,
-    in_hand: i64,
-) -> Result<(Channels, jetstream::consumer::pull::Stream)> {
-    let channels = Channels::watch(bus::ensure_channels(js).await?).await?;
-    let posts = bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    Ok((channels, posts))
 }
 
 /// Ctrl-C, SIGTERM or a request on `stop`, whichever comes first.
@@ -884,6 +906,8 @@ struct Inbox<'a> {
     redactor: &'a Redactor,
     /// Counts the messages being handled and the live harnesses, for the roster.
     workload: &'a roster::Workload,
+    /// Whether the ant is paused: then no prompt starts, the messages in hand waiting.
+    pause: &'a crate::pause::Pause,
     /// The ant's counters, for monitoring.
     metrics: std::sync::Arc<crate::metrics::Ant>,
     limits: PromptLimits,
@@ -953,6 +977,7 @@ impl Inbox<'_> {
             }
         };
         let mut answering = FuturesUnordered::new();
+        let mut paused = self.pause.subscribe();
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
             // Every fallback was turned away lately: the first to be tried again lets the messages on.
@@ -975,6 +1000,7 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
+                Ok(()) = paused.changed() => ready = Some(threads.keys().cloned().collect()),
                 () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {
@@ -1002,10 +1028,13 @@ impl Inbox<'_> {
             }
             // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
             // wait in hand, unless a fallback answers them: the consumer's limit on them stops deliveries. A rate limit
-            // is waited out.
+            // is waited out. While the ant is paused they wait in hand too, and the consumers are not pulled from.
             let now = tokio::time::Instant::now();
-            let held = self.throttle.is_held() && !self.throttle.is_quota_held()
+            let pause = paused.borrow_and_update().clone();
+            let held = pause.is_some()
+                || self.throttle.is_held() && !self.throttle.is_quota_held()
                 || self.outage().is_some() && self.fallback(now).is_none();
+            self.workload.set_paused(pause);
             for thread in ready.into_iter().flatten().filter(|_| !held) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {

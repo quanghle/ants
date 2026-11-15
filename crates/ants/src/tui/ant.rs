@@ -17,8 +17,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
+use super::exec::Job;
 use super::frame::{self, ago};
-use super::model::{Data, Key, To};
+use super::model::{Action, Data, Key, To};
 use super::select::Selection;
 use super::work::{self, Filter};
 use crate::live::maybe;
@@ -76,9 +77,10 @@ pub struct Page {
 }
 
 impl Page {
-    pub const THREADS_KEYS: &str =
-        "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · Esc back";
-    pub const QUEUE_KEYS: &str = "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · Esc back";
+    pub const THREADS_KEYS: &str = "↑↓ thread · Enter open · s steer · x cancel · z snooze · S TL;DR · ←→ pane · a ask · w work · p pause/resume · \
+         Esc back";
+    pub const QUEUE_KEYS: &str =
+        "↑↓ message · Enter open its thread · ←→ pane · a ask · w work · p pause/resume · Esc back";
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
@@ -124,6 +126,12 @@ impl Page {
             Key::Char('w') => return Some(To::Work(Filter { user: Some(self.ant.clone()), ..Filter::default() })),
             Key::Char('a') => return Some(To::Bar(format!("@{} ", self.ant))),
             Key::Char('c') => return Some(To::Credentials),
+            Key::Char('p') => {
+                let paused = data.live.roster.iter().any(|e| e.ant == self.ant && e.paused.is_some());
+                let (ant, verb) = (self.ant.clone(), if paused { "resume" } else { "pause" });
+                let job = Job::Pause { ant, paused: !paused };
+                return Some(To::Do(Action::Run(job, format!("{verb} {}", self.ant))));
+            }
             _ => {}
         }
         if self.pane == Pane::Threads {
@@ -441,6 +449,25 @@ mod tests {
         m.key(Key::Esc, at(3));
         m.key(Key::Char('a'), at(3));
         assert!(m.bar.focused && m.bar.text() == "@dev-a ", "a opens the bar on the ant");
+    }
+
+    #[test]
+    fn p_pauses_the_ant_or_resumes_it_when_paused() {
+        let mut m = model();
+        let mut dev = entry("dev-a", 60, 2, at(2));
+        m.data.live.roster(vec![dev.clone()], at(2));
+        m.select(nav::Item::Ant(user("dev-a")));
+        m.focus = crate::tui::model::Focus::View;
+        let pause = |paused| Some(Action::Run(Job::Pause { ant: user("dev-a"), paused }, String::new()));
+        let sent = |action: Option<Action>| match action {
+            Some(Action::Run(job, _)) => Some(Action::Run(job, String::new())),
+            other => other,
+        };
+        assert_eq!(sent(m.key(Key::Char('p'), at(3))), pause(true));
+        dev.paused = Some(ants_proto::Paused { since: at(3), by: None });
+        m.data.live.roster(vec![dev], at(3));
+        assert_eq!(sent(m.key(Key::Char('p'), at(4))), pause(false));
+        assert!(screen(&m, at(4)).contains("paused"), "{}", screen(&m, at(4)));
     }
 
     #[test]

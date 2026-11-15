@@ -161,6 +161,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         domain: nats.domain.cloned(),
         meta,
         sealing: sealing.clone(),
+        admin: crate::orders::Admin::of(nats).map_err(|e| e.to_string()),
         account: nats.account.clone(),
         keyring: feed.keyring(),
     };
