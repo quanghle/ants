@@ -468,6 +468,7 @@ impl Ant {
             worktree_base: self.worktree_base,
             publish: self.publish,
             pause: crate::pause::Pause::new(self.paused),
+            drift: Vec::new(),
         })
     }
 

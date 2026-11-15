@@ -83,6 +83,9 @@ struct Shown {
     threads: Vec<thread::Summary>,
     /// None when never read.
     settings: Option<settings::Read>,
+    /// The ant's settings on every machine; none while it has no record of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_settings: Option<Box<ants_proto::SharedSettings>>,
     /// Why the settings are not read afresh, if they are not.
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_stale: Option<String>,
@@ -130,7 +133,7 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
         let roster = entry.as_ref().map(|e| roster::json(e, now, &faces)).transpose()?;
         let roster = roster.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
-        let settings::Reading { read, stale, orders } = reading;
+        let settings::Reading { read, stale, orders, shared } = reading;
         let shown = Shown {
             ant,
             roster,
@@ -140,6 +143,7 @@ pub async fn show(nats: &crate::Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, C
             spend_today: spend,
             threads,
             settings: read,
+            shared_settings: shared,
             settings_stale: stale,
             orders,
         };

@@ -1,14 +1,20 @@
 //! An ant's settings, as the config file of the machine serving it has them: read with an admin order
 //! ([`AdminOp::ReadSettings`]) whose outcome every human reads, else as last read; and changed with one
 //! ([`AdminOp::Set`]) expecting the values read, so the daemon refuses it should a field have changed meanwhile
-//! (`ants ant show`, `ants ant set`, the settings pane of the ant view of `ants chat`).
+//! (`ants ant show`, `ants ant set`, the settings pane of the ant view of `ants chat`). The ant's shared settings
+//! ([`SHARED_FIELDS`]), the same on every machine, are read from their record on the bus ([`shared_of`]), and a change
+//! of one expects the record's value.
 
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use ants_daemon::config::edit;
-use ants_proto::{ADMIN_TAG, AdminOp, Machine, OrderState, Settings, UserId, Uuid};
+#[cfg(doc)]
+use ants_proto::SHARED_FIELDS;
+use ants_proto::{
+    ADMIN_TAG, AdminOp, IDENTITIES_BUCKET, Machine, OrderState, Settings, SharedSettings, UserId, Uuid, is_shared_field,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -72,11 +78,38 @@ fn equals(text: &str) -> Option<usize> {
     None
 }
 
-/// The order making `assignments` to the settings `read` has, each expecting the value read. The one place changes
-/// asked for become an order.
-pub fn order(read: &Settings, assignments: &[Assignment]) -> AdminOp {
-    let changes = assignments.iter().map(|a| read.change(a.field.clone(), a.value.clone())).collect();
+/// The order making `assignments` to the settings `read` has, each expecting the value read: that of the ant's
+/// `shared` settings for one of those, when it has a record of them. The one place changes asked for become an order.
+pub fn order(read: &Settings, shared: Option<&SharedSettings>, assignments: &[Assignment]) -> AdminOp {
+    let changes = assignments
+        .iter()
+        .map(|a| match (a.field.as_slice(), shared) {
+            ([key], Some(shared)) if is_shared_field(key) => ants_proto::FieldChange {
+                field: a.field.clone(),
+                expected: shared.fields.get(key).cloned(),
+                expected_digest: None,
+                value: a.value.clone(),
+            },
+            _ => read.change(a.field.clone(), a.value.clone()),
+        })
+        .collect();
     AdminOp::Set { changes }
+}
+
+/// The shared settings of `ant`, read with a human's credentials; none while it has no record of them.
+pub async fn shared_of(js: &jetstream::Context, ant: &UserId) -> Result<Option<SharedSettings>> {
+    let key = SharedSettings::key_of(ant);
+    let filter = format!("$KV.{IDENTITIES_BUCKET}.{key}");
+    let found = crate::machines::latest_in(js, IDENTITIES_BUCKET, &filter).await?;
+    let Some((_, payload)) = found.into_iter().find(|(k, _)| *k == key) else { return Ok(None) };
+    let record: SharedSettings = serde_json::from_slice(&payload).context("reading the ant's shared settings")?;
+    record.check_key(&key)?;
+    Ok(Some(record))
+}
+
+/// One `KEY = VALUE` line per field of `shared`.
+pub fn shared_lines(shared: &SharedSettings) -> Vec<String> {
+    shared.fields.iter().map(|(key, value)| format!("{key} = {}", edit::toml_text(value))).collect()
 }
 
 /// The settings as a read order's outcome carries them.
@@ -124,16 +157,29 @@ pub struct Reading {
     pub stale: Option<String>,
     /// The orders to the ant, oldest first.
     pub orders: Vec<Listed>,
+    /// The ant's shared settings; none while it has none, or they could not be read.
+    pub shared: Option<Box<SharedSettings>>,
 }
 
 /// The settings and orders sections of `ants ant show`, as lines.
 pub fn sections(ant: &UserId, reading: &Reading, now: DateTime<Utc>) -> Vec<String> {
     let mut out = vec![String::new(), format!("settings (`ants ant set {ant} KEY=VALUE...`):")];
+    if let Some(shared) = &reading.shared {
+        let ago = short(since(shared.updated_at, now));
+        let by = shared.by.as_ref().map_or_else(String::new, |by| format!(" by {by}"));
+        out.push(format!("  shared, the ant's on every machine: set{by} on {} {ago} ago", shared.machine));
+        out.extend(shared_lines(shared).into_iter().map(|line| format!("  {line}")));
+    }
     match &reading.read {
         Some(read) => {
             let ago = short(since(read.read_at, now));
             out.push(format!("  as config.toml on {} has them, read {ago} ago", read.machine));
-            out.extend(read.lines().into_iter().map(|line| format!("  {line}")));
+            let shared = reading.shared.is_some();
+            for line in read.lines() {
+                let key = line.split([' ', '.']).next().unwrap_or_default();
+                let ignored = if shared && is_shared_field(key) { "  (ignored: shared)" } else { "" };
+                out.push(format!("  {line}{ignored}"));
+            }
         }
         None => out.push("  never read".to_owned()),
     }
@@ -194,7 +240,13 @@ pub async fn read(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId, wait: 
             Err(e) => Some(format!("{e:#}")),
         }
     };
-    Ok(Reading { read: Read::last(&orders), stale, orders })
+    let shared = shared_of(js, ant)
+        .await
+        .inspect_err(|e| tracing::debug!("no shared settings: {e:#}"))
+        .ok()
+        .flatten()
+        .map(Box::new);
+    Ok(Reading { read: Read::last(&orders), stale, orders, shared })
 }
 
 /// `ants ant set ANT KEY=VALUE...`: read `ant`'s settings, send the order of `assignments` expecting the values read,
@@ -213,7 +265,7 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId, assignments: &[Assignment], wait
         let ago = short(since(read.read_at, SystemTime::now().into()));
         eprintln!("expecting the settings as read {ago} ago: {stale}");
     }
-    let op = order(&read.settings, assignments);
+    let op = order(&read.settings, reading.shared.as_deref(), assignments);
     let (sent, outcome) = orders::send(nats, &js, Some(read.machine.clone()), ant, op, wait).await?;
     println!("order {} sent to the daemon of {}", sent.id, read.machine);
     match outcome {
@@ -233,7 +285,10 @@ mod tests {
 
     use super::*;
     use crate::auth::tests::Server;
-    use crate::auth::{NewDevice, issue_device_with};
+    use ants_daemon::Harnesses;
+    use ants_daemon::direct_kv::DirectKv;
+
+    use crate::auth::{NewDevice, issue_device_with, issue_host};
     use crate::orders::tests::{WAIT, host_of_m1};
     use crate::revoke::Kind;
 
@@ -268,7 +323,8 @@ mod tests {
         fields.insert("env".to_owned(), json!({ "API_TOKEN": "[redacted]" }));
         let hidden = vec![Hidden { field: field("env.API_TOKEN"), digest: "d1".to_owned() }];
         let read = Settings { fields, hidden };
-        let AdminOp::Set { changes } = order(&read, &[a("model=o3"), a("env.API_TOKEN=new"), a("workdir=/w")]) else {
+        let AdminOp::Set { changes } = order(&read, None, &[a("model=o3"), a("env.API_TOKEN=new"), a("workdir=/w")])
+        else {
             panic!("a set")
         };
         assert_eq!(
@@ -348,7 +404,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
             .iter()
             .map(|a| a.parse().unwrap())
             .collect();
-        let op = order(&first.settings, &changes);
+        let op = order(&first.settings, None, &changes);
         let (_, applied) = orders::send(&admin, &js, Some(first.machine.clone()), &dev_a, op, WAIT).await.unwrap();
         assert_eq!(applied.map(|o| (o.state, o.reason)), Some((OrderState::Applied, None)));
         let edited = std::fs::read_to_string(&path).unwrap();
@@ -356,7 +412,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert!(edited.contains("API_TOKEN = \"n3w-s3cr3t-value\"") && edited.contains("command = \"other\""));
 
         std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
-        let stale = order(&first.settings, &["model=o5".parse().unwrap()]);
+        let stale = order(&first.settings, None, &["model=o5".parse().unwrap()]);
         let (_, refused) = orders::send(&admin, &js, None, &dev_a, stale, WAIT).await.unwrap();
         let refused = refused.expect("decided at once");
         assert_eq!(refused.state, OrderState::Refused);
@@ -382,7 +438,7 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!(reads, away.orders.iter().filter(|o| o.op == Some(AdminOp::ReadSettings)).count(), "sent once");
         let workdir = server.dir().display().to_string();
         let moved = Assignment { field: vec!["workdir".to_owned()], value: Some(json!(workdir)) };
-        let op = order(&last.settings, &[moved]);
+        let op = order(&last.settings, None, &[moved]);
         let (pending, none) = orders::send(&admin, &js, None, &dev_a, op, Duration::ZERO).await.unwrap();
         assert_eq!(none, None);
         let listed = orders::orders_of(&js, &dev_a).await.unwrap();
@@ -401,6 +457,120 @@ env = { RUST_LOG = "info", API_TOKEN = "s3cr3t-value-42" }
         assert_eq!(decided.state, OrderState::Applied, "{:?}", decided.reason);
         let back = read(&admin, &js, &dev_a, WAIT).await.unwrap();
         assert_eq!(back.read.unwrap().settings.get(&["workdir".to_owned()]), Some(&json!(workdir)));
+        drop(ants);
+        tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+    }
+
+    /// The first daemon of an ant to start creates its shared settings from its config; an admin's change of one
+    /// lands in them, and in the config where it sets the field, and the daemon serves it, core memories included. A
+    /// standby machine serves the shared settings over its own config's, telling which fields drift, as does the
+    /// first's record of its machine once its config is edited otherwise.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_every_machine() {
+        let Some(server) = Server::start() else { return };
+        let (alice, dev_a) = ("alice".parse().unwrap(), "dev-a".parse::<UserId>().unwrap());
+        let (_, h_js) = server.connect_as(&alice, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
+        for config in [
+            ants_daemon::hub::machines_config(),
+            ants_daemon::hub::devices_config(),
+            ants_daemon::hub::identities_config(),
+        ] {
+            h_js.create_key_value(config).await.unwrap();
+        }
+        let admin_creds = server.dir().join("alice-admin.creds");
+        let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+        let rights = Permissions::for_user(&alice, Role::Human);
+        issue_device_with(&server.dir().join("auth"), &alice, Kind::Human, rights, &device, &admin_creds).unwrap();
+        let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let (_, js) = admin.connect("test").await.unwrap();
+        let path = server.dir().join("config.toml");
+        std::fs::write(&path, FILE.replace("workdir = \".\"", "workdir = \".\"\nwhoami = \"a tester\"")).unwrap();
+        let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
+        let config = ConfigFile::new(path.clone(), triggers.edits());
+        let shared = config.shared.clone();
+        let mut changes = shared.subscribe();
+        shared.listed(&ants_daemon::config::load(&path).unwrap().ants);
+        let (ants, task) = host_of_m1(&server, &js, true, Some(config)).await;
+        assert!(shared.wait_polled(WAIT).await, "the host reads the shared settings");
+
+        let created = shared_of(&js, &dev_a).await.unwrap().expect("created from the config");
+        assert_eq!(
+            serde_json::Value::Object(created.fields.clone()),
+            json!({ "model": "gpt-5", "whoami": "a tester" })
+        );
+        assert_eq!((created.machine.as_str(), created.by.as_ref()), ("m1", None));
+
+        let reading = read(&admin, &js, &dev_a, WAIT).await.unwrap();
+        assert_eq!(reading.shared.as_deref(), Some(&created));
+        let lines = sections(&dev_a, &reading, Utc::now());
+        assert!(lines.contains(&"  model = \"gpt-5\"  (ignored: shared)".to_owned()), "{lines:?}");
+        let op = order(&reading.read.unwrap().settings, reading.shared.as_deref(), &[a("model=o3"), a("memory=notes")]);
+        changes.mark_unchanged();
+        let (_, applied) = orders::send(&admin, &js, None, &dev_a, op, WAIT).await.unwrap();
+        assert_eq!(applied.map(|o| (o.state, o.reason)), Some((OrderState::Applied, None)));
+        let changed = shared_of(&js, &dev_a).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::Value::Object(changed.fields.clone()),
+            json!({ "model": "o3", "whoami": "a tester", "memory": "notes" })
+        );
+        assert_eq!(changed.by, Some(alice.clone()));
+        assert!(changes.has_changed().unwrap(), "the daemon reloads with the change");
+        let edited = std::fs::read_to_string(&path).unwrap();
+        assert!(edited.contains("model = \"o3\"  # fast enough"), "the config sets the model too: {edited}");
+        assert!(!edited.contains("memory"), "a field the config leaves out stays out: {edited}");
+
+        let loaded = ants_daemon::config::load(&path).unwrap();
+        let served = crate::serve::configs(loaded.ants, &loaded.harnesses, &server.url, None, None, Some(&shared));
+        let served = served.unwrap().remove(0);
+        assert_eq!((served.model_settings.model.as_deref(), served.drift.as_slice()), (Some("o3"), &[] as &[String]));
+        let (_, read_memories) = orders::send(&admin, &js, None, &dev_a, AdminOp::ReadMemories, WAIT).await.unwrap();
+        let memories: ants_proto::Memories = serde_json::from_value(read_memories.unwrap().result.unwrap()).unwrap();
+        assert_eq!(
+            (memories.core.whoami.as_deref(), memories.core.memory.as_deref()),
+            (Some("a tester"), Some("notes")),
+            "the core memories are the shared ones"
+        );
+
+        let standby = ants_daemon::shared::Shared::default();
+        let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
+        (own.model, own.harness) = (Some("gpt-4".to_owned()), Some("copilot".to_owned()));
+        standby.listed(std::slice::from_ref(&own));
+        let (m2, m2_creds) = ("m2".parse().unwrap(), server.dir().join("host-m2.creds"));
+        issue_host(&server.dir().join("auth"), &m2, None, &m2_creds).unwrap();
+        let client = async_nats::ConnectOptions::with_credentials_file(&m2_creds)
+            .await
+            .unwrap()
+            .custom_inbox_prefix(ants_proto::host_inbox_prefix(&m2))
+            .connect(&server.url)
+            .await
+            .unwrap();
+        let m2_kv = DirectKv::new(&jetstream::new(client), None, ants_proto::IDENTITIES_BUCKET).await.unwrap();
+        ants_daemon::shared::refresh(&m2_kv, &m2, &standby, std::slice::from_ref(&dev_a)).await;
+        assert_eq!(shared_of(&js, &dev_a).await.unwrap(), Some(changed), "the first record stays");
+        let taken = crate::serve::configs(vec![own], &Harnesses::builtin(), &server.url, None, None, Some(&standby));
+        let taken = taken.unwrap().remove(0);
+        assert_eq!(
+            (taken.model_settings.model.as_deref(), taken.drift.as_slice()),
+            (Some("o3"), &["model".to_owned()][..])
+        );
+        assert_eq!(ants_daemon::roster::entry(&taken).await.drift, ["model"], "the roster tells the drift");
+
+        std::fs::write(&path, edited.replace("\"o3\"", "\"o4\"")).unwrap();
+        shared.listed(&ants_daemon::config::load(&path).unwrap().ants);
+        ants.send_replace(vec![dev_a.clone()]);
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let records = crate::machines::list(&js).await.unwrap();
+                if records.iter().any(|r| r.drift.get(&dev_a).is_some_and(|d| d == &["model"])) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the machine's record tells the drift");
         drop(ants);
         tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
     }

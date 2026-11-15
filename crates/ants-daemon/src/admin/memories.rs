@@ -1,7 +1,8 @@
 //! [`AdminOp::ReadMemories`]: read the ant's memories ([`Memories`]) for the outcome's `result`.
 //!
-//! - Core memories ([`core_memories`]): the `whoami`, `memory` and `tasks` of the ant's `[[ant]]` table in the config
-//!   file the daemon serves, which a set order edits.
+//! - Core memories ([`core_memories`]): the `whoami` and `memory` of the ant's shared settings ([`crate::shared`]),
+//!   else of its `[[ant]]` table in the config file the daemon serves while it has none, and the `tasks` of that
+//!   table, which a set order edits.
 //! - Harness memories: the files matching the `memory_files` globs of the ant's harness, relative to its workdir or
 //!   under `~`, and the bd memories of the database `BD_DB` names in its environment (its `env`, its harness's, the
 //!   daemon's), as `bd memories --json` lists them.
@@ -63,16 +64,17 @@ pub(super) async fn apply(orders: &Orders, order: &AdminOrder, stored_at: DateTi
     let Some(ant) = loaded.ants.iter().find(|ant| ant.name == order.ant) else {
         return refused(order, &format!("{} lists no ant {}", file.path.display(), order.ant));
     };
+    let ant = file.shared.overlaid(ant).map_or_else(|| ant.clone(), |(overlaid, _)| overlaid);
     let harness = ant.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
     let Some(env) = Env::current() else { return refused(order, "no home directory") };
-    let memories = read(ant, harness.as_deref(), &env).await;
+    let memories = read(&ant, harness.as_deref(), &env).await;
     match serde_json::to_value(&memories) {
         Ok(result) => applied(order, Some(result)),
         Err(e) => refused(order, &format!("writing the memories read: {e}")),
     }
 }
 
-/// The ant's core memories, as its config sets them.
+/// The core memories of `ant`, as served: overlaid with its shared settings ([`crate::shared::Shared::overlaid`]).
 pub fn core_memories(ant: &Ant) -> CoreMemories {
     CoreMemories { whoami: ant.whoami.clone(), memory: ant.memory.clone(), tasks: ant.tasks.clone() }
 }

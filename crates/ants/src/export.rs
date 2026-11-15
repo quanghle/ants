@@ -3,8 +3,10 @@
 //! leaves behind what it was doing and the old job's role.
 //!
 //! An export is one plain JSON file ([`Export`]), not signed or encrypted: whoever carries it is trusted with it. Its
-//! settings come from the ant's `[[ant]]` table ([`settings_of`]) and its files from its home ([`core_files_of`],
-//! [`harness_files_of`]); an import writes them back through [`with_settings`] and [`restore`].
+//! settings come from the ant's shared settings on the bus, which hold its role settings and core memories, over its
+//! `[[ant]]` table ([`settings_of`]), and its files from its home ([`core_files_of`], [`harness_files_of`]); an import
+//! writes them back through [`with_settings`] and [`restore`]. It lists the settings in the ant's `[[ant]]` table, from
+//! which the first daemon serving the ant creates its shared settings on the new bus.
 //!
 //! No bus holds two copies of one ant: an import creates the ant's identity record by a KV create, refused when a record
 //! holds its name, and refused first when one holds its id. The id is looked up by reading the whole identities bucket,
@@ -18,7 +20,7 @@ use ants_daemon::config::{self, Ant};
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_daemon::harness::Harness;
 use ants_daemon::keystore::{self, Store};
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, MovedMark, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, MovedMark, SharedSettings, UserId};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use data_encoding::BASE64;
@@ -93,19 +95,31 @@ pub enum Kind {
     Harness,
 }
 
-/// The settings of `ant` an export carries.
-pub fn settings_of(ant: &Ant) -> Settings {
-    Settings {
+/// The settings of `ant` an export carries: those of its shared settings `shared` where the bus holds them, as its
+/// daemon serves them, else of its `[[ant]]` table.
+pub fn settings_of(ant: &Ant, shared: Option<&SharedSettings>) -> Result<Settings> {
+    let overlaid;
+    let ant = match shared {
+        Some(record) => {
+            let roles = ants_daemon::shared::Roles::of(&record.fields)
+                .with_context(|| format!("reading the shared settings of {}", ant.name))?;
+            overlaid = roles.overlay(ant.clone());
+            &overlaid
+        }
+        None => ant,
+    };
+    Ok(Settings {
         whoami: ant.whoami.clone(),
         harness: ant.harness.clone(),
         model: ant.model.clone(),
         reasoning_effort: ant.reasoning_effort.clone(),
         context: ant.context.clone(),
         fallback: ant.fallback.clone(),
-    }
+    })
 }
 
-/// `ant` with the exported `settings` in place of its own.
+/// `ant` with the exported `settings` in place of its own. Listed in a config, they become the ant's shared settings on
+/// the bus when the first daemon serving it creates them; shared settings the bus holds already serve instead.
 pub fn with_settings(settings: &Settings, ant: Ant) -> Ant {
     Ant {
         whoami: settings.whoami.clone(),
@@ -228,9 +242,10 @@ pub async fn export(
     let identity =
         identity.with_context(|| format!("{ant} has no identity record: its daemon creates one when it starts"))?;
     wait_between_prompts(&js, ant).await;
+    let shared = crate::settings::shared_of(&js, ant).await.context("reading the ant's shared settings")?;
     let harness = listed.harness.as_deref().and_then(|name| loaded.harnesses.get(name).ok());
 
-    let export = pack_ant(listed, harness.as_deref(), identity, nats.account.clone())?;
+    let export = pack_ant(listed, harness.as_deref(), shared.as_ref(), identity, nats.account.clone())?;
     write_new(&out, &serde_json::to_vec_pretty(&export)?)?;
     let count = |kind| export.files.iter().filter(|f| f.kind == kind).count();
     println!(
@@ -252,8 +267,15 @@ pub async fn export(
     Ok(())
 }
 
-/// The export of `ant`, whose harness is `harness` and identity record `identity`, from the bus of `bus`.
-fn pack_ant(ant: &Ant, harness: Option<&Harness>, identity: AntIdentity, bus: Option<String>) -> Result<Export> {
+/// The export of `ant`, whose harness is `harness`, shared settings `shared` and identity record `identity`, from the bus
+/// of `bus`.
+fn pack_ant(
+    ant: &Ant,
+    harness: Option<&Harness>,
+    shared: Option<&SharedSettings>,
+    identity: AntIdentity,
+    bus: Option<String>,
+) -> Result<Export> {
     let home = home_of(ant)?;
     let harness_files = harness_files_of(harness, &home);
     let core_files = core_files_of(ant, &home, &harness_files)?;
@@ -265,7 +287,7 @@ fn pack_ant(ant: &Ant, harness: Option<&Harness>, identity: AntIdentity, bus: Op
         created_at: Utc::now(),
         bus,
         identity: AntIdentity { moved: None, ..identity },
-        settings: settings_of(ant),
+        settings: settings_of(ant, shared)?,
         files,
     })
 }
@@ -479,6 +501,16 @@ async fn import_with(nats: &crate::Nats<'_>, args: ImportArgs, store: &dyn Store
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;
+    if let Some(shared) = crate::settings::shared_of(&js, &name).await.ok().flatten() {
+        let drift = shared.drift(&ants_daemon::shared::local_fields(ant));
+        if !drift.is_empty() {
+            eprintln!(
+                "warning: the bus holds shared settings of {name} already, which serve in place of the imported {}: \
+                 `ants ant set {name} FIELD=VALUE` changes them",
+                drift.join(", ")
+            );
+        }
+    }
     let done = async {
         let harness_kept = listing.harness == export.settings.harness;
         let dropped = restore(&home, &export.files, harness_kept)?;

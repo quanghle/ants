@@ -11,6 +11,7 @@ use ants_daemon::admin::{ConfigFile, LeafNode};
 use ants_daemon::config::{self, Ant, HostSettings, Summary};
 use ants_daemon::host::{self, Host};
 use ants_daemon::schedule::Schedule;
+use ants_daemon::shared::Shared;
 use ants_daemon::{Config, Harnesses, Stop};
 use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, bail};
@@ -335,13 +336,16 @@ fn pick(all: Vec<Ant>, args: &DaemonArgs, path: &Path) -> Result<Vec<Ant>> {
 
 /// Daemon configs, with their harnesses from `harnesses`, `nats` as the server, `js_domain` as the JetStream domain
 /// and, for a lone ant, `creds` as the credentials where the ant sets none. Several ants cannot share one set of
-/// credentials, so `creds` is ignored for them.
+/// credentials, so `creds` is ignored for them. An ant with settings in `shared` is served with those in place of its
+/// table's ([`Shared::overlaid`]), and told the fields its table sets otherwise (its drift); shared settings this
+/// machine cannot serve, such as a harness it lacks, are warned of and its table's serve it.
 pub fn configs(
     ants: Vec<Ant>,
     harnesses: &Harnesses,
     nats: &str,
     creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
+    shared: Option<&Shared>,
 ) -> Result<Vec<Config>> {
     let lone = ants.len() == 1;
     if !lone && creds.is_some() {
@@ -354,6 +358,15 @@ pub fn configs(
             }
             if p.js_domain.is_none() {
                 p.js_domain.clone_from(&js_domain);
+            }
+            if let Some((overlaid, drift)) = shared.and_then(|shared| shared.overlaid(&p)) {
+                match overlaid.into_config(nats, harnesses) {
+                    Ok(config) => return Ok(Config { drift, ..config }),
+                    Err(e) => tracing::warn!(
+                        ant = %p.name, error = format!("{e:#}"),
+                        "the ant's shared settings do not suit this machine; serving it with its config's"
+                    ),
+                }
             }
             p.into_config(nats, harnesses)
         })
@@ -386,6 +399,10 @@ pub fn host(
     host.config = config;
     Some((host, configs.iter().map(|c| c.ant.clone()).collect()))
 }
+
+/// How long [`run`] waits at start for the host connection's first read of the shared settings, to serve the ants with
+/// them rather than restart them once read.
+const SHARED_FIRST_READ: Duration = Duration::from_secs(5);
 
 /// The machine's leaf node, at ~/.config/ants/leaf.conf, whose uplink an add order renews to carry the ant added
 /// ([`crate::add::renew_and_reconnect`]); none without a home directory.
@@ -425,11 +442,32 @@ pub async fn run(
     let restarting = |wanted: Option<(Host, Vec<UserId>)>| {
         wanted.map(|(host, ants)| (Host { restarts: restarts.clone(), ..host }, ants))
     };
+    let mut host = HostRun::default();
+    let shared = served.host.as_ref().and_then(|(h, _)| h.config.as_ref()).map(|c| c.shared.clone());
+    host.reconcile(restarting(served.host.clone()));
+    let served = match shared {
+        Some(shared) if shared.wait_polled(SHARED_FIRST_READ).await => match reload() {
+            Ok(again) => {
+                host.reconcile(restarting(again.host.clone()));
+                again
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = format!("{e:#}"),
+                    "reload with the shared settings failed; serving the config's"
+                );
+                served
+            }
+        },
+        Some(_) => {
+            tracing::warn!("the shared settings could not be read yet; serving the config's until they are");
+            served
+        }
+        None => served,
+    };
     let mut tasks: FuturesUnordered<_> = reconcile(&mut running, served.configs).into_iter().map(serve).collect();
     let mut schedules = Schedules::default();
     schedules.reconcile(served.schedules, run_schedule);
-    let mut host = HostRun::default();
-    host.reconcile(restarting(served.host));
     let shutdown = async {
         if let Err(e) = ants_daemon::daemon::stop_signal().await {
             tracing::warn!(error = %e, "waiting for Ctrl-C or SIGTERM");
@@ -596,7 +634,7 @@ impl HostRun {
         let started = wanted.clone();
         let task = tokio::spawn(
             async move {
-                if let Err(e) = host::run(started, receiver).await {
+                if let Err(e) = Box::pin(host::run(started, receiver)).await {
                     tracing::error!(error = format!("{e:#}"), "host connection stopped");
                 }
             }
@@ -785,6 +823,7 @@ mod tests {
             "nats://cli:4222",
             cli_creds.clone(),
             Some(cli_domain.clone()),
+            None,
         )
         .unwrap();
         assert_eq!((one[0].nats_url.as_str(), one[0].creds.clone()), ("nats://cli:4222", cli_creds.clone()));
@@ -793,12 +832,14 @@ mod tests {
         let mut own = ant("dev-a");
         own.js_domain = Some(own_domain.clone());
         let one =
-            configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", cli_creds.clone(), Some(cli_domain)).unwrap();
+            configs(vec![own], &Harnesses::builtin(), "nats://cli:4222", cli_creds.clone(), Some(cli_domain), None)
+                .unwrap();
         assert_eq!(one[0].nats_url, "nats://dev-a:4222");
         assert_eq!(one[0].creds, Some(PathBuf::from("dev-a.creds")));
         assert_eq!(one[0].js_domain, Some(own_domain));
 
-        let two = configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None).unwrap();
+        let two =
+            configs(vec![bare, ant("dev-b")], &Harnesses::builtin(), "nats://cli:4222", cli_creds, None, None).unwrap();
         assert_eq!((two[0].nats_url.as_str(), two[0].creds.clone()), ("nats://cli:4222", None));
         assert_eq!(two[1].creds, Some(PathBuf::from("dev-b.creds")));
     }
@@ -808,7 +849,7 @@ mod tests {
         let config = |name: &str, model: Option<&str>| {
             let mut p = ant(name);
             p.model = model.map(str::to_owned);
-            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
         };
         let names = |start: Vec<(Config, Stop)>| start.into_iter().map(|(c, _)| c.ant.to_string()).collect::<Vec<_>>();
         let state = |running: &HashMap<UserId, Running>, name: &str| {
@@ -845,7 +886,7 @@ mod tests {
                 members: Members::new(members.iter().map(|m| member(m)).collect()),
             };
             let p = Ant { pool: Some(pool), ..ant("lead-a") };
-            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
         };
         let mut running = HashMap::new();
         let (served, _) = reconcile(&mut running, vec![config(&["lead-a"])]).remove(0);
@@ -858,7 +899,7 @@ mod tests {
     fn a_reload_pauses_and_resumes_a_running_ant_without_a_restart() {
         let ant_named = |paused: bool, model: Option<&str>| {
             let p = Ant { paused, model: model.map(str::to_owned), ..ant("dev-a") };
-            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0)
+            configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0)
         };
         let dev_a: UserId = "dev-a".parse().unwrap();
         let mut running = HashMap::new();
@@ -889,7 +930,7 @@ mod tests {
         std::fs::write(&creds, "issued").unwrap();
         let mut p = ant("dev-a");
         p.creds = Some(creds.clone());
-        let config = configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None).unwrap().remove(0);
+        let config = configs(vec![p], &Harnesses::builtin(), "nats://cli:4222", None, None, None).unwrap().remove(0);
         let mut running = HashMap::new();
         assert_eq!(reconcile(&mut running, vec![config.clone()]).len(), 1);
         assert!(reconcile(&mut running, vec![config.clone()]).is_empty());

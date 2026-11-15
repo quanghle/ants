@@ -141,21 +141,24 @@ pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &P
     Ok(recorded)
 }
 
-/// Delete `ant`'s identity record from [`IDENTITIES_BUCKET`] of the hub at `url`, so a later ant of the name is born
-/// afresh. A bucket not created yet holds no record to delete.
+/// Delete `ant`'s identity record and shared settings from [`IDENTITIES_BUCKET`] of the hub at `url`, so a later ant
+/// of the name is born afresh. A bucket not created yet holds no record to delete.
 pub async fn forget_identity(url: &str, js_domain: Option<&JsDomain>, dir: &Path, ant: &str) -> Result<()> {
     let js = revoker(url, js_domain, dir).await?;
     let kv = DirectKv::new(&js, js_domain, IDENTITIES_BUCKET).await?;
-    match kv.delete(ant).await {
-        Err(e)
-            if e
-                .downcast_ref::<jetstream::context::PublishError>()
-                .is_some_and(|e| e.kind() == jetstream::context::PublishErrorKind::StreamNotFound) =>
-        {
-            Ok(())
+    for key in [ant.to_owned(), format!("{ant}.settings")] {
+        match kv.delete(&key).await {
+            Err(e)
+                if e
+                    .downcast_ref::<jetstream::context::PublishError>()
+                    .is_some_and(|e| e.kind() == jetstream::context::PublishErrorKind::StreamNotFound) =>
+            {
+                return Ok(());
+            }
+            done => done.with_context(|| format!("the credentials were revoked, but {ant}'s identity is still in {IDENTITIES_BUCKET}: revoke them again by name"))?,
         }
-        done => done.with_context(|| format!("the credentials were revoked, but {ant}'s identity is still in {IDENTITIES_BUCKET}: revoke them again by name")),
     }
+    Ok(())
 }
 
 /// A JetStream context, in domain `js_domain` if the hub has one, of short-lived credentials signed with the account

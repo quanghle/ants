@@ -183,6 +183,7 @@ mod tests {
             hostname: "box.local".into(),
             version: String::new(),
             updated_at: now - chrono::Duration::minutes(5),
+            drift: std::collections::BTreeMap::new(),
         };
         let table = table(&[record], now);
         assert_eq!(table.lines().nth(1), Some("box      box.local  -        5m ago    dev-a,dev-b"), "{table}");

@@ -417,6 +417,12 @@ pub fn identity(ant: &UserId) -> String {
     format!("$KV.{}.{ant}", super::IDENTITIES_BUCKET)
 }
 
+/// Every ant's shared settings in [`super::IDENTITIES_BUCKET`]: the subjects host credentials put
+/// [`super::SharedSettings`] on ([`super::SharedSettings::key_of`]).
+pub fn all_shared_settings() -> String {
+    format!("$KV.{}.*.settings", super::IDENTITIES_BUCKET)
+}
+
 /// The entry of a human in [`super::HUMANS_BUCKET`]: the subject a human puts [`super::HumanEntry`] on.
 pub fn human_entry(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::HUMANS_BUCKET)
