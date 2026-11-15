@@ -199,15 +199,29 @@ impl RenewRequest {
 }
 
 /// The answer to a [`RenewRequest`], on [`subject::renew_reply`]: the user JWT of `public_key`, which completes the
-/// renewed credentials with the seed kept by the asking holder. A request the approver refuses gets no answer.
+/// renewed credentials with the seed kept by the asking holder, or, from `ants signer` for credentials a registration
+/// granted, why it refuses them (`refused`, with no JWT). A request `ants enroll renew` refuses gets no answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewReply {
     pub name: String,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub jwt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 impl RenewReply {
+    /// The answer giving `public_key` of `name` the user JWT `jwt`.
+    pub fn signed(name: &str, public_key: &str, jwt: String) -> Self {
+        Self { name: name.to_owned(), public_key: public_key.to_owned(), jwt, refused: None }
+    }
+
+    /// The answer refusing to renew the credentials of `name` for `public_key`, and why.
+    pub fn refused(name: &str, public_key: &str, reason: String) -> Self {
+        Self { name: name.to_owned(), public_key: public_key.to_owned(), jwt: String::new(), refused: Some(reason) }
+    }
+
     pub fn subject(&self) -> String {
         subject::renew_reply(&self.name)
     }
@@ -301,7 +315,7 @@ mod tests {
             let odd = RenewRequest::new(name, "UKEY", "macbook");
             assert!(odd.check_subject(&odd.subject()).is_err(), "{name:?}");
         }
-        let reply = RenewReply { name: "leaf-m1".into(), public_key: "UKEY".into(), jwt: "j".into() };
+        let reply = RenewReply::signed("leaf-m1", "UKEY", "j".into());
         assert_eq!(reply.subject(), "ants.renew.leaf-m1.reply");
     }
 }

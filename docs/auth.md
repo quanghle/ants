@@ -80,6 +80,24 @@ A reader takes a device's key only from a JWT it verifies itself: signed by the 
 
 `ants auth revoke`, and `ants auth push` for those not recorded yet, put `revoked.<U...>` (`{key, revoked_at}`) for each revocation in `revoked.json` of a human's credentials, or of a key `issued.jsonl` does not know, once the hub applied the pushed account. They use short-lived credentials issued from the account key that may put only those records. When the hub cannot take them, the command fails after the push, and the next `ants auth push` records them. `ants doctor` checks it as **credentials xkey**: no key bound warns with `ants renew` as the fix; a seed missing, unreadable or not that of the JWT's tag fails.
 
+#### Sealed messages between humans
+
+`ants ask @HUMAN` with a human's credentials seals the message end to end, so the hub, ants and other humans' devices see none of its text. The message is sent with an empty `text` and a `sealed` object:
+
+```json
+"sealed": {"v": 1, "device": "<sending device>", "keys": [{"device": "<id>", "key": "<base64>"}], "body": "<base64>"}
+```
+
+- **`body`:** a random 24-byte nonce followed by the XSalsa20-Poly1305 encryption, under a random 32-byte content key, of a JSON `SealedBody`: `from`, `to`, `thread_id`, `id` (the message's) and `text`, plus `title` and `attachments` when present.
+- **`keys`:** per recipient device, its id and the content key sealed with crypto_box (nkeys `XKey::seal`) from the sending device's encryption key to that device's. They cover every device of both humans with a verified key in `ants_devices` at sending time, the sending one included, and no other: a device added later opens no earlier message.
+- **In the clear:** the subject, id, thread, `from`, `to`, time, `in_reply_to`, owner, sizes, recipient device ids and reactions.
+
+Sending refuses, and sends nothing, when the credentials bind no encryption key, when the sending device's key is not the verified one in `ants_devices`, or when the recipient has no device with a verified key; each error names its fix, and `--plaintext` sends the message in the clear instead. `--attach` is refused for a sealed message for now. Only a human seals, and only to another human; messages to ants and channel posts stay in the clear.
+
+A reader opens a sealed message only through its own device's entry in `keys`, which must open with the verified key of the sending device the message names, a device of its `from` human, and a body naming the envelope's `from`, `to`, thread and id. `ants inbox`, `ants thread show`, `ants thread list`, `ants thread search` and `ants ask --wait`/`-f` print the opened text; a message without an entry for the device prints as `[sealed]` and one that does not open as `[forged]` (`sealed`: `opened`, `unreadable` or `forged` in `--json`). `--grep` matches only opened text. `ants watch` and dead letters keep the ciphertext and show `[sealed, N bytes]`. When `ants_devices` cannot be read, a sender with no known key makes a message `[sealed]` rather than `[forged]`.
+
+On a thread holding a sealed message between two humans, `ants thread title` seals the title the same way for every device of both with a verified key, refusing when either has none, and refuses a third human. The `title.<thread>` entry of `ants_threads` then carries an empty `title` and `sealed`, whose body is a JSON `SealedTitle` (`thread_id`, `by`, `title`) checked against the entry and opened with the verified key of a sending device of `by`. `ants thread list`, `ants thread show` and THREAD completion show the title where the device opens it and `[sealed]` elsewhere, and no ant's suggested title is stored for such a thread. A notice of `ants webhook serve` about a sealed message says only `a sealed message arrived`, naming its sender and thread ([webhooks.md](webhooks.md#notifications)).
+
 ## Adding an ant
 
 `ants add` generates a user NKey on the target machine (`<ant>.nk` at mode `0600`, or seed straight into the OS store with `--store-key`), appends `[[ant]]` to `config.toml`, writes `<ant>.creds` once signed, and reloads `ants.daemon` / `ants-daemon`:
@@ -115,8 +133,9 @@ Bootstrap credentials are meant to be shared: they only publish registration req
 A registration request on `ants.login.<name>` carries the name asked for, the device's new NKey public key, a one-off X25519 reply key, optionally the device's [encryption key](#device-encryption-keys) and label, and its making and expiry times (at most 15 min apart), signed by the NKey. Requests are core NATS messages, stored nowhere: the machine repeats its request every 5 s until an answer settles it, and `ants signer` (with a `[registration]` table in its `--config`; see [config.md](config.md#human-registration)) answers each repeat on `ants.login.<name>.reply` with what it has for that key, sealed to the latest reply key and naming the signer's sealing key:
 
 - `verify`: sign in to GitHub at the URL with the user code, before the time given. The signer runs one GitHub device flow per key, at most 10 at once, and reads the signed-in user's ID, login, verified email addresses and memberships with the user's token, which it then drops.
+- `waiting`: the GitHub user who signed in (login) is outside the policy, and a human of the team decides ([config.md](config.md#human-registration)); `signed` or `refused` follows.
 - `signed`: the human's credentials (a JWT for the request's NKey, with the device's encryption key when given), valid for the policy's `ttl`, recorded in `issued.jsonl` with the label, GitHub binding and grant.
-- `refused`: why, such as registration not enabled, a key already issued, a GitHub user outside the policy, or a name bound to someone else.
+- `refused`: why, such as registration not enabled, a key already issued, a human's rejection or no decision in time, or a name bound to someone else.
 
 Requests that are malformed, unsigned by their key, expired or for another subject get no answer. A key whose registration ended gets the same answer until its request expires; another attempt uses a new key.
 
@@ -130,13 +149,13 @@ ants login --hub wss://hub.example/nats --name alice [--label laptop] [--store-k
 
 ### GitHub bindings
 
-A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
+A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. `ants auth revoke NAME` keeps the binding but withdraws an `approval` grant (the key's line appended again, marked `withdrawn`), so the user registers again only by the policy or a new approval; revoking one device or key withdraws nothing. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:
 
 ```sh
 ants auth user alice --human --github octocat [--config FILE]   # bind alice to GitHub user octocat, new device
 ```
 
-`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap` and `channel-manager`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
+`--github` looks the login up on GitHub (with the signer's token and GitHub URLs of the `[registration]` table in `--config`, `ANTS_CONFIG` or the default config file when present; see [config.md](config.md#human-registration)) and records its ID. It refuses `human`, the reserved names `bootstrap`, `channel-manager` and `signer`, a name holding credentials of anything but a human, a name bound to another GitHub user and a GitHub user bound to another name; on a name already bound to the same user it adds a device. `ants signer` applies the same rules, and also refuses to register a name that holds human credentials but no binding.
 
 ## Renewing over NATS
 
@@ -150,6 +169,14 @@ ants enroll renew dev-a --js-domain hub                                         
 ```
 
 `ants renew` generates a local NKey, publishes signed `RenewRequest`s on `ants.renew.<name>` every 5 s, verifies the returned JWT, atomically replaces the `.creds` file (preserving OS credential store placement), and reloads `ants.daemon`, or for leaf uplink credentials reconnects the uplink by reloading `ants.nats` with the `credentials` path respelled in `leaf.conf` (see [transport.md](transport.md#enrollment-behind-a-leaf-node)). For a human's credentials without an encryption key, `ants renew` also generates one and asks for it bound (the request's signed `xkey`), keeping its seed beside the new NKey seed; credentials that hold one keep it. `ants enroll renew` refuses a requested key for credentials of others than humans or already binding one, and preserves role, device, encryption key, domain, webhook destinations, leaf members and TTL while stamping the current permissions version, records `renewed_from` in `issued.jsonl`, and prints `ants auth revoke --key` for the old key. `ants enroll renew --auto` continuously approves valid unrevoked requests (reconnecting every 5 m to refresh `revoked.json`). Enrollment, leaf system, expired, or revoked credentials must be reissued via `ants auth`.
+
+Credentials a registration granted (a device registered with `ants login`, whose latest line in `issued.jsonl` has a grant) are renewed by `ants signer` instead, which `ants enroll renew` and `ants enroll renewals` leave them to. The signer answers each repeat of such a request with the same `RenewReply`, holding either the JWT or `refused` with the reason, which `ants renew` fails with:
+
+- `org` or `team` grant: the signer looks the GitHub user up by ID with its own token (see [config.md](config.md#human-registration)) and checks the memberships of the policy, reread. A user still a member under the policy is renewed with that grant and the current login; a user who is no member any more, or no GitHub user any more, is refused, every key of the name is revoked and the account pushed. Without a `[registration]` table or token, or when GitHub cannot tell, the renewal is refused alone: try again later. At most 10 checks run at once; more requests wait for their next repeat.
+- `approval` grant: renewed while the approval stands; once `ants auth revoke NAME` withdrew it, refused, naming `ants login`.
+- `email-domain` grant: refused, naming `ants login`, as only a new sign-in shows the verified email addresses.
+
+A renewal keeps the credentials' earlier lifetime, not the policy's current `ttl`.
 
 ## Credentials across upgrades
 

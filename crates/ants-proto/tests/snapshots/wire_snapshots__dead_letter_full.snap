@@ -75,6 +75,21 @@ expression: value
         "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
       }
     ],
+    "sealed": {
+      "v": 1,
+      "device": "019a7d2a-0000-7000-8000-000000000001",
+      "keys": [
+        {
+          "device": "019a7d2a-0000-7000-8000-000000000001",
+          "key": "eGt2MQ=="
+        },
+        {
+          "device": "019a7d2a-0000-7000-8000-000000000002",
+          "key": "eGt2MQ=="
+        }
+      ],
+      "body": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"

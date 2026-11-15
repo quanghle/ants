@@ -1020,7 +1020,7 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
             about: About::Escalation { id: envelope.id, from: envelope.from.clone(), escalation: escalation.clone() },
             human: envelope.to.clone(),
             title: format!("for {} (away): {what}", away.human),
-            text: cut(&redactor().redact(&envelope.text), 2 * MAX_TEXT),
+            text: notice_text(envelope, 2 * MAX_TEXT),
             buttons: Vec::new(),
             urgent: escalation.reason == EscalationReason::Approval,
         });
@@ -1028,7 +1028,7 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
     let thread = &escalation.thread_id;
     let text = format!(
         "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
-        cut(&redactor().redact(&envelope.text), MAX_TEXT),
+        notice_text(envelope, MAX_TEXT),
         envelope.from,
     );
     let title = match escalation.reason {
@@ -1044,6 +1044,14 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
         buttons: Vec::new(),
         urgent: false,
     })
+}
+
+/// What a notice shows of the text of `envelope`, cut at `max`: of a sealed message, only that it arrived.
+fn notice_text(envelope: &Envelope, max: usize) -> String {
+    match envelope.sealed {
+        Some(_) => "a sealed message arrived".to_owned(),
+        None => cut(&redactor().redact(&envelope.text), max),
+    }
 }
 
 /// Whose escalation or tool request `escalation`, sent by `from`, relays to a stand-in: the human away, who sent it.
@@ -1102,7 +1110,7 @@ fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let thread = &envelope.thread_id;
     let text = format!(
         "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{} TEXT",
-        cut(&redactor().redact(&envelope.text), MAX_TEXT),
+        notice_text(envelope, MAX_TEXT),
         envelope.from,
     );
     Some(Notice {

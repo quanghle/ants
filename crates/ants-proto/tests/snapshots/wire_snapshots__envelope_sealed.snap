@@ -1,0 +1,29 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "id": "019a7d2e-0000-7000-8000-000000000001",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "from": "alice",
+  "to": "bob",
+  "text": "",
+  "turn_budget": 8,
+  "owner": "alice",
+  "sealed": {
+    "v": 1,
+    "device": "019a7d2a-0000-7000-8000-000000000001",
+    "keys": [
+      {
+        "device": "019a7d2a-0000-7000-8000-000000000001",
+        "key": "eGt2MQ=="
+      },
+      {
+        "device": "019a7d2a-0000-7000-8000-000000000002",
+        "key": "eGt2MQ=="
+      }
+    ],
+    "body": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "sent_at": "2025-01-01T12:00:00Z"
+}

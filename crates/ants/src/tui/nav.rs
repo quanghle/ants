@@ -172,7 +172,7 @@ mod tests {
         let items = items(&m.data, at(0));
         assert_eq!(items[..2], [Item::Home, Item::Work(None)]);
         assert_eq!(
-            items[7..],
+            items[8..],
             [
                 Item::Channel("ops".parse().unwrap()),
                 Item::Ant(user("dev-a")),

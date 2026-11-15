@@ -40,6 +40,10 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     pub(crate) js_domain: Option<JsDomain>,
 
+    /// With bare `ants`: the two-line pane of `ants chat --compact`.
+    #[arg(long)]
+    pub(crate) compact: bool,
+
     // None for bare `ants`, which runs `ants chat` on a terminal.
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -56,10 +60,8 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
-        /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
-        /// ahead of the messages waiting there. Needs --thread and a human's credentials.
-        #[arg(long, requires = "thread")]
-        steer: bool,
+        #[command(flatten)]
+        sending: Sending,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -233,6 +235,21 @@ pub(crate) enum Command {
         /// How far back to read threads, such as 90m, 24h or 7d; 0 for everything the stream keeps.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "7d")]
         since: Duration,
+        /// Draw a two-line pane instead, as for a tmux split: what waits on the human by kind, the ants working and on
+        /// what, the spend that UTC day, and the top home item with its keys; Enter opens the full view.
+        #[arg(long)]
+        compact: bool,
+    },
+    /// One line of what waits on the human by kind, the ants working and the ants' spend that UTC day, without a
+    /// terminal: for a status bar or a script. Reads for at most 3s and prints ? for what it could not read in time.
+    /// Needs a human's credentials.
+    Status {
+        /// One short line for tmux's status-right: `⚑3 ◐2 $4.12`, the items waiting, the ants working, the spend.
+        #[arg(long, conflicts_with = "json")]
+        tmux: bool,
+        /// One JSON object, null for what was not read in time.
+        #[arg(long)]
+        json: bool,
     },
     /// Interactive terminal dashboard: recent threads and their history, the ants' live progress and the roster, and
     /// the pending tool requests, each shown in full and answered after a confirmation. Needs a terminal and a human's
@@ -305,13 +322,15 @@ pub(crate) enum Command {
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
     /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
     /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
-    /// messages each ant reads.
+    /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
+    /// renewing them while their grant holds.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
-        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
+        /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
         approval_timeout: Duration,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
@@ -327,7 +346,8 @@ pub(crate) enum Command {
     /// credentials. A refusal, an expiry or Ctrl-C leaves no key and no file.
     Login(login::LoginArgs),
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
-    /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
+    /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key (or, for
+    /// a device registered with `ants login`, for `ants signer` there, which may refuse). Then
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
     /// Expired credentials are renewed with `ants auth` instead.
     Renew(renew::RenewArgs),
@@ -429,6 +449,19 @@ pub(crate) enum HookCommand {
         #[arg(last = true, required = true, value_name = "CMD")]
         command: Vec<String>,
     },
+}
+
+/// How `ants ask` sends.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sending {
+    /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
+    /// ahead of the messages waiting there. Needs --thread and a human's credentials.
+    #[arg(long, requires = "thread")]
+    pub(crate) steer: bool,
+    /// Send a message from a human to another human in the clear: by default it is sealed so only the two humans'
+    /// devices read it.
+    #[arg(long)]
+    pub(crate) plaintext: bool,
 }
 
 /// What `ants ask` and `ants post` do once sent: return at once, wait for the first reply, or follow the thread.
@@ -543,18 +576,24 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "--nats", "nats://hub:4222"]).unwrap();
         assert!(cli.command.is_none());
         let cli = Cli::try_parse_from(["ants", "chat"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_hours(7 * 24));
+        assert_matches!(cli.command, Some(Command::Chat { since, compact: false }) if since == Duration::from_hours(7 * 24));
         let cli = Cli::try_parse_from(["ants", "chat", "--since", "90m"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Chat { since }) if since == Duration::from_mins(90));
+        assert_matches!(cli.command, Some(Command::Chat { since, .. }) if since == Duration::from_mins(90));
+        let cli = Cli::try_parse_from(["ants", "--compact"]).unwrap();
+        assert!(cli.compact && cli.command.is_none());
+        let cli = Cli::try_parse_from(["ants", "chat", "--compact"]).unwrap();
+        assert_matches!(cli.command, Some(Command::Chat { compact: true, .. }));
+        assert!(Cli::try_parse_from(["ants", "status", "--tmux", "--json"]).is_err());
     }
 
     #[test]
     fn ask_steers_only_a_thread() {
         assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
         let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. }));
+        let steering = Sending { steer: true, plaintext: false };
+        assert_matches!(cli.command, Some(Command::Ask { sending, thread: Some(thread::Pick::Last), .. }) if sending == steering);
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { steer: false, .. }));
+        assert_matches!(cli.command, Some(Command::Ask { sending: Sending { steer: false, .. }, .. }));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     Answer, ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans,
-    Question, Role, ThreadId, UserId, subject,
+    Question, Role, Sealed, ThreadId, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -112,6 +112,11 @@ pub struct Envelope {
     /// own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The text, and the suggested title and attachments if any, of a message between two humans, sealed so only
+    /// their devices read them ([`Sealed`]); `text` is then empty, and `title` and `attachments` are none. Only a
+    /// human seals, and only to another human. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Box<Sealed>>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -201,6 +206,7 @@ impl Envelope {
             answer: None,
             steer: false,
             attachments: Vec::new(),
+            sealed: None,
             sent_at: Utc::now(),
         }
     }
@@ -339,6 +345,7 @@ impl Envelope {
             answer: None,
             steer: false,
             attachments: Vec::new(),
+            sealed: None,
             sent_at: Utc::now(),
         })
     }
