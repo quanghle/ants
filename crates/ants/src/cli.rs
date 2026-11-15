@@ -51,12 +51,12 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; the
-    /// messenger gets it otherwise. With --wait or --follow, print the replies to the CLI's human on the thread and
-    /// mark them read.
+    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
+    /// human's assistant gets it while its grant stands, else the messenger. With --wait or --follow, print the
+    /// replies to the CLI's human on the thread and mark them read.
     Ask {
         /// Continue an existing thread: its id, a unique start of one, or `last`. The message still prompts only
-        /// its recipient (@ant, else the messenger), not the thread's other ants.
+        /// its recipient (@ant, else the human's assistant or the messenger), not the thread's other ants.
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,

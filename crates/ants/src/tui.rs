@@ -159,6 +159,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
         domain: nats.domain.cloned(),
         meta,
         sealing: sealing.clone(),
+        account: nats.account.clone(),
         keyring: feed.keyring(),
     };
     let feed = feed.with_timelines();

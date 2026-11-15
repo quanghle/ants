@@ -199,6 +199,27 @@ pub async fn show(nats: &Nats<'_>, human: Option<UserId>) -> Result<()> {
     Ok(())
 }
 
+/// The ant the grant of `human` designates, read and verified now for the team of `account` (the issuer of the CLI's
+/// credentials): none without an account or a grant that verifies, and none after a withdrawal. Whether the ant's own
+/// credentials name `human` is for the readers of what the ant does for `human` to check, not for whoever writes to it.
+pub(crate) async fn designated(js: &jetstream::Context, account: Option<&str>, human: &UserId) -> Option<UserId> {
+    let account = account?;
+    let grant = match read(js, human).await {
+        Ok(grant) => grant?,
+        Err(e) => {
+            tracing::warn!("reading the assistant of {human}: {e:#}");
+            return None;
+        }
+    };
+    match grant.verify(&assistant_grant_key(human), account, Utc::now()) {
+        Ok(verified) => verified.assistant,
+        Err(e) => {
+            tracing::warn!("not honouring the assistant grant of {human}: {e}");
+            None
+        }
+    }
+}
+
 /// A verified record in a line.
 fn describe(grant: &VerifiedGrant) -> String {
     let when = grant.issued_at.format("%Y-%m-%d %H:%M UTC");
@@ -331,6 +352,34 @@ mod tests {
             after(now, Some(now + TimeDelta::seconds(5))),
             now + TimeDelta::seconds(5) + TimeDelta::microseconds(1)
         );
+    }
+
+    /// What a human sends naming no one goes to its assistant while the grant naming it verifies, else the messenger.
+    #[tokio::test]
+    async fn a_human_s_unaddressed_asks_go_to_its_assistant_while_its_grant_stands() {
+        use crate::cmd::send::{Recipient, unaddressed};
+
+        let Some(server) = Server::start() else { return };
+        let alice = p("alice");
+        let creds = server.creds_as(&alice, Role::Human);
+        let account = devices::account_of(Some(&creds)).unwrap();
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        let me = humans::Me { id: alice.clone(), role: Role::Human };
+        let messenger = Recipient::from(UserId::messenger());
+
+        assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "no grant");
+        put(&js, &creds, &alice, Some(p("pa"))).await.unwrap();
+        let assistant = unaddressed(&js, &me, account.as_deref()).await;
+        assert_eq!(assistant, Recipient { to: p("pa"), assistant_of: Some(alice.clone()) });
+        assert_eq!(assistant.to_string(), "pa (assistant of alice)");
+        assert_eq!(unaddressed(&js, &me, None).await, messenger, "not verified without an account");
+        let foreign = Some("AAOTHERACCOUNT");
+        assert_eq!(unaddressed(&js, &me, foreign).await, messenger, "signed for another team");
+        let ant = humans::Me { id: alice.clone(), role: Role::Ant };
+        assert_eq!(unaddressed(&js, &ant, account.as_deref()).await, messenger, "an ant has no assistant");
+        put(&js, &creds, &alice, None).await.unwrap();
+        assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "withdrawn");
     }
 
     /// A human's device signs a grant only the human's credentials store, readers watching honour it at once, and

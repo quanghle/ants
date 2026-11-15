@@ -1,6 +1,6 @@
 //! The command bar under the view: Ctrl-K focuses it, and @ or # typed in a view focuses it with that character. Its
 //! text starts a thread with `@user` as `ants ask` does, posts a new thread with `#channel` as `ants post` does, and
-//! else replies on the open thread, or asks the messenger; `/` starts a slash command over the CLI's verbs, acting on
+//! else replies on the open thread, or asks the human's assistant, else the messenger; `/` starts a slash command over the CLI's verbs, acting on
 //! the selected item or open thread ([`COMMANDS`]). Sends run in the background ([`super::exec`]); the bar's status
 //! line tells how they went, and a failed send's text comes back into the bar.
 
@@ -72,7 +72,7 @@ pub enum Command {
         channel: ChannelId,
         text: String,
     },
-    /// Reply on the open thread, else ask the messenger.
+    /// Reply on the open thread, else ask the human's assistant, else the messenger.
     Say(String),
     Slash(Slash),
 }
@@ -634,12 +634,13 @@ impl Model {
         }
     }
 
-    /// What plain text does: reply on the open thread, as a post on a channel's thread, else ask the messenger.
+    /// What plain text does: reply on the open thread, as a post on a channel's thread, else ask the human's assistant,
+    /// else the messenger ([`Job::Unaddressed`]).
     fn say(&self, text: String) -> Job {
         let page = match self.page() {
             Page::Thread(page) => page,
             Page::Dm(page) => return Job::Ask { to: page.with.clone(), thread: None, text, steer: false },
-            _ => return Job::Ask { to: UserId::messenger(), thread: None, text, steer: false },
+            _ => return Job::Unaddressed { text },
         };
         let thread = page.history.thread.clone();
         match self.data.live.summary(&thread).and_then(|s| s.channels.first()) {
@@ -886,12 +887,12 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_replies_on_the_open_thread_and_else_asks_the_messenger() {
+    fn plain_text_replies_on_the_open_thread_and_else_goes_unaddressed() {
         let thread = ThreadId::generate();
         let mut m = model();
         m.key(Key::Ctrl('k'), at(0));
         typed(&mut m, "who owns billing?");
-        let job = Job::Ask { to: UserId::messenger(), thread: None, text: "who owns billing?".into(), steer: false };
+        let job = Job::Unaddressed { text: "who owns billing?".into() };
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "who owns billing?".into())));
         m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
         typed(&mut m, "go on");
