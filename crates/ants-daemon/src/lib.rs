@@ -35,6 +35,7 @@ pub mod schedule;
 pub mod signin;
 pub mod status;
 pub mod template;
+pub mod unserved;
 pub mod webhooks;
 pub mod worktrees;
 

@@ -13,9 +13,11 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use ants_daemon::bus;
+use ants_daemon::humans::Registry;
 use ants_daemon::reactions::{self, Reacted};
 use ants_daemon::reading::{self, Reading};
-use ants_proto::{Envelope, READ_BUCKET, ReadMarker, STREAM, ThreadId, UserId, Uuid, inbox_consumer, subject};
+use ants_daemon::unserved;
+use ants_proto::{Envelope, READ_BUCKET, ReadMarker, Role, STREAM, ThreadId, UserId, Uuid, inbox_consumer, subject};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::consumer::{DeliverPolicy, PullConsumer};
 use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
@@ -327,6 +329,29 @@ pub struct Shown<'a> {
     #[serde(flatten)]
     pub envelope: &'a Envelope,
     pub reactions: &'a [Reacted],
+}
+
+/// Print, while it runs, the notices of the messages the human of `nats` sent that keep waiting for an ant no daemon
+/// serves ([`unserved`]); none with credentials that may not mark what it was told of.
+pub async fn tell_unserved(nats: &crate::Nats<'_>, js: &jetstream::Context) {
+    let me = &nats.me.id;
+    if !nats.rights.may_publish(&unserved::marker_subject(me)) {
+        return;
+    }
+    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
+    let mut watch = match unserved::Watch::new(js, nats.domain, me.clone(), Role::Human, roster).await {
+        Ok(watch) => watch,
+        Err(e) => return tracing::warn!("not watching the messages sent: {e:#}"),
+    };
+    let humans = Registry::new(me.clone());
+    let _watching = humans.watch(js.clone(), ants_daemon::humans::RETRY);
+    loop {
+        for found in watch.next(|user| humans.is_human(user)).await {
+            if let Some(found) = watch.claim(found).await {
+                println!("{}", found.text(me, chrono::Utc::now()));
+            }
+        }
+    }
 }
 
 /// The reactions to `messages`, none if they cannot be read.

@@ -33,9 +33,11 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::direct_kv::{DirectKv, Lookup};
+use ants_daemon::humans::Registry;
+use ants_daemon::unserved::{self, Unserved, Watch};
 use ants_proto::{
     ApprovalRequest, DeviceId, Envelope, Escalation, EscalationReason, Following, JsDomain, NOTIFY_BUCKET, NotifyPrefs,
-    STREAM, ThreadId, UserId, Uuid, Verdict, notify_consumer, subject,
+    Role, STREAM, ThreadId, UserId, Uuid, Verdict, notify_consumer, subject,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::{self, consumer, stream::Stream};
@@ -752,6 +754,8 @@ enum About {
     Completion { id: Uuid, from: UserId, thread: ThreadId },
     /// A test notice of `ants webhook notify-test`.
     Test { id: Uuid },
+    /// The messages `messages` the human sent, waiting for `ant`, which no daemon serves.
+    Unserved { ant: UserId, messages: Vec<Uuid> },
 }
 
 impl About {
@@ -761,7 +765,7 @@ impl About {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
             Self::Completion { thread, .. } => Some(thread),
-            Self::Test { .. } => None,
+            Self::Test { .. } | Self::Unserved { .. } => None,
         }
     }
 
@@ -770,7 +774,7 @@ impl About {
         match self {
             Self::Approval { .. } => Some(Bypass::Approvals),
             Self::Escalation { .. } => Some(Bypass::Escalations),
-            Self::Completion { .. } | Self::Test { .. } => None,
+            Self::Completion { .. } | Self::Test { .. } | Self::Unserved { .. } => None,
         }
     }
 }
@@ -834,6 +838,9 @@ fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "thread": thread,
         }),
         About::Test { id } => json!({ "kind": "test", "id": id }),
+        About::Unserved { ant, messages } => {
+            json!({ "kind": "unserved", "id": messages.first(), "ant": ant, "messages": messages })
+        }
     };
     if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts) {
         json.extend(facts);
@@ -967,6 +974,19 @@ fn completion_notice(envelope: &Envelope) -> Option<Notice> {
         buttons: Vec::new(),
         urgent: false,
     })
+}
+
+/// The notice to `human` of its messages `found` waiting for an ant no daemon serves, at `now`.
+fn unserved_notice(found: &Unserved, human: &UserId, now: DateTime<Utc>) -> Notice {
+    let text = found.text(human, now);
+    Notice {
+        about: About::Unserved { ant: found.ant.clone(), messages: found.messages.iter().map(|m| m.id).collect() },
+        human: human.clone(),
+        title: format!("messages wait for {}, which no daemon serves", found.ant),
+        text: text.strip_prefix("[ants] ").unwrap_or(&text).to_owned(),
+        buttons: Vec::new(),
+        urgent: false,
+    }
 }
 
 // ---- sending ---------------------------------------------------------------------------------------------------
@@ -1225,12 +1245,18 @@ pub async fn run(
             None
         }
     };
+    let unserved = unserved_watch(&human.config, &js, js_domain.as_ref()).await;
     let _ = human.bus.set(HumanBus { client, js, stream, present, prefs });
     let bus = human.bus.get().expect("just set");
     tracing::info!(human = %name, sinks = ?human.config.sinks, "notifying");
+    let mut unserved = Box::pin(tell_unserved(&human.config, bus, unserved));
     let mut delay = Duration::from_secs(1);
     loop {
-        match watch(&human, bus, links.as_deref()).await {
+        let watched = tokio::select! {
+            watched = watch(&human, bus, links.as_deref()) => watched,
+            never = &mut unserved => match never {},
+        };
+        match watched {
             Ok(()) => delay = Duration::from_secs(1),
             Err(e) => {
                 tracing::warn!(human = %name, retry_in = ?delay, "notifications: {e:#}");
@@ -1333,6 +1359,53 @@ async fn notify(human: &Notified, bus: &HumanBus, links: Option<&Links>, subject
         tracing::debug!(human = %config.name, devices = ?reading, what = what.as_str(), "skipping devices reading");
     }
     send(config, &notice, |device| !reading.contains(device)).await;
+}
+
+/// The watch of the messages `human` sends ([`unserved`]), when it takes escalations and its credentials may mark
+/// what it was told of.
+async fn unserved_watch(human: &Human, js: &jetstream::Context, js_domain: Option<&JsDomain>) -> Option<Watch> {
+    if !human.escalations {
+        return None;
+    }
+    let name = &human.name;
+    if !crate::humans::Rights::from_creds(human.creds.as_deref())
+        .is_ok_and(|rights| rights.may_publish(&unserved::marker_subject(name)))
+    {
+        tracing::warn!(
+            human = %name,
+            "credentials from before notices of messages waiting for an ant no daemon serves: none is sent; renew \
+             with `ants auth user {name} --human`"
+        );
+        return None;
+    }
+    let roster = ants_daemon::mcp::jetstream_roster(js.clone());
+    Watch::new(js, js_domain, name.clone(), Role::Human, roster)
+        .await
+        .inspect_err(|e| tracing::warn!(human = %name, error = format!("{e:#}"), "watching the messages sent"))
+        .ok()
+}
+
+/// Tell `human`, through its sinks, of the messages it sent that keep waiting for an ant no daemon serves, as `watch`
+/// finds them: those held back by a snooze or quiet hours wait for them to end.
+async fn tell_unserved(human: &Human, bus: &HumanBus, watch: Option<Watch>) -> std::convert::Infallible {
+    if let Some(mut watch) = watch {
+        let humans = Registry::new(human.name.clone());
+        let _watching = humans.watch(bus.js.clone(), ants_daemon::humans::RETRY);
+        loop {
+            for found in watch.next(|user| humans.is_human(user)).await {
+                let now = Utc::now();
+                let notice = unserved_notice(&found, &human.name, now);
+                if let Some(why) = held(human, &notice.about, &holds(human, bus).await, now) {
+                    tracing::debug!(human = %human.name, why, title = notice.title, "holding back a notice");
+                    continue;
+                }
+                if let Some(found) = watch.claim(found).await {
+                    send(human, &unserved_notice(&found, &human.name, Utc::now()), |_| true).await;
+                }
+            }
+        }
+    }
+    std::future::pending().await
 }
 
 /// The holds `human` set, read anew for each notice: none when they cannot be read, so a failure sends a notice too
@@ -2070,6 +2143,22 @@ mod tests {
             (&json!("turn_budget"), &json!("dev-a"), &json!(0))
         );
         assert!(json.get("expires_at").is_none() && json["links"] == json!([]), "{json}");
+
+        let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+        let about = About::Unserved { ant: p("dev-c"), messages: vec![first, second] };
+        let waiting = Notice {
+            about,
+            human: p("alice"),
+            title: String::new(),
+            text: String::new(),
+            buttons: Vec::new(),
+            urgent: false,
+        };
+        let json = notice_json(&waiting, now);
+        assert_eq!(
+            (&json["kind"], &json["id"], &json["ant"], &json["messages"]),
+            (&json!("unserved"), &json!(first), &json!("dev-c"), &json!([first, second]))
+        );
 
         let http = Sink::Http { url: "https://hooks.example/a".to_owned(), secret: "0123456789abcdef-hook".into() };
         let Delivery::Post { url, headers, body } = http.request(&notice) else { panic!("not a POST") };

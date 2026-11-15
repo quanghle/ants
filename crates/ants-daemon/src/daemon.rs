@@ -38,7 +38,7 @@ use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
 use crate::webhooks::Webhooks;
 use crate::worktrees::{Branch, Worktrees};
-use crate::{bus, roster};
+use crate::{bus, roster, unserved};
 
 /// Period of the progress acks sent for every message in hand, from its arrival to its ack: waiting for its thread,
 /// and prompting, which covers waiting for a harness, starting it and a tool request waiting for the human.
@@ -331,6 +331,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
     };
+    let mut unserved =
+        unserved::Watch::new(&js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, roster.clone()).await?;
     let (stopping, mut asked) = (std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request or the hand-over, after which the prompts in flight finish; the second
     // only Ctrl-C or a stop request.
@@ -354,6 +356,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         }) => {}
         () = inbox.hear_cancels() => {}
         () = crate::creds::recheck(config.creds.as_deref()) => {}
+        () = tell_unserved(&js, &humans, &mut unserved) => {}
     }
     let handed_over = registration.is_lost() && !stopping.get();
     registration.deregister().await;
@@ -1070,8 +1073,10 @@ impl Inbox<'_> {
         match mcp.claim(envelope).await {
             Ok(false) => false,
             Ok(true) => {
-                if let Err(e) = bus::double_ack(self.client, msg).await {
-                    tracing::warn!(error = %e, "acking a reply to ask_agent");
+                match bus::double_ack(self.client, msg).await {
+                    // Finished, not left waiting to the watcher of its sender ([`unserved`]).
+                    Ok(()) => self.attempts.finish(envelope).await,
+                    Err(e) => tracing::warn!(error = %e, "acking a reply to ask_agent"),
                 }
                 true
             }
@@ -1970,6 +1975,22 @@ async fn tell_kept_branches(
         let notice = kept_branch_notice(ant, &branch, owner, humans);
         if let Err(e) = bus::publish_json(js, notice.subject(), &notice, None).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the thread's kept branch");
+        }
+    }
+}
+
+/// Tell a human of the messages the ant sent that keep waiting for an ant no daemon serves ([`unserved`]): the owner
+/// they name, else the default human, on a thread of its own.
+async fn tell_unserved(js: &jetstream::Context, humans: &Registry, watch: &mut unserved::Watch) {
+    let ant = watch.sender().clone();
+    loop {
+        for found in watch.next(|user| humans.is_human(user)).await {
+            let Some(found) = watch.claim(found).await else { continue };
+            let to = humans.owner_or_default(found.owner.as_ref());
+            let notice = Envelope::new(ant.clone(), to, found.text(&ant, chrono::Utc::now()));
+            if let Err(e) = bus::publish_json(js, notice.subject(), &notice, None).await {
+                tracing::warn!(waiting_for = %found.ant, error = format!("{e:#}"), "telling a human of messages waiting");
+            }
         }
     }
 }

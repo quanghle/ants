@@ -759,6 +759,13 @@ pub fn message_mark_key(ant: &UserId, message: &Uuid) -> String {
     format!("{ant}.msg.{message}")
 }
 
+/// Key in [`ATTEMPTS_BUCKET`] of the marker that `sender` was told that its message `message` keeps waiting for an
+/// ant no daemon serves: the first of the sender's watchers to create it tells, once across watchers and restarts.
+/// Keys start with the sender, so its credentials can be confined to its own.
+pub fn unserved_key(sender: &UserId, message: &Uuid) -> String {
+    format!("{sender}.unserved.{message}")
+}
+
 /// Key in [`LINKS_BUCKET`] of the record that `from` passed the link to channel thread `thread` on to `to`. Keys start
 /// with the ant that passed it on, so its credentials can be confined to its own.
 pub fn link_key(from: &UserId, thread: &ThreadId, to: &UserId) -> String {
@@ -874,7 +881,8 @@ pub fn dead_reader(ant: &UserId) -> String {
 }
 
 /// JetStream consumer an ant's daemon reads back the messages the ant sent through, one read at a time, like
-/// [`notes_consumer`], to rebuild the context of a thread. Its filter is pinned to [`subject::inbox_from`] of the ant.
+/// [`notes_consumer`], to rebuild the context of a thread and to find those that keep waiting for an ant no daemon
+/// serves ([`unserved_key`]). Its filter is pinned to [`subject::inbox_from`] of the ant.
 pub fn sent_reader(ant: &UserId) -> String {
     format!("sentread-{ant}")
 }
@@ -1111,14 +1119,15 @@ impl Permissions {
     /// markers in [`WEBHOOKS_BUCKET`], none of their events), asks the channel manager for changes to
     /// a channel only as itself ([`subject::chanadm_from`]), and reads and writes only its own keys in the sessions and attempts buckets,
     /// except that it reads every ant's daily spend there ([`daily_spend_key`]), to hold the ants of a template to
-    /// their pool caps. Of
+    /// their pool caps, and every message's mark ([`message_mark_key`]), to tell which of those it sent keep waiting. Of
     /// these and the owners bucket it gets no stream info, which lists every key of a bucket (so the threads of other
     /// ants): it reads single keys by direct gets. Nor does it get the stream's info, which lists every subject stored,
     /// so who messages whom: it finds the stream through the info of its own inbox consumer. The filter of each of its consumers is
     /// part of the subject that creates it, so none can be pointed at another inbox: a consumer with several filters
     /// has none in that subject, so no ant may create one. A human (a CLI user; [`Role::Human`], whatever its
     /// name) also watches all ants traffic, decides approval requests, asks for and withdraws the messages waiting in
-    /// an ant's queue ([`QueueRequest`], [`message_mark_key`], the only keys of the attempts bucket it writes or reads),
+    /// an ant's queue ([`QueueRequest`], [`message_mark_key`]: with its own [`unserved_key`]s, the only keys of the
+    /// attempts bucket it writes or reads),
     /// reads every ant's thread and daily spend in the
     /// sessions bucket ([`thread_spend_key`], [`daily_spend_key`]) but none of its other keys there, may create and
     /// upgrade the stream and create the roster, sessions,
@@ -1278,6 +1287,9 @@ impl Permissions {
                 // Withdrawing a message from an ant's queue: creating its mark, and reading the mark that won.
                 format!("$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
                 format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
+                // Its own markers of the messages it was told keep waiting for an ant no daemon serves.
+                format!("$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
+                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.{user}.unserved.*"),
                 subject::DEAD_ALL.to_owned(),
                 // Setting up the store and forward of leaf nodes: the hub's intake, and each leaf's outbox through the
                 // leaf's own domain (the plain form is what a leaf maps its own domain to).
@@ -1326,6 +1338,8 @@ impl Permissions {
                 format!("$JS.API.CONSUMER.CREATE.{STREAM}.{sent_read}.{}", subject::inbox_from(user)),
                 format!("$JS.API.CONSUMER.MSG.NEXT.{STREAM}.{sent_read}"),
                 format!("$JS.API.CONSUMER.DELETE.{STREAM}.{sent_read}"),
+                // Get of the mark of every message to an ant, to tell whether those it sent still wait.
+                format!("$JS.API.DIRECT.GET.{attempts}.$KV.{ATTEMPTS_BUCKET}.*.msg.*"),
                 subject::status_of(user),
                 subject::cancelled_of(user),
                 subject::queued(user),

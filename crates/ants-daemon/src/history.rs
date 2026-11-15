@@ -59,8 +59,9 @@ pub fn budget(set: Option<usize>, window: Option<u64>) -> usize {
     bytes(WINDOW_CAP).map_or(budget, |cap| budget.min(cap))
 }
 
-/// One read through the ant's sent reader at a time: each deletes the consumer a read before left.
-static SENT_READS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One read through an ant's sent reader at a time, of a thread's history or of the messages that keep waiting
+/// ([`crate::unserved`]): each deletes the consumer a read before left.
+pub(crate) static SENT_READS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// What a prompt in a session rebuilt for `why` starts with: why, and the thread's history within `budget` bytes, or
 /// half of it after a context overflow so that the new session has room to spare.

@@ -1332,6 +1332,30 @@ pub(crate) mod tests {
         assert!(marks.put(attempt_key(&dev_a, 2), "started").await.is_err());
         assert!(marks.get(attempt_key(&dev_a, 1)).await.is_err());
         assert!(attempts.create(mark(&dev_b, &queued), "started").await.is_err());
+        // Watching the messages it sent for those that keep waiting, dev-a reads them back through its own reader and
+        // what became of them, and marks those told of under its own keys; the human only under its own.
+        let (sent, all) = (subject::inbox_from(&dev_a), jetstream::consumer::DeliverPolicy::All);
+        let read_sent = async |ant: &UserId, filter: &str| {
+            let (reader, mut read) = (ants_proto::sent_reader(ant), Vec::new());
+            let reading = ants_daemon::reading::Reading::Consumer;
+            ants_daemon::reading::read_back(&a_js, &reader, reading, filter, all, |seq, _, _, _| {
+                read.push(seq);
+                std::ops::ControlFlow::Continue(())
+            })
+            .await
+            .map(|()| read)
+        };
+        assert_eq!(read_sent(&dev_a, &sent).await.unwrap().len(), 1, "its reply");
+        assert!(read_sent(&dev_a, &subject::inbox_from(&dev_b)).await.is_err());
+        assert!(read_sent(&dev_b, &subject::inbox_from(&dev_b)).await.is_err());
+        assert_eq!(attempts.get(mark(&dev_b, &queued)).await.unwrap(), None);
+        let told = |user: &UserId, message| ants_proto::unserved_key(user, message);
+        assert!(attempts.create(told(&dev_a, &queued), "{}").await.unwrap());
+        assert!(!attempts.create(told(&dev_a, &queued), "{}").await.unwrap(), "told once");
+        assert!(attempts.create(told(&dev_b, &queued), "{}").await.is_err());
+        assert!(marks.create(told(&human, &queued), "{}").await.unwrap());
+        assert!(marks.create(told(&dev_a, &taken), "{}").await.is_err());
+        assert!(marks.get(told(&dev_a, &queued)).await.is_err());
 
         // Nor list their keys, which a stream info request with a subjects filter would, as of the owners bucket.
         let (a_raw, mut errors) = server.watched(&dev_a).await;
