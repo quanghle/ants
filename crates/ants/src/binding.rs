@@ -52,9 +52,7 @@ pub fn check_name(issued: &[Issued], name: &UserId) -> Result<()> {
     if name.is_human() {
         bail!("{name} is the default human, which no one registers");
     }
-    if *name == UserId::channel_manager() || *name == UserId::signer() || name.as_str() == ants_proto::BOOTSTRAP_USER {
-        bail!("{name} is a reserved name");
-    }
+    crate::auth::check_not_reserved(name)?;
     if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.kind != Kind::Human) {
         bail!("{name} is taken: {} credentials were issued to it", kind(other.kind));
     }
@@ -113,6 +111,7 @@ mod tests {
             ("channel-manager", 2, Binder::Signer, "reserved"),
             ("bootstrap", 2, Binder::Signer, "reserved"),
             ("signer", 2, Binder::Signer, "reserved"),
+            ("revoked", 2, Binder::Signer, "reserved"),
         ];
         for (name, id, binder, why) in refused {
             let err = check(name, id, binder).unwrap_err();

@@ -117,8 +117,10 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
-/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take, and
-/// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records.
+/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take,
+/// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records, [`UserId::signer`], and
+/// [`ants_proto::BOOTSTRAP_USER`], the name of the public bootstrap credentials, which `ants auth revoke bootstrap`
+/// revokes.
 pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if *user == UserId::channel_manager() {
         bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
@@ -128,6 +130,9 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
     }
     if *user == UserId::signer() {
         bail!("{user} is reserved for the approval requests of `ants signer`; choose another name");
+    }
+    if user.as_str() == ants_proto::BOOTSTRAP_USER {
+        bail!("{user} is reserved for the public bootstrap credentials (`ants auth bootstrap`); choose another name");
     }
     Ok(())
 }

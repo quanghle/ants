@@ -178,7 +178,7 @@ An approval stands for that GitHub user and name: the user's later devices of th
 A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good, so a renamed GitHub account keeps its name:
 
 - The first registration signed for a free name binds it. The same GitHub user registering the name again adds a device; another GitHub user asking for it is refused, and so is a GitHub user already bound to another name.
-- `human`, the reserved names `bootstrap`, `channel-manager` and `signer`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
+- `human`, the reserved names `bootstrap`, `channel-manager`, `revoked` and `signer`, and names any key other than a human's was issued to (an ant, webhook, leaf node, enrollment, ...) are refused.
 - A name holding human credentials but no binding (issued with `ants auth user --human`) is refused until the operator binds it:
 
 ```sh
