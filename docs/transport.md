@@ -210,6 +210,7 @@ Because core NATS republishes do not cross a down uplink, waiters also poll `ANT
 - **`ants ask --wait` / `--follow`**: polls `ANTS` every 5 s (up to 100 messages/round from the starting sequence): humans via batched direct gets (`$JS.API.DIRECT.GET.ANTS`, `next_by_subj`) updating `ants_read`; ants via short-lived no-ack spare consumers `inbox-<ant>_1..3` (`inactive_threshold` 30 s).
 - **Daemon `ask_ant` and escalation waiters**: listen on live subscriptions while connected and receive outage replies via durable consumer `inbox-<ant>` on reconnect.
 - **`ants post --wait` / `--follow`**: subscribes to `ants.chan.<channel>.*` and polls stored channel posts every 5 s (humans via batched direct gets; ants via `chanread-<ant>_1..3`), starting from the publish ack sequence or 5 m before send time if buffered in `ANTS_OUT`, deduplicating the last 1,024 post IDs.
+- **Reactions while following** (`ants inbox -f`, `ants ask -f`, `ants post -f`): credentials holding `$JS.API.CONSUMER.CREATE.KV_ants_reactions` (humans) open one ordered push consumer (`DeliverPolicy::New`, headers only) on `$KV.ants_reactions.>` before the message is sent or the inbox read, and print changes to shown messages; ant credentials skip it silently, and a consumer that cannot be created logs one warning while following continues.
 
 ## HTTPS fallback bridge
 

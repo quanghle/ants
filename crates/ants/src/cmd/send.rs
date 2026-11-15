@@ -5,10 +5,11 @@ use ants_daemon::{bus, notes, owners, reactions};
 use ants_proto::{ChannelId, ChannelPost, Envelope, NotesPost, Reaction, ThreadId, UserId, subject};
 use anyhow::Result;
 use futures::StreamExt as _;
+use futures::stream::BoxStream;
 
 use crate::cli::Replies;
 use crate::cmd::inbox::REISSUE_HUMAN;
-use crate::{Nats, channel, compose, humans, inbox, progress, roster, thread};
+use crate::{Nats, channel, compose, humans, inbox, progress, reacted, roster, thread};
 
 /// Split a leading `@ant` off the words; the message is the rest, or what `input` reads.
 pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Result<(UserId, String)> {
@@ -55,6 +56,7 @@ pub(crate) async fn ask(
             tracing::warn!("a reply waits for a daemon to serve {}: {flag} may not end until one does", envelope.to);
         }
     }
+    let changes = followed_reactions(nats, &js, replies).await;
     let status = if (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
         client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok()
     } else {
@@ -76,6 +78,8 @@ pub(crate) async fn ask(
         let status = progress::Status::new(vec![envelope.id]).with(envelope.to.clone(), stand);
         progress::start(sub, status, replies.wait)
     });
+    let shown = reacted::Shown::default();
+    shown.add(envelope.id, &envelope.from, &envelope.text);
     let thread = envelope.thread_id.clone();
     let on_thread = inbox.filter_map(move |msg| {
         let reply = match serde_json::from_slice::<Envelope>(&msg.payload) {
@@ -90,24 +94,24 @@ pub(crate) async fn ask(
         };
         std::future::ready(reply)
     });
-    replies
-        .show(&envelope.thread_id, on_thread, async |reply: Envelope| {
-            progress::clear();
-            println!("{}: {}", reply.from, reply.text);
-            // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
-            // consumer is its daemon's.
-            if nats.me.role.is_human() && !nats.device.marks_read {
-                tracing::warn!("{REISSUE_HUMAN}; the reply stays unread");
-            } else if nats.me.role.is_human() {
-                match inbox::mark_read(&js, &nats.me.id, &reply).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::debug!("reply already read"),
-                    Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
-                }
+    let shown_replies = replies.show(&envelope.thread_id, on_thread, async |reply: Envelope| {
+        progress::clear();
+        shown.add(reply.id, &reply.from, &reply.text);
+        println!("{}: {}", reply.from, reply.text);
+        // Seen here, so `ants inbox` need not show it again. The other replies stay unread; an ant's inbox
+        // consumer is its daemon's.
+        if nats.me.role.is_human() && !nats.device.marks_read {
+            tracing::warn!("{REISSUE_HUMAN}; the reply stays unread");
+        } else if nats.me.role.is_human() {
+            match inbox::mark_read(&js, &nats.me.id, &reply).await {
+                Ok(true) => {}
+                Ok(false) => tracing::debug!("reply already read"),
+                Err(e) => tracing::warn!("could not mark the reply read: {e:#}"),
             }
-            Ok(())
-        })
-        .await
+        }
+        Ok(())
+    });
+    Box::pin(with_reactions(shown_replies, &shown, changes)).await
 }
 
 /// What `ants ask` sends as `me`: a thread `me` owns, as it starts it or continues it, when `me` is a human. A thread
@@ -148,6 +152,7 @@ pub(crate) async fn post(
     } else {
         None
     };
+    let changes = followed_reactions(nats, &js, replies).await;
     let status = if room.is_some() && progress::wanted(nats.me.role.is_human()) {
         client.subscribe(subject::status_on(&post.thread_id)).await.ok()
     } else {
@@ -173,13 +178,37 @@ pub(crate) async fn post(
     // never comes live, as while the leaf's uplink is down, is read back from the hub's stream.
     let posts = channel::caught_up_posts(room, &js, &nats.me, &post, stored);
     let on_thread = channel::thread_posts(posts, &post, replies.wait);
-    replies
-        .show(&post.thread_id, on_thread, async |reply: ChannelPost| {
-            progress::clear();
-            println!("{}: {}", reply.from, reply.text);
-            Ok(())
-        })
-        .await
+    let shown = reacted::Shown::default();
+    shown.add(post.id, &post.from, &post.text);
+    let shown_replies = replies.show(&post.thread_id, on_thread, async |reply: ChannelPost| {
+        progress::clear();
+        shown.add(reply.id, &reply.from, &reply.text);
+        println!("{}: {}", reply.from, reply.text);
+        Ok(())
+    });
+    Box::pin(with_reactions(shown_replies, &shown, changes)).await
+}
+
+/// The reactions `ants ask` and `ants post` follow: with --follow, from before the message goes out on; none with
+/// --wait, which only the first reply ends.
+async fn followed_reactions(
+    nats: &Nats<'_>,
+    js: &async_nats::jetstream::Context,
+    replies: &Replies,
+) -> BoxStream<'static, reactions::Change> {
+    if replies.follow { reacted::changes(nats, js).await } else { futures::stream::pending().boxed() }
+}
+
+/// Show the replies, printing meanwhile the reactions to the message sent and the replies shown.
+async fn with_reactions(
+    shown_replies: impl Future<Output = Result<()>>,
+    shown: &reacted::Shown,
+    changes: BoxStream<'static, reactions::Change>,
+) -> Result<()> {
+    tokio::select! {
+        shown = shown_replies => shown,
+        printed = shown.show(changes, false) => printed,
+    }
 }
 
 pub(crate) async fn thread_notes(nats: &Nats<'_>, thread: thread::Pick, text: Vec<String>) -> Result<()> {

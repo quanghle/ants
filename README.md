@@ -89,7 +89,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 | Command | Description |
 |---|---|
 | `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT \| --file PATH \| --edit` | Send to `@ant` (`messenger` if omitted); prints `thread <id>` and `message <id>`. Warns on stderr if `@ant` is missing from `ants_roster`, `stale`, `signed-out`, `failing`, or provider-limited. |
-| `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies (with message IDs and reactions) and mark read across all devices (`--peek` keeps unread; `-f` streams replies, `MAX_DELIVERIES` advisories and, without `--thread`/`--json`, tool requests; records presence without `--thread`). |
+| `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies (with message IDs and reactions) and mark read across all devices (`--peek` keeps unread; `-f` streams replies, reactions added/removed to shown messages (human creds; `--json`: `{message, by, reaction, removed}`), `MAX_DELIVERIES` advisories and, without `--thread`/`--json`, tool requests; records presence without `--thread`). |
 | `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift and recovery notes. |
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
@@ -169,7 +169,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 ### Composing and waiting
 
 - **Input:** `ants ask` and `ants post` take trailing words joined by spaces, `--file PATH` (`--file -` reads stdin; preserves internal formatting, strips BOM and trailing newlines), or `--edit` (`$VISUAL` -> `$EDITOR` -> `vi`/`notepad` on a `0600` temp file; empty/blank messages abort).
-- **Waiting:** `--wait` prints the first reply and exits `0` (`--timeout` exits `1` on timeout; Ctrl-C exits `130`); `-f`/`--follow` streams replies until `--timeout` or Ctrl-C (`0`), marking printed replies read. On a terminal with human credentials, stderr displays a live in-place status line (`not served`, `queued behind N`, `working`, `thinking`, `writing`, `running <tool>`, `waiting for approval` with `ants tools approve <ant>/<id>`, `harness signed out`).
+- **Waiting:** `--wait` prints the first reply and exits `0` (`--timeout` exits `1` on timeout; Ctrl-C exits `130`); `-f`/`--follow` streams replies until `--timeout` or Ctrl-C (`0`), marking printed replies read, plus reactions added/removed to the sent message and printed replies (human creds; `dev-a reacted eyes to message <id> (alice: <opening>)`). On a terminal with human credentials, stderr displays a live in-place status line (`not served`, `queued behind N`, `working`, `thinking`, `writing`, `running <tool>`, `waiting for approval` with `ants tools approve <ant>/<id>`, `harness signed out`).
 
 ### Pool, worktrees and at-least-once retries
 
@@ -272,7 +272,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 ## Dashboard and reactions
 
 - **`ants dash [--since DUR]`:** full-screen terminal UI (human creds) showing active threads (`▶` while busy), selected thread live progress and history, 10 s roster refresh, and live pending tool requests (`Enter` opens details; `a`/`A`/`r` then `y` confirms `allow_once`/`allow_always`/`reject`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
-- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`. A human's `MESSAGE` may be a unique start of an id: matched first among messages to or from the human stored in the last 7 d, then among any stored then (narrowed by the time in a time-ordered id); several or no matches are refused with a list of candidates. Ant credentials need the whole id.
+- **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Users write/delete only their own keys; humans read all reactions in `ants inbox`, `ants thread show` and `ants watch`, and follow them live in `ants inbox -f`, `ants ask -f` and `ants post -f`; reactions never end a wait or mark anything read. A human's `MESSAGE` may be a unique start of an id: matched first among messages to or from the human stored in the last 7 d, then among any stored then (narrowed by the time in a time-ordered id); several or no matches are refused with a list of candidates. Ant credentials need the whole id.
 
 ## Channels
 
