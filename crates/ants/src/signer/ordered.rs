@@ -8,19 +8,26 @@
 //! hears it, for that machine and the ant asked about. An order adds one key only: another key asking on the same
 //! order is refused, and a retirement revokes only keys of an ant that was there when the admin sent the order. An order
 //! never grants host credentials ([`EnrollRequest::host_creds`]): only a human approving does.
+//!
+//! On a machine behind a leaf node, the request of an add order also carries the leaf's live uplink credentials, which
+//! sign it too: the signer renews them to carry the ant, keeps the ant among the leaf's members and admits it from the
+//! machine's outbox, as for an ant enrolling through the leaf.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use ants_daemon::creds::{Finding, Kind as CredsKind};
-use ants_proto::{AdminOp, AdminOrder, EnrollReply, EnrollRequest, Machine, ORDER_CLOCK_SKEW, Uuid, host_user};
+use ants_proto::{
+    AdminOp, AdminOrder, EnrollLeaf, EnrollReply, EnrollRequest, Machine, ORDER_CLOCK_SKEW, Permissions, Role, Uuid,
+    host_user,
+};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::live;
-use crate::auth;
 use crate::enroll::Approver;
 use crate::revoke::{self, Kind};
+use crate::{auth, members, outbox};
 
 /// How long the signer answers a repeat of a request the same way, without deciding again.
 const REMEMBER: TimeDelta = TimeDelta::minutes(10);
@@ -107,9 +114,6 @@ async fn decide(
     machine: &Machine,
     now: DateTime<Utc>,
 ) -> Result<EnrollReply> {
-    if request.leaf.is_some() {
-        bail!("an order travels with no leaf node's uplink");
-    }
     if request.host_creds.is_some() {
         bail!("an order grants no host credentials: the machine asking holds its own");
     }
@@ -124,21 +128,50 @@ async fn decide(
     if order.ant != request.ant {
         bail!("the order is about {}, not {}", order.ant, request.ant);
     }
-    let leaf = auth::leaf_user(machine);
-    if live(dir)?.iter().any(|i| i.kind == Kind::Leaf && i.name == leaf) {
-        bail!("{machine} is a leaf node's machine: adding or retiring an ant there by order is not supported yet");
+    if let Some(leaf) = &request.leaf {
+        check_leaf(approver, request, leaf, machine, &revoked)?;
     }
     match &order.op {
-        AdminOp::Add { .. } => add(dir, request, order, &revoked),
+        AdminOp::Add { .. } => add(approver, request, order, machine, &revoked).await,
         AdminOp::Retire => retire(dir, url, request, order).await,
         op => bail!("an order to {} asks nothing of the signer", op.describe()),
     }
 }
 
-/// Sign the key `request` asks for, of the ant the order adds: never a key revoked or issued to other credentials than
-/// the ant's on an order, nor another key on the same order, nor while the team holds live credentials of the name
-/// for another key.
-fn add(dir: &Path, request: &EnrollRequest, order: &AdminOrder, revoked: &BTreeSet<String>) -> Result<EnrollReply> {
+/// Check that `leaf`, the uplink credentials `request` carries, are the live ones of the leaf node of `machine`, whose
+/// host asks, and that their key signed the request too.
+fn check_leaf(
+    approver: &Approver,
+    request: &EnrollRequest,
+    leaf: &EnrollLeaf,
+    machine: &Machine,
+    revoked: &BTreeSet<String>,
+) -> Result<()> {
+    if leaf.machine != *machine {
+        bail!("the request carries the uplink credentials of {}, not of {machine}", leaf.machine);
+    }
+    let uplink = auth::check_leaf(&approver.account, &leaf.jwt, machine)
+        .with_context(|| format!("the uplink credentials of {machine}"))?;
+    if revoked.contains(&uplink.sub) || approver.revoked.contains(&uplink.sub) {
+        bail!("revoked uplink credentials of {machine}");
+    }
+    auth::check_signature(&uplink.sub, &request.signed(), &leaf.signature)
+        .with_context(|| format!("the uplink credentials of {machine}"))
+}
+
+/// Sign the key `request` asks for, of the ant the order adds on `machine`: never a key revoked or issued to other
+/// credentials than the ant's on an order, nor another key on the same order, nor while the team holds live
+/// credentials of the name for another key. Behind a leaf node, also renew its uplink credentials the request carries
+/// to carry the ant, first, so that an uplink the hub would refuse leaves no ant signed; keep the ant among the leaf's
+/// members and admit it from the machine's outbox.
+async fn add(
+    approver: &Approver,
+    request: &EnrollRequest,
+    order: &AdminOrder,
+    machine: &Machine,
+    revoked: &BTreeSet<String>,
+) -> Result<EnrollReply> {
+    let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
     if ant.is_human() {
         bail!("{ant} is a human's name, not an ant's");
@@ -159,8 +192,35 @@ fn add(dir: &Path, request: &EnrollRequest, order: &AdminOrder, revoked: &BTreeS
         bail!("the team holds credentials named {ant} already (key {})", other.key);
     }
     let domain = Finding::from_jwt(&request.enrollment)?.js_domain;
+    let leaf_jwt = match &request.leaf {
+        Some(leaf) => {
+            let more = Permissions::for_leaf(machine, [(ant, Role::Ant)]).with_uplink_js_domain(domain.as_ref());
+            let renewed = auth::extend_leaf(dir, &leaf.jwt, machine, more)
+                .with_context(|| format!("the uplink of the leaf node {machine} cannot carry {ant}"))?;
+            Some(renewed)
+        }
+        None if live(dir)?.iter().any(|i| i.kind == Kind::Leaf && i.name == auth::leaf_user(machine)) => bail!(
+            "{machine} runs a leaf node, and the request carries none of its uplink credentials to renew for {ant}: \
+             its daemon finds them through ~/.config/ants/leaf.conf"
+        ),
+        None => None,
+    };
     let jwt = auth::sign_ordered(dir, ant, domain.as_ref(), key, order.id)?;
-    Ok(EnrollReply::Approved { ant: ant.clone(), public_key: key.to_owned(), jwt, leaf_jwt: None, host_jwt: None })
+    if leaf_jwt.is_some() {
+        members::enrolled(dir, machine, ant)
+            .with_context(|| format!("keeping {ant} among the members of {machine}"))?;
+        // The key is signed already: a failed admission leaves it to `ants leaf outbox` rather than refusing.
+        match outbox::admit_ant(approver.hub(), machine, ant).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(%machine, %ant, "the hub does not source the machine's outbox: `ants leaf outbox` sets it up");
+            }
+            Err(e) => {
+                tracing::warn!(%machine, %ant, "admitting the ant from the machine's outbox failed: {e:#}; `ants leaf outbox` admits it");
+            }
+        }
+    }
+    Ok(EnrollReply::Approved { ant: ant.clone(), public_key: key.to_owned(), jwt, leaf_jwt, host_jwt: None })
 }
 
 /// Revoke the ant's key `request` names and the live keys of the name issued before it, which it renewed, pushing the

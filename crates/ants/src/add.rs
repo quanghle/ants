@@ -411,6 +411,33 @@ pub(crate) fn renew_uplink(leaf: &enroll::Leaf, renewed: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Renew the uplink credentials of the leaf node configured at `conf` with `renewed` ([`renew_uplink`]) and have the
+/// node connect its uplink again with them, by a reload keeping local connections ([`leaf::reconnect_uplink`]): what
+/// came of it, or None when the credentials changed meanwhile and were left as they are. Blocks while the leaf node's
+/// service reloads.
+pub(crate) fn renew_and_reconnect(conf: &Path, renewed: &str) -> Result<Option<String>> {
+    renew_and_apply(conf, renewed, |action| Services::local().apply(Service::Nats, action, conf))
+}
+
+/// [`renew_and_reconnect`], `apply` reloading the leaf node.
+pub(crate) fn renew_and_apply(
+    conf: &Path,
+    renewed: &str,
+    apply: impl FnOnce(Action) -> Outcome,
+) -> Result<Option<String>> {
+    let (machine, creds) = leaf::read_uplink(conf)?;
+    if !renew_uplink(&enroll::Leaf { machine, creds }, renewed)? {
+        return Ok(None);
+    }
+    let said = leaf::reconnect_uplink(conf, apply).unwrap_or_else(|e| {
+        format!(
+            "{e:#}; a human restarts the leaf node to use them ({})",
+            crate::service::manual(Service::Nats, Action::Restart)
+        )
+    });
+    Ok(Some(said))
+}
+
 /// Where the seed waits for its JWT: beside the credentials, as `<name>.nk`.
 pub(crate) fn seed_path(creds: &Path) -> PathBuf {
     creds.with_extension("nk")
