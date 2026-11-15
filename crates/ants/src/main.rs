@@ -1,7 +1,9 @@
 //! `ants`: talk to agent teams over NATS from the terminal, and run the ant daemon.
 
 mod add;
+mod age;
 mod auth;
+mod backup;
 mod bridge;
 mod channel;
 mod completions;
@@ -1016,6 +1018,36 @@ enum AuthCommand {
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
+    /// Back up the team keys (operator, account and system account seeds), server.conf, issued.jsonl and
+    /// revoked.json into FILE, encrypted with a passphrase in the age format (`age -d` decrypts it too) and readable
+    /// by its owner only. Without them no credentials can be issued, renewed or revoked again. The passphrase comes
+    /// from --passphrase-file, else ANTS_BACKUP_PASSPHRASE, else the terminal; `ants doctor` warns until a backup
+    /// holds every key issued.
+    Backup {
+        /// The backup file to write, replacing any there.
+        file: PathBuf,
+        /// Read the passphrase from the first line of this file.
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Restore the team keys and files of a backup of `ants auth backup` into the team directory, as files there.
+    /// Keys issued and revocations made after the backup are not restored.
+    Restore {
+        /// The backup file.
+        file: PathBuf,
+        /// Read the passphrase from the first line of this file (else ANTS_BACKUP_PASSPHRASE, else the terminal).
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
+        /// Replace the team files already in the directory, removing those the backup has none of.
+        #[arg(long)]
+        force: bool,
+        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        #[arg(long, env = "ANTS_AUTH_DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1697,6 +1729,12 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Command::Auth(AuthCommand::Push { dir }) => push(&cli.nats, &team_dir(dir)?).await,
+        Command::Auth(AuthCommand::Backup { file, passphrase_file, dir }) => {
+            backup::run_backup(&team_dir(dir)?, &file, passphrase_file.as_deref())
+        }
+        Command::Auth(AuthCommand::Restore { file, passphrase_file, force, dir }) => {
+            backup::run_restore(&team_dir(dir)?, &file, passphrase_file.as_deref(), force)
+        }
         Command::Leaf(LeafCommand::Config {
             machine,
             uplinks,

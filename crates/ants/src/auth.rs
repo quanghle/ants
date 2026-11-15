@@ -24,9 +24,9 @@ use serde_json::{Value, json};
 
 use crate::revoke::{self, Issued, Kind};
 
-const OPERATOR_SEED: &str = "operator.nk";
-const ACCOUNT_SEED: &str = "account.nk";
-const SYSTEM_SEED: &str = "system.nk";
+pub(crate) const OPERATOR_SEED: &str = "operator.nk";
+pub(crate) const ACCOUNT_SEED: &str = "account.nk";
+pub(crate) const SYSTEM_SEED: &str = "system.nk";
 pub const SERVER_CONF: &str = "server.conf";
 const TEAM: &str = "ants";
 /// `max_control_line` of the servers that include [`SERVER_CONF`], hub and leaf nodes alike.
