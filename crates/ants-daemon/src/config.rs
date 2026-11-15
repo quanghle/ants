@@ -27,7 +27,8 @@
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
 //! worktrees = true                  # a git worktree per thread, under the ant's home; unset: on for a git
-//!                                   # workdir with max_harnesses above 1 (crate::worktrees::per_thread)
+//!                                   # workdir git does not ignore, with max_harnesses above 1
+//!                                   # (crate::worktrees::per_thread)
 //! harness = "my-agent"
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)

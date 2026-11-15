@@ -153,7 +153,7 @@ impl Stop {
 /// [`run`], also stopping on `stop`'s request.
 pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
     let _serving = crate::metrics::ant(&config.ant).serving();
-    let config = settle_worktrees(config);
+    let config = settle_worktrees(config).await;
     while Box::pin(serve(&config, stop)).await? == Served::HandedOver {
         tracing::info!("another daemon serves the ant; waiting for it to stop");
     }
@@ -162,8 +162,8 @@ pub async fn run_until(config: Config, stop: &Stop) -> Result<()> {
 
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
 /// running at once in one git work tree.
-fn settle_worktrees(config: Config) -> Config {
-    let worktrees = crate::worktrees::per_thread(&config.workdir, config.max_harnesses, config.worktrees);
+async fn settle_worktrees(config: Config) -> Config {
+    let worktrees = crate::worktrees::per_thread(&config.workdir, config.max_harnesses, config.worktrees).await;
     if config.worktrees.is_none() && worktrees {
         tracing::info!(
             ant = %config.ant,

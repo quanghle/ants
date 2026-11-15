@@ -42,7 +42,8 @@ approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
 worktrees = true                           # git worktree per thread; default: on for a git workdir
-                                           # with max_harnesses > 1 (see Worktrees); false shares the workdir
+                                           # not ignored by git, with max_harnesses > 1 (see Worktrees);
+                                           # false shares the workdir
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -96,7 +97,7 @@ allow = ["read:*", "execute:cargo test*"]
 
 With worktrees on, each thread works in its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, created from `HEAD` on the thread's first prompt and removed once its session expires (a branch with unmerged commits is kept, and its thread is told). A workdir outside a git work tree stays shared.
 
-- Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
+- Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
 - `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.
 
 Trade-offs of worktrees:
