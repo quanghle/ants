@@ -943,3 +943,77 @@ async fn held_notices_are_dropped_unread_and_undecided_and_each_reply_is_notifie
         assert!(read.entry(alice.as_str()).await.unwrap().is_none(), "nothing marked read");
     }
 }
+
+#[tokio::test]
+async fn one_digest_of_what_a_snooze_held_back_follows_its_end_across_services() {
+    let Some((server, _, _)) = hub().await else { return };
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let creds = server.creds_as(&alice, ants_proto::Role::Human);
+    let (sink, mut posts) = sink().await;
+    let config = server.dir().join("webhooks.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[human]]\nname = \"alice\"\ncreds = {creds:?}\ncompletions = true\ndigest = true\n\
+                 [[human.notify]]\nkind = \"ntfy\"\nurl = \"http://{sink}\"\ntopic = \"alice\"\n"
+        ),
+    )
+    .unwrap();
+    let (_one, _) = start(&config, &server.url).await;
+    let (_two, _) = start(&config, &server.url).await;
+    let (_, own) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    let stream = own.get_stream(STREAM).await.unwrap();
+    for _ in 0..100 {
+        if stream.consumer_info(&ants_proto::notify_consumer(&alice)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, ant) = server.connect(&dev_a).await;
+    let hold = async |change: &(dyn Fn(&mut ants_proto::NotifyPrefs, chrono::DateTime<chrono::Utc>) + Sync)| {
+        crate::quiet::update(&own, &alice, change).await.unwrap();
+    };
+    let thread = ThreadId::generate();
+    hold(&|prefs, now| prefs.snoozed_until = Some(now + chrono::TimeDelta::hours(1))).await;
+    let tool = ants_proto::ToolCall { kind: "execute".into(), title: "make".into(), ..Default::default() };
+    let asked = ants_proto::ApprovalRequest::new(
+        dev_a.clone(),
+        thread.clone(),
+        tool,
+        vec![ants_proto::Verdict::AllowOnce],
+        Duration::from_secs(600),
+    );
+    ant.publish(asked.subject(), serde_json::to_vec(&asked).unwrap().into()).await.unwrap().await.unwrap();
+    for text in ["one", "two"] {
+        let question = Envelope::on_thread(thread.clone(), alice.clone(), dev_a.clone(), "go on");
+        let reply = question.reply(dev_a.clone(), text, ants_proto::Role::Human).unwrap();
+        ant.publish(reply.subject(), serde_json::to_vec(&reply).unwrap().into()).await.unwrap().await.unwrap();
+    }
+
+    let notify = own.get_key_value(ants_proto::NOTIFY_BUCKET).await.unwrap();
+    let key = ants_proto::held_key(&alice);
+    let mut counts = std::collections::BTreeMap::new();
+    for _ in 0..100 {
+        if let Some(value) = notify.get(&key).await.unwrap() {
+            counts = serde_json::from_slice::<ants_proto::HeldNotices>(&value).unwrap().counts;
+            if counts.values().sum::<u32>() == 3 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(counts, std::collections::BTreeMap::from([("approval".to_owned(), 1), ("completion".to_owned(), 2)]));
+    assert!(tokio::time::timeout(Duration::from_millis(500), posts.recv()).await.is_err(), "held back while snoozed");
+
+    hold(&|prefs, _| prefs.snoozed_until = None).await;
+    let (_, digest) = next(&mut posts).await;
+    assert_eq!(digest["title"], "3 notices held back");
+    let text = digest["message"].as_str().unwrap();
+    assert!(text.starts_with("1 tool request, 2 replies held back by quiet hours or a snooze since "), "{text}");
+    assert!(text.contains(&format!("1 tool request still pending:\n{} make", crate::tools::qualified(&asked))));
+    assert!(tokio::time::timeout(Duration::from_millis(1000), posts.recv()).await.is_err(), "one digest, sent once");
+    assert!(notify.get(&key).await.unwrap().is_none(), "claimed");
+    let seq = stream.get_last_raw_message_by_subject(&asked.subject()).await.unwrap().sequence;
+    let state = crate::tools::state(&own, &stream, seq, &asked, chrono::Utc::now()).await.unwrap();
+    assert_matches!(state, crate::tools::State::Pending, "still pending");
+}

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ThreadId;
 #[cfg(doc)]
-use crate::{NOTIFY_BUCKET, READ_BUCKET, STREAM};
+use crate::{NOTIFY_BUCKET, READ_BUCKET, STREAM, held_key};
 
 /// Which of a human's inbox messages, by [`STREAM`] sequence, the human has read: every one up to `below`, and those
 /// in `read` above it. Kept under the human's key in [`READ_BUCKET`] and shared by all its devices, which update it
@@ -78,6 +78,34 @@ impl NotifyPrefs {
             self.snoozed_until = None;
         }
         self.muted.retain(|_, until| now < *until);
+    }
+}
+
+/// What `ants webhook serve` held back from a human, with `digest = true`, while a snooze or quiet hours held its
+/// notices back: kept under [`held_key`] in [`NOTIFY_BUCKET`], counted with compare-and-set by every instance notifying
+/// the human, and deleted with compare-and-set by the one instance sending the digest once the hold ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldNotices {
+    /// When the first of them was held back.
+    pub since: DateTime<Utc>,
+    /// How many were held back of each kind of notice (`approval`, `escalation`, `completion`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub counts: std::collections::BTreeMap<String, u32>,
+}
+
+impl HeldNotices {
+    /// Count one more notice of `kind`, held back at `now`.
+    pub fn add(&mut self, kind: &str, now: DateTime<Utc>) {
+        if self.counts.is_empty() {
+            self.since = now;
+        }
+        let count = self.counts.entry(kind.to_owned()).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    /// How many were held back in all.
+    pub fn total(&self) -> u32 {
+        self.counts.values().fold(0, |sum, n| sum.saturating_add(*n))
     }
 }
 
