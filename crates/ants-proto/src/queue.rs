@@ -1,0 +1,179 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[cfg(doc)]
+use crate::{ATTEMPTS_BUCKET, Envelope, message_mark_key};
+use crate::{ChannelId, Error, ThreadId, UserId, subject};
+
+/// A human asking the daemons of `ant` to cancel the prompt running on `thread_id`, on [`subject::cancel`] with
+/// core NATS: never stored, so only daemons connected at the time hear it. Each one answers with a [`CancelReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRequest {
+    pub id: Uuid,
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// The human asking, as the request names it: only human credentials publish cancel requests.
+    pub by: UserId,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl CancelRequest {
+    pub fn new(ant: UserId, thread_id: ThreadId, by: UserId) -> Self {
+        Self { id: Uuid::now_v7(), ant, thread_id, by, sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::cancel(&self.ant, &self.thread_id)
+    }
+
+    pub fn reply_subject(&self) -> String {
+        subject::cancelled(&self.ant, &self.thread_id)
+    }
+
+    /// Check that the request arrived on its own [`CancelRequest::subject`], so that a request naming another ant or
+    /// thread than its subject is not acted on.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser {
+            kind: "cancel request",
+            user: self.ant.clone(),
+            at: format!("{subject} (thread {})", self.thread_id),
+        })
+    }
+
+    /// A daemon's answer: whether it had a prompt running on the thread, which it then cancelled.
+    pub fn answer(&self, cancelled: bool) -> CancelReply {
+        CancelReply { request_id: self.id, ant: self.ant.clone(), thread_id: self.thread_id.clone(), cancelled }
+    }
+}
+
+/// The answer of one daemon of `ant` to a [`CancelRequest`], on [`subject::cancelled`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReply {
+    pub request_id: Uuid,
+    pub ant: UserId,
+    pub thread_id: ThreadId,
+    /// Whether a prompt was running on the thread and is now cancelled. Its partial reply follows on the thread.
+    pub cancelled: bool,
+}
+
+impl CancelReply {
+    pub fn subject(&self) -> String {
+        subject::cancelled(&self.ant, &self.thread_id)
+    }
+
+    /// Check that the answer arrived on its own [`CancelReply::subject`], which credentials pin to the ant's own.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser {
+            kind: "cancel answer",
+            user: self.ant.clone(),
+            at: format!("{subject} (thread {})", self.thread_id),
+        })
+    }
+}
+
+/// A human asking the daemons of `ant` which messages they hold, on [`subject::queue`] with core NATS. Each one answers
+/// with a [`QueueReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRequest {
+    pub id: Uuid,
+    pub ant: UserId,
+    /// The human asking, as the request names it: only human credentials publish queue requests.
+    pub by: UserId,
+    pub sent_at: DateTime<Utc>,
+}
+
+impl QueueRequest {
+    pub fn new(ant: UserId, by: UserId) -> Self {
+        Self { id: Uuid::now_v7(), ant, by, sent_at: Utc::now() }
+    }
+
+    pub fn subject(&self) -> String {
+        subject::queue(&self.ant)
+    }
+
+    pub fn reply_subject(&self) -> String {
+        subject::queued(&self.ant)
+    }
+
+    /// Check that the request arrived on its own [`QueueRequest::subject`].
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "queue request", user: self.ant.clone(), at: subject.to_owned() })
+    }
+
+    /// A daemon's answer: the messages it holds, and where the ant's inbox consumer stands.
+    pub fn answer(&self, messages: Vec<QueuedMessage>, delivered: Option<u64>, undelivered: Option<u64>) -> QueueReply {
+        QueueReply { request_id: self.id, ant: self.ant.clone(), messages, delivered, undelivered }
+    }
+}
+
+/// The answer of one daemon of `ant` to a [`QueueRequest`], on [`subject::queued`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReply {
+    pub request_id: Uuid,
+    pub ant: UserId,
+    /// The messages the daemon holds, in flight or waiting their turn on their thread, by stream sequence.
+    pub messages: Vec<QueuedMessage>,
+    /// The stream sequence of the last message the ant's inbox consumer delivered: later inbox messages wait in the
+    /// stream. None when the consumer's info could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<u64>,
+    /// How many inbox messages wait in the stream, not delivered yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<u64>,
+}
+
+impl QueueReply {
+    pub fn subject(&self) -> String {
+        subject::queued(&self.ant)
+    }
+
+    /// Check that the answer arrived on its own [`QueueReply::subject`], which credentials pin to the ant's own.
+    pub fn check_subject(&self, subject: &str) -> Result<(), Error> {
+        if subject == self.subject() {
+            return Ok(());
+        }
+        Err(Error::ForeignUser { kind: "queue answer", user: self.ant.clone(), at: subject.to_owned() })
+    }
+}
+
+/// A message to an ant waiting to be answered, as [`QueueReply`] lists it and `ants queue` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// The message's [`Envelope::id`], or a channel post's id.
+    pub id: Uuid,
+    pub thread_id: ThreadId,
+    pub from: UserId,
+    /// The channel, for a channel post.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChannelId>,
+    pub sent_at: DateTime<Utc>,
+    /// Its stream sequence.
+    pub seq: u64,
+    /// Whether the daemon is handling it now.
+    pub running: bool,
+    /// How many messages of its thread go before it: 0 for the one running, or next.
+    pub ahead: usize,
+}
+
+/// What became of a message to an ant, in [`ATTEMPTS_BUCKET`] under its [`message_mark_key`]. The daemon creates the
+/// mark [`MessageMark::Started`] right before handling the message, and a human creates it
+/// [`MessageMark::Withdrawn`] (`ants withdraw`): both create the key only if it has no value, so the first wins and the
+/// other sees what it found. A daemon acks a withdrawn message without prompting with it, and puts
+/// [`MessageMark::Finished`] once it acked a message it started. Marks expire with the stream's messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MessageMark {
+    Started { thread_id: ThreadId, at: DateTime<Utc> },
+    Finished { thread_id: ThreadId, at: DateTime<Utc> },
+    Withdrawn { by: UserId, at: DateTime<Utc> },
+}
