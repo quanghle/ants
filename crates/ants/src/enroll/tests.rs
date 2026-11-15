@@ -348,6 +348,99 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
     let err = approver.approve(&team, &dev_a, None).await.unwrap_err().to_string();
     assert!(err.contains("no enrollment request for dev-a"), "{err}");
     let short = enrollment(&server, &dev_a, Duration::from_secs(1));
-    let err = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending()).await.unwrap_err();
+    let asking = request(&server.url, &short, &dev_a, &first, None, REPEAT, pending());
+    let err = timeout(WAIT, asking).await.expect("the request outlives its enrollment credentials").unwrap_err();
     assert!(format!("{err:#}").contains("expire"), "{err:#}");
+}
+
+/// With the server gone, a flush waits forever for a reconnect: the expiry and `stop` still end a request.
+#[tokio::test]
+async fn the_expiry_or_a_stop_ends_a_request_whose_server_is_gone() {
+    let Some(server) = Server::start() else { return };
+    let (team, url, dev_a, dev_b) = (server.dir().join("auth"), server.url.clone(), p("dev-a"), p("dev-b"));
+    let expiring = enrollment(&server, &dev_a, Duration::from_secs(3));
+    let lasting = enrollment(&server, &dev_b, Duration::ZERO);
+    let approver = Approver::connect(&url, &team, None, LISTEN).await.unwrap();
+    let (a, b) = (KeyPair::new_user(), KeyPair::new_user());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let first = request(&url, &expiring, &dev_a, &a, None, REPEAT, pending());
+    let second = request(&url, &lasting, &dev_b, &b, None, REPEAT, async {
+        let _ = stop_rx.await;
+    });
+    let stopping = async {
+        while approver.pending(None).await.unwrap().len() < 2 {}
+        drop(server);
+        // Long enough for both requests to repeat into a flush that waits.
+        tokio::time::sleep(REPEAT * 3).await;
+        stop_tx.send(()).unwrap();
+    };
+    let (first, second, ()) =
+        Box::pin(timeout(WAIT, async { tokio::join!(first, second, stopping) })).await.expect("a request hangs");
+    let (first, second) = (format!("{:#}", first.unwrap_err()), format!("{:#}", second.unwrap_err()));
+    assert!(first.contains("expired without an answer"), "{first}");
+    assert!(second.contains("stopped before an answer came"), "{second}");
+}
+
+/// The server ending the connection of revoked enrollment credentials and refusing every reconnect ends a request.
+#[tokio::test]
+async fn a_refusal_of_the_enrollment_credentials_ends_the_request() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_a) = (server.dir().join("auth"), p("dev-a"));
+    let creds = enrollment(&server, &dev_a, Duration::from_secs(60));
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let user = KeyPair::new_user();
+
+    let asking = request(&server.url, &creds, &dev_a, &user, None, REPEAT, pending());
+    let revoking = async {
+        while approver.pending(None).await.unwrap().is_empty() {}
+        let (_, key) = auth::read_creds(&creds).unwrap();
+        revoke::revoke(&team, None, &[key.public_key()]).unwrap();
+        let reload = std::process::Command::new("kill").arg("-HUP").arg(server.pid().to_string()).status();
+        assert!(reload.unwrap().success());
+    };
+    let (refused, ()) =
+        Box::pin(timeout(WAIT, async { tokio::join!(asking, revoking) })).await.expect("the request goes on");
+    let err = format!("{:#}", refused.unwrap_err());
+    assert!(err.contains("the NATS server refused the enrollment credentials"), "{err}");
+}
+
+/// Behind a leaf node whose uplink the hub would refuse with one more ant, an approval fails with the reason before
+/// anything is signed, recorded or answered.
+#[tokio::test]
+async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
+    let Some(server) = Server::start() else { return };
+    let (team, dev_x) = (server.dir().join("auth"), p("dev-x"));
+    let creds = enrollment(&server, &dev_x, Duration::from_secs(60));
+    let m1: Machine = "m1".parse().unwrap();
+    let uplink = server.dir().join("leaf-m1.creds");
+    auth::tests::uplink_for_most_ants(&team, &m1, None, &uplink);
+    let before = std::fs::read_to_string(&uplink).unwrap();
+    let (members_before, issued_before) =
+        (members::issued(&team, &m1, &uplink).unwrap(), revoke::issued(&team).unwrap().len());
+    let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
+    let (leaf, user) = (Leaf { machine: m1.clone(), creds: uplink.clone() }, KeyPair::new_user());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let asking = request(&server.url, &creds, &dev_x, &user, Some(&leaf), REPEAT, async {
+        let _ = stop_rx.await;
+    });
+    let approving = async {
+        let refused = approver.approve(&team, &dev_x, None).await;
+        // Long enough for an answer to arrive, had one gone out.
+        tokio::time::sleep(REPEAT * 3).await;
+        stop_tx.send(()).unwrap();
+        refused
+    };
+    let (asked, refused) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
+    let err = format!("{:#}", refused.unwrap_err());
+    assert!(err.contains("the uplink of the leaf node m1 cannot carry dev-x"), "{err}");
+    assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
+    let asked = format!("{:#}", asked.unwrap_err());
+    assert!(asked.contains("stopped before an answer came"), "no answer: {asked}");
+    let issued = revoke::issued(&team).unwrap();
+    assert!(!issued.iter().any(|i| i.name == "dev-x"), "dev-x is not signed");
+    assert_eq!(issued.len(), issued_before);
+    assert_eq!(members::issued(&team, &m1, &uplink).unwrap(), members_before, "dev-x is not among m1's members");
+    assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
 }
