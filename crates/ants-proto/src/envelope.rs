@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ApprovalDecision, ApprovalRequest, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Role, ThreadId,
-    UserId, subject,
+    ApprovalDecision, ApprovalRequest, Attachment, ChannelId, DEFAULT_TURN_BUDGET, Error, Escalation, Humans, Role,
+    ThreadId, UserId, subject,
 };
 #[cfg(doc)]
 use crate::{
@@ -91,6 +91,11 @@ pub struct Envelope {
     /// ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steer: bool,
+    /// The files attached to the message, stored before it under its [`Envelope::attachment_handle`]s. Never copied
+    /// by [`Envelope::reply`] or [`Envelope::follow_up`]: a message passing an attachment on stores it again under its
+    /// own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -132,6 +137,7 @@ impl Envelope {
             mention: None,
             title: None,
             steer: false,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         }
     }
@@ -266,6 +272,7 @@ impl Envelope {
             mention: None,
             title: None,
             steer: false,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         })
     }
@@ -302,6 +309,9 @@ pub struct NotesPost {
     /// carries the one its MCP tool suggest_thread_title took.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The files attached to the post, stored before it under its [`NotesPost::attachment_handle`]s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -315,6 +325,7 @@ impl NotesPost {
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
             title: None,
+            attachments: Vec::new(),
             sent_at: Utc::now(),
         }
     }

@@ -58,6 +58,16 @@ fn at(minute: u32) -> DateTime<Utc> {
     format!("2025-01-01T12:{minute:02}:00Z").parse().unwrap()
 }
 
+fn attachment() -> Attachment {
+    Attachment {
+        id: id(20),
+        name: "build log.txt".to_owned(),
+        mime: "text/plain".to_owned(),
+        size: 1234,
+        sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned(),
+    }
+}
+
 fn escalation() -> Escalation {
     Escalation {
         stuck: user("dev-a"),
@@ -105,6 +115,7 @@ fn envelope() -> Envelope {
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
         steer: true,
+        attachments: vec![attachment()],
         sent_at: at(0),
     }
 }
@@ -123,6 +134,7 @@ fn plain_envelope() -> Envelope {
         mention: None,
         title: None,
         steer: false,
+        attachments: Vec::new(),
         ..envelope()
     }
 }
@@ -339,6 +351,7 @@ fn notes() {
             text: "taking the parser".to_owned(),
             turn_budget: 7,
             title: Some("Rewrite the parser".to_owned()),
+            attachments: vec![attachment()],
             sent_at: at(0),
         },
     );
@@ -413,6 +426,7 @@ fn channels() {
             webhook: true,
             allow: Some(vec!["read:*".to_owned()]),
             title: Some("Fix CI".to_owned()),
+            attachments: vec![attachment()],
             sent_at: at(0),
         },
     );

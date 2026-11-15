@@ -231,6 +231,8 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         mention: None,
         title: None,
         steer: false,
+        // Stored under the post's channel handles, which an inbox message's would not name.
+        attachments: Vec::new(),
         sent_at: post.sent_at,
     }
 }

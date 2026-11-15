@@ -15,6 +15,7 @@ pub mod dead;
 pub mod direct_kv;
 pub mod escalation;
 pub mod fallback;
+pub mod files;
 pub mod harness;
 pub mod history;
 pub mod hub;

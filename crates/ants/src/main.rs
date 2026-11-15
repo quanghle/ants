@@ -237,7 +237,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let mut lines: Vec<String> = fixed.iter().map(|finding| format!("created {}", finding.object)).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
-        "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -252,7 +252,8 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::THREADS_BUCKET,
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET,
-        ants_proto::NOTIFY_BUCKET
+        ants_proto::NOTIFY_BUCKET,
+        ants_proto::FILES_BUCKET
     ));
     Ok(lines)
 }
