@@ -348,7 +348,7 @@ async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
     assert!(reaches_hub_stream(&b_js, &dev_b, false).await, "dev-b is not on the uplink yet");
 
     let (jwt, key) = auth::read_creds(&leaf_creds).unwrap();
-    let more = Permissions::for_leaf(&M1, [(&dev_b, Role::Ant)]).with_js_domain(Some(&domain));
+    let more = Permissions::for_leaf(&M1, [(&dev_b, Role::Ant)]).with_uplink_js_domain(Some(&domain));
     let renewed = auth::extend_leaf(&team, &jwt, &M1, more).unwrap();
     auth::write_creds(&leaf_creds, &renewed, &key).unwrap();
     let hup = || Command::new("kill").arg("-HUP").arg(leaf_node.pid().to_string()).status().unwrap().success();

@@ -355,7 +355,7 @@ fn issued_credentials_carry_the_current_permissions_version_and_name_their_renew
         (creds::Kind::LeafSystem { machine: m1.clone() }, VersionStatus::Current)
     );
     let (jwt, _) = read_creds(&out("leaf-m1")).unwrap();
-    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_js_domain(Some(&hub));
+    let more = Permissions::for_leaf(&m1, [(&p("dev-c"), Role::Ant)]).with_uplink_js_domain(Some(&hub));
     let renewed = creds::Finding::from_jwt(&extend_leaf(&team, &jwt, &m1, more).unwrap()).unwrap();
     assert_eq!(renewed.version_status(), VersionStatus::Current);
     assert!(renewed.renew()[0].starts_with("ants auth leaf m1 --ant dev-a --ant dev-c --human alice"), "{renewed:?}");
@@ -387,42 +387,49 @@ fn uplink_credentials_a_hub_would_refuse_are_neither_issued_nor_renewed() {
     init(&team).unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
     let (ants, err) = uplink_for_most_ants(&team, &m1, Some(&domain), &out);
-    assert!(ants.len() >= 29, "only {} ants fit", ants.len());
+    eprintln!("{} ants fit the uplink of m1 (domain {domain})", ants.len());
+    assert!(ants.len() >= 48, "only {} ants fit", ants.len());
     assert!(err.contains("max_control_line 16384") && err.contains("another leaf node"), "{err}");
     let (jwt, _) = read_creds(&out).unwrap();
     assert!(jwt.len() <= MAX_UPLINK_JWT, "the refused credentials are not written");
     // As long a name as that of the ant refused.
-    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_js_domain(Some(&domain));
+    let more = Permissions::for_leaf(&m1, [(&p("dev-xx"), Role::Ant)]).with_uplink_js_domain(Some(&domain));
     let err = extend_leaf(&team, &jwt, &m1, more).unwrap_err().to_string();
     assert!(err.contains("the uplink credentials of m1 would take"), "{err}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// Each ant added behind a leaf node (`request_ant`, enrollment) grows its uplink JWT by the same amount, about
-/// 4.7 KB for a six-character name, 8.7 KB with the hub's JetStream domain: no permission is shared between two
-/// ants, and none is a pattern matching an ant not yet added.
+/// 4.7 KB for a six-character name, 5 KB with the hub's JetStream domain, whose plain JetStream API and KV forms it
+/// leaves out: no permission is shared between two ants, and none is a pattern matching an ant not yet added.
 #[test]
 fn each_ant_added_grows_the_uplink_by_the_same_measure() {
     let dir = ants_test_support::scratch_dir("uplink-growth");
     let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
     init(&team).unwrap();
     let hub: JsDomain = "hub".parse().unwrap();
-    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 8_000, 9_000)] {
+    for (domain, least, most) in [(None, 4_200, 5_000), (Some(&hub), 4_800, 5_400)] {
         issue_leaf(&team, &m1, &members(&[p("dev-00")], &[]), &[], EnrollApprover::Without, domain, &out).unwrap();
         let (mut jwt, _) = read_creds(&out).unwrap();
         let mut growth = Vec::new();
         for i in 1..=5 {
-            let more = Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_js_domain(domain);
+            let more =
+                Permissions::for_leaf(&m1, [(&p(&format!("dev-{i:02}")), Role::Ant)]).with_uplink_js_domain(domain);
             let renewed = extend_leaf(&team, &jwt, &m1, more).unwrap();
             growth.push(renewed.len() - jwt.len());
             jwt = renewed;
+        }
+        if domain.is_some() {
+            let publish = allowed(&verified_body(&jwt).unwrap().1).publish;
+            let plain = publish.iter().find(|s| s.starts_with("$JS.API.") || s.starts_with("$KV."));
+            assert_eq!(plain, None, "the hub denies the plain forms on a leaf connection of another domain");
         }
         let (min, max) = (*growth.iter().min().unwrap(), *growth.iter().max().unwrap());
         eprintln!("uplink of m1 (domain {domain:?}): {} bytes, each ant adds {growth:?}", jwt.len());
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 29 } else { 54 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 48 } else { 54 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
