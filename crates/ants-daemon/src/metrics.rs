@@ -3,7 +3,7 @@
 //! a [`Source`] of its own.
 //!
 //! The daemon's counters ([`Ant`]) are kept per ant in one registry ([`ant`]) whether or not anything listens: a few
-//! atomics each.
+//! atomics each. The JetStream storage usage [`crate::storage`] last measured is kept beside them ([`stored`]).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -220,6 +220,15 @@ pub fn ant(name: &UserId) -> Arc<Ant> {
     ANTS.lock().unwrap().entry(name.clone()).or_default().clone()
 }
 
+/// JetStream storage usage by domain (empty for none) and store, with the limit when known.
+type Stored = BTreeMap<(String, &'static str), (u64, Option<u64>)>;
+static STORAGE: Mutex<Stored> = Mutex::new(BTreeMap::new());
+
+/// Note that JetStream store `store` (`file` or `memory`) of `domain` holds `used` bytes of at most `limit`.
+pub fn stored(domain: Option<&str>, store: &'static str, used: u64, limit: Option<u64>) {
+    STORAGE.lock().unwrap().insert((domain.unwrap_or_default().to_owned(), store), (used, limit));
+}
+
 /// What one ant's daemon did and is doing.
 #[derive(Default)]
 pub struct Ant {
@@ -367,6 +376,18 @@ impl Source for Daemon {
                 out.sample(name, &[("ant", ant.as_str())], read(counters));
             }
         }
+        let storage = STORAGE.lock().unwrap();
+        let (bytes, limit) = ("ants_jetstream_bytes", "ants_jetstream_limit_bytes");
+        out.family(bytes, Kind::Gauge, "Bytes the account stores in JetStream, by domain and store (file or memory).");
+        for ((domain, store), (used, _)) in storage.iter() {
+            out.sample(bytes, &[("domain", domain), ("store", store)], *used as f64);
+        }
+        out.family(limit, Kind::Gauge, "The most bytes a JetStream store takes, where known.");
+        for ((domain, store), (_, max)) in storage.iter() {
+            if let Some(max) = max {
+                out.sample(limit, &[("domain", domain), ("store", store)], *max as f64);
+            }
+        }
     }
 }
 
@@ -460,5 +481,16 @@ mod tests {
         assert!(rendered().contains("ants_prompts_in_flight{ant=\"metrics-unit\"} 0"));
         drop(serving);
         assert!(!rendered().contains("metrics-unit"), "not reported once it stopped");
+        stored(Some("metrics-unit"), "file", 900, Some(1000));
+        stored(Some("metrics-unit"), "memory", 5, None);
+        let text = rendered();
+        for line in [
+            "ants_jetstream_bytes{domain=\"metrics-unit\",store=\"file\"} 900",
+            "ants_jetstream_bytes{domain=\"metrics-unit\",store=\"memory\"} 5",
+            "ants_jetstream_limit_bytes{domain=\"metrics-unit\",store=\"file\"} 1000",
+        ] {
+            assert!(text.lines().any(|l| l == line), "no {line:?} in\n{text}");
+        }
+        assert!(!text.contains("ants_jetstream_limit_bytes{domain=\"metrics-unit\",store=\"memory\"}"));
     }
 }

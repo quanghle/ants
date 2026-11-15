@@ -945,6 +945,7 @@ fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
     );
     let title = match escalation.reason {
         EscalationReason::Approval => format!("{}'s tool request expired unanswered", escalation.stuck),
+        EscalationReason::Storage => "JetStream storage filling up".to_owned(),
         reason => format!("{} escalates: {} on {}", envelope.from, reason.as_str(), escalation.stuck),
     };
     Some(Notice {

@@ -723,6 +723,7 @@ fn reason_text(reason: EscalationReason) -> &'static str {
         EscalationReason::Asked => "asked for help",
         EscalationReason::ContextWindow => "context window exceeded",
         EscalationReason::Harness => "the harness keeps failing to start",
+        EscalationReason::Storage => "JetStream storage filling up",
         EscalationReason::Unknown => "reason unknown",
     }
 }

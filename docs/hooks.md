@@ -140,7 +140,7 @@ message is not part of it.
 ```
 
 `escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked`,
-`context_window` or `harness`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
+`context_window`, `harness` or `storage`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
 went up any chain, and `leader` who leads at that level. The notice `ants dead watch` sends with human credentials is told by the dead letter it writes, not by a status
 update, and the `harness` notice of a harness failing to start by the `failing` of the ant's roster entry.
 
