@@ -21,6 +21,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
+use crate::breaker::StartFailed;
 use crate::history::{History, Rebuild};
 use crate::overflow::{ContextOverflow, overflows};
 use crate::permission::PermissionPolicy;
@@ -721,12 +722,23 @@ pub struct Session {
 
 impl Session {
     /// Start a harness and open a session in it: `resume` through session/load when the harness can, else a new one.
+    /// A failure other than for want of signing in or a provider limit is a [`StartFailed`] one.
     pub async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
         let (opened_tx, opened) = oneshot::channel();
         let (turns, turns_rx) = mpsc::channel(1);
         let id = Arc::new(Mutex::new(SessionId::new("")));
         let task = tokio::spawn(serve(launch.clone(), resume, id.clone(), opened_tx, turns_rx));
-        let agent = opened.await.map_err(|_| anyhow!("{} exited before opening a session", launch.harness))??;
+        // Given up on before the session opens (a timed-out probe), the harness stops.
+        let mut abort = AbortOnDrop(Some(task.abort_handle()));
+        let opened =
+            opened.await.unwrap_or_else(|_| Err(anyhow!("{} exited before opening a session", launch.harness)));
+        abort.0 = None;
+        let agent = opened.map_err(|e| {
+            if e.is::<SignedOut>() || e.is::<crate::ratelimit::Limited>() {
+                return e;
+            }
+            StartFailed { harness: launch.harness.name.clone(), detail: format!("{e:#}") }.into()
+        })?;
         Ok(Self { id, turns, task, agent })
     }
 
@@ -764,6 +776,29 @@ impl Session {
             tracing::warn!(error = %e, "harness task");
         }
     }
+}
+
+/// Aborts a task when dropped, unless emptied first.
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Check that the harness of `launch` starts as it does for a thread, with the ant's settings but no MCP servers: start
+/// it, open a new session within the handshake's time and stop it. Prompts nothing.
+pub async fn probe(launch: &Launch) -> Result<()> {
+    let started = tokio::time::timeout(HANDSHAKE_TIMEOUT, Session::start(launch, None)).await;
+    let session = started.map_err(|_| StartFailed {
+        harness: launch.harness.name.clone(),
+        detail: format!("no session within {HANDSHAKE_TIMEOUT:?}"),
+    })??;
+    session.close().await;
+    Ok(())
 }
 
 /// Run one prompt in a fresh session, and return the agent's reply text.

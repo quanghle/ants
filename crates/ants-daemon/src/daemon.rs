@@ -22,6 +22,7 @@ use futures::stream::{FuturesUnordered, Stream, StreamExt as _};
 
 use crate::approvals::NatsApprover;
 use crate::attempts::{Answered, Attempts, Marker, Reply};
+use crate::breaker::{self, Breaker, StartFailed};
 use crate::caps::{Caps, Ledger, Recorded, Warning};
 use crate::channel::{self, Channels, Context, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
@@ -329,6 +330,7 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         progress_every: PROGRESS_EVERY,
         sign_in: SignIn::default(),
         sign_in_every: signin::CHECK_EVERY,
+        breaker: Breaker::default(),
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
     };
@@ -471,12 +473,15 @@ enum Handled {
     SignedOut(Box<InHand>),
     /// A provider limit: the message, as it arrived, waits in hand for the backoff to pass.
     Limited(Box<InHand>),
+    /// The harness keeps failing to start: the message, as it arrived, waits in hand for a check to start it.
+    Broken(Box<InHand>),
 }
 
 /// What a message handed back waits for, first on its thread.
 enum Wait {
     SignIn,
     Limit,
+    Repair,
 }
 
 /// The prompt running on each thread, and where to send the human who cancels it.
@@ -545,8 +550,10 @@ struct Inbox<'a> {
     progress_every: Duration,
     /// Whether the harness is signed out, holding the messages.
     sign_in: SignIn,
-    /// How often a signed-out harness is checked.
+    /// How often a signed-out harness, or one failing to start, is checked.
     sign_in_every: Duration,
+    /// Whether the harness keeps failing to start, holding the messages.
+    breaker: Breaker,
     /// Whether messages wait out a provider limit.
     throttle: Throttle,
     backoffs: Backoffs,
@@ -574,7 +581,8 @@ impl Inbox<'_> {
         let finishing = self.finish_buried();
         let signing_in = futures::future::Fuse::terminated();
         let lifting = futures::future::Fuse::terminated();
-        tokio::pin!(shutdown, finishing, signing_in, lifting);
+        let repairing = futures::future::Fuse::terminated();
+        tokio::pin!(shutdown, finishing, signing_in, lifting, repairing);
         let mut asks = match self.client.subscribe(subject::queue(self.ant)).await {
             Ok(asks) => asks.left_stream(),
             Err(e) => {
@@ -612,6 +620,7 @@ impl Inbox<'_> {
                 }
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
+                () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {
                         answering.push(self.answer_queue(request, in_hand(&threads)));
@@ -622,6 +631,7 @@ impl Inbox<'_> {
                     match handed_back(&mut threads, &thread, handled) {
                         Some(Wait::SignIn) if signing_in.is_terminated() => signing_in.set(self.signed_in().fuse()),
                         Some(Wait::Limit) if lifting.is_terminated() => lifting.set(self.limit_passed().fuse()),
+                        Some(Wait::Repair) if repairing.is_terminated() => repairing.set(self.repaired().fuse()),
                         _ => {}
                     }
                     ready = Some(vec![thread]);
@@ -661,9 +671,9 @@ impl Inbox<'_> {
                     }
                 }
             }
-            // While the harness is signed out or a provider limit holds, messages wait in hand: the consumer's limit on
-            // them stops deliveries.
-            let held = self.sign_in.is_out() || self.throttle.is_held();
+            // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
+            // wait in hand: the consumer's limit on them stops deliveries.
+            let held = self.sign_in.is_out() || self.throttle.is_held() || self.breaker.is_open();
             for thread in ready.into_iter().flatten().filter(|_| !held) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {
@@ -1153,8 +1163,19 @@ impl Inbox<'_> {
         let Err(e) = result else {
             self.sign_in.settled();
             self.throttle.settled();
+            self.breaker.settled();
             return (thread, Handled::Done);
         };
+        match e.downcast_ref::<StartFailed>() {
+            Some(failed) => {
+                if let Some(hold) = self.breaker.failed(&thread, &failed.detail) {
+                    self.attempts.release(&arrived.envelope).await;
+                    self.wait_for_repair(&arrived, failed, hold).await;
+                    return (thread, Handled::Broken(Box::new((arrived, msg))));
+                }
+            }
+            None => self.breaker.settled(),
+        }
         if let Some(signed_out) = e.downcast_ref::<SignedOut>() {
             self.wait_for_sign_in(&arrived, signed_out).await;
             return (thread, Handled::SignedOut(Box::new((arrived, msg))));
@@ -1318,6 +1339,53 @@ impl Inbox<'_> {
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the exhausted quota");
             self.throttle.untold();
+        }
+    }
+
+    /// Hold the messages, `incoming` having found the harness failing to start once too often ([`Breaker::failed`]),
+    /// show that in the roster entry, and tell its thread's owner, else the default human, how to check the harness,
+    /// unless told already since a message last got past its start. The notice goes to the human directly, carrying a
+    /// level-0 escalation so it is pushed: no ant up the chain can mend the harness.
+    async fn wait_for_repair(&self, incoming: &Incoming, failed: &StartFailed, hold: breaker::Hold) {
+        let thread = &incoming.envelope.thread_id;
+        status::state(self.client, self.ant, thread, State::Idle);
+        self.workload.set_failing(Some(hold.shown.clone()));
+        if !hold.tell {
+            tracing::info!(%thread, error = %failed, "harness failing to start; the message waits");
+            return;
+        }
+        tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
+        let machine = roster::machine().await;
+        let post = incoming.post.is_some();
+        let notice =
+            breaker::notice(self.ant, &incoming.envelope, post, failed, &machine, self.sign_in_every, self.humans);
+        let id = format!("harness-{}-{}", self.ant, hold.shown.since.timestamp_millis());
+        if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
+            tracing::warn!(%thread, error = format!("{e:#}"), "telling a human the harness fails to start");
+            self.breaker.untold();
+        }
+    }
+
+    /// Check the harness every `sign_in_every`, starting it as for a thread ([`harness::probe`]), until it starts or
+    /// says it is signed out or limited, then clear the roster entry's failing state and let the messages go on.
+    async fn repaired(&self) {
+        loop {
+            tokio::time::sleep(self.sign_in_every).await;
+            match harness::probe(self.pool.launch()).await {
+                Ok(()) => tracing::info!("harness started; answering the waiting messages"),
+                Err(e) if e.is::<SignedOut>() || e.is::<Limited>() => {
+                    tracing::info!(error = %e, "harness started; trying the waiting messages again");
+                }
+                Err(e) => {
+                    let error = format!("{e:#}");
+                    tracing::warn!(error, "harness still fails to start; messages wait");
+                    self.workload.set_failing(self.breaker.still_failing(&error));
+                    continue;
+                }
+            }
+            self.breaker.closed();
+            self.workload.set_failing(None);
+            return;
         }
     }
 
@@ -1586,6 +1654,14 @@ impl Inbox<'_> {
             Err(e) if e.is::<SignedOut>() && !cut_off && !worked => {
                 self.attempts.forget(seq).await;
                 self.attempts.release(envelope).await;
+                return Err(e);
+            }
+            // Nothing ran: the harness did not start. Its retry, or the message held for the harness to start, carries no
+            // cut-off warning.
+            Err(e) if e.is::<StartFailed>() => {
+                if !cut_off {
+                    self.attempts.forget(seq).await;
+                }
                 return Err(e);
             }
             // A provider limit spends no attempt. The marker stays when tools may have run, to warn the retry.
@@ -1864,6 +1940,10 @@ fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handl
             t.waiting.push_front(*held);
             Some(Wait::Limit)
         }
+        Handled::Broken(held) => {
+            t.waiting.push_front(*held);
+            Some(Wait::Repair)
+        }
     }
 }
 
@@ -2140,6 +2220,7 @@ mod tests {
                 perms: None,
                 signed_out: None,
                 limited: None,
+                failing: None,
             };
             roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
         }
@@ -2216,6 +2297,7 @@ mod tests {
                 progress_every,
                 sign_in: SignIn::default(),
                 sign_in_every: Duration::from_millis(300),
+                breaker: Breaker::default(),
                 throttle: Throttle::default(),
                 backoffs: Backoffs {
                     rate_limit: ratelimit::Backoff {
@@ -2564,6 +2646,61 @@ mod tests {
         let mut answered = log.lock().unwrap().answered.clone();
         answered.sort();
         assert_eq!(answered, ["a", "b", "c", "d"]);
+        assert!(dead::list(&bus.stream).await.unwrap().is_empty());
+        assert_eq!(bus.unacked().await, 0);
+    }
+
+    #[tokio::test]
+    async fn messages_wait_unspent_while_the_harness_keeps_failing_to_start() {
+        let Some((bus, mut replies)) = Bus::start().await else { return };
+        let (launch, log, _) = fake::launch(true);
+        log.lock().unwrap().broken = true;
+        let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+        let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+        let (_, seq) = bus.send(&t1, "a").await;
+        bus.send(&t2, "c").await;
+
+        let ctrl_c = Arc::new(Semaphore::new(0));
+        let check = async {
+            // Failures on both threads open the breaker before either message runs out of attempts.
+            let notice = next_envelope(&mut replies).await;
+            assert_eq!(notice.from, bus.dev);
+            assert!(notice.text.contains("ants harness check --harness test"), "{}", notice.text);
+            let escalation = notice.escalation.as_ref().expect("pushed as an escalation");
+            assert_eq!((escalation.reason, escalation.level), (EscalationReason::Harness, 0));
+            let shown = bus.workload.failing().expect("the roster shows the harness failing");
+            assert!(shown.error.contains("broken install"), "{}", shown.error);
+            let redelivered = bus.consumer().await.num_redelivered;
+            assert!(redelivered < 3, "{redelivered}");
+            // Several checks of the harness fail, telling nobody again and spending no attempt.
+            let starts = log.lock().unwrap().starts;
+            until("checks of the harness", || log.lock().unwrap().starts >= starts + 3).await;
+            assert!(timeout(Duration::from_millis(100), replies.next()).await.is_err(), "told once");
+            assert!(!bus.marked(seq).await, "no attempt is recorded");
+            assert_eq!(bus.consumer().await.num_redelivered, redelivered);
+            assert!(bus.workload.failing().is_some_and(|f| f.since == shown.since), "the same failing period");
+
+            log.lock().unwrap().broken = false;
+            let mut answered = vec![next_reply(&mut replies).await, next_reply(&mut replies).await];
+            answered.sort_by_key(|(_, text)| text.clone());
+            assert_eq!(answered, [(t1.clone(), "a".to_owned()), (t2.clone(), "c".to_owned())]);
+            assert_eq!(bus.workload.failing(), None, "started again: the roster no longer shows it");
+
+            // Once messages get through, a lone failure is tried again as before, holding nothing.
+            log.lock().unwrap().broken = true;
+            let t3 = ThreadId::generate();
+            let starts = log.lock().unwrap().starts;
+            bus.send(&t3, "d").await;
+            until("a failed start", || log.lock().unwrap().starts > starts).await;
+            log.lock().unwrap().broken = false;
+            assert_eq!(next_reply(&mut replies).await, (t3.clone(), "d".to_owned()));
+            assert_eq!(bus.workload.failing(), None);
+            ctrl_c.add_permits(1);
+        };
+        tokio::join!(bus.serve(&pool, &ctrl_c), check);
+        let mut answered = log.lock().unwrap().answered.clone();
+        answered.sort();
+        assert_eq!(answered, ["a", "c", "d"]);
         assert!(dead::list(&bus.stream).await.unwrap().is_empty());
         assert_eq!(bus.unacked().await, 0);
     }
@@ -4651,6 +4788,7 @@ mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         };
         roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
         let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");

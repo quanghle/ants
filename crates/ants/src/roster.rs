@@ -52,24 +52,41 @@ fn chain(entry: &RosterEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// What the ant is doing: `signed-out` while its harness is, `rate-limited` or `out-of-quota` while a provider limit
-/// holds its messages, else its activity, or `-` when its daemon does not say.
+/// What the ant is doing: `signed-out` while its harness is, `failing` while its harness keeps failing to start,
+/// `rate-limited` or `out-of-quota` while a provider limit holds its messages, else its activity, or `-` when its daemon
+/// does not say.
 pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
-    match (&entry.signed_out, &entry.limited, entry.activity) {
-        (Some(_), _, _) => "signed-out",
-        (None, Some(limited), _) => limited.kind.as_str(),
-        (None, None, activity) => activity.map_or("-", |a| a.as_str()),
+    match (&entry.signed_out, &entry.failing, &entry.limited, entry.activity) {
+        (Some(_), _, _, _) => "signed-out",
+        (None, Some(_), _, _) => "failing",
+        (None, None, Some(limited), _) => limited.kind.as_str(),
+        (None, None, None, activity) => activity.map_or("-", |a| a.as_str()),
     }
 }
 
-/// One line per ant whose harness is signed out (since when, and how to sign it in) or held back by a provider limit
-/// (until when).
+/// One line per ant whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
+/// when, with its last error) or is held back by a provider limit (until when).
 pub fn held(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
     entries.iter().filter_map(|e| held_line(e, now)).collect()
 }
 
 fn held_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
-    signed_out_line(e, now).or_else(|| limited_line(e, now))
+    signed_out_line(e, now).or_else(|| failing_line(e, now)).or_else(|| limited_line(e, now))
+}
+
+fn failing_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    let failing = e.failing.as_ref()?;
+    Some(format!(
+        "{}: harness {} failing to start for {} ({}); messages to {} wait, spending no attempts. Run `ants harness \
+         check --harness {}` on {}.",
+        e.ant,
+        e.harness,
+        short(since(failing.since, now)),
+        failing.error,
+        e.ant,
+        e.harness,
+        e.machine
+    ))
 }
 
 fn limited_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
@@ -295,6 +312,7 @@ mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         }
     }
 
@@ -377,10 +395,16 @@ mod tests {
         limited.limited = Some(HarnessLimit { kind: LimitKind::RateLimit, since: now, until });
         let mut quota = entry("dev-g", 600, 2, now);
         quota.limited = Some(HarnessLimit { kind: LimitKind::Quota, since, until });
-        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now), limited, quota];
+        let mut failing = entry("dev-h", 600, 2, now);
+        failing.activity = Some(Activity::Idle);
+        failing.failing = Some(ants_proto::HarnessFailing { since, error: "copilot: not found".to_owned() });
+        let entries = [out.clone(), unnamed, entry("dev-e", 600, 2, now), limited, quota, failing];
         let table = super::table(&entries, now);
         let activities: Vec<&str> = table.lines().map(|l| l.split_whitespace().nth(2).unwrap()).collect();
-        assert_eq!(activities, ["ACTIVITY", "signed-out", "signed-out", "-", "rate-limited", "out-of-quota"]);
+        assert_eq!(
+            activities,
+            ["ACTIVITY", "signed-out", "signed-out", "-", "rate-limited", "out-of-quota", "failing"]
+        );
         let at = until.format("%H:%M:%SZ");
         assert_eq!(
             held(&entries, now),
@@ -399,6 +423,9 @@ mod tests {
                     "dev-g: harness copilot out of quota for 5m; messages to dev-g wait, spending no attempts, until \
                      {at} (in 2m)."
                 ),
+                "dev-h: harness copilot failing to start for 5m (copilot: not found); messages to dev-h wait, \
+                 spending no attempts. Run `ants harness check --harness copilot` on m1."
+                    .to_owned(),
             ]
         );
         let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();

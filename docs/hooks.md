@@ -139,16 +139,16 @@ message is not part of it.
  "at": "2025-01-01T12:00:00Z"}
 ```
 
-`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked` or
-`context_window`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
+`escalation` is an `Escalation`: `reason` is `turn_budget`, `cap`, `notes`, `dead_letter`, `approval`, `asked`,
+`context_window` or `harness`; `request_id` names the tool request of an `approval` one; `level` is the chain level, 0 before it
 went up any chain, and `leader` who leads at that level. The notice `ants dead watch` sends with human credentials is told by the dead letter it writes, not by a status
-update.
+update, and the `harness` notice of a harness failing to start by the `failing` of the ant's roster entry.
 
 ### `RosterEntry` at `ants_roster` key `<ant>`
 
 What a daemon says of an ant it serves: `ant`, `machine`, `harness`, `capabilities`, `whoami`, `workdir`, `started_at`,
 `heartbeat_at`, `activity` (`idle`, `working`), `handling`, `harnesses`, `escalate_to`, `version`, `perms`,
-`signed_out`, `limited`. The daemon puts it on start and every 10 s, and deletes it on a clean stop; the bucket's
+`signed_out`, `limited`, `failing`. The daemon puts it on start and every 10 s, and deletes it on a clean stop; the bucket's
 entries expire after 30 s, so a daemon that died leaves none. `ants hook run --on roster` hands on puts only, every
 heartbeat included. Check: `key == ant`.
 

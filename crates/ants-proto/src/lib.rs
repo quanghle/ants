@@ -1699,6 +1699,19 @@ pub struct RosterEntry {
     /// until `until`. Missing otherwise, and from entries of older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limited: Option<HarnessLimit>,
+    /// Set while the ant's harness keeps failing to start: messages to the ant wait, spending no attempts, until a
+    /// check starts it. Missing otherwise, and from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing: Option<HarnessFailing>,
+}
+
+/// An ant's harness that keeps failing to start, as its roster entry reports it ([`RosterEntry::failing`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessFailing {
+    /// When the failures held the messages first since a message last got past the harness's start.
+    pub since: DateTime<Utc>,
+    /// The harness's last error.
+    pub error: String,
 }
 
 /// A provider limit an ant's harness ran into, as its roster entry reports it ([`RosterEntry::limited`]).
@@ -2478,6 +2491,8 @@ pub enum EscalationReason {
     Asked,
     /// A prompt does not fit the model's context window, even in a fresh session.
     ContextWindow,
+    /// The ant's harness keeps failing to start, so messages wait for a human to fix it.
+    Harness,
     /// A value from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -2493,6 +2508,7 @@ impl EscalationReason {
             Self::Approval => "approval",
             Self::Asked => "asked",
             Self::ContextWindow => "context_window",
+            Self::Harness => "harness",
             Self::Unknown => "unknown",
         }
     }
@@ -5497,12 +5513,13 @@ mod tests {
             perms: None,
             signed_out: None,
             limited: None,
+            failing: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
         assert!(!json.contains("version") && !json.contains("perms"), "{json}");
-        assert!(!json.contains("signed_out") && !json.contains("limited"), "{json}");
+        assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
         assert!(!json.contains("agent"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
@@ -5550,6 +5567,13 @@ mod tests {
             "{json}"
         );
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), limited);
+        let failing = RosterEntry {
+            failing: Some(HarnessFailing { since, error: "copilot: not found".to_owned() }),
+            ..entry.clone()
+        };
+        let json = serde_json::to_string(&failing).unwrap();
+        assert!(json.contains(r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), failing);
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -5564,6 +5588,7 @@ mod tests {
         assert_eq!((entry.activity, entry.handling, entry.harnesses), (None, None, None));
         assert_eq!(entry.signed_out, None, "an older daemon's entry");
         assert_eq!(entry.limited, None, "an older daemon's entry");
+        assert_eq!(entry.failing, None, "an older daemon's entry");
 
         let newer = r#"{"ant":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,
             "signed_out":{"since":"2026-01-01T00:00:05Z","sign_in":"x login","reason":"expired"},
