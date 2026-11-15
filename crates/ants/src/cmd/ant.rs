@@ -10,7 +10,7 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::serve::AntOptions;
 use crate::settings::{self, Assignment};
-use crate::{ant, avatars, completions, memories, orders, pause, restart};
+use crate::{ant, avatars, completions, export, memories, orders, pause, restart};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
@@ -148,6 +148,36 @@ pub(crate) enum AntCommand {
         #[command(flatten)]
         order: Order,
     },
+    /// Export ANT to a file another bus imports it from (`ants ant import`): its identity record (id, birth, avatar,
+    /// prompts), the settings that make it (whoami, harness, model, reasoning_effort, context, fallback) and its
+    /// home's memory files, packed between prompts. Leaves out its task database, other settings, credentials,
+    /// environment, workdir, worktrees, sessions and history. Plain JSON, not encrypted. Runs on the machine whose
+    /// config file lists ANT, with a human's credentials.
+    Export {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+        /// The file to write (default: ./ANT.ant); never overwritten.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Mark ANT moved once exported: its daemon drains it and leaves the roster, and no daemon starts it until
+        /// `ants ant unseal`.
+        #[arg(long = "move")]
+        seal: bool,
+        /// Config file listing ANT (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
+    },
+    /// Import an ant from a file `ants ant export` wrote, as `ants add` adds one: create its identity record on this
+    /// bus, refused when an ant there holds its name or its id, list it in the config file with the exported settings
+    /// (the flags given win), give it a new key and restore its memories into its empty home, with no tasks. Harness
+    /// memory files are left out, with a warning, when the ant runs another harness here. Needs a human's
+    /// credentials.
+    Import(Box<crate::export::ImportArgs>),
+    /// Clear the moved mark `ants ant export --move` set on ANT, so a daemon listing it serves it again.
+    Unseal {
+        #[arg(add = ArgValueCandidates::new(completions::ants))]
+        ant: UserId,
+    },
 }
 
 /// Where an order goes, and how long to wait for its outcome.
@@ -193,5 +223,8 @@ pub(crate) async fn run(nats: &crate::Nats<'_>, command: AntCommand) -> Result<(
         AntCommand::Resume { order: Order { ant, machine, wait } } => {
             pause::run(nats, &ant, machine, false, wait).await
         }
+        AntCommand::Export { ant, out, seal, config } => export::export(nats, &ant, out, seal, config).await,
+        AntCommand::Import(args) => Box::pin(export::import(nats, *args)).await,
+        AntCommand::Unseal { ant } => export::unseal(nats, &ant).await,
     }
 }

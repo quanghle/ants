@@ -63,3 +63,39 @@ async fn prompts_are_counted_across_a_standby_takeover() {
     let record: AntIdentity = serde_json::from_slice(&kv.get("dev-a").await.unwrap().unwrap()).unwrap();
     assert_eq!(record.prompts, 14);
 }
+
+/// A record marked moved stops the daemon serving the ant and keeps a daemon starting it waiting, until the mark goes;
+/// counting prompts keeps the mark.
+#[tokio::test]
+async fn a_moved_mark_drains_and_holds_the_ant_until_it_goes() {
+    let Some(server) = NatsServer::start() else { return };
+    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let dev = Identity::new(&js, None, &p("dev-a")).await.unwrap();
+    assert_eq!(dev.read().await.unwrap(), None, "no bucket yet");
+    assert!(!dev.is_moved().await);
+    js.create_key_value(hub::identities_config()).await.unwrap();
+    assert_eq!(dev.read().await.unwrap(), None, "reading creates no record");
+    let born = dev.ensure().await.unwrap().unwrap();
+    let every = Duration::from_millis(50);
+    let wait = Duration::from_secs(5);
+    tokio::time::timeout(wait, dev.unsealed(every)).await.expect("an ant not moved is served at once");
+    assert!(tokio::time::timeout(every * 4, dev.moved(every)).await.is_err(), "not moved");
+
+    let kv = js.get_key_value(IDENTITIES_BUCKET).await.unwrap();
+    let mark = ants_proto::MovedMark { at: Utc::now(), by: UserId::human() };
+    let moved = AntIdentity { moved: Some(mark.clone()), ..born.clone() };
+    let (watching, ()) = tokio::join!(tokio::time::timeout(wait, dev.moved(every)), async {
+        tokio::time::sleep(every * 2).await;
+        kv.put("dev-a", serde_json::to_vec(&moved).unwrap().into()).await.unwrap();
+    });
+    watching.expect("the serving daemon sees the move");
+    assert!(tokio::time::timeout(every * 4, dev.unsealed(every)).await.is_err(), "a moved ant is not started");
+    assert_eq!(dev.count_prompt().await.unwrap().unwrap().moved, Some(mark), "counting keeps the mark");
+
+    let (waiting, ()) = tokio::join!(tokio::time::timeout(wait, dev.unsealed(every)), async {
+        tokio::time::sleep(every * 2).await;
+        let unsealed = AntIdentity { moved: None, ..dev.read().await.unwrap().unwrap() };
+        kv.put("dev-a", serde_json::to_vec(&unsealed).unwrap().into()).await.unwrap();
+    });
+    waiting.expect("unsealing lets the ant be served again");
+}

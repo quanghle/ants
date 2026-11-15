@@ -23,6 +23,7 @@ mod defaults;
 mod devices;
 mod doctor;
 mod enroll;
+mod export;
 mod github;
 mod hook;
 mod http;

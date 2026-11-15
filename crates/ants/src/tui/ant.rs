@@ -213,16 +213,17 @@ impl Page {
         let head_width = u16::try_from(head_width).unwrap_or(u16::MAX);
         let [face, left, right] =
             Layout::horizontal([Constraint::Length(head_width), Constraint::Fill(1), Constraint::Fill(1)]).areas(top);
+        let moved = data.looks.identity(&self.ant).and_then(|i| i.moved.as_ref());
         let title = match head {
             Some(head) => {
                 frame.render_widget(Paragraph::new(head).block(frame::block(String::new(), false)), face);
-                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, now))
+                format!(" {mark} {} · {} ", self.ant, crate::ant::state(entry, moved, now))
             }
             None => format!(
                 " {mark} {} {} · {} ",
                 data.looks.face(&self.ant).content,
                 self.ant,
-                crate::ant::state(entry, now)
+                crate::ant::state(entry, moved, now)
             ),
         };
 
@@ -324,7 +325,8 @@ fn about(entry: Option<&RosterEntry>, now: DateTime<Utc>, width: usize) -> Vec<L
 /// What holds the ant back, what it does now on each thread, and what it spent that UTC day.
 fn status(ant: &UserId, entry: Option<&RosterEntry>, data: &Data, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let holds = crate::ant::holds(ant, entry, now);
+    let moved = data.looks.identity(ant).and_then(|i| i.moved.as_ref());
+    let holds = crate::ant::holds(ant, entry, moved, now);
     if holds.is_empty() {
         lines.push(Line::styled(format!("nothing holds {ant} back"), frame::dim()));
     }
