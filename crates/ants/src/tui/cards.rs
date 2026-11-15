@@ -1,5 +1,5 @@
 //! What `ants chat` reads of the threads besides their messages, every while: each thread's shared done state and
-//! TL;DR in ants_threads, and what the ants spent on it since a human's last message, and in the UTC day, in
+//! TL;DR and the human's snoozes in ants_threads, and what the ants spent on it since a human's last message, and in the UTC day, in
 //! ants_sessions.
 
 use std::collections::{HashMap, HashSet};
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ants_daemon::caps::Spent;
 use ants_daemon::direct_kv::DirectKv;
-use ants_proto::{SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSummary, UserId};
+use ants_proto::{SESSIONS_BUCKET, ThreadDone, ThreadId, ThreadSnoozes, ThreadSummary, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -30,6 +30,8 @@ pub struct Cards {
     pub spend: HashMap<ThreadId, Vec<(UserId, Spent)>>,
     /// What each ant spent that UTC day, once read.
     pub today: Option<Vec<(UserId, Spent)>>,
+    /// The threads the human snoozed on home.
+    pub snoozed: ThreadSnoozes,
     /// Why the last read failed, to tell only once.
     pub failed: Vec<String>,
 }
@@ -70,6 +72,10 @@ impl Cards {
             Ok(today) => self.today = Some(today),
             Err(e) => failed.push(format!("reading the spend: {e:#}")),
         }
+        match read.snoozed {
+            Ok(snoozed) => self.snoozed = snoozed,
+            Err(e) => failed.push(format!("reading the snoozes: {e:#}")),
+        }
         failed.dedup();
         if failed == self.failed {
             return None;
@@ -84,6 +90,7 @@ pub struct Read {
     pub meta: Result<(HashMap<ThreadId, ThreadDone>, HashMap<ThreadId, ThreadSummary>)>,
     pub spend: Result<HashMap<ThreadId, Vec<(UserId, Spent)>>>,
     pub today: Result<Vec<(UserId, Spent)>>,
+    pub snoozed: Result<ThreadSnoozes>,
 }
 
 /// Where the reads go: the titles bucket's [`Meta`], and the sessions bucket.
@@ -102,7 +109,8 @@ impl Source {
         Self { js: js.clone(), meta, sessions }
     }
 
-    /// Read what there is of `threads`: their done states and TL;DRs, what was spent on them, and that day's spend.
+    /// Read what there is of `threads`: their done states and TL;DRs, what was spent on them, that day's spend, and the
+    /// human's snoozes.
     pub async fn read(self, threads: HashSet<ThreadId>) -> Read {
         let meta = async {
             let meta = self.meta.as_ref().map_err(|e| anyhow!("{e}"))?;
@@ -125,8 +133,9 @@ impl Source {
             let kv = self.sessions.as_ref().map_err(|e| anyhow!("{e}"))?;
             crate::spend::today(&self.js, kv).await.context("of the day")
         };
-        let (meta, spend, today) = futures::join!(meta, spend, today);
-        Read { meta, spend, today }
+        let snoozed = async { self.meta.as_ref().map_err(|e| anyhow!("{e}"))?.snoozes().await };
+        let (meta, spend, today, snoozed) = futures::join!(meta, spend, today, snoozed);
+        Read { meta, spend, today, snoozed }
     }
 }
 
@@ -205,6 +214,7 @@ mod tests {
             meta: Ok((HashMap::new(), HashMap::new())),
             spend: Ok([(thread.clone(), vec![(user("dev-a"), spent), (user("dev-b"), spent)])].into()),
             today: Ok(vec![(user("dev-a"), spent)]),
+            snoozed: Ok(ThreadSnoozes::default()),
         };
         assert_eq!(cards.take(ok()), None);
         assert_eq!(cards.spent(&thread), Some(Spent { tokens: 20, cost: 0.5 }));

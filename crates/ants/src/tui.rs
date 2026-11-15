@@ -25,6 +25,7 @@ mod people;
 mod react;
 mod reads;
 mod search;
+mod snooze;
 mod status;
 mod thread;
 mod timeline;
@@ -259,6 +260,10 @@ impl Chat {
                 }
                 acted = self.acts.next() => {
                     dirty = true;
+                    if matches!(acted, acts::Acted::Changed(..)) {
+                        // Home shows done states and snoozes: read them back at once.
+                        self.cards.refresh();
+                    }
                     self.model.acted(acted, Utc::now());
                     Vec::new()
                 }

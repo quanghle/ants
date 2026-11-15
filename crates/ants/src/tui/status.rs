@@ -204,6 +204,7 @@ mod tests {
             meta: Ok(Default::default()),
             spend: Ok(Default::default()),
             today: Err(anyhow::anyhow!("timed out")),
+            snoozed: Ok(Default::default()),
         };
         let parts = Parts {
             threads: Some((State::new(user("alice"), SINCE), entries)),

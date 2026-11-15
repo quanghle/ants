@@ -1,6 +1,8 @@
-//! Home: what waits on the human, one row per thread and reason (per tool request for approvals, as cards answered
-//! where they show, [`approvals`]), the most pressing reasons first and the oldest first within one. Questions
-//! (ants-ofmi.21) and humans' messages (ants-ofmi.26) are to join the reasons.
+//! Home, the triage queue: what waits on the human, one item per thread and reason (per tool request for approvals,
+//! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
+//! one, each with its one-key actions: answer, grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
+//! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
+//! Questions (ants-ofmi.21) and humans' messages (ants-ofmi.26) are to join the reasons.
 
 use ants_proto::{ApprovalRequest, ThreadId, Verdict};
 use chrono::{DateTime, Utc};
@@ -10,9 +12,13 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
+use super::acts::Change;
 use super::approvals;
+use super::command::GRANT;
+use super::exec::Job;
 use super::frame::{self, ago};
-use super::model::{Data, Key, Model, To};
+use super::interrupt::Intent;
+use super::model::{Action, Data, Key, Model, To};
 use crate::thread::Kind;
 use crate::tools::State;
 
@@ -36,6 +42,25 @@ impl Why {
             Self::Stuck => "stuck",
             Self::Mention => "mention",
             Self::Finished => "finished",
+        }
+    }
+
+    /// The item's one-key actions but Enter, as home and the compact pane show them.
+    pub fn keys(self) -> &'static str {
+        match self {
+            Self::Approval => "a A r answer · z snooze",
+            Self::Stuck => "g grant · x cancel · d done · z snooze",
+            Self::Mention => "r reply · d done · z snooze",
+            Self::Finished => "f follow up · d mark done · z snooze",
+        }
+    }
+
+    /// What Enter does on the item, in home.
+    fn enter(self) -> &'static str {
+        match self {
+            Self::Approval => "Enter details",
+            Self::Finished => "Enter review",
+            Self::Stuck | Self::Mention => "Enter open",
         }
     }
 
@@ -90,7 +115,16 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from)));
         }
     }
-    items.sort_by_key(|i| (i.why, i.at));
+    // A snooze holds until an item for the human arrives on the thread after it was set.
+    let snoozes = &data.cards.snoozed;
+    let woken: Vec<ThreadId> = items
+        .iter()
+        .filter(|i| snoozes.get(&i.thread, now).is_some_and(|s| i.at > s.at))
+        .map(|i| i.thread.clone())
+        .collect();
+    items.retain(|i| snoozes.get(&i.thread, now).is_none() || woken.contains(&i.thread));
+    // The requests waiting for the human before those settled lately.
+    items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
     items
 }
 
@@ -105,7 +139,7 @@ pub struct Page {
 }
 
 impl Page {
-    pub const KEYS: &str = "↑↓ item · Enter open · a A r answer a tool request";
+    pub const KEYS: &str = "j/k move · Enter open · d done · z snooze · t tree";
 
     /// The selected item's thread.
     pub fn thread(&self, data: &Data) -> Option<ThreadId> {
@@ -115,7 +149,7 @@ impl Page {
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
         let items = items(data, now);
-        let selected = items.get(self.selected);
+        let selected = items.get(self.selected.min(items.len().saturating_sub(1)));
         let pending = selected.and_then(|i| i.request.as_ref()).filter(|(_, s)| s.is_none()).map(|(r, _)| r.clone());
         let verdict = match key {
             Key::Char('a') => Some(Verdict::AllowOnce),
@@ -123,14 +157,30 @@ impl Page {
             Key::Char('r') => Some(Verdict::Reject),
             _ => None,
         };
+        let thread = || selected.map(|i| i.thread.clone());
         self.selected = match key {
             Key::Enter => {
                 return match pending {
                     Some(request) => Some(To::Ask(request, None)),
-                    None => selected.map(|i| To::Thread(i.thread.clone())),
+                    None => thread().map(To::Thread),
                 };
             }
-            Key::Char('a' | 'A' | 'r') => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('r' | 'f') => return thread().map(To::Reply),
+            Key::Char('g') => {
+                let stuck = selected.filter(|i| i.why == Why::Stuck)?;
+                let job = Job::Grant { thread: stuck.thread.clone(), text: GRANT.to_owned() };
+                return Some(To::Do(Action::Run(job, String::new())));
+            }
+            Key::Char('x') => return thread().map(|thread| To::Interrupt(Intent::Cancel, thread)),
+            Key::Char('d') => {
+                let thread = thread()?;
+                let last = data.live.summary(&thread).map_or(0, |s| s.last_reopening);
+                return Some(To::Do(Action::Change(thread, Change::Done(true), last)));
+            }
+            Key::Char('z') => return thread().map(To::Snooze),
+            Key::Char('t') => return thread().map(To::Tree),
             Key::Up | Key::Char('k') => self.selected.saturating_sub(1),
             Key::Down | Key::Char('j') => self.selected + 1,
             Key::Home => 0,
@@ -164,6 +214,9 @@ impl Page {
                     ]),
                     Line::styled(format!("         {}", crate::excerpt(&i.text, 160)), frame::dim()),
                 ];
+                if i.request.is_none() {
+                    lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), frame::dim()));
+                }
                 if let Some((request, settled)) = &i.request {
                     let card = approvals::Card { request, settled: settled.as_ref() };
                     let card = approvals::lines(card, model.asking.as_ref(), at == selected, now, width);
@@ -242,5 +295,70 @@ mod tests {
         m.key(Key::Esc, at(5));
         m.key(Key::End, at(500));
         assert_eq!(m.key(Key::Enter, at(500)), Some(Action::Open(done)));
+    }
+
+    fn escalation(seq: u64, thread: &ThreadId, from: &str, to: &str) -> crate::thread::Entry {
+        let x = ants_proto::Escalation::new(user(from), thread.clone(), ants_proto::EscalationReason::TurnBudget);
+        let envelope = Envelope {
+            thread_id: thread.clone(),
+            escalation: Some(Box::new(x)),
+            ..Envelope::new(user(from), user(to), "help")
+        };
+        let payload = serde_json::to_vec(&envelope).unwrap();
+        Parser::default().entry(seq, at(seq.cast_signed()), &subject::inbox(&user(to), &user(from)), &payload).unwrap()
+    }
+
+    fn shown(m: &crate::tui::model::Model, now: DateTime<Utc>) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| crate::tui::frame::draw(f, m, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
+        cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn home_items_carry_their_keys_and_a_snooze_holds_until_a_new_item_arrives() {
+        use crate::tui::command::GRANT;
+        use crate::tui::exec::Job;
+
+        let (stuck, done) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let mut opening = message(1, &done, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(
+            vec![
+                opening,
+                message(2, &done, "dev-a", "alice", "deployed"),
+                message(3, &stuck, "alice", "dev-b", "review"),
+                escalation(4, &stuck, "dev-b", "alice"),
+            ],
+            at(4),
+        );
+        let whys: Vec<Why> = items(&m.data, at(5)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Stuck, Why::Finished]);
+        let screen = shown(&m, at(5));
+        assert!(screen.contains("g grant · x cancel · d done · z snooze · Enter open"), "{screen}");
+        assert!(screen.contains("f follow up · d mark done · z snooze · Enter review"), "{screen}");
+
+        let grant = Job::Grant { thread: stuck.clone(), text: GRANT.into() };
+        assert_eq!(m.key(Key::Char('g'), at(5)), Some(Action::Run(grant, String::new())));
+        let cancel = Job::Cancel { thread: stuck.clone(), ants: vec![user("dev-b")] };
+        assert_eq!(m.key(Key::Char('x'), at(5)), Some(Action::Run(cancel, String::new())));
+        let last = m.data.live.summary(&stuck).unwrap().last_reopening;
+        assert_eq!(m.key(Key::Char('d'), at(5)), Some(Action::Change(stuck.clone(), Change::Done(true), last)));
+
+        assert_eq!(m.key(Key::Char('z'), at(5)), None);
+        assert!(shown(&m, at(5)).contains("for (at most 7d): 1h"), "the footer asks how long");
+        let snooze = Change::Snooze(Some(at(5 + 3600)));
+        assert_eq!(m.key(Key::Enter, at(5)), Some(Action::Change(stuck.clone(), snooze, last)));
+        let whys: Vec<Why> = items(&m.data, at(6)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Finished], "snoozed off home");
+        assert_eq!(items(&m.data, at(5 + 3600)).len(), 2, "until the snooze ends");
+        m.stored(vec![escalation(7, &stuck, "dev-b", "alice")], at(7));
+        assert_eq!(items(&m.data, at(8)).len(), 2, "or a new item arrives on the thread");
+
+        m.key(Key::End, at(8));
+        assert_eq!(m.key(Key::Char('f'), at(8)), Some(Action::Open(done)));
+        assert!(m.bar.focused, "the bar open to follow up on the thread");
     }
 }

@@ -11,13 +11,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::acts::{Acted, Change};
 use super::approvals::{self, Answer, Asking};
-use super::command::Bar;
+use super::command::{Bar, Tone};
 use super::exec::Job;
 use super::interrupt::{Confirm, Intent};
 use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, thread, timeline, tree, work};
+use super::{cards, channel, dm, home, nav, people, search, snooze, thread, timeline, tree, work};
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
 use crate::tools::Update;
@@ -219,6 +219,10 @@ pub enum To {
     Tree(ThreadId),
     /// Steer or cancel the prompt running on a thread.
     Interrupt(Intent, ThreadId),
+    /// The thread, with the command bar open to reply on it.
+    Reply(ThreadId),
+    /// Ask how long to keep the thread off home.
+    Snooze(ThreadId),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -239,6 +243,8 @@ pub struct Model {
     pub picking: Option<Picker>,
     /// The steer or cancel waiting for y while an ant runs a tool call.
     pub interrupting: Option<Confirm>,
+    /// How long to snooze a thread from home, being asked.
+    pub snoozing: Option<snooze::Prompt>,
     /// Whether the two-line pane shows instead of the full view ([`super::compact`]).
     pub compact: bool,
 }
@@ -273,6 +279,7 @@ impl Model {
             asking: None,
             picking: None,
             interrupting: None,
+            snoozing: None,
             compact: false,
         }
     }
@@ -598,6 +605,9 @@ impl Model {
         if self.interrupting.is_some() {
             return self.confirm_key(key);
         }
+        if self.snoozing.is_some() {
+            return self.snooze_key(key, now);
+        }
         if let Some(picker) = &mut self.picking {
             return match picker.key(key) {
                 Pick::Typing => None,
@@ -759,6 +769,18 @@ impl Model {
                 None
             }
             To::Interrupt(intent, thread) => self.interrupt(intent, thread),
+            To::Reply(thread) => {
+                self.bar.focused = true;
+                self.go(To::Thread(thread), now)
+            }
+            To::Snooze(thread) => {
+                self.snooze(thread);
+                None
+            }
+            To::Do(action @ Action::Run(..)) => {
+                self.bar.set_status("running…", Tone::Busy);
+                Some(action)
+            }
             To::Do(action) => Some(action),
         }
     }

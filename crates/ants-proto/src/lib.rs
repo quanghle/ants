@@ -178,7 +178,8 @@ pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// KV bucket of what humans make of threads: the title of each thread ([`ThreadTitle`], keyed by [`title_key`]), one
 /// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
 /// one for every human too, which any human sets or clears, and each human's pinned and archived threads
-/// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
+/// ([`ThreadMarks`], keyed by [`marks_key`]) and the threads it snoozed on home ([`ThreadSnoozes`], keyed by
+/// [`snoozed_key`]), each shared by its devices and read and written by that human alone
 /// ([`Permissions::for_user`]), and the TL;DR of each thread a human's CLI asked an ant for ([`ThreadSummary`], keyed
 /// by [`summary_key`]), which any human puts or deletes. Ants read and write none of it: a title an ant suggests
 /// ([`Envelope::title`], [`ChannelPost::title`], [`NotesPost::title`]) and a TL;DR an ant replies with

@@ -167,6 +167,12 @@ pub fn marks_key(human: &UserId) -> String {
     format!("marks.{human}")
 }
 
+/// Key in [`THREADS_BUCKET`] of the threads `human` snoozed on home ([`crate::ThreadSnoozes`]): starting with
+/// `snoozed`, so no thread id or human name collides with a title's key.
+pub fn snoozed_key(human: &UserId) -> String {
+    format!("snoozed.{human}")
+}
+
 /// Key in [`READ_BUCKET`] of the posts `human` read of the channels ([`ChannelReadMarkers`]): its user id with
 /// `.chan` after it, so it collides with no human's inbox [`ReadMarker`], whose key is the bare user id.
 pub fn channel_reads_key(human: &UserId) -> String {

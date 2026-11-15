@@ -93,6 +93,9 @@ fn footer_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
     if let Some(confirm) = &model.interrupting {
         return confirm.line();
     }
+    if let Some(prompt) = &model.snoozing {
+        return prompt.line(&model.data);
+    }
     if let Some(line) = model.asking.as_ref().and_then(approvals::Asking::footer) {
         return line;
     }
@@ -137,6 +140,7 @@ const HELP: &[(&str, &str)] = &[
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
+    ("g r f x d z", "on home: grant turns, reply, follow up, cancel, mark done, snooze"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
     ("t", "in a thread: its delegation tree"),
     ("s", "in a thread or work: the bar on /steer for the ant at work"),
@@ -202,7 +206,7 @@ mod tests {
         assert!(shown.contains("waiting on ant 1"), "{shown}");
         assert!(shown.contains("● dev-a") && shown.contains("PEOPLE") && shown.contains("bob"), "{shown}");
         assert!(shown.contains("nothing waits on a human"), "{shown}");
-        let keys = "Enter open · a A r answer a tool request · Tab nav/view · / search · ? help · q quit";
+        let keys = "j/k move · Enter open · d done · z snooze · t tree · Tab nav/view · / search · ? help · q quit";
         assert!(shown.contains(keys), "{shown}");
 
         m.select(nav::Item::Work(None));
