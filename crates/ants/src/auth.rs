@@ -20,7 +20,7 @@ use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
 use ants_proto::{
     DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions,
-    REVOKED_DEVICES, Role, UserId,
+    REGISTERED_TAG, REVOKED_DEVICES, Role, UserId,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
@@ -199,7 +199,7 @@ pub fn issue_device_with(
     let key = KeyPair::new_user();
     let xkey = (kind == Kind::Human).then(XKey::new);
     let bound = xkey.as_ref().map(device_key).transpose()?;
-    let (device, extra) = device_claims(kind, new.label, bound.as_ref())?;
+    let (device, extra) = device_claims(kind, new, bound.as_ref())?;
     let jwt = user_jwt(&account, &key.public_key(), user.as_str(), permissions, extra, new.expires_at)?;
     write_secret(out, &creds_with(&jwt, &seed(&key)?, xkey.as_ref())?)?;
     let issued = Issued::new(&key.public_key(), user.as_str(), kind, new.expires_at)?;
@@ -212,10 +212,11 @@ pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
     Ok(xkey.public_key().parse()?)
 }
 
-/// A new device for credentials of `kind`, if a human's, and the claims carrying it with its encryption key `xkey`.
-fn device_claims(kind: Kind, label: Option<&str>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
+/// A new device for credentials of `kind`, if a human's, and the claims carrying it with its encryption key `xkey`,
+/// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`).
+fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
     if kind != Kind::Human {
-        if label.is_some() {
+        if new.label.is_some() {
             bail!("only a human's credentials are for a device with a label");
         }
         if xkey.is_some() {
@@ -223,9 +224,10 @@ fn device_claims(kind: Kind, label: Option<&str>, xkey: Option<&DeviceKey>) -> R
         }
         return Ok((None, json!({})));
     }
-    label.map(revoke::check_label).transpose()?;
+    new.label.map(revoke::check_label).transpose()?;
     let device = DeviceId::generate();
-    let tags: Vec<String> = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag)).collect();
+    let tags = std::iter::once(device.tag()).chain(xkey.map(DeviceKey::tag));
+    let tags: Vec<String> = tags.chain(new.grant.is_some().then(|| REGISTERED_TAG.to_owned())).collect();
     Ok((Some(device), json!({ "tags": tags })))
 }
 
@@ -537,7 +539,7 @@ pub fn sign_device_with(
     check_user_key(public_key)?;
     check_not_reserved(user)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
-    let (device, extra) = device_claims(kind, new.label, xkey)?;
+    let (device, extra) = device_claims(kind, new, xkey)?;
     let jwt = user_jwt(&account, public_key, user.as_str(), permissions, extra, new.expires_at)?;
     let issued = Issued::new(public_key, user.as_str(), kind, new.expires_at)?;
     revoke::record(dir, &new.record(issued, device, xkey.cloned()))?;
@@ -603,7 +605,8 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
 }
 
 /// [`renew`] the credentials of a device a registration granted, as `ants signer` does once their grant still holds:
-/// recorded as now bound to `github` (its current login) and granted by `grant`.
+/// recorded as now bound to `github` (its current login) and granted by `grant`, and marked [`REGISTERED_TAG`], which
+/// [`renew`] leaves out.
 pub fn renew_registered(
     dir: &Path,
     current: &str,
@@ -664,7 +667,7 @@ fn renew_as(
         CredsKind::Ant => (Permissions::for_user(&user()?, Role::Ant), json!({})),
         CredsKind::Human => {
             let tags = finding.device.iter().map(DeviceId::tag).chain(xkey.iter().map(DeviceKey::tag));
-            let tags: Vec<String> = tags.collect();
+            let tags: Vec<String> = tags.chain(registered.is_some().then(|| REGISTERED_TAG.to_owned())).collect();
             (Permissions::for_user(&user()?, Role::Human), json!({ "tags": tags }))
         }
         CredsKind::Webhook { to, channels } => {

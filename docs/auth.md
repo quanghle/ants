@@ -199,6 +199,8 @@ Registered credentials expire after the policy's `ttl` (default 30 d). Before th
 
 A renewal keeps the credentials' lifetime, not the policy's current `ttl`. Expired credentials are not renewed: run `ants login` again, which adds a device for the same GitHub user while the policy or a standing approval admits it.
 
+Credentials the signer signs or renews for a registration carry the user JWT tag `ants-registered`, which `ants enroll renew` leaves out, so the holder's renewal hints name the right path: `ants renew`, `ants doctor` and the warnings logged at connect name `ants signer` for them, `ants login` once they expired, and `ants enroll renew NAME` only for credentials without the tag. The tag only guides the holder; the signer goes by `issued.jsonl`.
+
 ### Membership sweep
 
 Between renewals, `ants signer` checks the memberships again every `sweep` of the `[registration]` table (default `6h`, the first sweep at start; `"0"` turns it off), for every name with live credentials (neither revoked nor expired) an `org` or `team` grant admitted: it looks the bound GitHub user up by ID with its own token, as a renewal does, one user per second. A user GitHub definitely finds no longer a member of a listed organization or team, or no GitHub user any more, loses every key of the name, as at a refused renewal. A name is kept whenever GitHub cannot tell (an error, a timeout or a rate limit), until the next sweep. Credentials of `approval` and `email-domain` grants, and devices issued with `ants auth user`, are not swept.

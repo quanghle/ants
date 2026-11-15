@@ -13,6 +13,15 @@ use crate::{DeviceKey, Error, UserId, subject};
 /// The `name` of the user JWT of the team's bootstrap credentials (`ants auth bootstrap`).
 pub const BOOTSTRAP_USER: &str = "bootstrap";
 
+/// The user JWT tag of credentials a registration granted, which `ants signer` signs and renews, not
+/// `ants enroll renew`: it tells their holder which renewal applies. The signer itself goes by its registry.
+pub const REGISTERED_TAG: &str = "ants-registered";
+
+/// Whether a user JWT's `tags` carry [`REGISTERED_TAG`], in either case.
+pub fn tagged_registered<'a>(tags: impl IntoIterator<Item = &'a str>) -> bool {
+    tags.into_iter().any(|tag| tag.eq_ignore_ascii_case(REGISTERED_TAG))
+}
+
 /// The largest message, in bytes, bootstrap credentials may publish.
 pub const BOOTSTRAP_MAX_PAYLOAD: u32 = 4096;
 
@@ -187,6 +196,13 @@ mod tests {
         let mut long = request;
         long.expires_at += chrono::TimeDelta::seconds(1);
         assert!(!long.is_live(now), "good for longer than LOGIN_TTL");
+    }
+
+    #[test]
+    fn only_the_registered_tag_marks_registered_credentials() {
+        assert!(tagged_registered(["ants-perms:2", "ants-registered"]));
+        assert!(tagged_registered(["ANTS-REGISTERED"]));
+        assert!(!tagged_registered(["ants-perms:2", "ants-registered:x", "ants-device:x"]));
     }
 
     #[test]
