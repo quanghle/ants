@@ -18,6 +18,7 @@ env:
   CARGO_BUILD_WARNINGS: deny
   NATS_SERVER_VERSION: v2.15.3
 
+# Every job's `toolchain:` matches rust-toolchain.toml and `rust-version` in Cargo.toml; the three move together.
 jobs:
   check:
     strategy:

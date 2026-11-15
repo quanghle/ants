@@ -1342,11 +1342,16 @@ Measured with `ants` 0.1.0 (release) and `nats-server` 2.15.3:
 
 ```sh
 cargo build --release
+scripts/check.sh        # the checks of CI's check and deny jobs, below
 cargo fmt --all --check
 CARGO_BUILD_WARNINGS=deny cargo clippy --all-targets
 cargo test
 cargo deny check        # licenses, advisories, bans, sources (deny.toml)
 ```
+
+`scripts/check.sh` runs formatting, lints, the test suite twice (`ANTS_REQUIRE_TOOLS=1`, then also `ANTS_TEST_JS_ACK_FC_V2=1`) and `cargo deny --locked check`, with `CARGO_BUILD_WARNINGS=deny`, and stops at the first failure. Without `nats-server` on `PATH` the tests needing it skip; without cargo-deny the dependency check is skipped; the summary lists either.
+
+`rust-toolchain.toml` pins the toolchain CI uses (Rust 1.100 with rustfmt and clippy); rustup installs it on the first `cargo` command in the checkout. A toolchain bump changes it, `rust-version` in `Cargo.toml` and every `toolchain:` in `.github/workflows/ci.yml` together.
 
 CI sets `CARGO_BUILD_WARNINGS=deny`, so any lint warning (rustc or clippy) fails `cargo clippy`, `cargo test` and `cargo build` there. `.cargo/config.toml` sets a 7-day dependency cooldown (`registry.global-min-publish-age`): `cargo update` and `cargo add` resolve only to crate versions published at least 7 days ago, unless `Cargo.lock` already holds them; builds and `cargo install --path` from the committed `Cargo.lock` are unaffected. `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p CRATE --precise VERSION` takes a newer release, such as a security fix.
 
@@ -1363,7 +1368,7 @@ Integration tests requiring `nats-server` on `PATH` skip when absent unless `ANT
 | `crates/ants` | `ants` binary: CLI, `daemon` and its schedules, `auth`, `enroll`, `leaf`, `bridge`, `channel`, `webhook`, `hook`, `mcp` |
 | `crates/ants-test-support` | Dev-only test helpers: `PATH` checks and throwaway `nats-server` |
 | `contrib/` | `launchd` plists, `systemd` user units and CLI agent skill (`contrib/skills/ants/SKILL.md`) |
-| `scripts/` | `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |
+| `scripts/` | `check.sh` (CI checks run locally), `install-units.sh` (service installer) and `footprint.sh` (RSS budget check) |
 | `docs/transport.md` | Transport reference: hub, reverse proxy, leaf nodes, store-and-forward, HTTPS bridge, Dev Tunnels |
 | `docs/hooks.md` | Hook contract: observer credentials, the subjects and JSON documents hooks rely on, versioning |
 
