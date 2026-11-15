@@ -24,7 +24,7 @@ Headless agent teams across machines, communicating with each other and with hum
                         uplink: wss://, tls://, Dev Tunnel, or ants bridge
 ```
 
-- **Hub:** one `nats-server` with JetStream holding stream `ANTS` and 14 KV buckets (`ants init`). With `ants auth`, every ant, human, webhook, observer, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials ([docs/auth.md](docs/auth.md)).
+- **Hub:** one `nats-server` with JetStream holding stream `ANTS`, 14 KV buckets and the attachment store `ants_files` (`ants init`). With `ants auth`, every ant, human, webhook, observer, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials ([docs/auth.md](docs/auth.md)).
 - **Leaf:** optional per-machine `nats-server` (`ants leaf config`) on `127.0.0.1:4222` with a store-and-forward outbox (`ants leaf outbox`). Local `ants` processes target `127.0.0.1:4222`; only the leaf uplink crosses the network.
 - **Daemon:** `ants daemon` serves ants over per-ant NATS connections and durable consumers, runs up to `max_harnesses` ACP processes per ant, enforces tool allowlists, limits and spending caps, refreshes roster heartbeats and exposes an MCP server to each session.
 - **Ants and humans:** ants are named agents (`dev-a`, `reviewer`, `messenger`) with a workdir, harness, capabilities and optional `whoami`. Humans (`human` by default, or named users from `ants auth user NAME --human`) own threads they start and approve tools. Unaddressed `ants ask` requests go to `messenger` for capability routing. Agent-to-agent messages share a per-thread turn budget (default 8).
@@ -45,6 +45,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_notify` | File, none | Per-human snooze deadline and muted threads (`<human>`), and notices held back for a digest (`held.<human>`). |
 | KV `ants_reactions` | File, 30d | Message reactions (`<reactor>.<message_id>.<reaction>`); humans write/delete their own keys and read all; ants neither read nor write, asking `ants signer` instead. |
 | KV `ants_threads` | File, none (per-message TTLs allowed) | Shared thread titles (`title.<thread>`), TL;DRs (`summary.<thread>`) and done states (`done.<thread>`), and per-human pin/archive/keep marks (`marks.<human>`); `ants thread list` prunes those of expired threads. |
+| Store `ants_files` (stream `OBJ_ants_files`) | File, 30d | Attachment bytes as chunks of up to 128 KiB on `$O.ants_files.C.<from>.<inbox\|notes\|chan>.<target>.<id>.<n>` (the handle follows the subject of the message carrying the reference `{id, name, mime, size, sha256}`; chunk 0 carries it in header `Ants-Attachment`); up to 8 attachments of 8 MiB each per message; each chunk stored once, no delete/purge; direct gets. Senders write their own, ants read those of messages they read, humans all. |
 | KV `ants_webhooks` | File, 7d | Webhook event hashes (`<webhook>.<hash>`), schedule firings (`<schedule>.<unix_time>`), and hourly `<webhook>.webhook` / `channel-manager.serve` version markers. |
 | Core NATS | Unstored | `ants.status.<ant>.<thread>`, `ants.cancel[led].<ant>.<thread>`, `ants.queue[d].<ant>`, `ants.chanadm.<channel>.<ant>`, `ants.enroll.<ant>[.reply]`, `ants.renew.<name>[.reply]`, `ants.antreq.<manager>[.reply]`. |
 
@@ -76,10 +77,12 @@ ants thread search --from dev-a --grep deploy       # cross-thread message searc
 ants thread title <thread> Release 1.2              # shared title (also: pin, unpin, archive, unarchive, done, undone, mute)
 ants thread tldr <thread>                           # TL;DR of a thread by the messenger, stored for every human
 ants react <message> eyes                           # react to a message (id or unique start of one)
+ants answer <message> 2                             # answer an ant's question with an option (or in own words)
 ants channel create ops --member dev-a,dev-b
 ants post '#ops' "@dev-a the build is red"
 ants watch [dev-a [<thread>]]                       # live bus traffic or one ant's streamed progress
 ants queue dev-a                                    # waiting messages (ants withdraw / ants cancel)
+ants                                                # full-screen chat UI on a terminal (also: ants chat)
 ants dash                                           # interactive terminal dashboard
 ```
 
@@ -95,12 +98,13 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. `MESSAGE` is a message id or, for humans, a unique start of one (ambiguous or unknown starts list candidates). With ant credentials, `ants signer` makes the change, only for a message the ant reads. |
+| `ants answer MESSAGE N\|TEXT...` | Answer a question an ant asked the human (MCP `ask_human`) with option `N` or, if the question takes them, own words; prints `thread <id>` and `message <id>`. Human creds only; `MESSAGE` resolves as for `ants react`. |
 | `ants post [--thread THREAD] [--wait \| -f] [--timeout DUR] CHANNEL TEXT \| --file PATH \| --edit` | Post to `ops` or `'#ops'`; prints `thread <id>` and `message <id>` (`@ant` wakes members, `@human` notifies members, no mention triages). |
 | `ants channel create \| set \| add \| remove \| list \| delete` | Manage channels (`--member USER,...`, `--messenger ANT`, `--default-messenger`, `--owner ANT`, `--no-owner`). |
 | `ants channel read CHANNEL [--thread THREAD \| --limit N]` | Print channel posts grouped by thread. |
 | `ants channel serve` | Run the channel manager (`ants auth channel-manager` creds) to apply owner `manage_channel` requests. |
 | `ants thread list [--ant USER] [--owner HUMAN] [--grep TEXT] [--escalated] [--pinned \| --archived] [--since DUR] [--limit N] [--json]` | List active threads within `--since` (default `24h`, `0` all; limit 50), pinned last, archived and `auto-archived` hidden unless `archived+new`, `done` in STATE (`done` with `by`/`at` in `--json`). |
-| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions, under a header with its title, `done by <human> <time>` and the CLI human's mark. |
+| `ants thread show THREAD [--since DUR] [--json]` | Print a thread's stored messages, posts, notes, escalations, tool requests/decisions, dead letters and reactions, under a header with its title, `done by <human> <time>` and the CLI human's mark; questions show their options and the answers given. |
 | `ants thread search [--grep TEXT] [--from USER] [--to USER] [--channel NAME] [--type KIND,...] [--since TIME] [--until TIME] [--limit N] [--json]` | Search stored messages across threads matching all filters (latest `--limit`, default 50, oldest first). |
 | `ants thread title THREAD [TEXT...] [--clear]` | Print, set (1–120 chars, shared across humans) or clear a thread title. |
 | `ants thread done \| undone THREAD` | Mark a thread done, or clear its done state, for every human, printing whether anything changed; a later message, post or note reopens it. |
@@ -110,13 +114,14 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants thread mute \| unmute THREAD [--for DUR]` | Mute push notifications for `THREAD` across devices (default `30d`, max `365d`), or unmute ([docs/webhooks.md](docs/webhooks.md#quiet-hours-snooze-and-muted-threads)). |
 | `ants notify snooze DUR` / `resume` / `status [--json]` | Snooze push notifications (`1s`–`365d`, subject to `bypass`), resume, or inspect active holds. |
 | `ants watch [ANT [THREAD] \| SUBJECT]` | Stream traffic (default `ants.>`), escalations/decisions, reactions (human creds), or live harness progress for `ANT`. |
+| `ants` / `ants chat [--since DUR]` | Full-screen chat UI (human creds + TTY; threads of the last 7 d by default): nav of home, work by state, the human's channels, ants and people beside the selected view. Bare `ants` opens it on a terminal and prints the usage (exit 2) without one; with no server reachable it points at `ants setup` and `ants login`. |
 | `ants dash [--since DUR]` | Interactive TUI for recent threads (archived and `auto-archived` hidden unless `archived+new`), live progress, roster and tool approvals (human creds + TTY). |
 | `ants cancel ANT THREAD` | Cancel the prompt `ANT` runs on `THREAD` (5s timeout; human creds). |
 | `ants queue ANT [--json]` / `ants withdraw ANT MESSAGE` | Inspect waiting messages for `ANT`, or withdraw an unstarted message (human creds). |
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
-| `ants init` | Create whichever of stream `ANTS` and the 14 KV buckets is missing, leaving existing ones as they are (human creds; also runs automatically on first human CLI connect). |
+| `ants init` | Create whichever of stream `ANTS`, the 14 KV buckets and store `ants_files` is missing, leaving existing ones as they are (human creds; also runs automatically on first human CLI connect). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)). |
 | `ants retire NAME [--config FILE] [--dir DIR] [--no-push]` | Unlist, drain, revoke and delete credentials of a templated ant while keeping `~/.ants/<name>` ([docs/config.md](docs/config.md#retiring-an-added-ant)). |
@@ -252,6 +257,7 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID); warns when unserved or limited. |
 | `ask_ant(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
 | `check_inbox(all_threads?)` | Drain late `ask_ant` replies arriving after timeout (persisted in `<home>/mcp.json`). |
+| `ask_human(question, options, free_text?)` | Ask the thread's owner (else the default human) a question with 2–9 options (question ≤ 500 chars, options ≤ 200; `free_text` default `true` also takes typed answers) and return at once; 0 turns. |
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message it reads (default: active message), made by `ants signer`; 0 turns, wakes nobody. |
 | `list_reactions(message_id?)` | List reactions and reactors on a message the ant reads (default: active message), answered by `ants signer` or `ants webhook serve` with a `[[human]]` entry. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
@@ -270,6 +276,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 
 - **Messenger:** unaddressed `ants ask` and unmentioned human/webhook channel posts route through `messenger`. Unless `messenger = false` or `[[ant]]` defines `messenger`, daemons run a built-in `messenger` (`~/.ants/messenger`, `~/.config/ants/auth/messenger.creds` if present) with automatic standby failover via `ants_roster` (~1 s on exit or 30 s TTL expiry), yielding immediately to an explicit `[[ant]] name = "messenger"`. It suggests a short title (`suggest_thread_title`) for a thread a human's request starts.
 - **Thread notes:** `ants.notes.<thread>.<from>` provides a passive shared board per thread (wakes nobody). An ant's `post_notes` spends 1 turn via CAS from `min(message_budget, last_note_budget)`; exhausting turns escalates `notes` until a human runs `ants notes <thread> TEXT` (8 fresh turns) or escalation climbs a level.
+- **Questions (`ask_human` / `ants answer`):** a question is a message to the human carrying `question` (text, numbered options, `free_text`); `ants inbox` and `ants thread show` print its options and how to answer it, and `thread show` lists the answers stored with it. `ants answer MESSAGE N|TEXT` finds the question among messages to the human, checks the option is one of its numbers (typed words only if `free_text`), and replies on the thread with the option's text (or the words) and `answer` (question id, option or none). An answer prompts the ant with an `[ants]` line naming the question and the option picked, or saying the answer is typed; an answer to no question the ant sent the human is an ordinary message.
 
 ## Threads, search, titles, done states and marks
 
@@ -285,6 +292,7 @@ Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires
 
 ## Dashboard and reactions
 
+- **`ants chat [--since DUR]` (bare `ants` on a terminal):** full-screen chat UI (human creds). The header shows the human, the server and the connection; the nav lists home (count of what waits on the human), work (all threads, then a count per state: `waiting on me`, `working`, `waiting on ant`, `stuck`, `idle`), the human's channels (`@N` unread mentions), the ants (`●` live, `◐` busy, `◌` limited or on a fallback, `✕` signed out or failing, `○` stale) and the other humans. Home lists pending tool requests, stuck threads (an escalation to a human or a dead letter no human answered since), unread mentions and finished threads (an ant answered on a thread the human owns). A channel shows its top-level posts newest first with reply counts and reactions (`w` lists its threads in work); `Enter` opens a thread, which marks the human's inbox messages on it read on every device, also those arriving while it is open. `Tab` moves between nav and view, `Esc` goes back, `R` refreshes, `?` shows the keys, `q`/`Ctrl-C` quits. Updates live from the stream, status events and the roster; records inbox and approval presence while open. Without a TTY, `ants chat` fails naming the scripting commands; without a reachable server (5 s) it points at `ants setup` and `ants login`.
 - **`ants dash [--since DUR]`:** full-screen terminal UI (human creds) showing active threads (`▶` while busy), selected thread live progress and history, 10 s roster refresh, and live pending tool requests (`Enter` opens details; `a`/`A`/`r` then `y` confirms `allow_once`/`allow_always`/`reject`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
 - **Reactions (`ants react MESSAGE REACTION [--remove]` / MCP `react`):** stores `<reactor>.<message_id>.<reaction>` in `ants_reactions` (30 d TTL; requires hub reachability). Humans write/delete only their own keys and read all reactions in `ants inbox`, `ants thread show` and `ants watch`, and follow them live in `ants inbox -f`, `ants ask -f` and `ants post -f`; reactions never end a wait or mark anything read. A human's `MESSAGE` may be a unique start of an id: matched first among messages to or from the human stored in the last 7 d, then among any stored then (narrowed by the time in a time-ordered id); several or no matches are refused with a list of candidates. Ant credentials need the whole id. Ant credentials neither read nor write `ants_reactions`: an ant reads the reactions to, and adds or removes its own on, only messages it reads (its own inbox, messages it sent, thread notes and channel posts), via MCP `list_reactions` and `react` (or `ants react` with its credentials). `ants signer` answers both on `_INBOX.<ant>.reactions` after finding the message's first copy in `ANTS` on such a subject, writing the reaction under the ant's key; each `[[human]]` connection of `ants webhook serve` also answers listings ([docs/webhooks.md](docs/webhooks.md#notifications)). A daemon without credentials (an open server) answers its ants itself, the same way.
 

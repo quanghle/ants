@@ -158,7 +158,7 @@ pub async fn load(js: &jetstream::Context, me: &Me) -> Humans {
     humans
 }
 
-async fn read(js: &jetstream::Context) -> Result<Humans> {
+pub(crate) async fn read(js: &jetstream::Context) -> Result<Humans> {
     let Ok(kv) = js.get_key_value(HUMANS_BUCKET).await else { return Ok(Humans::default()) };
     let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
     let mut entries = Vec::with_capacity(keys.len());

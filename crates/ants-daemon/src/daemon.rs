@@ -2218,7 +2218,7 @@ impl Inbox<'_> {
                 };
                 let mut reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
                 reply.to = owner;
-                Reply::Message(reply)
+                Reply::Message(Box::new(reply))
             }
             _ => {
                 // A reply on an escalation carries it, so its leader's answer is known as one.
@@ -2241,13 +2241,13 @@ impl Inbox<'_> {
                         if let Some(Route::Stuck(stuck)) = route {
                             reply.to = stuck;
                         }
-                        Reply::Message(reply.with_escalation(envelope.escalation.as_deref().cloned()))
+                        Reply::Message(Box::new(reply.with_escalation(envelope.escalation.as_deref().cloned())))
                     }
                 }
             }
         };
         Ok(Some(match reply {
-            Reply::Message(message) => Reply::Message(Envelope { title, ..message }),
+            Reply::Message(message) => Reply::Message(Box::new(Envelope { title, ..*message })),
             Reply::Post(post) => Reply::Post(ChannelPost { title, ..post }),
             // Posted with the title already.
             Reply::Notes(post) => Reply::Notes(post),
@@ -2277,10 +2277,30 @@ impl Inbox<'_> {
             }
             None => text,
         };
+        let text = match self.answer_line(envelope, humans).await {
+            Some(line) => format!("{line}\n\n{text}"),
+            None => text,
+        };
         let text = prompt_text(&text, cut_off, late);
         match incoming.steered {
             Steered::Interrupted => format!("{}\n\n{text}", steer_note(&envelope.from)),
             Steered::No | Steered::Ahead => text,
+        }
+    }
+
+    /// The `[ants]` line telling that `envelope`, a human's message, answers a question the ant asked on the thread
+    /// ([`crate::questions::answer_line`]); none for any other message, which is prompted as an ordinary one.
+    async fn answer_line(&self, envelope: &Envelope, humans: &Humans) -> Option<String> {
+        if envelope.answer.is_none() || !envelope.sender_role(humans).is_human() {
+            return None;
+        }
+        match crate::questions::asked(self.js, self.ant, envelope).await {
+            Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
+            Err(e) => {
+                let thread = &envelope.thread_id;
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading back the question a message answers");
+                None
+            }
         }
     }
 

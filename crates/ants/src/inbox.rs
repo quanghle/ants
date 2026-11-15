@@ -6,6 +6,7 @@
 //! compare-and-set, so devices reading at the same time each keep the other's marks. Nothing is consumed, so a reply
 //! one device reads still reaches the others following the inbox.
 
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use ants_daemon::humans::Registry;
 use ants_daemon::reactions::{self, Reacted};
 use ants_daemon::reading::{self, Reading};
 use ants_daemon::unserved;
-use ants_proto::{Envelope, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
+use ants_proto::{Envelope, Question, READ_BUCKET, ReadMarker, Role, ThreadId, UserId, Uuid, subject};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use async_nats::jetstream::consumer::DeliverPolicy;
@@ -86,7 +87,7 @@ impl Inbox {
     }
 
     /// The marker and its revision, 0 when there is none.
-    async fn marker(&self) -> Result<(ReadMarker, u64)> {
+    pub(crate) async fn marker(&self) -> Result<(ReadMarker, u64)> {
         let Some(entry) = self.kv.entry(self.human.as_str()).await.context("reading the read marker")? else {
             return Ok((ReadMarker::default(), 0));
         };
@@ -305,14 +306,35 @@ pub fn render_reactions(reactions: &[Reacted], indent: &str) -> String {
         .collect()
 }
 
+/// A question for the terminal ([`Envelope::question`]): its text, its options numbered, whether a typed answer is
+/// taken, then the `answers` given, a line each, or with none how to answer it.
+pub fn render_question(id: Uuid, question: &Question, answers: Vec<String>) -> String {
+    let mut text = question.render();
+    if answers.is_empty() {
+        let how = if question.free_text { "N|TEXT" } else { "N" };
+        let _ = write!(text, "\n(`ants answer {id} {how}` answers it)");
+    }
+    for answer in answers {
+        text.push('\n');
+        text.push_str(&answer);
+    }
+    text
+}
+
 /// A message for the terminal: a header line with its id, then the text indented and the reactions to it. A mention
-/// notice names its channel, the sender that relayed it if any, and how to answer there.
+/// notice names its channel, the sender that relayed it if any, and how to answer there; a question shows its options
+/// numbered, whether a typed answer is taken and how to answer it.
 pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
-    let text: Vec<String> = e.text.lines().map(|line| format!("  {line}")).collect();
+    let indent = |text: &str| text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
     let reacted = render_reactions(reactions, "  ");
+    if let Some(question) = e.asks() {
+        let text = indent(&render_question(e.id, question, Vec::new()));
+        return format!("{at}  {} asks on thread {}, message {}\n{text}\n{reacted}", e.from, e.thread_id, e.id);
+    }
+    let text = indent(&e.text);
     let Some(mention) = &e.mention else {
-        return format!("{at}  {} on thread {}, message {}\n{}\n{reacted}", e.from, e.thread_id, e.id, text.join("\n"));
+        return format!("{at}  {} on thread {}, message {}\n{text}\n{reacted}", e.from, e.thread_id, e.id);
     };
     let (channel, thread) = (&mention.channel, &e.thread_id);
     let (author, relayed) = match &mention.author {
@@ -320,11 +342,9 @@ pub fn render(e: &Envelope, reactions: &[Reacted]) -> String {
         None => (&e.from, String::new()),
     };
     format!(
-        "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}, message {}\n{}\n  (`ants post \
+        "{at}  {author} mentioned {} in #{channel} on thread {thread}{relayed}, message {}\n{text}\n  (`ants post \
          {channel} --thread {thread} ...` answers on the thread)\n{reacted}",
-        e.to,
-        e.id,
-        text.join("\n")
+        e.to, e.id,
     )
 }
 
@@ -374,6 +394,18 @@ mod tests {
         );
         assert!(shown.contains(&header), "{shown}");
         assert!(shown.contains("\n  deploy failed\n"), "{shown}");
+    }
+
+    #[test]
+    fn a_question_shows_its_options_numbered_and_how_to_answer_it() {
+        let options = ["yes".to_owned(), "not yet".to_owned()];
+        let question = Question::new("Ship it?", &options, false).unwrap();
+        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
+        let shown = render(&asked, &[]);
+        assert!(shown.contains(&format!("dev-a asks on thread t1, message {}\n  Ship it?\n", asked.id)), "{shown}");
+        assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
+        assert!(shown.contains("\n  Answer with an option's number.\n"), "{shown}");
+        assert!(shown.contains(&format!("\n  (`ants answer {} N` answers it)\n", asked.id)), "{shown}");
     }
 
     /// Runs as the human and dev-a with their own credentials, so it also checks the human's permissions.

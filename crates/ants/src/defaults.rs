@@ -41,7 +41,7 @@ pub fn summaries() -> Result<config::SummaryConfig> {
 /// if it exists, except for `ants daemon` and `ants add`: their flags describe ants, and they read the file's
 /// top-level keys themselves.
 fn apply(cli: &mut Cli, matches: &ArgMatches, path: &Path) -> Result<()> {
-    if matches!(cli.command, Command::Daemon(_) | Command::Add(_)) {
+    if matches!(cli.command, Some(Command::Daemon(_) | Command::Add(_))) {
         return Ok(());
     }
     let given = |id| matches!(matches.value_source(id), Some(ValueSource::CommandLine | ValueSource::EnvVariable));

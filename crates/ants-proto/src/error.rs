@@ -25,6 +25,10 @@ pub enum Error {
     InvalidMachine(String),
     #[error("invalid thread title {0:?}: use one line of 1-{MAX_TITLE} characters")]
     InvalidTitle(String),
+    #[error("invalid question: {0}")]
+    InvalidQuestion(String),
+    #[error("invalid answer: {0}")]
+    InvalidAnswer(String),
     /// A renewal request naming other credentials than the subject it arrived on, or no credentials renewable over
     /// NATS ([`subject::renewable_name`]).
     #[error("renewal request of {name:?} found at {at}")]
@@ -33,4 +37,10 @@ pub enum Error {
         "invalid device encryption key {0:?}: use the public key of an nkeys xkey, X followed by 55 base32 characters"
     )]
     InvalidDeviceKey(String),
+    #[error("invalid attachment {name:?}: {reason}")]
+    InvalidAttachment { name: String, reason: &'static str },
+    #[error("{0} attachments: a message carries at most {max}", max = crate::MAX_ATTACHMENTS)]
+    TooManyAttachments(usize),
+    #[error("invalid attachment handle {0:?}: use <from>.<inbox|notes|chan>.<to, thread or channel>.<id>")]
+    InvalidAttachmentHandle(String),
 }
