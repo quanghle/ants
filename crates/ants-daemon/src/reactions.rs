@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime};
 pub use ants_proto::Reacted;
 use ants_proto::{
     JsDomain, REACTIONS_BUCKET, REACTIONS_REPEAT, REACTIONS_WAIT, Reaction, ReactionChange, ReactionEntry,
-    ReactionsOutcome, ReactionsReply, ReactionsRequest, UserId, Uuid, parse_reaction_key, reaction_key, reactions_to,
-    subject,
+    ReactionsOutcome, ReactionsReply, ReactionsRequest, ReactionsResponder, UserId, Uuid, parse_reaction_key,
+    reaction_key, reactions_to, subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::stream::{ConsumerError, ConsumerErrorKind};
@@ -278,6 +278,16 @@ pub enum Answering {
     ListsAndChanges,
 }
 
+impl Answering {
+    /// The kind of process answering so: `ants webhook serve` lists, `ants signer` changes as well.
+    pub fn responder(self) -> ReactionsResponder {
+        match self {
+            Self::Lists => ReactionsResponder::Webhook,
+            Self::ListsAndChanges => ReactionsResponder::Signer,
+        }
+    }
+}
+
 /// Answer the reactions requests of ants on `client`, in the queue group of every process that does, until the
 /// subscription ends. Each answer goes to the asking ant's [`subject::reactions_reply`] only.
 pub async fn serve(
@@ -296,7 +306,8 @@ pub async fn serve(
             futures::stream::select(lists, subscribe(subject::ALL_REACT_REQUESTS).await?).boxed()
         }
     };
-    requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &js, js_domain.as_ref(), msg)).await;
+    let responder = answering.responder();
+    requests.for_each_concurrent(CONCURRENT, |msg| respond(&client, &js, js_domain.as_ref(), responder, msg)).await;
     bail!("the subscription to reactions requests ended")
 }
 
@@ -304,6 +315,7 @@ async fn respond(
     client: &async_nats::Client,
     js: &jetstream::Context,
     js_domain: Option<&JsDomain>,
+    responder: ReactionsResponder,
     msg: async_nats::Message,
 ) {
     let request = serde_json::from_slice::<ReactionsRequest>(&msg.payload)
@@ -327,7 +339,13 @@ async fn respond(
     if outcome == ReactionsOutcome::Unknown {
         tracing::debug!(ant = %request.ant, message = %request.message, "reactions asked of a message the ant does not read");
     }
-    let reply = ReactionsReply { request_id: request.id, ant: request.ant, message: request.message, outcome };
+    let reply = ReactionsReply {
+        request_id: request.id,
+        ant: request.ant,
+        message: request.message,
+        outcome,
+        responder: Some(responder),
+    };
     let payload = serde_json::to_vec(&reply).expect("an answer");
     if let Err(e) = client.publish(reply.subject(), payload.into()).await {
         tracing::warn!(error = %e, "answering a reactions request");
@@ -343,9 +361,18 @@ pub async fn ask(client: &async_nats::Client, ant: &UserId, message: Uuid) -> Re
 /// answered within [`REACTIONS_WAIT`]. An answer to a repeated change may say it changed nothing, an earlier attempt
 /// having made it.
 pub async fn request(client: &async_nats::Client, request: &ReactionsRequest) -> Result<Option<ReactionsOutcome>> {
+    Ok(request_within(client, request, REACTIONS_WAIT).await?.map(|reply| reply.outcome))
+}
+
+/// Make `request` as [`request`] does, waiting at most `wait`: the whole answer, saying who answered.
+pub async fn request_within(
+    client: &async_nats::Client,
+    request: &ReactionsRequest,
+    wait: Duration,
+) -> Result<Option<ReactionsReply>> {
     let mut replies = client.subscribe(request.reply_subject()).await.context("subscribing to the answers")?;
     let payload = serde_json::to_vec(request)?;
-    let deadline = tokio::time::Instant::now() + REACTIONS_WAIT;
+    let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {
         client.publish(request.subject(), payload.clone().into()).await.context("asking about the reactions")?;
         let next = (tokio::time::Instant::now() + REACTIONS_REPEAT).min(deadline);
@@ -353,7 +380,7 @@ pub async fn request(client: &async_nats::Client, request: &ReactionsRequest) ->
             let msg = msg.context("the answers ended")?;
             match serde_json::from_slice::<ReactionsReply>(&msg.payload) {
                 Ok(reply) if reply.request_id == request.id && reply.check_subject(&msg.subject).is_ok() => {
-                    return Ok(Some(reply.outcome));
+                    return Ok(Some(reply));
                 }
                 Ok(_) => tracing::debug!("ignoring an answer to another reactions request"),
                 Err(e) => tracing::warn!(error = %e, "ignoring a malformed reactions answer"),

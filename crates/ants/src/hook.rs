@@ -28,6 +28,8 @@ pub enum Event {
     DeadLetter,
     /// An escalation sent (a `StatusEvent` of type `escalated`).
     Escalation,
+    /// A question an ant asked a human with ask_human (a `StatusEvent` of type `asked`).
+    Question,
     /// A tool request settled by a human, an ant of the requester's chain or its expiry (a `StatusEvent` of type
     /// `decided`).
     Decided,
@@ -44,7 +46,7 @@ impl Event {
             Self::ApprovalRequest => Some(Feed::ApprovalRequests),
             Self::ApprovalDecision => Some(Feed::ApprovalDecisions),
             Self::DeadLetter => Some(Feed::DeadLetters),
-            Self::Escalation | Self::Decided | Self::Status | Self::Roster => None,
+            Self::Escalation | Self::Question | Self::Decided | Self::Status | Self::Roster => None,
         }
     }
 
@@ -65,14 +67,16 @@ impl Event {
                     bail!("a dead letter of {} read on {subject}", dead.ant);
                 }
             }
-            Self::Escalation | Self::Decided | Self::Status => {
+            Self::Escalation | Self::Question | Self::Decided | Self::Status => {
                 let event: StatusEvent = serde_json::from_slice(payload)?;
                 event.check_subject(subject)?;
-                return Ok(match event.update {
-                    StatusUpdate::Escalated { .. } => self != Self::Decided,
-                    StatusUpdate::Decided { .. } => self != Self::Escalation,
-                    _ => self == Self::Status,
-                });
+                let kind = match event.update {
+                    StatusUpdate::Escalated { .. } => Self::Escalation,
+                    StatusUpdate::Asked { .. } => Self::Question,
+                    StatusUpdate::Decided { .. } => Self::Decided,
+                    _ => Self::Status,
+                };
+                return Ok(self == kind || self == Self::Status);
             }
             Self::Roster => serde_json::from_slice::<RosterEntry>(payload)?.check_key(subject)?,
         }
@@ -260,6 +264,15 @@ mod tests {
         assert!(Event::Decided.accepts(&working.subject(), &decided).unwrap());
         assert!(Event::Status.accepts(&working.subject(), &decided).unwrap());
         assert!(!Event::Escalation.accepts(&working.subject(), &decided).unwrap());
+        assert!(!Event::Question.accepts(&working.subject(), &decided).unwrap());
+        let options = ["yes".to_owned(), "no".to_owned()];
+        let question = ants_proto::Question::new("Ship it?", &options, true).unwrap();
+        let asked = StatusUpdate::Asked { to: "alice".parse().unwrap(), message: ants_proto::Uuid::now_v7(), question };
+        let asked = serde_json::to_vec(&StatusEvent::new(working.ant.clone(), thread.clone(), asked)).unwrap();
+        assert!(Event::Question.accepts(&working.subject(), &asked).unwrap());
+        assert!(Event::Status.accepts(&working.subject(), &asked).unwrap());
+        assert!(!Event::Escalation.accepts(&working.subject(), &asked).unwrap());
+        assert!(!Event::Question.accepts(&working.subject(), &json).unwrap());
         assert!(Event::Status.accepts(&subject::status(&"dev-c".parse().unwrap(), &thread), &json).is_err());
     }
 }

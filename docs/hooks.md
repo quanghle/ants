@@ -20,7 +20,8 @@ They may:
 - read every approval request, approval decision and dead letter stored in stream `ANTS`, through consumers named
   after the observer, one per feed, whose filter is pinned in the subject creating them (below), and hear the same
   subjects live;
-- hear every ant's live status (`ants.status.<ant>.<thread>`), escalations and settled tool requests among them;
+- hear every ant's live status (`ants.status.<ant>.<thread>`), escalations, questions to humans and settled tool requests
+  among them;
 - read and watch the `ants_roster` bucket;
 - ask for their own renewal, and hear their own reply inboxes (`_INBOX.<observer>.>`).
 
@@ -44,6 +45,7 @@ Event payloads can still contain prompt or tool text:
 | `approval-decision` | `ants.approvals.<ant>.<request id>` | Stored; consumer `observe-decisions-<observer>` | `ApprovalDecision` |
 | `dead-letter` | `ants.dead.<ant>` | Stored; consumer `observe-dead-<observer>` | `DeadLetter` |
 | `escalation` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `escalated` |
+| `question` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `asked` |
 | `decided` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `decided` |
 | `status` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` |
 | `roster` | `$KV.ants_roster.<ant>` | Live (KV watch) | `RosterEntry` |
@@ -122,6 +124,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `queued` | `message` (id), `ahead` | A message waits behind `ahead` others |
 | `approval` | `request_id` | A tool request waits for a decision |
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
+| `asked` | `to`, `message` (id), `question`: `{text, options, free_text}` | A question was asked of a human (below) |
 | `decided` | `request_id`, `verdict`, `by`, `decider`? | A tool request was settled (below) |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
@@ -146,6 +149,19 @@ went up any chain, and `leader` who leads at that level; `stand_in`, when presen
 one sent to a human. Direct notices that emit no `StatusEvent` here: the
 `dead_letter` notice `ants dead watch` sends with human credentials (observed via `ants.dead.<ant>`), the `harness`
 notice of a harness failing to start (observed via `failing` in `ants_roster`), and the `storage` capacity warning.
+
+#### Questions
+
+Each question an ant asks a human with `ask_human`, once stored, is told as an `asked` update on the status of the
+ant, on the question's thread: `to` is the human asked, `message` the id of the message carrying the question (the
+question's id, which `ants answer` takes), and `question` the question with its options and whether a typed answer is
+taken. The text of the message, which repeats the question and its numbered options, is not part of it.
+
+```json
+{"ant": "dev-a", "thread_id": "019a7d2c-…", "type": "asked", "to": "alice", "message": "019a7d2e-…",
+ "question": {"text": "Ship it?", "options": ["yes", "not yet"], "free_text": false},
+ "at": "2025-01-01T12:00:00Z"}
+```
 
 #### Decisions
 
@@ -197,7 +213,7 @@ with the event's document and a newline on its stdin, until stopped. Its stdout 
   the feed, from where it left off: on the first run, from the next event stored. Each event is acked once `CMD` ends,
   whatever its exit status, so a failing command does not stall the feed; an event whose `CMD` was still running when
   `ants hook run` stopped is handed on again. The consumer is removed after 7 days without a reader.
-- **Live feeds** (`escalation`, `decided`, `status`, `roster`) take events from now on.
+- **Live feeds** (`escalation`, `question`, `decided`, `status`, `roster`) take events from now on.
 - At most `--concurrency` (default 4) runs at once; a run lasting past `--timeout` (default `60s`) is killed. Failed
   runs, timeouts and documents that are forged or unreadable (skipped) are logged.
 

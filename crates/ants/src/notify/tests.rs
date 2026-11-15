@@ -57,6 +57,8 @@ fn a_human_has_sinks_and_what_to_be_notified_of() {
     assert_matches!(&quiet.sinks[0].sink, Sink::Ntfy { url, .. } if url == "http://ntfy.lan");
     let every = human(&format!("name = \"bob\"\nescalations = false\n{NTFY_SINK}")).unwrap();
     assert_eq!(every.subjects(), ["ants.approvals.*"]);
+    let asked = human(&format!("name = \"bob\"\nescalations = false\nquestions = true\n{NTFY_SINK}")).unwrap();
+    assert_eq!(asked.subjects(), ["ants.approvals.*", "ants.inbox.bob.*"], "questions follow escalations unless set");
     assert!(every.wants_request_of(&p("dev-b")));
 
     for (text, why) in [
@@ -329,6 +331,56 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     assert!(completion_notice(&summarised).is_none(), "the CLI that asked for a summary takes it");
     let hooked = Envelope { webhook: true, ..done };
     assert!(completion_notice(&hooked).is_none());
+}
+
+#[test]
+fn a_question_is_its_own_notice_held_back_like_a_completion_unless_bypass_lists_it() {
+    let (alice, dev_a) = (p("alice"), p("dev-a"));
+    let options = ["Postgres".to_owned(), "SQLite".to_owned()];
+    let question = ants_proto::Question::new(
+        "Which  database\nfor token ghp_abcdefghijklmnopqrstuvwxyz0123456789?",
+        &options,
+        false,
+    );
+    let asking = Envelope::asking(ThreadId::generate(), dev_a.clone(), alice.clone(), question.unwrap());
+    let notice = question_notice(&asking).unwrap();
+    assert_eq!(
+        (notice.title.as_str(), &notice.human, notice.urgent),
+        ("dev-a asks: Which database for token [redacted]?", &alice, false)
+    );
+    let (id, thread) = (asking.id, &asking.thread_id);
+    assert!(
+        notice.text.ends_with(&format!("\n\nthread {thread}; answer with ants answer {id} NUMBER")),
+        "{}",
+        notice.text
+    );
+    assert!(notice.text.contains("1. Postgres") && !notice.text.contains("ghp_"), "{}", notice.text);
+    let json = notice_json(&notice, at("2026-03-10T12:00:00Z"));
+    assert_eq!(
+        (&json["kind"], &json["id"], &json["ant"], &json["thread"], &json["options"], &json["free_text"]),
+        (&json!("question"), &json!(id), &json!("dev-a"), &json!(thread), &json!(options), &json!(false))
+    );
+    assert!(!json["question"].as_str().unwrap().contains("ghp_"), "{json}");
+    assert!(completion_notice(&asking).is_none() && question_notice(&Envelope::new(dev_a, alice, "hi")).is_none());
+    assert_eq!(counted("question", 2), "2 questions");
+
+    let now = at("2026-03-10T12:00:00Z");
+    let night = human(&format!("name = \"bob\"\nquiet = \"11:00-13:00\"\n{NTFY_SINK}")).unwrap();
+    let prefs = NotifyPrefs::default();
+    assert_eq!(held(&night, &notice.about, &prefs, now), Some("quiet hours"));
+    let through = human(&format!("name = \"bob\"\nquiet = \"11:00-13:00\"\nbypass = [\"questions\"]\n{NTFY_SINK}"));
+    let through = through.unwrap();
+    assert_eq!(held(&through, &notice.about, &prefs, now), None, "questions bypass");
+    assert!(through.quiet_hours(now).unwrap().ends_with("let questions through"));
+    let mut muted = NotifyPrefs::default();
+    muted.muted.insert(thread.clone(), now + TimeDelta::hours(1));
+    assert_eq!(held(&through, &notice.about, &muted, now), Some("muted thread"), "whatever bypass says");
+    let only = "name = \"bob\"\napprovals = false\nescalations = false\nquestions = true\n";
+    assert_eq!(
+        human(&format!("{only}{NTFY_SINK}")).unwrap().subjects(),
+        ["ants.inbox.bob.*"],
+        "questions read the inbox"
+    );
 }
 
 #[test]
