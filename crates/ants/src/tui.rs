@@ -32,6 +32,7 @@ mod react;
 mod reads;
 mod search;
 mod select;
+mod settings;
 mod snooze;
 mod status;
 mod thread;
@@ -41,6 +42,7 @@ mod work;
 
 use std::io::{IsTerminal as _, Write as _};
 use std::ops::ControlFlow;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ants_proto::Following;
@@ -172,6 +174,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
     let searches = Searches::new(js.clone(), feed.keyring());
     let trees = tree::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
+    let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
     let (credentials, holder) =
         credentials::Io::new(nats.url, nats.domain.cloned(), crate::team_dir(None), crate::enroll::LISTEN);
     let cards = cards::Io::new(cards::Source::open(nats, &js).await);
@@ -196,6 +199,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration, compact: bool) -> Resu
             searches,
             trees,
             ants,
+            settings,
             credentials,
             cards,
             summaries,
@@ -257,6 +261,8 @@ struct Chat {
     trees: tree::Io,
     /// The reads of the shown ant's queue.
     ants: ant::Io,
+    /// The reads of the shown ant's settings and orders, and the orders sent.
+    settings: settings::Io,
     /// The credentials asked for, where the team's account key is.
     credentials: credentials::Io,
     cards: cards::Io,
@@ -338,6 +344,10 @@ impl Chat {
                     self.model.ant_event(event);
                     Some(Vec::new())
                 }
+                event = self.settings.next() => {
+                    self.model.settings_event(event);
+                    Some(Vec::new())
+                }
                 event = self.credentials.next() => {
                     self.model.credentials(event, Utc::now());
                     Some(Vec::new())
@@ -384,6 +394,8 @@ impl Chat {
         self.acts.watch(self.model.open().cloned());
         self.trees.watch(self.model.tree_shown());
         self.ants.watch(self.model.ant_shown());
+        let (shown, unread) = self.model.settings_shown().unzip();
+        self.settings.watch(shown, unread.unwrap_or(false));
         if let Some(images) = &mut self.images {
             let wanted = images::wanted(&self.model);
             images.want(&wanted);
@@ -440,6 +452,7 @@ impl Chat {
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::React(message, reaction, remove) => self.reads.react(message, reaction, remove),
             Action::Send(draft) => self.people.send(draft),
+            Action::Settings(ask) => self.settings.ask(ask),
             Action::Search(search) => self.searches.start(search),
             Action::Summarise(ask) => self.summaries.ask(ask),
             Action::CancelSubtree(prompts) => {

@@ -1,7 +1,8 @@
 //! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
 //! its roster entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
-//! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, or the messages waiting for
-//! it, which [`Io`] asks its daemon for every while (as `ants queue` does).
+//! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for
+//! it, which [`Io`] asks its daemon for every while (as `ants queue` does), or its settings and the admin orders to it
+//! ([`settings`]).
 
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use super::frame::{self, ago};
 use super::model::{Data, Key, To};
 use super::select::Selection;
+use super::settings;
 use super::work::{self, Filter};
 use crate::live::maybe;
 use crate::queue::{self, Waiting};
@@ -34,15 +36,18 @@ pub enum Pane {
     Threads,
     /// The messages waiting for the ant.
     Queue,
+    /// Its settings, and the admin orders to it.
+    Settings,
 }
 
 impl Pane {
-    pub const ALL: [Self; 2] = [Self::Threads, Self::Queue];
+    pub const ALL: [Self; 3] = [Self::Threads, Self::Queue, Self::Settings];
 
     fn label(self) -> &'static str {
         match self {
             Self::Threads => "threads",
             Self::Queue => "queue",
+            Self::Settings => "settings",
         }
     }
 
@@ -73,6 +78,7 @@ pub struct Page {
     /// The selected message of the queue, kept as messages come and go.
     message: Selection<Uuid>,
     pub queue: Queue,
+    pub settings: settings::Pane,
 }
 
 impl Page {
@@ -82,14 +88,24 @@ impl Page {
 
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
-        Self { ant, pane: Pane::Threads, threads, message: Selection::default(), queue: Queue::Asking }
+        let settings = settings::Pane::default();
+        Self { ant, pane: Pane::Threads, threads, message: Selection::default(), queue: Queue::Asking, settings }
     }
 
     pub fn keys(&self) -> &'static str {
         match self.pane {
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
+            Pane::Settings => self.settings.keys(),
         }
+    }
+
+    /// Take `key` into the change of a setting being written, if one is.
+    pub fn write(&mut self, key: Key) -> Option<Option<super::model::Action>> {
+        if self.pane != Pane::Settings {
+            return None;
+        }
+        self.settings.write(key, &self.ant)
     }
 
     fn waiting(&self) -> &[Waiting] {
@@ -108,6 +124,7 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.thread(data),
             Pane::Queue => self.waiting().get(self.message.at(&self.messages())).map(|m| m.thread_id.clone()),
+            Pane::Settings => None,
         }
     }
 
@@ -126,8 +143,10 @@ impl Page {
             Key::Char('c') => return Some(To::Credentials),
             _ => {}
         }
-        if self.pane == Pane::Threads {
-            return self.threads.key(key, data);
+        match self.pane {
+            Pane::Threads => return self.threads.key(key, data),
+            Pane::Settings => return self.settings.key(key, &self.ant),
+            Pane::Queue => {}
         }
         let messages = self.messages();
         let at = self.message.at(&messages);
@@ -162,7 +181,7 @@ impl Page {
         let block = frame::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
-        let counts = [threads.to_string(), self.queued()];
+        let counts = [threads.to_string(), self.queued(), self.settings.count()];
         let mut spans = vec![Span::raw(" ")];
         for (pane, count) in Pane::ALL.iter().zip(counts) {
             let style = if *pane == self.pane { frame::highlight(focused) } else { frame::dim() };
@@ -174,6 +193,7 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
+            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
         }
     }
 
