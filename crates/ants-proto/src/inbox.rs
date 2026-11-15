@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ThreadId;
+use crate::{ChannelId, ThreadId};
 #[cfg(doc)]
-use crate::{NOTIFY_BUCKET, READ_BUCKET, STREAM, held_key};
+use crate::{NOTIFY_BUCKET, READ_BUCKET, STREAM, channel_reads_key, held_key};
 
 /// Which of a human's inbox messages, by [`STREAM`] sequence, the human has read: every one up to `below`, and those
 /// in `read` above it. Kept under the human's key in [`READ_BUCKET`] and shared by all its devices, which update it
@@ -45,6 +45,47 @@ impl ReadMarker {
         }
         let below = self.below;
         self.read.retain(|seq| *seq > below);
+    }
+}
+
+/// Which channel posts, by [`STREAM`] sequence, a human has read: per channel, a [`ReadMarker`] over the sequences of
+/// that channel's posts. Kept under [`channel_reads_key`] in [`READ_BUCKET`], apart from the human's inbox
+/// [`ReadMarker`], so a CLI that knows only the inbox marker keeps both; shared by all the human's devices, which
+/// update it with compare-and-set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelReadMarkers {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub channels: std::collections::BTreeMap<ChannelId, ReadMarker>,
+}
+
+impl ChannelReadMarkers {
+    /// Whether the post of `channel` at `seq` is read.
+    pub fn is_read(&self, channel: &ChannelId, seq: u64) -> bool {
+        self.channels.get(channel).is_some_and(|m| m.is_read(seq))
+    }
+
+    /// Mark the post of `channel` at `seq` read.
+    pub fn mark(&mut self, channel: &ChannelId, seq: u64) {
+        if !self.is_read(channel, seq) {
+            self.channels.entry(channel.clone()).or_default().mark(seq);
+        }
+    }
+
+    /// Mark every post of `channel` at or below `seq` read.
+    pub fn mark_through(&mut self, channel: &ChannelId, seq: u64) {
+        let marker = self.channels.entry(channel.clone()).or_default();
+        if seq > marker.below {
+            marker.below = seq;
+            marker.read.retain(|read| *read > seq);
+        }
+    }
+
+    /// Move the marker of `channel` past the read posts that follow it ([`ReadMarker::compact`]), given `posts`, the
+    /// sequences, in order, of every post of the channel stored after some sequence at or below its `below`.
+    pub fn compact(&mut self, channel: &ChannelId, posts: impl IntoIterator<Item = u64>) {
+        if let Some(marker) = self.channels.get_mut(channel) {
+            marker.compact(posts);
+        }
     }
 }
 
@@ -134,5 +175,25 @@ mod tests {
         let json = serde_json::to_string(&marker).unwrap();
         assert_eq!(json, r#"{"below":9}"#);
         assert_eq!(serde_json::from_str::<ReadMarker>("{}").unwrap(), ReadMarker::default());
+    }
+
+    #[test]
+    fn channel_read_markers_keep_a_marker_per_channel() {
+        let (ops, dev) = ("ops".parse::<ChannelId>().unwrap(), "dev".parse::<ChannelId>().unwrap());
+        let mut markers = ChannelReadMarkers::default();
+        markers.mark(&ops, 7);
+        markers.mark(&ops, 9);
+        assert!(markers.is_read(&ops, 7) && !markers.is_read(&ops, 8) && !markers.is_read(&dev, 7));
+        markers.compact(&ops, [7, 8, 9]);
+        assert_eq!(markers.channels[&ops], ReadMarker { below: 7, read: [9].into() }, "8 holds the marker back");
+        markers.mark_through(&ops, 8);
+        assert_eq!(markers.channels[&ops], ReadMarker { below: 8, read: [9].into() });
+        markers.mark_through(&ops, 9);
+        markers.mark_through(&ops, 3);
+        assert_eq!(markers.channels[&ops], ReadMarker { below: 9, read: Default::default() }, "never moves back");
+        markers.compact(&dev, [1, 2]);
+        assert!(!markers.channels.contains_key(&dev), "no marker for a channel with nothing read");
+        assert_eq!(serde_json::to_string(&markers).unwrap(), r#"{"channels":{"ops":{"below":9}}}"#);
+        assert_eq!(serde_json::from_str::<ChannelReadMarkers>("{}").unwrap(), ChannelReadMarkers::default());
     }
 }

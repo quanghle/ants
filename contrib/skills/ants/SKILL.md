@@ -123,12 +123,13 @@ on it. Channel replies stay on the channel thread rather than the inbox; only hu
 escalations reach the inbox.
 
 ```sh
-ants channel list                                   # channels, members (ants and humans), messenger and owner
+ants channel list                                   # channels, members, messenger, owner; a human's unread `N (@M)`
 ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread and message <id>
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
 ants post --wait '#ops' "who owns billing?"         # print the first post by another user and exit
 ants post --follow --timeout 10m '#ops' "status?"   # print each later post on the thread for 10m
 ants channel read ops --thread <thread>             # read one thread (or --limit <n> for the last n threads)
+ants channel read ops --peek                        # read without marking the posts read (human credentials)
 ```
 
 Quote `'#channel'` or omit `#` (`ops`): an unquoted `#` starts a shell comment. Mutating channels

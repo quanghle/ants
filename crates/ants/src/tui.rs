@@ -119,7 +119,7 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     };
     nats.prepare(&js).await;
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
-    let reads = Reads::new(js.clone(), me.clone());
+    let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
@@ -202,7 +202,7 @@ impl Chat {
                     Vec::new()
                 }
             };
-            for action in actions {
+            for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
@@ -237,6 +237,7 @@ impl Chat {
                 self.reads.mark_read(thread);
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Refresh => {
                 self.feed.refresh();

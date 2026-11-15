@@ -137,7 +137,8 @@ pub const WEBHOOKS_BUCKET: &str = "ants_webhooks";
 /// How long [`WEBHOOKS_BUCKET`] remembers an event.
 pub const WEBHOOK_RETENTION: Duration = Duration::from_hours(7 * 24);
 /// KV bucket of each human's [`ReadMarker`], keyed by its user id: which inbox messages the human has read, on any
-/// of its devices. Each human reads and writes only its own key ([`Permissions::for_user`]); entries never expire.
+/// of its devices; and of its [`ChannelReadMarkers`], keyed by [`channel_reads_key`]: which channel posts it has read.
+/// Each human reads and writes only its own keys ([`Permissions::for_user`]); entries never expire.
 pub const READ_BUCKET: &str = "ants_read";
 /// KV bucket of where each human is reading: one [`Presence`] per device of a human following its inbox or the tool
 /// requests, keyed by [`presence_key`], put when the following starts, renewed every [`PRESENCE_HEARTBEAT`] and

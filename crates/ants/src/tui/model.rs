@@ -3,10 +3,10 @@
 //! notice. Keys and changes return the [`Action`]s the UI then performs.
 
 use ants_daemon::reactions::Reactions;
-use ants_proto::{ChannelEntry, Humans, ReadMarker, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 
-use super::reads::Read;
+use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{channel, home, nav, thread, work};
 use crate::live::{self, State};
@@ -37,6 +37,8 @@ pub enum Action {
     Open(ThreadId),
     /// Mark the human's inbox messages on the thread read on all its devices, as `ants inbox --thread` does.
     MarkRead(ThreadId),
+    /// Mark the human's posts of the channel read on all its devices, as `ants channel read` does.
+    MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
     /// Read again what may have missed changes.
@@ -73,6 +75,8 @@ pub struct Data {
     pub feeds: channel::Feeds,
     /// Which of the human's inbox messages are read, once read.
     pub marker: Option<ReadMarker>,
+    /// Which channel posts the human has read, once read; never without the credentials to.
+    pub channel_reads: Option<ChannelReadMarkers>,
     /// The channels the human is a member of.
     pub channels: Vec<ChannelEntry>,
     /// The team's humans, once read.
@@ -175,6 +179,7 @@ impl Model {
             facts: Facts::default(),
             feeds: channel::Feeds::default(),
             marker: None,
+            channel_reads: None,
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
@@ -258,6 +263,15 @@ impl Model {
         match read {
             Read::Marker(Ok(marker)) => data.marker = Some(marker),
             Read::Marker(Err(e)) => self.notify(format!("reading what was read: {e:#}"), Level::Error, now),
+            Read::ChannelMarkers(Ok(markers)) | Read::ChannelMarked(_, Ok(markers)) => {
+                data.channel_reads = Some(markers);
+            }
+            Read::ChannelMarkers(Err(e)) => {
+                self.notify(format!("reading which channel posts were read: {e:#}"), Level::Error, now);
+            }
+            Read::ChannelMarked(channel, Err(e)) => {
+                self.notify(format!("marking #{channel} read: {e:#}"), Level::Error, now);
+            }
             Read::Directory(Ok((channels, humans))) => {
                 let me = data.me().clone();
                 data.channels = channels.into_iter().filter(|c| c.members.contains(&me)).collect();
@@ -269,6 +283,33 @@ impl Model {
                 self.notify(format!("marking thread {thread} read: {e:#}"), Level::Error, now);
             }
             Read::Reactions(reactions) => data.reactions = reactions,
+        }
+    }
+
+    /// Mark read the channel posts the shown view shows, once which are read is known: every post of a channel's
+    /// feed through its newest, or the posts of a thread. Marks them read here at once, so asks only once.
+    pub fn mark_shown(&mut self) -> Option<Action> {
+        let data = &mut self.data;
+        let markers = data.channel_reads.as_mut()?;
+        match self.pages.last()? {
+            Page::Channel(page) => {
+                let newest = data.feeds.newest(&page.channel)?;
+                if markers.channels.get(&page.channel).is_some_and(|m| m.below >= newest) {
+                    return None;
+                }
+                markers.mark_through(&page.channel, newest);
+                Some(Action::MarkChannel(page.channel.clone(), Mark::Through(newest)))
+            }
+            Page::Thread(page) => {
+                let (channel, mut seqs) = data.feeds.thread_posts(&page.history.thread)?;
+                seqs.retain(|seq| !markers.is_read(channel, *seq));
+                if seqs.is_empty() {
+                    return None;
+                }
+                seqs.iter().for_each(|seq| markers.mark(channel, *seq));
+                Some(Action::MarkChannel(channel.clone(), Mark::Posts(seqs)))
+            }
+            Page::Home(_) | Page::Work(_) => None,
         }
     }
 
@@ -382,12 +423,13 @@ impl Model {
 pub mod tests {
     use std::time::Duration;
 
-    use ants_proto::{HumanEntry, Verdict};
+    use ants_proto::{ChannelPost, HumanEntry, Verdict};
 
     use super::*;
     use crate::live::Link;
     use crate::live::tests::{at, message, request, user};
     use crate::tools::Update;
+    use crate::tui::channel::tests::post;
 
     /// The model of alice, with bob a human too and nothing read yet.
     pub fn model() -> Model {
@@ -449,6 +491,33 @@ pub mod tests {
         assert_eq!(m.open_thread(), Some(thread), "a refresh reads the open thread again");
         m.key(Key::Esc, at(6));
         assert_eq!((m.page().name(), m.focus), ("work", Focus::View));
+    }
+
+    #[test]
+    fn a_shown_channel_or_thread_marks_its_posts_read_once() {
+        let ops: ChannelId = "ops".parse().unwrap();
+        let down = ChannelPost::new(ops.clone(), user("bob"), "the site is down");
+        let lunch = ChannelPost::new(ops.clone(), user("bob"), "lunch?");
+        let on = |text| ChannelPost::on_thread(ops.clone(), down.thread_id.clone(), user("dev-a"), text);
+        let mut m = model();
+        m.stored(vec![post(1, &down), post(2, &lunch), post(3, &on("looking"))], at(1));
+        m.select(nav::Item::Channel(ops.clone()));
+        assert_eq!(m.mark_shown(), None, "not before which posts are read is known");
+        m.read(Read::ChannelMarkers(Ok(ChannelReadMarkers::default())), at(1));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Through(3))));
+        assert_eq!(m.mark_shown(), None, "marked here at once");
+
+        m.data.channel_reads = Some(ChannelReadMarkers::default());
+        m.pages.push(Page::Thread(thread::Page::new(down.thread_id.clone())));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Posts(vec![1, 3]))));
+        m.stored(vec![post(4, &on("fixed"))], at(2));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Posts(vec![4]))));
+        assert_eq!(m.mark_shown(), None);
+        m.key(Key::Esc, at(3));
+        assert_eq!(m.mark_shown(), Some(Action::MarkChannel(ops.clone(), Mark::Through(4))), "the feed shows #2");
+        m.select(nav::Item::Home);
+        m.stored(vec![post(5, &lunch)], at(4));
+        assert_eq!(m.mark_shown(), None, "only what is shown");
     }
 
     #[test]

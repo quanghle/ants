@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ants_proto::{STREAM, chan_reader};
+use ants_proto::{ChannelReadMarkers, STREAM, chan_reader};
 
 use super::*;
 use crate::auth::tests::Server;
@@ -11,6 +11,10 @@ fn p(s: &str) -> UserId {
 
 fn ops() -> ChannelId {
     "ops".parse().unwrap()
+}
+
+async fn read(js: &jetstream::Context, reader: &Me, channel: &ChannelId) -> Result<Vec<ChannelPost>> {
+    Ok(read_from(js, reader, channel, 0).await?.into_iter().map(|(_, post)| post).collect())
 }
 
 #[test]
@@ -40,9 +44,15 @@ fn the_table_shows_members_and_the_messenger_or_its_default() {
     busy.owner = Some(p("lead"));
     let quiet = ChannelEntry::new("dev".parse().unwrap());
     assert_eq!(
-        table(&[quiet.clone(), busy.clone()]),
+        table(&[quiet.clone(), busy.clone()], None),
         "CHANNEL  MEMBERS      MESSENGER            OWNER\n#dev     -            messenger (default)  -\n\
              #ops     dev-a,dev-b  triage               lead"
+    );
+    let unread = HashMap::from([(ops(), reads::Unread { posts: 3, mentions: 1 })]);
+    assert_eq!(
+        table(&[quiet.clone(), busy.clone()], Some(&unread)),
+        "CHANNEL  MEMBERS      MESSENGER            OWNER  UNREAD\n#dev     -            messenger (default)  -      -\n\
+             #ops     dev-a,dev-b  triage               lead   3 (@1)"
     );
     assert_eq!(describe(&quiet), "#dev: members -; messenger messenger (default)");
     assert_eq!(describe(&busy), "#ops: members dev-a,dev-b; messenger triage; owner lead");
@@ -329,4 +339,51 @@ async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
     let shown = crate::inbox::render(&unread[1], &[]);
     assert!(shown.contains(&format!("dev-a mentioned bob in #ops on thread {}", ant_post.thread_id)), "{shown}");
     assert!(shown.contains(&format!("`ants post ops --thread {} ...`", ant_post.thread_id)), "{shown}");
+}
+
+/// alice's channel read markers, with her credentials: shared by her devices, kept per channel, and counting her
+/// unread posts from what her marker covers on; neither bob nor an ant reads or writes hers.
+#[tokio::test]
+async fn a_human_marks_channel_posts_read_for_itself_only() {
+    let Some(server) = Server::start() else { return };
+    let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
+    let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let (_, phone_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
+    let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
+    let (_, d_js) = server.connect(&dev_a).await;
+    bus::ensure_stream(&a_js).await.unwrap();
+    let as_alice = Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let look = ChannelPost::new(ops(), dev_a.clone(), "@alice look");
+    let mine = ChannelPost::new(ops(), alice.clone(), "on it");
+    let fixed = ChannelPost::new(ops(), dev_a.clone(), "fixed");
+    bus::publish_json(&d_js, look.subject(), &look, None).await.unwrap();
+    bus::store(&a_js, mine.subject(), &mine, &mine.id.to_string()).await.unwrap();
+    bus::publish_json(&d_js, fixed.subject(), &fixed, None).await.unwrap();
+    let seqs: Vec<u64> = read_from(&a_js, &as_alice, &ops(), 0).await.unwrap().into_iter().map(|(s, _)| s).collect();
+    assert_eq!(seqs.len(), 3);
+    let from_second = read_from(&a_js, &as_alice, &ops(), seqs[1]).await.unwrap();
+    assert_eq!(from_second.into_iter().map(|(_, p)| p).collect::<Vec<_>>(), [mine, fixed]);
+
+    let (laptop, phone) = (
+        reads::ChannelReads::open(&a_js, &alice).await.unwrap(),
+        reads::ChannelReads::open(&phone_js, &alice).await.unwrap(),
+    );
+    let (none, revision) = laptop.markers().await.unwrap();
+    assert_eq!((&none, revision), (&ChannelReadMarkers::default(), 0));
+    let unread = |markers: ChannelReadMarkers| {
+        let (js, me) = (a_js.clone(), as_alice.clone());
+        async move { reads::unread(&js, &me, &markers, &ops()).await.unwrap() }
+    };
+    assert_eq!(unread(none).await, reads::Unread { posts: 2, mentions: 1 }, "alice's own post is read");
+    laptop.change(|m| m.mark(&ops(), seqs[2])).await.unwrap();
+    let marked = phone.change(|m| m.mark(&ops(), seqs[0])).await.unwrap();
+    assert!(marked.is_read(&ops(), seqs[0]) && marked.is_read(&ops(), seqs[2]), "the phone keeps the laptop's mark");
+    assert_eq!(laptop.markers().await.unwrap().0, marked);
+    assert_eq!(unread(marked).await, reads::Unread::default());
+
+    let theirs = reads::ChannelReads::open(&b_js, &alice).await.unwrap();
+    assert!(theirs.markers().await.is_err(), "bob reads alice's channel read markers");
+    assert!(theirs.change(|m| m.mark_through(&ops(), 9)).await.is_err());
+    let ants = async { reads::ChannelReads::open(&d_js, &dev_a).await?.markers().await };
+    assert!(ants.await.is_err(), "an ant has channel read markers");
 }

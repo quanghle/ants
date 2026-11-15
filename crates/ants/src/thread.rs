@@ -113,6 +113,9 @@ pub struct Entry {
     /// The channel of a post or of the post a mention tells of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
+    /// The users a channel post @mentions.
+    #[serde(skip)]
+    pub mentions: Vec<UserId>,
     /// The thread's owner as the message names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<UserId>,
@@ -173,6 +176,7 @@ impl Entry {
             from: None,
             to: None,
             channel: None,
+            mentions: Vec::new(),
             owner: None,
             note: None,
             text: String::new(),
@@ -300,6 +304,7 @@ impl Parser {
                 id: Some(post.id),
                 from: Some(post.from),
                 channel: Some(post.channel),
+                mentions: post.mentions,
                 owner: post.owner,
                 note,
                 text: post.text,

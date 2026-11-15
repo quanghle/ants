@@ -265,6 +265,8 @@ proptest! {
             (subject::chain(&ant), vec!["$KV", ants_proto::CHAINS_BUCKET, a]),
             (subject::human_entry(&ant), vec!["$KV", ants_proto::HUMANS_BUCKET, a]),
             (subject::read_marker(&ant), vec!["$KV", ants_proto::READ_BUCKET, a]),
+            (subject::channel_reads(&ant), vec!["$KV", ants_proto::READ_BUCKET, a, "chan"]),
+            (ants_proto::channel_reads_key(&ant), vec![a, "chan"]),
             (subject::notify_prefs(&ant), vec!["$KV", ants_proto::NOTIFY_BUCKET, a]),
             (subject::notify_held(&ant), vec!["$KV", ants_proto::NOTIFY_BUCKET, "held", a]),
             (ants_proto::held_key(&ant), vec!["held", a]),

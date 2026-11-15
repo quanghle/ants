@@ -278,6 +278,14 @@ fn channels_are_managed_posted_to_and_read() {
             vec!["#ops", "dev-b,dev-c", "messenger", "(default)", "lead"]
         ]
     );
+    // A human member of a channel sees its unread posts, its own counting as read.
+    ok(&["channel", "add", "dev", "human"]);
+    ok(&["post", "dev", "hello"]);
+    let rows: Vec<Vec<String>> =
+        ok(&["channel", "list"]).0.lines().map(|l| l.split_whitespace().map(str::to_owned).collect()).collect();
+    assert_eq!(rows[0].last().map(String::as_str), Some("UNREAD"));
+    assert_eq!(rows[1], ["#dev", "human", "messenger", "(default)", "-", "0"]);
+    assert_eq!(rows[2].last().map(String::as_str), Some("-"), "not a member of #ops");
 
     let (posted, warned) = ok(&["post", "#ops", "@dev-c", "and", "@dev-z,", "look"]);
     let thread = posted.lines().next().and_then(|t| t.strip_prefix("thread ")).expect(&posted).to_owned();
