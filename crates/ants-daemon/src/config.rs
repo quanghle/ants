@@ -21,6 +21,10 @@
 //! max_file_store = "10GB"           # the hub's limits, which its account's JetStream info does not tell
 //! max_memory_store = "1GB"
 //!
+//! [memory_pressure]                 # while memory is low (crate::pressure)
+//! min_available = "1GB"             # below this much memory available, or a share such as "10%"; "0" never
+//! max_harnesses = 1                 # the most harnesses each ant runs while memory is low
+//!
 //! [[ant]]
 //! name = "dev-a"
 //! workdir = "~/src/repo-a"
@@ -81,6 +85,7 @@ use crate::caps::{Caps, Members, Pool};
 use crate::daemon::Config;
 use crate::escalation::{self, Chain};
 use crate::harness::{self, DEFAULT_HARNESS, Harness, Harnesses, ModelSettings, PromptLimits};
+use crate::pressure;
 use crate::schedule::{self, Schedule};
 use crate::storage;
 use crate::template::{AntTemplate, REQUEST_KEYS, Request};
@@ -129,6 +134,9 @@ struct File {
     /// The warnings of JetStream storage filling up ([`crate::storage`]).
     #[serde(default)]
     storage: storage::Settings,
+    /// What the ants do while memory is low ([`crate::pressure`]).
+    #[serde(default)]
+    memory_pressure: pressure::Settings,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant_template")]
@@ -242,6 +250,9 @@ pub struct Ant {
     /// The file's `[storage]` table.
     #[serde(skip)]
     pub storage: storage::Settings,
+    /// The file's `[memory_pressure]` table.
+    #[serde(skip)]
+    pub memory_pressure: pressure::Settings,
 }
 
 fn default_max_harnesses() -> usize {
@@ -329,6 +340,7 @@ impl Ant {
             pool: None,
             redact: true,
             storage: storage::Settings::default(),
+            memory_pressure: pressure::Settings::default(),
         }
     }
 
@@ -387,6 +399,7 @@ impl Ant {
             caps,
             spend_warn_percent: self.spend_warn_percent,
             storage: self.storage,
+            memory_pressure: self.memory_pressure,
             pool: self.pool,
             escalation: Chain {
                 escalate_to: self.escalate_to,
@@ -537,6 +550,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         crate::bus::check_url(url).with_context(|| format!("config {}: [cli]", path.display()))?;
     }
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
+    file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
     if file.ants.is_empty() && !file.messenger {
         bail!("config {}: messenger = false and no [[ant]] entries: nothing to serve", path.display());
     }
@@ -587,6 +601,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         }
         ant.redact = file.redact;
         ant.storage = file.storage;
+        ant.memory_pressure = file.memory_pressure;
         ants.push(ant);
     }
     let timezone = file

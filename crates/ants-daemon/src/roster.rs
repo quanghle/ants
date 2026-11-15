@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ants_proto::{
-    ANTS_VERSION, Activity, HarnessAgent, HarnessFailing, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT,
-    ROSTER_TTL, RosterEntry, SignInNeeded, UserId,
+    ANTS_VERSION, Activity, HarnessAgent, HarnessFailing, HarnessLimit, MemoryLow, PERMISSIONS_VERSION,
+    ROSTER_HEARTBEAT, ROSTER_TTL, RosterEntry, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -30,8 +30,8 @@ pub struct Registration {
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
-/// harnesses, the agent the latest harness start named and whether the harness is signed out, held back by a provider
-/// limit or failing to start.
+/// harnesses, the agent the latest harness start named, whether the harness is signed out, held back by a provider
+/// limit or failing to start, and whether memory is low.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
@@ -40,9 +40,10 @@ pub struct Workload {
     signed_out: Mutex<Option<SignInNeeded>>,
     limited: Mutex<Option<HarnessLimit>>,
     failing: Mutex<Option<HarnessFailing>>,
+    memory_low: Mutex<Option<MemoryLow>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
-    /// agent, a provider limit starts or ends, or the harness's start failures hold messages or no longer do, so the
-    /// roster shows it before the next beat.
+    /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, or memory
+    /// turns low or recovers, so the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -111,6 +112,20 @@ impl Workload {
         self.failing.locked().clone()
     }
 
+    /// Note that memory is low, or with `None` that it is not. Only turning low or recovering wakes the heartbeats.
+    pub fn set_memory_low(&self, low: Option<MemoryLow>) {
+        let mut current = self.memory_low.locked();
+        let changed = current.is_some() != low.is_some();
+        *current = low;
+        if changed {
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn memory_low(&self) -> Option<MemoryLow> {
+        self.memory_low.locked().clone()
+    }
+
     pub fn handling(&self) -> usize {
         self.handling.load(Ordering::Relaxed)
     }
@@ -133,6 +148,7 @@ impl Workload {
         entry.signed_out = self.signed_out();
         entry.limited = self.limited();
         entry.failing = self.failing();
+        entry.memory_low = self.memory_low();
     }
 }
 
@@ -170,6 +186,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        memory_low: None,
     }
 }
 
@@ -626,6 +643,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            memory_low: None,
         }
     }
 
@@ -677,6 +695,16 @@ mod tests {
         assert_eq!(stamped.limited, Some(limited));
         workload.set_limited(None);
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "its end too");
+        let low = MemoryLow { since: now, available: 900 << 20, max_harnesses: 1 };
+        workload.set_memory_low(Some(low.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "low memory shows at once");
+        let lower = MemoryLow { available: 800 << 20, ..low };
+        workload.set_memory_low(Some(lower.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_none(), "a new reading waits a beat");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.memory_low, Some(lower));
+        workload.set_memory_low(None);
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "recovering too");
     }
 
     #[test]

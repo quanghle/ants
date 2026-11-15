@@ -106,6 +106,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        memory_low: None,
     }
 }
 
@@ -430,6 +431,7 @@ async fn requests_are_routed_by_roster_capabilities() {
     let mut limited = listed("dev-q", &[]);
     let until = "2026-01-01T00:10:00Z".parse().unwrap();
     limited.limited = Some(ants_proto::HarnessLimit { kind: ants_proto::LimitKind::Quota, since, until });
+    limited.memory_low = Some(ants_proto::MemoryLow { since, available: 512 << 20, max_harnesses: 1 });
     let roster = vec![listed("dev-a", &["rust"]), billing, out, busy, docs, limited];
     let (mcp, mut sent) = start_with_roster(&home("route"), roster).await;
     let current = from_human();
@@ -454,7 +456,8 @@ async fn requests_are_routed_by_roster_capabilities() {
     assert!(
         text.contains(
             "dev-q: no capabilities (copilot on m1, out-of-quota)\n  harness held back by a provider limit \
-                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z"
+                 (out-of-quota): messages to dev-q wait until about 2026-01-01T00:10:00Z\n  memory low on m1 since \
+                 2026-01-01T00:00:00Z: at most 1 harness runs at once, so messages may wait longer"
         ),
         "{text}"
     );

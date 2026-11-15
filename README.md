@@ -7,7 +7,7 @@ Headless agent teams across machines, communicating with each other and with hum
 - **Backbone:** NATS + JetStream stream `ANTS` for durable inboxes, channels, thread notes, approvals and dead letters, plus 14 NATS KV buckets for roster, sessions, attempts, channels, humans, chains, links, owners, read markers, presence, notifications, reactions, thread metadata and webhooks.
 - **Transport:** `wss://`/`ws://` behind a reverse proxy, `tls://`, a Dev Tunnel, or the plain-HTTPS fallback bridge (`ants bridge`), optionally with a local store-and-forward leaf node per machine. See [docs/transport.md](docs/transport.md).
 - **Harnesses:** ACP (Agent Client Protocol) agents over stdio: Copilot CLI (`copilot --acp`, default), Claude Code (`claude-agent-acp`), Google Antigravity CLI (`agy acp`), or custom `[harnesses.NAME]` definitions such as Codex (`codex-acp`). See [docs/config.md](docs/config.md#harnesses).
-- **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, signer, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS.
+- **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, signer, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS; when system memory runs low, idle harnesses stop at once and fewer run ([memory pressure](docs/config.md#memory-pressure)).
 
 ## Architecture
 
@@ -90,7 +90,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 |---|---|
 | `ants ask [--thread THREAD] [--wait \| -f] [--timeout DUR] [@ant] TEXT \| --file PATH \| --edit` | Send to `@ant` (`messenger` if omitted); prints `thread <id>` and `message <id>`. Warns on stderr if `@ant` is missing from `ants_roster`, `stale`, `signed-out`, `failing`, or provider-limited. |
 | `ants inbox [--peek] [--thread THREAD] [--limit N] [-f] [--json]` | Print unread replies (with message IDs and reactions) and mark read across all devices (`--peek` keeps unread; `-f` streams replies, reactions added/removed to shown messages (human creds; `--json`: `{message, by, reaction, removed}`), `MAX_DELIVERIES` advisories and, without `--thread`/`--json`, tool requests; records presence without `--thread`). |
-| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift and recovery notes. |
+| `ants roster [--json]` | List ants (`live`/`stale`, `idle`/`working`/`signed-out`/`failing`/`rate-limited`/`out-of-quota`), daemon/perms versions, harness and `AGENT` (`name@version`), capabilities, `escalate_to` and workdirs, plus version-drift, recovery and memory-pressure notes. |
 | `ants spend [ANT] [--thread THREAD \| --days N] [--json] [--config FILE]` | Report token and cost spend over UTC days (default 7, max 366) or on a thread against local config caps ([docs/config.md](docs/config.md#spend-report)). |
 | `ants notes THREAD [TEXT]` | Show thread notes, or post `TEXT` as the CLI human (resets budget to 8 turns; wakes nobody). |
 | `ants react MESSAGE REACTION [--remove]` | Add or remove a message reaction (`1–64` of `a-z0-9-`); wakes nobody, marks nothing read, ends no wait. `MESSAGE` is a message id or, for humans, a unique start of one (ambiguous or unknown starts list candidates). |
@@ -173,7 +173,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 
 ### Pool, worktrees and at-least-once retries
 
-Each ant runs up to `max_harnesses` (default 4) ACP processes, concurrent across threads and sequential per thread. Idle harnesses stop after `idle_timeout` (`10m`) and resume via ACP `session/load` (`<ant>.<thread>` in `ants_sessions`), rebuilding from stored thread history if `session/load` fails ([docs/config.md](docs/config.md#lost-sessions-and-context-window)). First Ctrl-C/`SIGTERM` drains active prompts; second Ctrl-C exits immediately.
+Each ant runs up to `max_harnesses` (default 4) ACP processes, concurrent across threads and sequential per thread. Idle harnesses stop after `idle_timeout` (`10m`), or at once while system memory is low ([`[memory_pressure]`](docs/config.md#memory-pressure)), and resume via ACP `session/load` (`<ant>.<thread>` in `ants_sessions`), rebuilding from stored thread history if `session/load` fails ([docs/config.md](docs/config.md#lost-sessions-and-context-window)). First Ctrl-C/`SIGTERM` drains active prompts; second Ctrl-C exits immediately.
 
 With worktrees on, each thread gets its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>` from `HEAD`, pruned once `<ant>.<thread>` expires from `ants_sessions` (preserving branches with unmerged commits and appending an `[ants]` notice). Worktrees are on by default for a workdir inside a git work tree, and not ignored by it, with `max_harnesses > 1` (logged at daemon start); `worktrees = true` (`--worktrees`) forces them on and `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir. Trade-offs: one checkout per thread (plus its build outputs) on disk, a branch per thread to merge or delete, and threads not seeing uncommitted changes of the workdir; see [docs/config.md](docs/config.md#worktrees). `ants daemon` and `ants doctor` warn when `worktrees = false` leaves `max_harnesses > 1` sharing a git workdir.
 
@@ -227,6 +227,7 @@ Each daemon publishes a `RosterEntry` at `<ant>` in `ants_roster` every 10 s (an
 
 - **Identity & runtime:** `machine`, daemon `instance`, `harness`, `agent` (`{name, version}` from ACP `initialize`), `workdir`, `capabilities`, `whoami`, `escalate_to`, `version`, `perms`, `started_at`, `heartbeat_at`, `activity` (`idle` / `working`), `handling` count, live `harnesses` count.
 - **Hold states:** `signed_out` (`{since, sign_in?}`), `limited` (`{kind: "rate_limit" | "quota", since, until}`), and `failing` (`{since, error}`).
+- **Memory pressure:** `memory_low` (`{since, available, max_harnesses}`) while the machine's available memory is below `[memory_pressure]` `min_available` ([docs/config.md](docs/config.md#memory-pressure)).
 
 Per-ant prompt instructions and state isolation:
 
@@ -371,6 +372,8 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 |---|---|---|---|
 | `ants_nats_connected` | gauge | `ant` / `user` | NATS connection state (`1` up, `0` down) |
 | `ants_harnesses` | gauge | `ant` | Live harness processes |
+| `ants_memory_low` | gauge | `ant` | `1` while memory is low and the ant runs fewer harnesses ([memory pressure](docs/config.md#memory-pressure)), else `0` |
+| `ants_memory_available_bytes` | gauge | | System memory available at the last pool check (absent until read) |
 | `ants_messages_in_hand`, `ants_prompts_in_flight` | gauge | `ant` | Messages held by daemon; active harness prompts |
 | `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters |
 | `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Reported tokens and cost ([docs/config.md](docs/config.md#spend-report)) |
@@ -394,6 +397,8 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | Idle daemon | 5.9 MB | 8.5 MB |
 | Idle daemon with MCP server / one Copilot session | — | 10.5 MB |
 | Copilot CLI harness processes | — | 255 MB |
+
+Harness processes dominate memory use. Below `[memory_pressure]` `min_available` (default `1GB`), each ant stops its idle harnesses at once and runs at most one until memory recovers ([docs/config.md](docs/config.md#memory-pressure)).
 
 ## Development
 

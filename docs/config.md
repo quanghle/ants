@@ -23,6 +23,10 @@ warn_percent = 80                          # warn past this share of a store's l
 max_file_store = "100GB"                   # hub max_file_store (default: unknown); bytes or 1024-based K/M/G/T[B]
 max_memory_store = "1GB"                   # hub max_memory_store (default: unknown)
 
+[memory_pressure]                          # stop idle harnesses early when memory runs low (see Memory pressure)
+min_available = "1GB"                      # default; bytes, 1024-based K/M/G/T[B] or a share like "10%"; "0" disables
+max_harnesses = 1                          # default; per-ant harness cap while memory is low (at least 1)
+
 [[ant]]
 name = "dev-a"
 workdir = "~/src/repo-a"                   # must exist
@@ -252,6 +256,16 @@ History budget precedence: ant `history_budget` -> selected `context`'s `history
 - **Copilot:** `context` accepts `default` or `long_context` (`--context ...`).
 - **Claude:** `context` accepts `default`, or `1m` with an explicit `model` (selects `<model>[1m]`).
 - **Antigravity:** no `context` selector; choose a model with the desired window.
+
+### Memory pressure
+
+Each harness process takes hundreds of MB (about 255 MB for Copilot CLI, see README.md, Footprint). On every idle check of an ant's harness pool (every `idle_timeout`, at most 30 s), the daemon reads the system's available memory (Linux `MemAvailable` in `/proc/meminfo`; macOS `hw.memsize × kern.memorystatus_level`; Windows `GlobalMemoryStatusEx`; elsewhere, or when unreadable, memory never counts as low). Below `min_available`:
+
+- Every idle harness (no prompt in flight) stops at once, least recently used first, instead of after `idle_timeout`; its session resumes via `session/load` on the next message. Busy harnesses finish their prompts.
+- New threads get a harness only while fewer than `max_harnesses` from `[memory_pressure]` run (capped by the ant's own `max_harnesses`); other messages wait in hand as when the pool is full.
+- The daemon logs a warning, sets `memory_low` (`{since, available, max_harnesses}`) in the ant's `ants_roster` entry (shown by `ants roster` and `list_ants`) and `ants_memory_low` to `1` in `/metrics`.
+
+Memory counts as recovered once available memory reaches 150 % of `min_available`, so the state does not flap; the daemon logs it, clears `memory_low` and admits threads up to `max_harnesses` again. Each ant checks on its own, so the lower cap applies per ant. `[memory_pressure]` applies to every ant in the file; changing it on reload restarts them.
 
 ## Prompt limits and spending caps
 

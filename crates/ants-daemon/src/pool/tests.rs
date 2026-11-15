@@ -181,6 +181,54 @@ async fn a_busy_harness_is_never_stopped() {
 }
 
 #[tokio::test]
+async fn low_memory_stops_idle_harnesses_at_once_and_lowers_the_cap_until_it_recovers() {
+    let (launch, log, gate) = fake::launch();
+    let available = Arc::new(Mutex::new(8u64 << 30));
+    let read = available.clone();
+    let probe: pressure::Probe =
+        Arc::new(move || Some(pressure::Memory { available: *read.locked(), total: 16 << 30 }));
+    let settings = pressure::Settings { min_available: pressure::Threshold::Bytes(1 << 30), max_harnesses: 1 };
+    let workload = Arc::new(Workload::default());
+    let pool = Pool::new(launch, SessionStore::memory(), 3, IDLE)
+        .reporting_to(workload.clone())
+        .with_memory_pressure(settings, probe);
+    for n in 1..=3 {
+        pool.prompt(&thread(n), "a").await.unwrap();
+    }
+    assert_eq!(pool.evict_idle(Instant::now()), 0, "with memory to spare, harnesses wait out the idle timeout");
+    assert_eq!(workload.memory_low(), None);
+    *available.locked() = 512 << 20;
+    let (t1, t3) = (thread(1), thread(3));
+    let busy = pool.prompt(&t3, "hold c");
+    let others = async {
+        settle().await;
+        assert_eq!(pool.evict_idle(Instant::now()), 2, "idle harnesses stop at once, the busy one stays");
+        let low = workload.memory_low().expect("the roster shows low memory");
+        assert_eq!((low.available, low.max_harnesses), (512 << 20, 1));
+        let waiting = pool.prompt(&t1, "d");
+        let release = async {
+            settle().await;
+            assert_eq!(log.locked().starts, 3, "a new thread waits under the lower cap");
+            gate.add_permits(1);
+        };
+        let (reply, ()) = tokio::join!(waiting, release);
+        reply.unwrap()
+    };
+    let (c, d) = tokio::join!(busy, others);
+    assert_eq!((c.unwrap().as_str(), d.as_str()), ("s3: hold c", "s1: d"));
+    assert_eq!(pool.live(), 1);
+    *available.locked() = 1200 << 20;
+    assert_eq!(pool.evict_idle(Instant::now()), 1, "still low just above the threshold");
+    assert!(workload.memory_low().is_some());
+    *available.locked() = 2 << 30;
+    assert_eq!(pool.evict_idle(Instant::now()), 0);
+    assert_eq!(workload.memory_low(), None, "recovered");
+    pool.prompt(&thread(1), "e").await.unwrap();
+    pool.prompt(&thread(2), "f").await.unwrap();
+    assert_eq!(pool.live(), 2, "the full cap again");
+}
+
+#[tokio::test]
 async fn a_restarted_pool_resumes_the_stored_session() {
     let (launch, log, _) = fake::launch();
     let store = SessionStore::memory();
