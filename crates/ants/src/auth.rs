@@ -746,25 +746,27 @@ pub fn issue_bootstrap(dir: &Path, ttl: Duration, out: &Path) -> Result<(String,
     Ok((user.public_key(), exp))
 }
 
-/// The text of short-lived credentials for `ants enroll` and `ants signer`, which hear enrollment and registration
-/// requests and answer them ([`Permissions::for_enroll_approver`], [`Permissions::for_registrar`]), for the hub's JetStream domain if it has one, issued afresh from the
+/// The text of short-lived credentials for `ants enroll` and `ants signer`, which hear enrollment requests and answer
+/// them ([`Permissions::for_enroll_approver`]), for the hub's JetStream domain if it has one, issued afresh from the
 /// account key of each run.
 pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     short_lived_creds(dir, js_domain, Permissions::for_enroll_approver())
 }
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
-/// ([`Permissions::for_reactions_responder`]).
+/// ([`Permissions::for_reactions_responder`]) and humans' registration requests ([`Permissions::for_registrar`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
-    short_lived_creds(dir, js_domain, signer_permissions())
+    let mut permissions = signer_permissions();
+    // Registration happens on the hub only: a leaf uplink with signer_permissions never carries it.
+    merge(&mut permissions, Permissions::for_registrar());
+    short_lived_creds(dir, js_domain, permissions)
 }
 
-/// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`],
-/// [`Permissions::for_reactions_responder`] and [`Permissions::for_registrar`].
+/// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`] and
+/// [`Permissions::for_reactions_responder`].
 fn signer_permissions() -> Permissions {
     let mut permissions = Permissions::for_enroll_approver();
     merge(&mut permissions, Permissions::for_reactions_responder());
-    merge(&mut permissions, Permissions::for_registrar());
     permissions
 }
 

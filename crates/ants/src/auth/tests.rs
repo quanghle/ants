@@ -2212,9 +2212,9 @@ async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answ
     let issued = revoke::issued(&team).unwrap();
     assert!(issued.iter().any(|i| i.key == key && i.kind == Kind::Bootstrap && i.name == "bootstrap"), "{issued:?}");
 
-    let signer_creds = server.dir().join("signer.creds");
-    std::fs::write(&signer_creds, approver_creds(&team, None).unwrap()).unwrap();
-    let signer = async_nats::ConnectOptions::with_credentials_file(&signer_creds)
+    let signer_file = server.dir().join("signer.creds");
+    std::fs::write(&signer_file, signer_creds(&team, None).unwrap()).unwrap();
+    let signer = async_nats::ConnectOptions::with_credentials_file(&signer_file)
         .await
         .unwrap()
         .connect(&server.url)
