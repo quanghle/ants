@@ -1120,6 +1120,74 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+#[tokio::test]
+async fn a_human_steers_a_running_prompt_ahead_of_the_queue_in_the_same_session() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "stall").await;
+    bus.send(&t1, "queued").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        steer(&bus, UserId::human(), &t1, "go left").await;
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.text, "partial\n\n[ants] human interrupted the prompt to steer dev-a (ants ask --steer).");
+        let steered = next_envelope(&mut to_human).await;
+        let note = "[ants] human interrupted the previous prompt on this thread with this message; tool calls it had \
+                    in flight were cancelled, so check what they left before repeating any.";
+        assert_eq!(steered.text, format!("s1: {note}\n\ngo left"), "the same session takes the steer first");
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "queued".to_owned()), "the queue waits");
+        assert!(timeout(Duration::from_millis(300), to_human.next()).await.is_err(), "no escalation");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.cancelled, log.prompted, log.new_sessions), (1, 3, 1), "not retried");
+        assert!(log.loaded.is_empty(), "the session goes on without a load");
+    }
+    assert_eq!(bus.unacked().await, 0);
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
+}
+
+#[tokio::test]
+async fn a_steer_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let t1 = ThreadId::generate();
+    steer(&bus, UserId::human(), &t1, "idle").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "idle".to_owned()), "an ordinary prompt");
+        bus.send(&t1, "stall").await;
+        until("the prompt to run", || log.locked().prompted == 2).await;
+        steer(&bus, dev_b.clone(), &t1, "from an ant").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().cancelled, 0, "an ant does not steer");
+        assert!(cancel(&bus, &t1).await);
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.text, "partial\n\n[ants] The prompt was cancelled by human (ants cancel).");
+        assert_eq!(next_reply(&mut to_dev_b).await, (t1.clone(), "from an ant".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// Send `text` on `thread` from `from` as a steer.
+async fn steer(bus: &Bus, from: UserId, thread: &ThreadId, text: &str) {
+    let envelope = Envelope::on_thread(thread.clone(), from, bus.dev.clone(), text).steering();
+    bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+}
+
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
     let request = QueueRequest::new(bus.dev.clone(), UserId::human());

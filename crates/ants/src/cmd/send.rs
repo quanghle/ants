@@ -3,7 +3,7 @@
 use ants_daemon::reading::Reading;
 use ants_daemon::{bus, notes, owners, reactions};
 use ants_proto::{ChannelId, ChannelPost, Envelope, NotesPost, Reaction, ThreadId, UserId, subject};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 
@@ -26,15 +26,20 @@ pub(crate) fn recipient(mut words: Vec<String>, input: &compose::Input) -> Resul
 pub(crate) async fn ask(
     nats: &Nats<'_>,
     thread: Option<thread::Pick>,
+    steer: bool,
     replies: &Replies,
     input: &compose::Input,
     words: Vec<String>,
 ) -> Result<()> {
+    if steer && !nats.me.role.is_human() {
+        bail!("the credentials of {} are an ant's; only a human steers an ant", nats.me.id);
+    }
     // Refuse a message with nothing to send before connecting.
     let (to, text) = recipient(words, input)?;
     let (client, js) = nats.connect("ants-cli").await?;
     let thread = thread::resolve(thread, &js, &nats.me).await?;
     let envelope = ask_envelope(&nats.me, thread, to, text);
+    let envelope = if steer { envelope.steering() } else { envelope };
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {

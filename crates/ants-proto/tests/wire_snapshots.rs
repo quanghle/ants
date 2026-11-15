@@ -104,6 +104,7 @@ fn envelope() -> Envelope {
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
         title: Some("Fix the build".to_owned()),
+        steer: true,
         sent_at: at(0),
     }
 }
@@ -121,6 +122,7 @@ fn plain_envelope() -> Envelope {
         allow: None,
         mention: None,
         title: None,
+        steer: false,
         ..envelope()
     }
 }
@@ -284,6 +286,7 @@ fn envelopes() {
             ..message.clone()
         },
     );
+    snap("envelope_steer", &Envelope { owner: Some(user("alice")), steer: true, ..message.clone() });
     snap(
         "envelope_mention_notice",
         &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message },

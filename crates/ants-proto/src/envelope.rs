@@ -84,6 +84,13 @@ pub struct Envelope {
     /// sender, so only an ant that messaged on the thread suggests its title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A human's message steering the ant on the thread, as `ants ask --steer` sends it: when the ant runs a prompt
+    /// on the thread, the recipient's daemon cancels it and prompts the same session with this message next, ahead of
+    /// the messages waiting there. Honoured only from a human ([`Envelope::sender_role`]) to an ant; any other, a
+    /// reader that does not know the field, or a daemon with no prompt running on the thread, handles it as an
+    /// ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steer: bool,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -124,8 +131,15 @@ impl Envelope {
             allow: None,
             mention: None,
             title: None,
+            steer: false,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The envelope steering its recipient ([`Envelope::steer`]).
+    #[must_use]
+    pub fn steering(self) -> Self {
+        Self { steer: true, ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -251,6 +265,7 @@ impl Envelope {
             allow: self.allow.clone(),
             mention: None,
             title: None,
+            steer: false,
             sent_at: Utc::now(),
         })
     }
@@ -492,6 +507,18 @@ mod tests {
         let json = serde_json::to_string(&owned).unwrap();
         assert!(json.contains(r#""owner":"alice""#), "{json}");
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), owned);
+    }
+
+    #[test]
+    fn a_steer_is_left_out_when_unset_and_never_carried_on() {
+        let plain = Envelope::new(p("alice"), p("dev-a"), "go left");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("steer"));
+        let steer = plain.steering();
+        let json = serde_json::to_string(&steer).unwrap();
+        assert!(json.contains(r#""steer":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), steer);
+        assert!(!steer.reply(p("dev-a"), "ok", Role::Human).unwrap().steer);
+        assert!(!steer.follow_up(p("dev-a"), p("dev-b"), "x").steer);
     }
 
     #[test]

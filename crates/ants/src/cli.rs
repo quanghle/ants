@@ -53,6 +53,10 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
+        /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
+        /// ahead of the messages waiting there. Needs --thread and a human's credentials.
+        #[arg(long, requires = "thread")]
+        steer: bool,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -480,6 +484,15 @@ mod tests {
         let cli = Cli::try_parse_from(["ants", "channel", "read", "ops", "--thread", "last"]).unwrap();
         let Command::Channel(ChannelCommand::Read { thread, .. }) = cli.command else { panic!("not channel read") };
         assert_eq!(thread, Some(thread::Pick::Last));
+    }
+
+    #[test]
+    fn ask_steers_only_a_thread() {
+        assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
+        let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. });
+        let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
+        assert_matches!(cli.command, Command::Ask { steer: false, .. });
     }
 
     #[test]
