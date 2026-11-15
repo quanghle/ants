@@ -67,6 +67,7 @@ Each human device also gets an X25519 encryption key (an nkeys xkey, public key 
 ```sh
 ants auth user alice --human --public-key U... --xkey X...   # sign keys generated on the device; without --xkey none is bound
 ants renew ~/.config/ants/auth/alice.creds                  # credentials binding none get a new key
+ants login --hub wss://hub.example/nats --name alice       # a registered device gets one too
 ```
 
 `ants auth devices` lists each device's encryption key (`xkey` in `--json`), as `issued.jsonl` records it. `ants doctor` checks it as **credentials xkey**: no key bound warns with `ants renew` as the fix; a seed missing, unreadable or not that of the JWT's tag fails.
@@ -117,7 +118,7 @@ On the machine being registered:
 ants login --hub wss://hub.example/nats --name alice [--label laptop] [--store-key] [--bootstrap FILE]
 ```
 
-`--bootstrap` defaults to `~/.config/ants/auth/bootstrap.creds`. `ants login` makes the device's NKey in memory, repeats its request until an answer comes, the request expires (15 min) or Ctrl-C, and shows the sign-in URL and user code only when the URL is GitHub's device login page (`https://github.com/login/device`); any other URL stops the login without showing it. Signed credentials are accepted only when issued to its key, for the name asked, by the account of the bootstrap credentials; they go to `~/.config/ants/auth/NAME.creds` (mode `0600`, replacing an earlier file, as a new login does to renew an `email-domain` grant), or with `--store-key` the seed goes to the [OS credential store](#private-keys-in-the-os-credential-store) after the credentials authenticate at the hub. When `[cli]` in `ANTS_CONFIG` (`~/.ants/config.toml`) names no `creds`, it gets `creds` set to that file and, when it has no `nats`, `nats` set to the hub. A refusal, expiry or Ctrl-C leaves no key and no file behind.
+`--bootstrap` defaults to `~/.config/ants/auth/bootstrap.creds`. `ants login` makes the device's NKey and [encryption key](#device-encryption-keys) in memory, repeats its request until an answer comes, the request expires (15 min) or Ctrl-C, and shows the sign-in URL and user code only when the URL is GitHub's device login page (`https://github.com/login/device`); any other URL stops the login without showing it. Signed credentials are accepted only when issued to its key, binding its encryption key, for the name asked, by the account of the bootstrap credentials; they go to `~/.config/ants/auth/NAME.creds` (mode `0600`, with the encryption key seed as an `ANTS XKEY SEED` block, replacing an earlier file, as a new login does to renew an `email-domain` grant), or with `--store-key` both seeds go to the [OS credential store](#private-keys-in-the-os-credential-store) after the credentials authenticate at the hub. When `[cli]` in `ANTS_CONFIG` (`~/.ants/config.toml`) names no `creds`, it gets `creds` set to that file and, when it has no `nats`, `nats` set to the hub. A refusal, expiry or Ctrl-C leaves no key and no file behind.
 
 ### GitHub bindings
 

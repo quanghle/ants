@@ -1,7 +1,8 @@
 //! `ants login`: a human registers a device with a GitHub sign-in, asking `ants signer` on the hub with the team's
-//! public bootstrap credentials ([`LoginRequest`]). The device's NKey is generated here and its seed never leaves the
-//! machine: it stays in memory while the request waits, and is written, to the `.creds` file or the OS credential
-//! store, only once the signed user JWT arrives, so a refusal, an expiry or Ctrl-C leaves neither key nor file.
+//! public bootstrap credentials ([`LoginRequest`]). The device's NKey and encryption key are generated here and their
+//! seeds never leave the machine: they stay in memory while the request waits, and are written, to the `.creds` file
+//! or the OS credential store, only once the signed user JWT binding both arrives, so a refusal, an expiry or Ctrl-C
+//! leaves neither key nor file.
 //!
 //! The signer seals each answer to the request's one-off X25519 key ([`LoginReply`]): anyone holding the bootstrap
 //! credentials hears it, and only this machine opens it. A sign-in page is shown only when it is GitHub's device login
@@ -102,9 +103,11 @@ pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Ou
     bus::check_url(login.hub)?;
     let account = bootstrap_account(login.bootstrap)?;
     let key = KeyPair::new_user();
+    let xkey = XKey::new();
     let reply_key = XKey::new();
     let mut request = LoginRequest::new(login.name.clone(), key.public_key(), reply_key.public_key());
     request.label = login.label.map(str::to_owned);
+    request.xkey = Some(auth::device_key(&xkey)?);
     request.signature = auth::sign(&key, &request.signed())?;
     let bootstrap_user: UserId = BOOTSTRAP_USER.parse()?;
     let (client, _) =
@@ -117,7 +120,7 @@ pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Ou
     );
     let jwt = ask(&client, &request, &reply_key, &account, login, stop).await?;
     drop(client);
-    write(login, &jwt, &key, store).await?;
+    write(login, &jwt, &key, &xkey, store).await?;
     let finding = Finding::from_jwt(&jwt)?;
     println!("{}", login.out.display());
     if let Some(device) = &finding.device {
@@ -221,7 +224,7 @@ fn open(payload: &[u8], request: &LoginRequest, reply_key: &XKey) -> Result<Opti
     Ok(Some(serde_json::from_slice(&opened).context("a malformed sealed answer")?))
 }
 
-/// Check that `jwt` is a human's, issued by `account` to `request`'s key for its name.
+/// Check that `jwt` is a human's, issued by `account` to `request`'s key for its name, binding its encryption key.
 fn check_signed(jwt: &str, request: &LoginRequest, account: &str) -> Result<()> {
     let claims = auth::verified(jwt)?;
     if claims.iss != account {
@@ -234,19 +237,22 @@ fn check_signed(jwt: &str, request: &LoginRequest, account: &str) -> Result<()> 
     if finding.kind != Kind::Human {
         bail!("a JWT of {}, not of a human", finding.holder());
     }
+    if finding.xkey != request.xkey {
+        bail!("a JWT that does not bind the device's encryption key");
+    }
     Ok(())
 }
 
-/// Write the credentials of `jwt` for `key` to `login.out`, replacing any there; with `login.store_key` the seed goes
-/// to `store`, proven at the hub. Seeds the earlier credentials kept in `store` are deleted.
-async fn write(login: &Login<'_>, jwt: &str, key: &KeyPair, store: &dyn Store) -> Result<()> {
+/// Write the credentials of `jwt` for `key` and `xkey` to `login.out`, replacing any there; with `login.store_key` the
+/// seeds go to `store`, proven at the hub. Seeds the earlier credentials kept in `store` are deleted.
+async fn write(login: &Login<'_>, jwt: &str, key: &KeyPair, xkey: &XKey, store: &dyn Store) -> Result<()> {
     let out = login.out;
     if let Some(dir) = out.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let earlier = std::fs::read_to_string(out).ok();
     if login.store_key {
-        if keys::write_new_stored(out, jwt, key, None, store, login.hub).await? == Proven::Unreached {
+        if keys::write_new_stored(out, jwt, key, Some(xkey), store, login.hub).await? == Proven::Unreached {
             eprintln!(
                 "warning: the hub did not answer at {}, so the stored key {} has not authenticated yet",
                 login.hub,
@@ -254,7 +260,7 @@ async fn write(login: &Login<'_>, jwt: &str, key: &KeyPair, store: &dyn Store) -
             );
         }
     } else {
-        auth::replace_creds(out, jwt, key, None)?;
+        auth::replace_creds(out, jwt, key, Some(xkey))?;
     }
     let Some(earlier) = earlier else { return Ok(()) };
     for seed in [creds::seed_of(&earlier), creds::xkey_of(&earlier)] {
@@ -401,6 +407,8 @@ mod tests {
             let (jwt, key) = auth::read_creds(first.out).unwrap();
             assert_eq!(auth::verified(&jwt).unwrap().iss, account);
             assert_eq!(finding.key, key.public_key());
+            let xkey = creds::load_xkey(first.out, &store).unwrap().expect("an encryption key seed in the file");
+            assert_eq!(finding.xkey, Some(auth::device_key(&xkey).unwrap()), "the JWT binds the encryption key");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
@@ -415,6 +423,8 @@ mod tests {
             assert!(check_signed(&jwt, &forged, &account).unwrap_err().to_string().contains("not to alice"));
             forged.public_key = key.public_key();
             assert!(check_signed(&jwt, &forged, "AOTHER").unwrap_err().to_string().contains("not by the account"));
+            assert!(check_signed(&jwt, &forged, &account).unwrap_err().to_string().contains("encryption key"));
+            forged.xkey = finding.xkey.clone();
             check_signed(&jwt, &forged, &account).unwrap();
 
             let again = Login { store_key: true, out: &again_out, ..first };
@@ -422,6 +432,10 @@ mod tests {
             let text = std::fs::read_to_string(again.out).unwrap();
             let Some(Seed::Stored(stored)) = creds::seed_of(&text) else { panic!("no stored seed: {text}") };
             assert!(store.get(stored).unwrap().is_some(), "the seed is in the store");
+            let Some(Seed::Stored(stored)) = creds::xkey_of(&text) else { panic!("no stored xkey: {text}") };
+            assert!(store.get(stored).unwrap().is_some(), "the encryption key seed is in the store");
+            let xkey = creds::load_xkey(again.out, &store).unwrap().unwrap();
+            assert_eq!(Finding::from_creds(&text).unwrap().xkey, Some(auth::device_key(&xkey).unwrap()));
             assert_eq!(config::CliDefaults::load(&config).unwrap().creds.as_deref(), Some(first.out), "the CLI's stay");
             let devices = revoke::issued(&team).unwrap().into_iter().filter(|i| i.name == "alice").count();
             assert_eq!(devices, 2, "a second device of alice");
