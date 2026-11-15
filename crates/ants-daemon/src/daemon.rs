@@ -2272,10 +2272,30 @@ impl Inbox<'_> {
             }
             None => text,
         };
+        let text = match self.answer_line(envelope, humans).await {
+            Some(line) => format!("{line}\n\n{text}"),
+            None => text,
+        };
         let text = prompt_text(&text, cut_off, late);
         match incoming.steered {
             Steered::Interrupted => format!("{}\n\n{text}", steer_note(&envelope.from)),
             Steered::No | Steered::Ahead => text,
+        }
+    }
+
+    /// The `[ants]` line telling that `envelope`, a human's message, answers a question the ant asked on the thread
+    /// ([`crate::questions::answer_line`]); none for any other message, which is prompted as an ordinary one.
+    async fn answer_line(&self, envelope: &Envelope, humans: &Humans) -> Option<String> {
+        if envelope.answer.is_none() || !envelope.sender_role(humans).is_human() {
+            return None;
+        }
+        match crate::questions::asked(self.js, self.ant, envelope).await {
+            Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
+            Err(e) => {
+                let thread = &envelope.thread_id;
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading back the question a message answers");
+                None
+            }
         }
     }
 

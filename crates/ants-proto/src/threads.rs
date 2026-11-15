@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
-use crate::{Envelope, STREAM, THREADS_BUCKET, marks_key, title_key};
+use crate::{Envelope, STREAM, THREADS_BUCKET, done_key, marks_key, title_key};
 use crate::{Error, MAX_TITLE, ThreadId, UserId};
 
 /// The title of a thread, under its [`title_key`] in [`THREADS_BUCKET`]: one per thread, shared by every human, which
@@ -31,6 +31,31 @@ impl ThreadTitle {
 
 fn breaks_title(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// A thread marked done, under its [`done_key`] in [`THREADS_BUCKET`]: one state per thread, shared by every human,
+/// which any human sets or clears and no ant reads or writes. `by` is the human that marked it, `after` the [`STREAM`]
+/// sequence of the last message, channel post or note on the thread it saw: one stored above it reopens the thread
+/// ([`ThreadDone::holds`]) without a write, as new activity shows on an archived thread. Being done changes no ant's
+/// work, reply or notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDone {
+    pub thread_id: ThreadId,
+    pub by: UserId,
+    pub at: DateTime<Utc>,
+    pub after: u64,
+}
+
+impl ThreadDone {
+    /// `thread_id` marked done by `by` now, as of sequence `after`.
+    pub fn new(thread_id: ThreadId, by: UserId, after: u64) -> Self {
+        Self { thread_id, by, at: Utc::now(), after }
+    }
+
+    /// Whether the thread is still done, the last message, channel post or note stored on it having sequence `last`.
+    pub fn holds(&self, last: u64) -> bool {
+        last <= self.after
+    }
 }
 
 /// A human's pinned and archived threads, under its [`marks_key`] in [`THREADS_BUCKET`], shared by all its devices,
@@ -162,7 +187,7 @@ impl ThreadMarks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{marks_key, p, title_key};
+    use crate::{done_key, marks_key, p, title_key};
 
     #[test]
     fn a_thread_is_pinned_or_archived_and_new_messages_show_on_an_archived_one() {
@@ -234,6 +259,14 @@ mod tests {
         let active = |t: &ThreadId, at| *t == outdone || (*t == idle && at > now);
         assert_eq!(marks.prune(before, |t| *t != idle, active), 2, "the old keep of a thread gone, one outdone");
         assert!(marks.kept.len() == 2 && marks.kept.contains_key(&recent_keep) && marks.kept.contains_key(&idle));
+    }
+
+    #[test]
+    fn a_thread_is_done_until_a_message_is_stored_after_the_one_seen() {
+        let done = ThreadDone::new(ThreadId::generate(), p("alice"), 10);
+        assert_eq!(done_key(&done.thread_id), format!("done.{}", done.thread_id));
+        assert!(done.holds(3) && done.holds(10));
+        assert!(!done.holds(11), "a later message reopens it");
     }
 
     #[test]

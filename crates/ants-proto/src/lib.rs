@@ -9,6 +9,7 @@ pub use uuid::Uuid;
 
 mod ant_request;
 mod approvals;
+mod attachments;
 mod chanadm;
 mod channels;
 mod dead;
@@ -24,6 +25,7 @@ mod keys;
 mod login;
 mod permissions;
 mod presence;
+mod questions;
 mod queue;
 mod reactions;
 mod roster;
@@ -33,6 +35,7 @@ mod threads;
 
 pub use ant_request::*;
 pub use approvals::*;
+pub use attachments::*;
 pub use chanadm::*;
 pub use channels::*;
 pub use dead::*;
@@ -47,6 +50,7 @@ pub use keys::*;
 pub use login::*;
 pub use permissions::*;
 pub use presence::*;
+pub use questions::*;
 pub use queue::*;
 pub use reactions::*;
 pub use roster::*;
@@ -158,7 +162,8 @@ pub const REACTIONS_REPEAT: Duration = Duration::from_secs(2);
 /// How long an ant waits for the answer to a [`ReactionsRequest`] in all.
 pub const REACTIONS_WAIT: Duration = Duration::from_secs(10);
 /// KV bucket of what humans make of threads: the title of each thread ([`ThreadTitle`], keyed by [`title_key`]), one
-/// for every human, which any human sets, renames or clears, and each human's pinned and archived threads
+/// for every human, which any human sets, renames or clears, its done state ([`ThreadDone`], keyed by [`done_key`]),
+/// one for every human too, which any human sets or clears, and each human's pinned and archived threads
 /// ([`ThreadMarks`], keyed by [`marks_key`]), shared by its devices and read and written by that human alone
 /// ([`Permissions::for_user`]). Ants read and write none of it: a title an ant suggests ([`Envelope::title`],
 /// [`ChannelPost::title`], [`NotesPost::title`]) gets there through a human's CLI. Entries never expire.
@@ -173,8 +178,8 @@ pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
-/// whose messages carry the narrowing on.
-pub const WEBHOOK_ALLOW: [&str; 14] = [
+/// whose messages carry the narrowing on, or ask a human a question.
+pub const WEBHOOK_ALLOW: [&str; 15] = [
     "read:*",
     "search",
     "think",
@@ -189,6 +194,7 @@ pub const WEBHOOK_ALLOW: [&str; 14] = [
     "other:react",
     "other:list_reactions",
     "other:suggest_thread_title",
+    "other:ask_human",
 ];
 /// Chain levels an escalation may climb before it goes to the thread's owner ([`Escalation::up`]).
 pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;

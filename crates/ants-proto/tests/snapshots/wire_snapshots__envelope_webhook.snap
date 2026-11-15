@@ -25,7 +25,8 @@ expression: value
     "other:escalate",
     "other:react",
     "other:list_reactions",
-    "other:suggest_thread_title"
+    "other:suggest_thread_title",
+    "other:ask_human"
   ],
   "sent_at": "2025-01-01T12:00:00Z"
 }
