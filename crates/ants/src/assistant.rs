@@ -3,6 +3,7 @@
 //! [`ants_proto::Grants`] for how readers honour it. `ants assistant seal on|off` enrolls the assistant as a device of
 //! the human by the same grant, or ends it, so the assistant opens and seals the human's sealed messages
 //! ([`ants_daemon::sealing`]), with a key whose seed waits beside its credentials (`ants assistant key`).
+//! `enable` and `disable` ([`dedicated`]) create and retire a dedicated assistant ant around the grant.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,10 @@ use serde::Deserialize;
 
 use crate::cli::{AssistantCommand, SealCommand};
 use crate::{Nats, auth, devices, humans, revoke, roster};
+
+mod dedicated;
+
+pub use dedicated::{DisableArgs, EnableArgs};
 
 /// How many times storing a record is tried again when another device of the human stored one meanwhile.
 const CONFLICTS: usize = 5;
@@ -42,6 +47,7 @@ struct AntEntry {
     name: String,
     template: Option<String>,
     workdir: Option<PathBuf>,
+    home: Option<PathBuf>,
     #[serde(default)]
     allow: Vec<String>,
     #[serde(default)]
@@ -89,9 +95,13 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
         );
     }
     let mut warnings = Vec::new();
+    let home = local.entry.as_ref().and_then(|e| e.home.as_deref());
     let workdirs = roster.iter().filter_map(|e| e.workdir.clone());
     let local_workdir = local.entry.as_ref().and_then(|e| e.workdir.as_ref()).filter(|w| !w.as_os_str().is_empty());
-    let mut workdirs: Vec<String> = workdirs.chain(local_workdir.map(|w| w.display().to_string())).collect();
+    let mut workdirs: Vec<String> = workdirs
+        .chain(local_workdir.map(|w| w.display().to_string()))
+        .filter(|w| !is_home(ant, Path::new(w), home))
+        .collect();
     workdirs.sort();
     workdirs.dedup();
     if !workdirs.is_empty() {
@@ -102,11 +112,7 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
         ));
     }
     if let Some(entry) = &local.entry {
-        let risky = |rule: &&String| {
-            let kind = rule.trim().split(':').next().unwrap_or_default();
-            ["*", "fetch", "execute"].contains(&kind)
-        };
-        let mut rules: Vec<&str> = entry.allow.iter().filter(risky).map(String::as_str).collect();
+        let mut rules: Vec<&str> = entry.allow.iter().map(String::as_str).filter(|r| risky(r)).collect();
         if entry.allow_tools {
             rules.insert(0, "allow_tools");
         }
@@ -134,6 +140,8 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
 /// `ants assistant`, with the connection `nats` gives.
 pub async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'a>>) -> Result<()> {
     match command {
+        AssistantCommand::Enable(args) => dedicated::enable(&nats()?, *args).await,
+        AssistantCommand::Disable(args) => dedicated::disable(&nats()?, args).await,
         AssistantCommand::Set { ant } => set(&nats()?, &ant).await,
         AssistantCommand::Clear => clear(&nats()?).await,
         AssistantCommand::Show { human } => show(&nats()?, human).await,
@@ -141,6 +149,19 @@ pub async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'
         AssistantCommand::Seal(SealCommand::Off) => seal_off(&nats()?).await,
         AssistantCommand::Key { ant } => key(&ant),
     }
+}
+
+/// Whether the allow rule `rule` lets an ant run what can bring in untrusted content or act beyond reading: `*`,
+/// `fetch` or `execute` requests.
+fn risky(rule: &str) -> bool {
+    let kind = rule.trim().split(':').next().unwrap_or_default();
+    ["*", "fetch", "execute"].contains(&kind)
+}
+
+/// Whether `workdir` is the home of `ant`, `home` as its entry sets one, or as `~/.ants/<ant>` by default on any
+/// machine: the workdir of a dedicated assistant, holding no repository.
+fn is_home(ant: &UserId, workdir: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|home| home == workdir) || workdir.ends_with(Path::new(".ants").join(ant.as_str()))
 }
 
 /// The credentials of the human the CLI acts as, which sign its grant: a human device's.
@@ -175,19 +196,25 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
         println!("warning: {warning}");
     }
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep).await?;
+    replaced(ant, human, before, None);
+    println!(
+        "It acts for {human} only while its credentials name {human} as the human it assists, as the team's account \
+         signs them."
+    );
+    Ok(())
+}
+
+/// Say that `ant` is the assistant of `human` now, the grant replacing `before`, and that the enrollment of another
+/// assistant `before` held ended, as [`ended_sealing`] does with the config file `config`.
+fn replaced(ant: &UserId, human: &UserId, before: Option<VerifiedGrant>, config: Option<&Path>) {
     match before.as_ref().and_then(|g| g.assistant.as_ref()) {
         Some(before) if before == ant => println!("{ant} stays the assistant of {human}"),
         Some(before) => println!("{ant} is now the assistant of {human}, in place of {before}"),
         None => println!("{ant} is now the assistant of {human}"),
     }
     if let Some(before) = before.filter(|g| g.assistant.as_ref() != Some(ant)) {
-        ended_sealing(&before);
+        ended_sealing(&before, config);
     }
-    println!(
-        "It acts for {human} only while its credentials name {human} as the human it assists, as the team's account \
-         signs them."
-    );
-    Ok(())
 }
 
 /// `ants assistant clear`.
@@ -201,7 +228,7 @@ pub async fn clear(nats: &Nats<'_>) -> Result<()> {
         None => println!("{human} has no assistant"),
     }
     if let Some(before) = &before {
-        ended_sealing(before);
+        ended_sealing(before, None);
     }
     Ok(())
 }
@@ -254,7 +281,7 @@ pub async fn seal_off(nats: &Nats<'_>) -> Result<()> {
     };
     let (before, _) = put(&js, creds, human, standing.assistant.clone(), Sealing::Off).await?;
     if let Some(before) = &before {
-        ended_sealing(before);
+        ended_sealing(before, None);
     }
     Ok(())
 }
@@ -274,8 +301,12 @@ pub fn key(ant: &UserId) -> Result<()> {
 
 /// The credentials of `ant` on this machine, as the config file names them.
 fn local_creds(ant: &UserId) -> Result<PathBuf> {
-    let config = crate::defaults::path()?;
-    match Summary::load(&config)?.creds_of(ant) {
+    creds_in(ant, &crate::defaults::path()?)
+}
+
+/// The credentials of `ant`, as the config file `config` names them.
+fn creds_in(ant: &UserId, config: &Path) -> Result<PathBuf> {
+    match Summary::load(config)?.creds_of(ant) {
         Some(Some(creds)) => Ok(creds.to_path_buf()),
         Some(None) => bail!("{ant} runs without credentials in {}, so it holds no key", config.display()),
         None => bail!("{ant} is not an ant of {}", config.display()),
@@ -294,14 +325,19 @@ fn key_of(creds: &Path) -> Result<(XKey, bool)> {
     Ok((xkey, true))
 }
 
-/// Say that the enrollment `before` held, if any, ended, and what of the key's seed.
-fn ended_sealing(before: &VerifiedGrant) {
+/// Say that the enrollment `before` held, if any, ended, and what of the key's seed, deleted where the config file
+/// `config` (default: the CLI's) names the assistant's credentials.
+fn ended_sealing(before: &VerifiedGrant, config: Option<&Path>) {
     let (Some(assistant), Some(sealing)) = (&before.assistant, &before.sealing) else { return };
     println!(
         "{assistant} is no longer device {} of {}: nothing is sealed for it from now on, and it opens nothing",
         sealing.device, before.human
     );
-    let path = local_creds(assistant).ok().map(|creds| sealing::key_path(&creds)).filter(|p| p.exists());
+    let creds = match config {
+        Some(config) => creds_in(assistant, config),
+        None => local_creds(assistant),
+    };
+    let path = creds.ok().map(|creds| sealing::key_path(&creds)).filter(|p| p.exists());
     match path.map(|path| std::fs::remove_file(&path).map(|()| path)) {
         Some(Ok(path)) => println!("Deleted the seed of its encryption key, {}.", path.display()),
         Some(Err(e)) => println!("warning: the seed of its encryption key stays: {e}"),
