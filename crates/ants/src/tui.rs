@@ -22,6 +22,7 @@ mod markdown;
 mod model;
 mod nav;
 mod people;
+mod question;
 mod react;
 mod reads;
 mod search;

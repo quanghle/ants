@@ -223,6 +223,8 @@ pub enum To {
     Reply(ThreadId),
     /// Ask how long to keep the thread off home.
     Snooze(ThreadId),
+    /// The command bar, open on this text.
+    Bar(String),
     /// Not another view: something to do.
     Do(Action),
 }
@@ -775,6 +777,11 @@ impl Model {
             }
             To::Snooze(thread) => {
                 self.snooze(thread);
+                None
+            }
+            To::Bar(text) => {
+                self.bar.set_text(&text);
+                self.bar.focused = true;
                 None
             }
             To::Do(action @ Action::Run(..)) => {

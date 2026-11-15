@@ -28,7 +28,7 @@ use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
 use super::timeline::Call;
-use super::{approvals, markdown, react, work};
+use super::{approvals, markdown, question, react, work};
 use crate::live::History;
 use crate::thread::{Entry, Kind};
 
@@ -159,8 +159,13 @@ impl Page {
                     _ => None,
                 };
                 let pending = data.live.approvals.iter().filter(|r| r.thread_id == self.history.thread);
-                let oldest = pending.min_by_key(|r| r.requested_at)?;
+                let Some(oldest) = pending.min_by_key(|r| r.requested_at) else {
+                    return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
+                };
                 return Some(To::Ask(oldest.clone(), verdict));
+            }
+            Key::Char('1'..='9') => {
+                return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             Key::Char('s') => return Some(To::Interrupt(Intent::Steer, self.history.thread.clone())),
@@ -185,7 +190,7 @@ impl Page {
         } else {
             (area, None)
         };
-        let area = draw_cards(frame, area, model, thread, now);
+        let area = draw_cards(frame, area, model, thread, &self.history.entries, now);
         let width = usize::from(area.width.saturating_sub(2));
         let mut lines = vec![work::why(data, thread)];
         if let Some((line, at)) = data.live.progress_of(thread, width.saturating_sub(16)) {
@@ -309,28 +314,40 @@ impl Page {
 }
 
 /// Draw the cards of the tool requests of `thread` at the bottom of `area`, in at most half of it: the area left.
-fn draw_cards(frame: &mut Frame, area: Rect, model: &Model, thread: &ThreadId, now: DateTime<Utc>) -> Rect {
+fn draw_cards(
+    frame: &mut Frame,
+    area: Rect,
+    model: &Model,
+    thread: &ThreadId,
+    entries: &[Entry],
+    now: DateTime<Utc>,
+) -> Rect {
     let width = usize::from(area.width.saturating_sub(2));
     let cards = approvals::cards(&model.data, Some(thread), now);
+    let cards = cards.into_iter().enumerate().map(|(at, card)| {
+        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
+        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
+        (approvals::title(card), lines, style)
+    });
+    let questions = question::cards(&model.data, entries, now);
+    let questions = questions.iter().map(|card| (card.title(), card.lines(width), card.style()));
     let mut boxes = Vec::new();
     let mut height = 0;
-    for (at, card) in cards.into_iter().enumerate() {
-        let lines = approvals::lines(card, model.asking.as_ref(), at == 0, now, width);
+    for (title, lines, style) in cards.chain(questions) {
         let tall = u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2);
         if height + tall > area.height / 2 {
             break;
         }
         height += tall;
-        boxes.push((card, lines, tall));
+        boxes.push((title, lines, style, tall));
     }
     if boxes.is_empty() {
         return area;
     }
     let [rest, mut below] = Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(area);
-    for (card, lines, tall) in boxes {
+    for (title, lines, style, tall) in boxes {
         let [this, next] = Layout::vertical([Constraint::Length(tall), Constraint::Min(0)]).areas(below);
-        let style = if card.settled.is_some() { frame::dim() } else { Style::new().fg(Color::Yellow) };
-        let block = ratatui::widgets::Block::bordered().title(approvals::title(card)).border_style(style);
+        let block = ratatui::widgets::Block::bordered().title(title).border_style(style);
         frame.render_widget(Paragraph::new(lines).block(block), this);
         below = next;
     }

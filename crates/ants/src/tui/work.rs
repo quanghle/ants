@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use ants_proto::{ChannelId, EscalationReason, ThreadDone, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, EscalationReason, Question, ThreadDone, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -89,6 +89,16 @@ pub struct Said {
     pub to: UserId,
 }
 
+/// A question to the human no answer was read to yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    /// The id of the question's envelope, which an answer names.
+    pub id: Uuid,
+    pub at: DateTime<Utc>,
+    pub from: UserId,
+    pub question: Question,
+}
+
 /// A message to the human, in its inbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inboxed {
@@ -117,7 +127,7 @@ pub struct Fact {
     /// Who first messaged each user on it, in the order they were first messaged: who delegated to whom.
     pub asked: Vec<(UserId, UserId)>,
     /// The questions to the human no answer was read to yet.
-    questions: Vec<Uuid>,
+    questions: Vec<Asked>,
     /// The messages to the human.
     pub inbox: Vec<Inboxed>,
 }
@@ -159,12 +169,12 @@ impl Facts {
             _ => {}
         }
         if let Some(answer) = &entry.answer {
-            fact.questions.retain(|q| *q != answer.question);
+            fact.questions.retain(|q| q.id != answer.question);
         }
         if to(entry, me)
-            && let (Some(_), Some(id)) = (&entry.question, entry.id)
+            && let (Some(question), Some(id), Some(from)) = (&entry.question, entry.id, &entry.from)
         {
-            fact.questions.push(id);
+            fact.questions.push(Asked { id, at: entry.stored_at, from: from.clone(), question: question.clone() });
         }
         if to(entry, me)
             && let Some(from) = &entry.from
@@ -211,7 +221,12 @@ impl Data {
 
     /// Whether a question to the human on the thread has no answer yet.
     pub fn asks(&self, thread: &ThreadId) -> bool {
-        self.facts.get(thread).is_some_and(|f| !f.questions.is_empty())
+        self.question(thread).is_some()
+    }
+
+    /// The latest question to the human on the thread with no answer yet: the one the bar's `/answer` answers.
+    pub fn question(&self, thread: &ThreadId) -> Option<&Asked> {
+        self.facts.get(thread)?.questions.last()
     }
 
     /// Whether an ant answered the human on a thread the human owns and nobody marked done, and is done with it: the

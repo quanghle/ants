@@ -1,10 +1,10 @@
 //! Home, the triage queue: what waits on the human, one item per thread and reason (per tool request for approvals,
 //! as cards answered where they show, [`approvals`]), the most pressing reasons first and the oldest first within
-//! one, each with its one-key actions: answer, grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
+//! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
-//! Questions (ants-ofmi.21) and humans' messages (ants-ofmi.26) are to join the reasons.
+//! Humans' messages (ants-ofmi.26) are to join the reasons.
 
-use ants_proto::{ApprovalRequest, ThreadId, Verdict};
+use ants_proto::{ApprovalRequest, Question, ThreadId, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,6 +19,7 @@ use super::exec::Job;
 use super::frame::{self, ago};
 use super::interrupt::Intent;
 use super::model::{Action, Data, Key, Model, To};
+use super::question;
 use crate::thread::Kind;
 use crate::tools::State;
 
@@ -27,6 +28,8 @@ use crate::tools::State;
 pub enum Why {
     /// A tool request waits for a decision.
     Approval,
+    /// A question to the human waits for an answer.
+    Question,
     /// Escalated to a human, or a message given up on.
     Stuck,
     /// An unread post @mentioning the human.
@@ -39,6 +42,7 @@ impl Why {
     pub fn label(self) -> &'static str {
         match self {
             Self::Approval => "approve",
+            Self::Question => "question",
             Self::Stuck => "stuck",
             Self::Mention => "mention",
             Self::Finished => "finished",
@@ -49,6 +53,7 @@ impl Why {
     pub fn keys(self) -> &'static str {
         match self {
             Self::Approval => "a A r answer · z snooze",
+            Self::Question => "1-9 answer · d done · z snooze",
             Self::Stuck => "g grant · x cancel · d done · z snooze",
             Self::Mention => "r reply · d done · z snooze",
             Self::Finished => "f follow up · d mark done · z snooze",
@@ -60,13 +65,14 @@ impl Why {
         match self {
             Self::Approval => "Enter details",
             Self::Finished => "Enter review",
-            Self::Stuck | Self::Mention => "Enter open",
+            Self::Question | Self::Stuck | Self::Mention => "Enter open",
         }
     }
 
     pub fn color(self) -> Color {
         match self {
             Self::Approval => Color::Yellow,
+            Self::Question => Color::Cyan,
             Self::Stuck => Color::Red,
             Self::Mention => Color::Magenta,
             Self::Finished => Color::Green,
@@ -83,6 +89,8 @@ pub struct Item {
     pub text: String,
     /// The tool request of an approval, and how it was settled lately, if it was.
     pub request: Option<(ApprovalRequest, Option<State>)>,
+    /// The question asked.
+    pub question: Option<Question>,
 }
 
 /// What waits on the human at `now`.
@@ -97,11 +105,23 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
                 at: request.requested_at,
                 text: format!("{} asks to run {}: {}", request.ant, request.tool.kind, request.tool.title),
                 request: Some((request.clone(), card.settled.cloned())),
+                question: None,
             }
         })
         .collect();
-    let item = |why, thread: &ThreadId, at, text| Item { why, thread: thread.clone(), at, text, request: None };
+    let item = |why, thread: &ThreadId, at, text| Item {
+        why,
+        thread: thread.clone(),
+        at,
+        text,
+        request: None,
+        question: None,
+    };
     for thread in &data.live.order {
+        if let Some(asked) = data.question(thread) {
+            let text = format!("{}: {}", asked.from, asked.question.text);
+            items.push(Item { question: Some(asked.question.clone()), ..item(Why::Question, thread, asked.at, text) });
+        }
         if let Some(alert) = data.stuck(thread) {
             items.push(item(Why::Stuck, thread, alert.at, alert.text.clone()));
         }
@@ -167,6 +187,10 @@ impl Page {
             }
             Key::Char('a' | 'A') => return pending.map(|request| To::Ask(request, verdict)),
             Key::Char('r') if pending.is_some() => return pending.map(|request| To::Ask(request, verdict)),
+            Key::Char('1'..='9' | 'r') if selected.is_some_and(|i| i.question.is_some()) => {
+                let item = selected?;
+                return question::key(key, &item.thread, item.question.as_ref()?);
+            }
             Key::Char('r' | 'f') => return thread().map(To::Reply),
             Key::Char('g') => {
                 let stuck = selected.filter(|i| i.why == Why::Stuck)?;
@@ -214,6 +238,9 @@ impl Page {
                     ]),
                     Line::styled(format!("         {}", crate::excerpt(&i.text, 160)), frame::dim()),
                 ];
+                if let Some(question) = &i.question {
+                    lines.push(Line::raw(format!("         {}", crate::excerpt(&question::options(question), 160))));
+                }
                 if i.request.is_none() {
                     lines.push(Line::styled(format!("         {} · {}", i.why.keys(), i.why.enter()), frame::dim()));
                 }
@@ -314,6 +341,37 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let cells: Vec<&str> = buffer.content.iter().map(ratatui::buffer::Cell::symbol).collect();
         cells.chunks(140).map(|row| row.concat().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_question_comes_after_the_approvals_and_answers_by_number_or_through_the_bar() {
+        use crate::tui::exec::Job;
+
+        let (asked, stuck) = (ThreadId::generate(), ThreadId::generate());
+        let mut m = model();
+        let mut question = message(2, &asked, "dev-b", "alice", "Which retry policy?");
+        let options = ["exponential".to_owned(), "fixed 5s".to_owned()];
+        question.question = Some(ants_proto::Question::new("Which retry policy?", &options, true).unwrap());
+        m.stored(vec![escalation(1, &stuck, "dev-a", "alice"), question.clone()], at(2));
+        let whys: Vec<Why> = items(&m.data, at(3)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Question, Why::Stuck]);
+        let screen = shown(&m, at(3));
+        assert!(screen.contains("question Which retry policy?"), "{screen}");
+        assert!(screen.contains("1 exponential  2 fixed 5s  or r types an answer"), "{screen}");
+        assert!(screen.contains("1-9 answer · d done · z snooze · Enter open"), "{screen}");
+
+        assert_eq!(m.key(Key::Char('3'), at(3)), None, "no third option");
+        let job = Job::Answer { thread: asked.clone(), choice: ants_proto::Choice::Option(2) };
+        assert_eq!(m.key(Key::Char('2'), at(3)), Some(Action::Run(job, String::new())));
+        assert_eq!(m.key(Key::Char('r'), at(3)), None);
+        assert!(m.bar.focused && m.bar.text() == "/answer ", "r types an answer in the bar");
+        m.key(Key::Esc, at(3));
+
+        let mut answer = message(3, &asked, "alice", "dev-b", "fixed 5s");
+        answer.answer = Some(ants_proto::Answer { question: question.id.unwrap(), option: Some(2) });
+        m.stored(vec![answer], at(3));
+        let whys: Vec<Why> = items(&m.data, at(4)).into_iter().map(|i| i.why).collect();
+        assert_eq!(whys, [Why::Stuck], "answered");
     }
 
     #[test]

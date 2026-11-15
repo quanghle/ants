@@ -140,6 +140,7 @@ const HELP: &[(&str, &str)] = &[
     ("y", "in a thread: copy the selected message"),
     ("p m e d", "in a thread: pin, mute, archive, mark done (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
+    ("1-9 r", "on a question: answer with that option, or type an answer"),
     ("g r f x d z", "on home: grant turns, reply, follow up, cancel, mark done, snooze"),
     ("+", "in a thread: react to the selected message, or take a reaction back"),
     ("t", "in a thread: its delegation tree"),
@@ -148,8 +149,7 @@ const HELP: &[(&str, &str)] = &[
     ("x y", "in a delegation tree: cancel every prompt in the selected subtree"),
     ("n", "with a person: write a message, starting a thread"),
     ("/", "the bar on /search, as in: /search deploy from:dev-a"),
-    ("R", "read everything again"),
-    ("?", "this help"),
+    ("R ?", "read everything again, this help"),
     ("q Ctrl-C", "quit"),
 ];
 
