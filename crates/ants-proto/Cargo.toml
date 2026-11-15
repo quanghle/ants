@@ -10,14 +10,16 @@ description = "The ants wire contract: message envelope, subjects, stream and bu
 
 [dependencies]
 chrono = { workspace = true, features = ["clock", "std", "serde"] }
+data-encoding.workspace = true
+nkeys = "0.4.5"
 serde.workspace = true
+serde_json.workspace = true
 thiserror = "2.0.21"
 uuid = { workspace = true, features = ["v7", "serde"] }
 
 [dev-dependencies]
 insta = { version = "1.49.0", default-features = false, features = ["json"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-serde_json.workspace = true
 
 [lints]
 workspace = true
