@@ -39,7 +39,7 @@ async fn a_tldr_is_asked_kept_while_current_and_its_thread_left_out() {
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let (_, js) = server.connect_as(&alice, Role::Human).await;
     bus::ensure_stream(&js).await.unwrap();
-    js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+    js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
     let (ant, ant_js) = server.connect(&dev_a).await;
     let work = Envelope::new(alice.clone(), dev_a.clone(), "fix the build");
     bus::publish(&js, &work).await.unwrap();

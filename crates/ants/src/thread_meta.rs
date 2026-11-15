@@ -1,23 +1,22 @@
-//! What humans make of threads, in [`THREADS_BUCKET`]: a title and a TL;DR ([`ThreadSummary`]) per thread, shared by
-//! every human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by direct gets and plain
-//! publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices marking at once lose
-//! nothing.
+//! What humans make of threads, in [`THREADS_BUCKET`]: a title, a TL;DR ([`ThreadSummary`]) and a done state per
+//! thread, each shared by every human, and each human's pinned and archived threads ([`ThreadMarks`]), shared by its devices. Read and written by
+//! direct gets and plain publishes ([`DirectKv`]); the marks, one entry per human, with compare-and-set, so devices
+//! marking at once lose nothing.
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 use std::time::Duration;
 
 use ants_daemon::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadId, ThreadMarks, ThreadSummary, ThreadTitle, UserId, marks_key,
-    summary_key, title_key,
+    JsDomain, Mark, STREAM, THREADS_BUCKET, ThreadDone, ThreadId, ThreadMarks, ThreadSummary, ThreadTitle, UserId,
+    done_key, marks_key, summary_key, title_key,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
-use serde::de::DeserializeOwned;
 
 use crate::thread::{self, Entry, Pick};
 
@@ -30,6 +29,9 @@ const CONCURRENT: usize = 16;
 /// How long a title or mark stays at least, even on a thread with no message in the stream: a message may reach the
 /// stream that late, out of a leaf's outbox, and a title or mark may come before it.
 pub const KEPT: Duration = ants_daemon::bus::RETENTION;
+/// How long the delete marker of a pruned title or a cleared done state lasts: the shortest per-message TTL the stream
+/// takes, as nothing needs it.
+const PRUNED_MARKER: Duration = Duration::from_secs(1);
 
 /// The direct get subject of `human`'s marks, which only `human`'s credentials may publish.
 fn marks_right(human: &UserId) -> String {
@@ -41,16 +43,19 @@ pub fn titles_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.title.*")
 }
 
-/// The direct get subject of every TL;DR, which credentials older than permissions version 2 lack.
+/// The direct get subject of every done state, which credentials issued before permissions version 2 lack.
+fn done_right() -> String {
+    format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.done.*")
+}
+
+/// The direct get subject of every TL;DR, which credentials issued before permissions version 2 lack.
 fn summaries_right() -> String {
     format!("$JS.API.DIRECT.GET.KV_{THREADS_BUCKET}.$KV.{THREADS_BUCKET}.summary.*")
 }
 
-/// Whether the lack of [`summaries_right`] was warned of.
-static NO_SUMMARIES: AtomicBool = AtomicBool::new(false);
-
-/// The titles and the marks of the CLI's human, unless its credentials are no human's: a request they deny would only
-/// time out. With credentials lacking [`summaries_right`], TL;DRs are neither read nor stored ([`Meta::summary`]).
+/// The titles, TL;DRs, done states and the marks of the CLI's human, unless its credentials are no human's: a request
+/// they deny would only time out. Credentials that may not read done states or TL;DRs leave them out ([`Meta::done`],
+/// [`Meta::summary`]).
 pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Meta> {
     let me = &nats.me.id;
     if !nats.rights.may_publish(&marks_right(me)) {
@@ -60,21 +65,32 @@ pub async fn open(nats: &crate::Nats<'_>, js: &jetstream::Context) -> Result<Met
         );
     }
     let mut meta = Meta::open(js, nats.domain, me).await?;
-    meta.summaries = nats.rights.may_publish(&summaries_right());
+    meta.done_right = nats.rights.may_publish(&done_right());
+    meta.summaries_right = nats.rights.may_publish(&summaries_right());
     Ok(meta)
 }
 
-/// The title of `thread`, whose last message read is `last`, and how the CLI's human marked it, idle for
-/// `auto_archive` included; none on any error, warned of. A thread that never had a title gets the one an ant
-/// `suggested`, if any ([`Meta::adopt_title`]).
+/// What humans made of a thread ([`of_or_none`]).
+#[derive(Debug, Default)]
+pub struct About {
+    pub title: Option<ThreadTitle>,
+    /// How the CLI's human marked it.
+    pub mark: Option<Mark>,
+    /// Its done state, while it holds.
+    pub done: Option<ThreadDone>,
+}
+
+/// The title of `thread`, whose entries read are `entries`, how the CLI's human marked it, idle for `auto_archive`
+/// included, and its done state while it holds; none on any error, warned of. A thread that never had a title gets
+/// the one an ant `suggested`, if any ([`Meta::adopt_title`]).
 pub async fn of_or_none(
     nats: &crate::Nats<'_>,
     js: &jetstream::Context,
     thread: &ThreadId,
-    last: Option<&Entry>,
+    entries: &[Entry],
     suggested: Option<(&UserId, &str)>,
     auto_archive: Option<Duration>,
-) -> (Option<ThreadTitle>, Option<Mark>) {
+) -> About {
     let read = async {
         let meta = open(nats, js).await?;
         let mut title = meta.title(thread).await?;
@@ -85,15 +101,16 @@ pub async fn of_or_none(
             });
         }
         let marks = meta.marks().await?;
-        let mark = match last {
+        let mark = match entries.last() {
             Some(e) => marks.mark_at(thread, e.seq, e.stored_at, thread::idle_before(auto_archive, Utc::now())),
             None => marks.mark(thread, 0),
         };
-        anyhow::Ok((title, mark))
+        let done = meta.done(thread).await?.filter(|d| d.holds(thread::last_reopening(entries)));
+        anyhow::Ok(About { title, mark, done })
     };
     read.await.unwrap_or_else(|e| {
-        tracing::warn!("not showing the title, pinned or archived: {e:#}");
-        (None, None)
+        tracing::warn!("not showing the title, pinned, archived or done: {e:#}");
+        About::default()
     })
 }
 
@@ -185,6 +202,47 @@ pub async fn mark(nats: &crate::Nats<'_>, pick: Pick, marking: Marking) -> Resul
     Ok(())
 }
 
+/// `ants thread done|undone THREAD`: mark the thread `pick` picks done, or not, for every human, as of the last
+/// message, channel post or note stored on it.
+pub async fn done(nats: &crate::Nats<'_>, pick: Pick, done: bool) -> Result<()> {
+    let js = thread::connect(nats).await?;
+    let thread = &pick.resolve(&js, &nats.me).await?;
+    let meta = open(nats, &js).await?;
+    let last = last_reopening(&js, thread).await?;
+    let line = match (done, mark_done(&meta, thread, done, last).await?) {
+        (true, true) => "done",
+        (true, false) => "already done",
+        (false, true) => "no longer done",
+        (false, false) => "not done",
+    };
+    println!("thread {thread} {line}");
+    Ok(())
+}
+
+/// Mark `thread`, the last message, channel post or note stored on which has sequence `last`, done as the human of
+/// `meta`, or with `done` false clear its done state. Whether that changed anything: marking a thread done while it is
+/// does not, nor does clearing the state of a thread not done, or reopened by a message since.
+pub async fn mark_done(meta: &Meta, thread: &ThreadId, done: bool, last: u64) -> Result<bool> {
+    if done {
+        meta.set_done(thread, last).await
+    } else {
+        Ok(meta.clear_done(thread).await?.is_some_and(|had| had.holds(last)))
+    }
+}
+
+/// The sequence of the last message, channel post or note stored on `thread` ([`thread::Kind::reopens`]), reading from
+/// the thread's start when its id is time-ordered, else from all the stream keeps; 0 for none.
+pub async fn last_reopening(js: &jetstream::Context, thread: &ThreadId) -> Result<u64> {
+    let mut last = 0;
+    thread::scan(js, thread::show_start(thread, None), |entry| {
+        if entry.thread_id == *thread && entry.kind.reopens() {
+            last = last.max(entry.seq);
+        }
+    })
+    .await?;
+    Ok(last)
+}
+
 /// The sequence of the last message the stream stored: a thread archived now has new messages once it has one stored
 /// after it.
 pub async fn last_sequence(js: &jetstream::Context) -> Result<u64> {
@@ -192,35 +250,42 @@ pub async fn last_sequence(js: &jetstream::Context) -> Result<u64> {
     Ok(stream.cached_info().state.last_sequence)
 }
 
-/// The titles, the TL;DRs and the marks of one human.
+/// The titles, the TL;DRs, the done states and the marks of one human.
 pub struct Meta {
     kv: DirectKv,
     human: UserId,
-    /// Whether the human's credentials may read and store TL;DRs.
-    summaries: bool,
+    /// Whether its credentials may read and write done states.
+    done_right: bool,
+    /// Whether its credentials may read and write TL;DRs.
+    summaries_right: bool,
 }
 
 impl Meta {
     /// Those of `human`, through `js`, made for JetStream domain `js_domain`.
     pub async fn open(js: &jetstream::Context, js_domain: Option<&JsDomain>, human: &UserId) -> Result<Self> {
-        Ok(Self { kv: DirectKv::new(js, js_domain, THREADS_BUCKET).await?, human: human.clone(), summaries: true })
+        let kv = DirectKv::new(js, js_domain, THREADS_BUCKET).await?;
+        Ok(Self { kv, human: human.clone(), done_right: true, summaries_right: true })
     }
 
-    /// Whether TL;DRs are read and stored: the human's credentials may. Warns once when not.
-    fn keeps_summaries(&self) -> bool {
-        if !self.summaries && !NO_SUMMARIES.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                "the credentials of {} predate permissions version 2 and may not keep TL;DRs of threads: going on \
-                 without them until renewed (`ants renew`)",
-                self.human
-            );
+    /// Whether the credentials may read and write TL;DRs; warns once per process when they may not.
+    fn may_summarise(&self) -> bool {
+        static WARNED: Once = Once::new();
+        if !self.summaries_right {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "the credentials of {} predate TL;DRs of threads (permissions version 2): going on without \
+                     keeping them; `ants renew` renews them",
+                    self.human
+                );
+            });
         }
-        self.summaries
+        self.summaries_right
     }
 
-    /// The TL;DR of `thread`, if it has one and TL;DRs are kept. An entry naming another thread than its key is none.
+    /// The TL;DR of `thread`, if it has one and the credentials may read it. An entry naming another thread than its
+    /// key is none.
     pub async fn summary(&self, thread: &ThreadId) -> Result<Option<ThreadSummary>> {
-        if !self.keeps_summaries() {
+        if !self.may_summarise() {
             return Ok(None);
         }
         match self.kv.lookup(summary_key(thread)).await.context("reading the TL;DR")? {
@@ -232,10 +297,10 @@ impl Meta {
         }
     }
 
-    /// Store `summary` as its thread's TL;DR for every human, in place of any it had, if TL;DRs are kept. Whether it
-    /// did.
+    /// Store `summary` as its thread's TL;DR for every human, in place of any it had, if the credentials may. Whether
+    /// it did.
     pub async fn put_summary(&self, summary: &ThreadSummary) -> Result<bool> {
-        if !self.keeps_summaries() {
+        if !self.may_summarise() {
             return Ok(false);
         }
         let key = summary_key(&summary.thread_id);
@@ -290,7 +355,8 @@ impl Meta {
 
     /// Title `thread` `text` as `by`, the ant that suggested it ([`ants_proto::Envelope::title`]), only if the thread
     /// never had a title: one a human set, renamed or cleared stays, compare-and-set keeping it from one set
-    /// meanwhile. The title stored, if any.
+    /// meanwhile. A cleared title's delete marker counts until [`Meta::prune`] drops it with its thread. The title
+    /// stored, if any.
     pub async fn adopt_title(&self, thread: &ThreadId, text: &str, by: &UserId) -> Result<Option<ThreadTitle>> {
         match self.kv.lookup_last(title_key(thread)).await.context("reading the title")? {
             (Lookup::NoBucket, _) => bail!(MISSING),
@@ -301,6 +367,93 @@ impl Meta {
         let value = serde_json::to_vec(&title)?;
         let stored = self.kv.update(title_key(thread), value, 0).await.context("storing the suggested title")?;
         Ok(stored.then_some(title))
+    }
+
+    /// Whether the credentials may read and write done states; warns once per process when they may not.
+    fn may_done(&self) -> bool {
+        static WARNED: Once = Once::new();
+        if !self.done_right {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "the credentials of {} predate done states (permissions version 2): not showing threads done; \
+                     `ants renew` renews them",
+                    self.human
+                );
+            });
+        }
+        self.done_right
+    }
+
+    /// The done state of `thread`, if any, whether or not a message since reopened it ([`ThreadDone::holds`]); none
+    /// when the credentials may not read it. An entry naming another thread than its key is none.
+    pub async fn done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
+        if !self.may_done() {
+            return Ok(None);
+        }
+        match self.kv.lookup(done_key(thread)).await.context("reading the done state")? {
+            Lookup::NoBucket => bail!(MISSING),
+            Lookup::NoValue => Ok(None),
+            Lookup::Value(value) => {
+                Ok(serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *thread))
+            }
+        }
+    }
+
+    /// The done states of those of `threads` that have one, as [`Meta::done`] reads them.
+    pub async fn dones<'a>(
+        &self,
+        threads: impl IntoIterator<Item = &'a ThreadId>,
+    ) -> Result<HashMap<ThreadId, ThreadDone>> {
+        if !self.may_done() {
+            return Ok(HashMap::new());
+        }
+        let reads =
+            futures::stream::iter(threads).map(async |thread| self.done(thread).await).buffer_unordered(CONCURRENT);
+        let read: Vec<Result<Option<ThreadDone>>> = reads.collect().await;
+        let mut dones = HashMap::new();
+        for done in read {
+            if let Some(done) = done? {
+                dones.insert(done.thread_id.clone(), done);
+            }
+        }
+        Ok(dones)
+    }
+
+    /// Mark `thread` done as the human, as of `after`, the sequence of the last message, channel post or note stored
+    /// on it the human saw. Whether that changed anything: a thread done as of `after` or later stays as it is.
+    pub async fn set_done(&self, thread: &ThreadId, after: u64) -> Result<bool> {
+        self.require_done()?;
+        if self.done(thread).await?.is_some_and(|had| had.holds(after)) {
+            return Ok(false);
+        }
+        let done = ThreadDone::new(thread.clone(), self.human.clone(), after);
+        self.kv.put(done_key(thread), serde_json::to_vec(&done)?).await.context("storing the done state")?;
+        Ok(true)
+    }
+
+    /// Clear the done state of `thread`, leaving a delete marker lasting [`PRUNED_MARKER`], as no reader needs it: a
+    /// state set again meanwhile stays. The state it had, if any, whether or not it still held.
+    pub async fn clear_done(&self, thread: &ThreadId) -> Result<Option<ThreadDone>> {
+        self.require_done()?;
+        let key = done_key(thread);
+        let (found, last) = self.kv.lookup_last(&key).await.context("reading the done state")?;
+        let value = match found {
+            Lookup::NoBucket => bail!(MISSING),
+            Lookup::NoValue => return Ok(None),
+            Lookup::Value(value) => value,
+        };
+        self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await.context("clearing the done state")?;
+        Ok(serde_json::from_slice::<ThreadDone>(&value).ok().filter(|d| d.thread_id == *thread))
+    }
+
+    fn require_done(&self) -> Result<()> {
+        if !self.done_right {
+            bail!(
+                "the credentials of {} predate done states (permissions version 2): `ants renew` renews them",
+                self.human
+            );
+        }
+        Ok(())
     }
 
     /// The human's marks, and the stream sequence of their entry (0 for none).
@@ -324,10 +477,10 @@ impl Meta {
     }
 
     /// Forget what was said of the threads `gone` says have no message left in the stream more than [`KEPT`] ago:
-    /// the human's marks, which `marks` are as last read, and with `titles`, every title and TL;DR; and the keeps of
-    /// threads `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A mark, title
-    /// or TL;DR set again meanwhile stays: marks change by compare-and-set and a title or TL;DR is deleted only if
-    /// unchanged since read. How many marks, and titles and TL;DRs, it forgot.
+    /// the human's marks, which `marks` are as last read, and with `titles`, every title, TL;DR and done state; and
+    /// the keeps of threads `active` says had a message stored at or after the given time ([`ThreadMarks::prune`]). A
+    /// mark, title, TL;DR or done state set again meanwhile stays: marks change by compare-and-set and the others are
+    /// deleted only if unchanged since read. How many marks, and titles, TL;DRs and done states, it forgot.
     pub async fn prune(
         &self,
         marks: &ThreadMarks,
@@ -346,33 +499,56 @@ impl Meta {
             .await?;
             marked = forgot.get();
         }
-        let mut titled = 0;
+        let mut shared = 0;
         if titles {
-            titled += self.prune_set::<ThreadTitle>("title", before, &gone, |t| t.at).await?;
-            if self.summaries {
-                titled += self.prune_set::<ThreadSummary>("summary", before, &gone, |t| t.at).await?;
+            shared += self.prune_titles(before, &gone).await?;
+            if self.done_right {
+                shared += self.prune_dones(before, &gone).await?;
+            }
+            if self.summaries_right {
+                shared += self.prune_summaries(before, &gone).await?;
             }
         }
-        Ok((marked, titled))
+        Ok((marked, shared))
     }
 
-    /// Delete the entries under `kind.THREAD` (titles or TL;DRs) set (`at`) before `before` of the threads `gone` says
-    /// have no message left. How many it deleted.
-    async fn prune_set<T: DeserializeOwned>(
+    async fn prune_titles(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("title", before, gone, |v| Some(serde_json::from_slice::<ThreadTitle>(v).ok()?.at)).await
+    }
+
+    async fn prune_dones(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("done", before, gone, |v| Some(serde_json::from_slice::<ThreadDone>(v).ok()?.at)).await
+    }
+
+    async fn prune_summaries(&self, before: DateTime<Utc>, gone: &impl Fn(&ThreadId) -> bool) -> Result<usize> {
+        self.prune_shared("summary", before, gone, |v| Some(serde_json::from_slice::<ThreadSummary>(v).ok()?.at)).await
+    }
+
+    /// Drop, of the threads `gone` says have no message left, the entries under `prefix` (titles, TL;DRs or done
+    /// states) set before `before`, as `at` reads the time an entry was set, and the delete markers of those cleared
+    /// before then, each replaced by a delete marker lasting [`PRUNED_MARKER`] if unchanged since read: a cleared
+    /// title's marker keeps an ant's suggestion from replacing it ([`Meta::adopt_title`]) only while its thread has
+    /// messages. How many it dropped.
+    async fn prune_shared(
         &self,
-        kind: &str,
+        prefix: &str,
         before: DateTime<Utc>,
         gone: &impl Fn(&ThreadId) -> bool,
-        at: impl Fn(&T) -> DateTime<Utc>,
+        at: impl Fn(&[u8]) -> Option<DateTime<Utc>>,
     ) -> Result<usize> {
-        let keys = self.kv.keys(&format!("{kind}.*")).await.with_context(|| format!("listing the {kind} entries"))?;
-        let threads = keys.iter().filter_map(|key| key.strip_prefix(kind)?.strip_prefix('.')?.parse::<ThreadId>().ok());
+        let keys = self.kv.keys(&format!("{prefix}.*")).await.with_context(|| format!("listing the {prefix} keys"))?;
+        let threads =
+            keys.iter().filter_map(|key| key.strip_prefix(prefix)?.strip_prefix('.')?.parse::<ThreadId>().ok());
         let deletes = futures::stream::iter(threads.filter(|t| gone(t)))
             .map(async |thread| {
-                let key = format!("{kind}.{thread}");
-                let (Lookup::Value(value), last) = self.kv.lookup_last(&key).await? else { return Ok(false) };
-                match serde_json::from_slice::<T>(&value) {
-                    Ok(set) if at(&set) < before => self.kv.delete_expecting(&key, last).await,
+                let key = format!("{prefix}.{thread}");
+                let set = match self.kv.lookup_stored(&key).await? {
+                    (Lookup::Value(value), last, _) => at(&value).map(|at| (at, last)),
+                    (Lookup::NoValue, last, Some(cleared)) => Some((cleared.into(), last)),
+                    _ => None,
+                };
+                match set {
+                    Some((at, last)) if at < before => self.kv.delete_expecting(&key, last, Some(PRUNED_MARKER)).await,
                     _ => Ok(false),
                 }
             })
@@ -380,7 +556,7 @@ impl Meta {
         let deleted: Vec<Result<bool>> = deletes.collect().await;
         let mut count = 0;
         for deleted in deleted {
-            count += usize::from(deleted.with_context(|| format!("deleting a {kind} entry"))?);
+            count += usize::from(deleted.with_context(|| format!("deleting a {prefix} key"))?);
         }
         Ok(count)
     }
@@ -425,7 +601,7 @@ mod tests {
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
-        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let ask = Envelope::new(alice.clone(), dev_a.clone(), "build it");
         let thread = &ask.thread_id;
@@ -472,12 +648,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_thread_done_for_every_human_reopens_once_a_message_is_stored_on_it() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, bob, dev_a) =
+            ("alice".parse::<UserId>().unwrap(), "bob".parse().unwrap(), "dev-a".parse().unwrap());
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        let (_, b_js) = server.connect_as(&bob, Role::Human).await;
+        ants_daemon::bus::ensure_stream(&js).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        let (meta, bob_meta) =
+            (Meta::open(&js, None, &alice).await.unwrap(), Meta::open(&b_js, None, &bob).await.unwrap());
+        let ask = Envelope::new(alice.clone(), dev_a, "build it");
+        let thread = &ask.thread_id;
+        let store = async |envelope: &Envelope| {
+            let payload = serde_json::to_vec(envelope).unwrap();
+            js.publish(envelope.subject(), payload.into()).await.unwrap().await.unwrap();
+        };
+        store(&ask).await;
+
+        let last = last_reopening(&js, thread).await.unwrap();
+        assert!(last > 0);
+        assert!(mark_done(&meta, thread, true, last).await.unwrap());
+        assert!(!mark_done(&bob_meta, thread, true, last).await.unwrap(), "done already, for bob too");
+        let done = bob_meta.done(thread).await.unwrap().unwrap();
+        assert_eq!((&done.by, done.after), (&alice, last));
+        assert!(meta.dones([thread, &ThreadId::generate()]).await.unwrap().contains_key(thread));
+
+        store(&ask.reply(ask.to.clone(), "built", Role::Human).unwrap()).await;
+        let later = last_reopening(&js, thread).await.unwrap();
+        assert!(!meta.done(thread).await.unwrap().unwrap().holds(later), "a reply reopens it");
+        assert!(!mark_done(&meta, thread, false, later).await.unwrap(), "reopened: nothing to clear");
+        assert_eq!(meta.done(thread).await.unwrap(), None, "the stale state is gone though");
+        assert!(mark_done(&bob_meta, thread, true, later).await.unwrap());
+        assert!(mark_done(&meta, thread, false, later).await.unwrap(), "alice clears bob's");
+
+        let mut old = Meta::open(&js, None, &alice).await.unwrap();
+        old.done_right = false;
+        assert!(mark_done(&bob_meta, thread, true, later).await.unwrap());
+        assert_eq!(old.done(thread).await.unwrap(), None, "credentials without the right see no done state");
+        assert!(old.dones([thread]).await.unwrap().is_empty());
+        assert!(old.set_done(thread, later).await.is_err() && old.clear_done(thread).await.is_err());
+    }
+
+    #[tokio::test]
     async fn marks_and_titles_of_threads_with_no_message_left_are_forgotten_once_old() {
         let Some(server) = crate::auth::tests::Server::start() else { return };
         let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
         let (_, js) = server.connect_as(&alice, Role::Human).await;
         ants_daemon::bus::ensure_stream(&js).await.unwrap();
-        js.create_key_value(ants_daemon::hub::threads_config()).await.unwrap();
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
         let meta = Meta::open(&js, None, &alice).await.unwrap();
         let (gone, alive, fresh, renamed) = (made_ago(40), made_ago(40), made_ago(40), made_ago(40));
         let unordered: ThreadId = "deploy-1".parse().unwrap();
@@ -490,6 +709,10 @@ mod tests {
         };
         for thread in [&gone, &alive, &renamed, &unordered] {
             meta.kv.put(title_key(thread), old_title(thread)).await.unwrap();
+        }
+        for thread in [&gone, &alive] {
+            let done = ThreadDone { at: long_ago, ..ThreadDone::new(thread.clone(), alice.clone(), 0) };
+            meta.kv.put(done_key(thread), serde_json::to_vec(&done).unwrap()).await.unwrap();
         }
         meta.set_title(&fresh, "new").await.unwrap();
         meta.change_marks(|m| {
@@ -512,7 +735,8 @@ mod tests {
         let (last, revision) = meta.kv.lookup_last(title_key(&renamed)).await.unwrap();
         assert!(matches!(last, Lookup::Value(_)));
         meta.set_title(&renamed, "renamed meanwhile").await.unwrap();
-        assert!(!meta.kv.delete_expecting(title_key(&renamed), revision).await.unwrap(), "a title set again stays");
+        let deleted = meta.kv.delete_expecting(title_key(&renamed), revision, None).await.unwrap();
+        assert!(!deleted, "a title set again stays");
 
         let start = crate::thread::window(Duration::from_hours(50 * 24));
         prune(&meta, &meta.marks().await.unwrap(), &start, &present(start).await).await;
@@ -522,6 +746,8 @@ mod tests {
         assert!(marks.archived.is_empty(), "so does an old archive");
         assert!(marks.kept.is_empty(), "and keeps of threads gone or with a message since");
         assert_eq!(meta.title(&gone).await.unwrap(), None, "and an old title");
+        assert_eq!(meta.done(&gone).await.unwrap(), None, "and an old done state");
+        assert!(meta.done(&alive).await.unwrap().is_some(), "a thread with a message keeps its done state");
         assert_eq!(meta.title(&alive).await.unwrap().unwrap().title, "old", "a thread with a message keeps its title");
         assert_eq!(meta.title(&fresh).await.unwrap().unwrap().title, "new", "a recent title stays");
         assert_eq!(meta.title(&renamed).await.unwrap().unwrap().title, "renamed meanwhile");
@@ -535,5 +761,43 @@ mod tests {
         assert_eq!(meta.title(&unordered).await.unwrap(), None, "a read of everything kept does");
         let pinned: Vec<ThreadId> = meta.marks().await.unwrap().pinned.into_keys().collect();
         assert_eq!(HashSet::from_iter(pinned), HashSet::from([alive, fresh]));
+    }
+
+    /// A cleared title's delete marker keeps out an ant's suggestion while its thread has messages, and goes with the
+    /// thread, as a pruned title's does, leaving no key behind.
+    #[tokio::test]
+    async fn the_markers_of_cleared_and_pruned_titles_go_with_their_threads() {
+        let Some(server) = crate::auth::tests::Server::start() else { return };
+        let (alice, dev_a) = ("alice".parse::<UserId>().unwrap(), "dev-a".parse::<UserId>().unwrap());
+        let (_, js) = server.connect_as(&alice, Role::Human).await;
+        js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();
+        let meta = Meta::open(&js, None, &alice).await.unwrap();
+        let (cleared, titled, alive) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        for thread in [&cleared, &titled, &alive] {
+            meta.set_title(thread, "Release 1.2").await.unwrap();
+        }
+        meta.clear_title(&cleared).await.unwrap();
+        meta.clear_title(&alive).await.unwrap();
+        assert_eq!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap(), None, "the clear wins");
+
+        let gone = |thread: &ThreadId| *thread != alive;
+        assert_eq!(meta.prune_titles(Utc::now() - KEPT, &gone).await.unwrap(), 0, "recent ones stay");
+        let later = Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(meta.prune_titles(later, &gone).await.unwrap(), 2);
+        assert_eq!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap(), None, "a marker for now");
+        let left = [title_key(&alive)];
+        for _ in 0..100 {
+            if meta.kv.keys("title.*").await.unwrap() == left {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(meta.kv.keys("title.*").await.unwrap(), left, "the markers of threads gone expire");
+        assert!(meta.adopt_title(&cleared, "Fix the build", &dev_a).await.unwrap().is_some());
+        assert_eq!(
+            meta.adopt_title(&alive, "Fix the build", &dev_a).await.unwrap(),
+            None,
+            "a live thread's clear wins"
+        );
     }
 }

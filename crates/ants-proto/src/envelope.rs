@@ -79,9 +79,9 @@ pub struct Envelope {
     pub mention: Option<Mention>,
     /// The title the sending ant suggests for the thread, as its MCP tool suggest_thread_title took it: a trimmed line
     /// of 1 to [`MAX_TITLE`] characters ([`ThreadTitle::new`]). A human's CLI reading it on a thread whose
-    /// [`title_key`] never had an entry in [`THREADS_BUCKET`] stores it there by the sender, so a title a human set or
-    /// cleared always wins. The subject pins the sender, so only an ant that messaged on the thread suggests its
-    /// title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    /// [`title_key`] has no entry in [`THREADS_BUCKET`], not even the delete marker a cleared title leaves until its
+    /// thread is gone, stores it there by the sender, so a title a human set or cleared wins. The subject pins the
+    /// sender, so only an ant that messaged on the thread suggests its title. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// A human's request for a summary of the entries the text carries ([`SummaryRequest`]), or, on an ant's reply to
@@ -90,6 +90,13 @@ pub struct Envelope {
     /// either as an ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRequest>,
+    /// A human's message steering the ant on the thread, as `ants ask --steer` sends it: when the ant runs a prompt
+    /// on the thread, the recipient's daemon cancels it and prompts the same session with this message next, ahead of
+    /// the messages waiting there. Honoured only from a human ([`Envelope::sender_role`]) to an ant; any other, a
+    /// reader that does not know the field, or a daemon with no prompt running on the thread, handles it as an
+    /// ordinary message. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steer: bool,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -175,8 +182,15 @@ impl Envelope {
             mention: None,
             title: None,
             summary: None,
+            steer: false,
             sent_at: Utc::now(),
         }
+    }
+
+    /// The envelope steering its recipient ([`Envelope::steer`]).
+    #[must_use]
+    pub fn steering(self) -> Self {
+        Self { steer: true, ..self }
     }
 
     /// The envelope with `owner` as the human who started its thread.
@@ -303,6 +317,7 @@ impl Envelope {
             mention: None,
             title: None,
             summary: None,
+            steer: false,
             sent_at: Utc::now(),
         })
     }
@@ -335,6 +350,10 @@ pub struct NotesPost {
     pub text: String,
     /// Turns left in the notes after this post.
     pub turn_budget: u32,
+    /// The title the posting ant suggests for the thread, as [`Envelope::title`]: an ant's reply posted to the notes
+    /// carries the one its MCP tool suggest_thread_title took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -347,6 +366,7 @@ impl NotesPost {
             from,
             text: text.into(),
             turn_budget: DEFAULT_TURN_BUDGET,
+            title: None,
             sent_at: Utc::now(),
         }
     }
@@ -539,6 +559,18 @@ mod tests {
         let json = serde_json::to_string(&owned).unwrap();
         assert!(json.contains(r#""owner":"alice""#), "{json}");
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), owned);
+    }
+
+    #[test]
+    fn a_steer_is_left_out_when_unset_and_never_carried_on() {
+        let plain = Envelope::new(p("alice"), p("dev-a"), "go left");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("steer"));
+        let steer = plain.steering();
+        let json = serde_json::to_string(&steer).unwrap();
+        assert!(json.contains(r#""steer":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), steer);
+        assert!(!steer.reply(p("dev-a"), "ok", Role::Human).unwrap().steer);
+        assert!(!steer.follow_up(p("dev-a"), p("dev-b"), "x").steer);
     }
 
     #[test]

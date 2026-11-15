@@ -1,4 +1,4 @@
-//! `ants thread`: list, show, search, title, pin, archive, mute and summarise threads.
+//! `ants thread`: list, show, search, title, pin, archive, mark done, mute and summarise threads.
 
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use crate::{Nats, completions, quiet, search, summary, thread, thread_meta};
 #[derive(Subcommand, Debug)]
 pub(crate) enum ThreadCommand {
     /// List the threads with messages stored within --since, one row each: id, owner, users and channels, first and
-    /// last time, messages, pinned or archived and title when any is, and the first line of the first message; the
+    /// last time, messages, pinned, archived or done and title when any is, and the first line of the first message; the
     /// most recently active last, and the pinned after the others. Archived threads are left out, but for those with
     /// a message stored since they were archived (`archived+new`). With `auto_archive` set in the config file's
     /// `[cli]`, such as "14d", a thread neither pinned nor archived with no message stored for that long is left out
@@ -148,6 +148,19 @@ pub(crate) enum ThreadCommand {
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: thread::Pick,
     },
+    /// Mark a thread done for every human, as of the last message, channel post or note stored on it: one stored
+    /// later reopens it. Its work goes on, and its replies and notifications reach everyone as before.
+    Done {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
+    /// Clear a thread's done state, for every human.
+    Undone {
+        /// The thread: its id, a unique start of one, or `last`.
+        #[arg(add = ArgValueCandidates::new(completions::threads))]
+        thread: thread::Pick,
+    },
     /// Hold back every notification `ants webhook serve` pushes to the CLI's human about a thread, on every device of
     /// the human, whatever the human's `bypass` lets through. Held notices are dropped, not sent later.
     Mute {
@@ -178,6 +191,8 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ThreadCommand) -> Result<()> {
         ThreadCommand::Unpin { thread } => thread_meta::mark(nats, thread, thread_meta::Marking::Unpin).await,
         ThreadCommand::Archive { thread } => thread_meta::mark(nats, thread, thread_meta::Marking::Archive).await,
         ThreadCommand::Unarchive { thread } => thread_meta::mark(nats, thread, thread_meta::Marking::Unarchive).await,
+        ThreadCommand::Done { thread } => thread_meta::done(nats, thread, true).await,
+        ThreadCommand::Undone { thread } => thread_meta::done(nats, thread, false).await,
         ThreadCommand::Show { thread, since, json } => thread::show(nats, thread, since, json).await,
         ThreadCommand::Search { grep, from, to, channel, kinds, since, until, limit, json } => {
             let kinds = kinds.into_iter().collect();

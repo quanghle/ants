@@ -113,20 +113,23 @@ pub async fn publish(js: &jetstream::Context, post: &NotesPost, last_seq: Option
     }
 }
 
-/// Post `text` from `from` to the notes of `thread`, spending one of its turns, at most `budget` left: the notes are
-/// read again when another post took the turn first. None when the notes have no turns left.
+/// Post `text` from `from` to the notes of `thread`, suggesting `title` for the thread ([`NotesPost::title`]),
+/// spending one of its turns, at most `budget` left: the notes are read again when another post took the turn first.
+/// None when the notes have no turns left.
 pub async fn spend(
     store: &dyn NotesStore,
     thread: &ThreadId,
     from: &UserId,
     text: &str,
     budget: u32,
+    title: Option<String>,
 ) -> Result<Option<NotesPost>> {
     for _ in 0..SPEND_TRIES {
         let notes = store.read(thread).await?;
         let Ok(post) = NotesPost::spend(thread.clone(), from.clone(), text, budget, notes.last()) else {
             return Ok(None);
         };
+        let post = NotesPost { title: title.clone(), ..post };
         if store.post(&post, notes.last_seq).await? {
             return Ok(Some(post));
         }

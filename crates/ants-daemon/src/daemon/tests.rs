@@ -1153,6 +1153,74 @@ async fn a_human_cancels_a_running_prompt_and_the_sender_gets_what_it_wrote() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+#[tokio::test]
+async fn a_human_steers_a_running_prompt_ahead_of_the_queue_in_the_same_session() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send(&t1, "stall").await;
+    bus.send(&t1, "queued").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        steer(&bus, UserId::human(), &t1, "go left").await;
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.text, "partial\n\n[ants] human interrupted the prompt to steer dev-a (ants ask --steer).");
+        let steered = next_envelope(&mut to_human).await;
+        let note = "[ants] human interrupted the previous prompt on this thread with this message; tool calls it had \
+                    in flight were cancelled, so check what they left before repeating any.";
+        assert_eq!(steered.text, format!("s1: {note}\n\ngo left"), "the same session takes the steer first");
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "queued".to_owned()), "the queue waits");
+        assert!(timeout(Duration::from_millis(300), to_human.next()).await.is_err(), "no escalation");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.cancelled, log.prompted, log.new_sessions), (1, 3, 1), "not retried");
+        assert!(log.loaded.is_empty(), "the session goes on without a load");
+    }
+    assert_eq!(bus.unacked().await, 0);
+    assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
+}
+
+#[tokio::test]
+async fn a_steer_with_no_prompt_running_or_from_an_ant_waits_its_turn() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let t1 = ThreadId::generate();
+    steer(&bus, UserId::human(), &t1, "idle").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_reply(&mut to_human).await, (t1.clone(), "idle".to_owned()), "an ordinary prompt");
+        bus.send(&t1, "stall").await;
+        until("the prompt to run", || log.locked().prompted == 2).await;
+        steer(&bus, dev_b.clone(), &t1, "from an ant").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(log.locked().cancelled, 0, "an ant does not steer");
+        assert!(cancel(&bus, &t1).await);
+        let reply = next_envelope(&mut to_human).await;
+        assert_eq!(reply.text, "partial\n\n[ants] The prompt was cancelled by human (ants cancel).");
+        assert_eq!(next_reply(&mut to_dev_b).await, (t1.clone(), "from an ant".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
+/// Send `text` on `thread` from `from` as a steer.
+async fn steer(bus: &Bus, from: UserId, thread: &ThreadId, text: &str) {
+    let envelope = Envelope::on_thread(thread.clone(), from, bus.dev.clone(), text).steering();
+    bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
+}
+
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
     let request = QueueRequest::new(bus.dev.clone(), UserId::human());
@@ -2312,22 +2380,25 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
+    let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
     let (titled, plain) = (ThreadId::generate(), ThreadId::generate());
     bus.send(&titled, "hold on").await;
 
-    let ctrl_c = Arc::new(Semaphore::new(0));
-    let check = async {
-        until("the prompt to run", || log.locked().prompted == 1).await;
-        let servers = bus.mcp.as_ref().unwrap().servers()(&titled, true);
+    let suggest = async |thread: &ThreadId, title: &str| {
+        let servers = bus.mcp.as_ref().unwrap().servers()(thread, true);
         let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
         let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
         let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
-        let args = serde_json::json!({"title": "  Fix the build "});
-        let serde_json::Value::Object(args) = args else { unreachable!() };
+        let serde_json::Value::Object(args) = serde_json::json!({"title": title}) else { unreachable!() };
         let call = CallToolRequestParams::new("suggest_thread_title").with_arguments(args);
         let result = client.call_tool(call).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
+    };
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        suggest(&titled, "  Fix the build ").await;
         gate.add_permits(1);
         let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
         let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -2340,6 +2411,37 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
             let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
             assert_eq!(reply.title, None, "the suggestion went with its turn's reply");
         }
+
+        // A reply posted to a channel thread carries it too.
+        let ask = ChannelPost::new(ops.clone(), UserId::human(), "hold: @dev-a the deploy failed");
+        bus.post(&ask).await;
+        until("the post to be prompted", || log.locked().prompted == 4).await;
+        suggest(&ask.thread_id, "Fix the deploy").await;
+        gate.add_permits(1);
+        let reply = next_post(&mut posts).await;
+        assert_eq!((&reply.thread_id, reply.title.as_deref()), (&ask.thread_id, Some("Fix the deploy")));
+
+        // And so does a member's answer posted to the thread notes of an escalation.
+        let [carol, lead] = ants(["carol", "lead"]);
+        let member = ThreadId::generate();
+        let escalation = escalated(&carol, &member, &[&[lead, bus.dev.clone()]]);
+        let help =
+            Envelope::on_thread(member.clone(), carol, bus.dev.clone(), "hold: help").with_escalation(Some(escalation));
+        bus::publish_json(&bus.js, help.subject(), &help, None).await.unwrap();
+        until("the member to be prompted", || log.locked().prompted == 5).await;
+        suggest(&member, "Unstick carol").await;
+        gate.add_permits(1);
+        let posted = timeout(WAIT, async {
+            loop {
+                if let Some(post) = read_notes(&bus, &member).await.pop() {
+                    break post;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the member's answer in the thread notes");
+        assert_eq!((&posted.from, posted.title.as_deref()), (&bus.dev, Some("Unstick carol")));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);

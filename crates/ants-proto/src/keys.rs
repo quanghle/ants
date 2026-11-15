@@ -156,6 +156,11 @@ pub fn summary_key(thread: &ThreadId) -> String {
     format!("summary.{thread}")
 }
 
+/// Key in [`THREADS_BUCKET`] of the done state of `thread` ([`crate::ThreadDone`]).
+pub fn done_key(thread: &ThreadId) -> String {
+    format!("done.{thread}")
+}
+
 /// Key in [`THREADS_BUCKET`] of the pinned and archived threads of `human`: starting with `marks`, so no thread id
 /// or human name collides with a title's key.
 pub fn marks_key(human: &UserId) -> String {

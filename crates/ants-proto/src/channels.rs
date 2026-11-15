@@ -188,6 +188,10 @@ pub struct ChannelPost {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
+    /// The title the posting ant suggests for the thread, as [`Envelope::title`]: an ant's reply on the thread
+    /// carries the one its MCP tool suggest_thread_title took. Never copied by [`ChannelPost::reply`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -217,6 +221,7 @@ impl ChannelPost {
             creator: None,
             webhook: false,
             allow: None,
+            title: None,
             sent_at: Utc::now(),
         }
     }
