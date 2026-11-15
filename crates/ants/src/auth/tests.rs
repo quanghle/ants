@@ -178,6 +178,54 @@ fn a_renewed_uplink_keeps_its_key_and_rights_and_a_revoked_one_is_not_renewed() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// An ant whose credentials make it a human's assistant takes the assistant's rights into a leaf node's uplink, issued
+/// or renewed, and an ant's again once those credentials are revoked.
+#[test]
+fn a_leaf_uplink_carries_an_assistant_s_rights() {
+    use ants_daemon::creds;
+    let dir = ants_test_support::scratch_dir("leaf-assistant");
+    let (team, out, m1) = (dir.join("auth"), dir.join("leaf-m1.creds"), "m1".parse::<Machine>().unwrap());
+    init(&team).unwrap();
+    let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));
+    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
+    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let rights = Permissions::for_assistant(&pa, &alice);
+    issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &dir.join("pa.creds")).unwrap();
+    issue_leaf(
+        &team,
+        &m1,
+        &[(pa.clone(), Role::Ant), (dev_a.clone(), Role::Ant)],
+        &[],
+        EnrollApprover::Without,
+        None,
+        &out,
+    )
+    .unwrap();
+    let sorted = |mut rights: Permissions| {
+        for all in [&mut rights.publish, &mut rights.subscribe] {
+            all.sort();
+            all.dedup();
+        }
+        rights
+    };
+    let carried = |jwt: &str| sorted(allowed(&verified_body(jwt).unwrap().1));
+    let as_assistant = [(&pa, LeafRole::AssistantOf(&alice)), (&dev_a, LeafRole::Ant)];
+    let (jwt, _) = read_creds(&out).unwrap();
+    assert_eq!(carried(&jwt), sorted(Permissions::for_leaf(&m1, as_assistant)));
+    let marker = "$JS.API.DIRECT.GET.KV_ants_read.$KV.ants_read.alice";
+    assert!(carried(&jwt).publish.iter().any(|s| s == marker), "pa reads alice's read marker through the leaf");
+    let finding = creds::Finding::from_jwt(&jwt).unwrap();
+    let creds::Kind::Leaf { ants, humans, .. } = finding.kind else { panic!("{:?}", finding.kind) };
+    assert_eq!((ants, humans), (vec![pa.clone(), dev_a.clone()], vec![]), "an assistant is an ant of the leaf");
+
+    let renewed = renew(&team, &jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&renewed.jwt), carried(&jwt));
+    revoke::revoke(&team, Some("pa"), &[]).unwrap();
+    let as_ant = renew(&team, &renewed.jwt, &KeyPair::new_user().public_key(), None).unwrap();
+    assert_eq!(carried(&as_ant.jwt), sorted(Permissions::for_leaf(&m1, [(&pa, Role::Ant), (&dev_a, Role::Ant)])));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn renewed_credentials_keep_what_they_are_for_a_new_key() {
     use ants_daemon::creds;

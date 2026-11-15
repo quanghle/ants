@@ -137,7 +137,13 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
     for (kind, rights) in [
         ("ant", Permissions::for_user(&a, Role::Ant)),
         ("assistant", Permissions::for_assistant(&pa, &human)),
-        ("leaf", Permissions::for_leaf(&m1, [(&a, Role::Ant), (&human, Role::Human)])),
+        (
+            "leaf",
+            Permissions::for_leaf(
+                &m1,
+                [(&a, LeafRole::Ant), (&human, LeafRole::Human), (&pa, LeafRole::AssistantOf(&human))],
+            ),
+        ),
         ("host", Permissions::for_host(&m1)),
         ("channel manager", Permissions::for_channel_manager()),
         ("enrollment", Permissions::for_enrollment(&a)),
@@ -160,6 +166,25 @@ fn no_credentials_hold_a_jetstream_family_right_a_human_lacks() {
             }
         }
     }
+}
+
+#[test]
+fn a_leaf_carries_an_assistant_s_rights_as_it_would_an_ant_s() {
+    let (alice, pa) = (p("alice"), p("pa"));
+    let m1: Machine = "m1".parse().unwrap();
+    let leaf = Permissions::for_leaf(&m1, [(&pa, LeafRole::AssistantOf(&alice))]);
+    let own = Permissions::for_assistant(&pa, &alice);
+    for s in own.publish.iter().filter(|s| !s.starts_with("ants.out.")) {
+        assert!(leaf.publish.contains(s), "{s}");
+    }
+    assert!(own.subscribe.iter().all(|s| leaf.subscribe.contains(s)));
+    // The literals the hub stream's interest needs, as for an ant; no outbox to set up, no admin order to send.
+    for s in ["ants.inbox.pa.pa", "ants.chan.pa.pa", "ants.chanadm.pa.pa", "ants.timeline.pa.pa"] {
+        assert!(leaf.publish.iter().any(|have| have == s), "{s}");
+    }
+    assert!(!leaf.publish.contains(&format!("{}.>", m1.setup_inbox(&pa))));
+    assert!(!leaf.publish.iter().any(|s| s == subject::ALL_ADMIN_ORDERS_SENT));
+    assert_eq!(Permissions::for_leaf(&m1, [(&pa, Role::Ant)]), Permissions::for_leaf(&m1, [(&pa, LeafRole::Ant)]));
 }
 
 #[test]

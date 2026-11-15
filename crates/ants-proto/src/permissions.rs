@@ -39,6 +39,24 @@ fn covers(pattern: &str, subject: &str) -> bool {
     subject.next().is_none()
 }
 
+/// The role of a member of a machine's leaf node ([`Permissions::for_leaf`]): an ant or a human in its [`Role`], or an
+/// ant that is the assistant of a human ([`AssistantOf`]), with the rights [`Permissions::for_assistant`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafRole<'a> {
+    Ant,
+    Human,
+    AssistantOf(&'a UserId),
+}
+
+impl From<Role> for LeafRole<'_> {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Ant => Self::Ant,
+            Role::Human => Self::Human,
+        }
+    }
+}
+
 /// Families of JetStream API rights naming no user, by the pattern of their plain form after `$JS.API.`: looking up,
 /// creating and updating streams, and creating the ordered consumers of a stream, whose name and filter its subject
 /// leaves out. No credentials hold a right of these a human lacks, so a human's take each family's domain forms as one
@@ -744,7 +762,8 @@ impl Permissions {
 
     /// What the uplink credentials of `machine`'s leaf node allow: everything any of `users` may do in its role,
     /// since every message of a user on the machine crosses that one connection, except the outbox subjects, which
-    /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`].
+    /// stay on the leaf. Include each human that runs the CLI on the machine, as [`Role::Human`], and an assistant as
+    /// [`LeafRole::AssistantOf`] its human, which carries what [`Self::for_assistant`] allows it.
     ///
     /// Besides, the hub's intake may source the leaf's outbox through the machine's own JetStream domain: the hub
     /// sends the leaf requests to create, update and look up the outbox and to create and delete the consumers that
@@ -765,14 +784,21 @@ impl Permissions {
     /// seed of the key it completes staying on the asking machine. Likewise renewal requests from the machine
     /// ([`subject::ALL_RENEW_REQUESTS`]), its own among them, and their answers ([`subject::ALL_RENEW_REPLIES`]): each
     /// request proves the credentials it renews by signature ([`RenewRequest::signed`]).
-    pub fn for_leaf<'a>(machine: &Machine, users: impl IntoIterator<Item = (&'a UserId, Role)>) -> Self {
+    pub fn for_leaf<'a, R: Into<LeafRole<'a>>>(
+        machine: &Machine,
+        users: impl IntoIterator<Item = (&'a UserId, R)>,
+    ) -> Self {
         let mut leaf = Self { publish: Vec::new(), subscribe: Vec::new() };
         let mut setup = vec![UserId::human()];
         for (user, role) in users {
+            let (role, Self { publish, subscribe }) = match role.into() {
+                LeafRole::Ant => (Role::Ant, Self::for_user(user, Role::Ant)),
+                LeafRole::Human => (Role::Human, Self::for_user(user, Role::Human)),
+                LeafRole::AssistantOf(human) => (Role::Ant, Self::for_assistant(user, human)),
+            };
             if role.is_human() && !setup.contains(user) {
                 setup.push(user.clone());
             }
-            let Self { publish, subscribe } = Self::for_user(user, role);
             // nats-server lets the hub stream's interest (`ants.inbox.>`, `ants.notes.>`, ...) cross the uplink only if
             // `ReverseMatch` finds a publish allowance under it, and that skips allowances with `*` before the last
             // token, such as `ants.inbox.*.dev-a`. One literal subject each of them already allows is found.
