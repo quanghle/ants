@@ -8,12 +8,17 @@
 //! The same watch keeps the humans' assistant grants ([`ants_proto::AssistantGrant`], under `<human>.assistant`),
 //! verified for the team's account ([`Registry::verifying_grants`]): a withdrawal holds as soon as the watch delivers
 //! it, and is announced to whoever listens ([`Registry::withdrawals`]).
+//!
+//! It keeps too each human's consent to what its assistant does for it ([`ants_proto::Consents`]): its signed answers
+//! to the assistant's acts (`<human>.confirmed`) and its pre-allow rules (`<human>.preallow`), announced as they
+//! change ([`Registry::consents`]).
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use ants_proto::{
-    Envelope, Grants, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, VerifiedGrant, assistant_grant_of,
+    Act, ActAnswer, ConsentKey, Consents, Envelope, Grants, HUMANS_BUCKET, HumanEntry, Humans, PreAllow, Role, UserId,
+    VerifiedGrant, assistant_grant_of,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
@@ -44,11 +49,21 @@ struct Assistants {
     /// The team's account, which signs the credentials of the devices whose grants count; none: no grant does.
     account: Option<String>,
     withdrawals: broadcast::Sender<Withdrawal>,
+    /// The humans' answers to their assistants' acts and their pre-allow rules, verified as the grants are.
+    consents: RwLock<Consents>,
+    /// Each human whose consent records changed.
+    consented: broadcast::Sender<UserId>,
 }
 
 impl Assistants {
     fn new(account: Option<String>) -> Self {
-        Self { grants: RwLock::default(), account, withdrawals: broadcast::channel(WITHDRAWALS).0 }
+        Self {
+            grants: RwLock::default(),
+            account,
+            withdrawals: broadcast::channel(WITHDRAWALS).0,
+            consents: RwLock::default(),
+            consented: broadcast::channel(WITHDRAWALS).0,
+        }
     }
 }
 
@@ -102,6 +117,22 @@ impl Registry {
     /// is not confirmed yet no longer counts.
     pub fn withdrawals(&self) -> broadcast::Receiver<Withdrawal> {
         self.assistants.withdrawals.subscribe()
+    }
+
+    /// The answer of `human`, by its signed record standing now, to `act` its assistant `assistant` made for it.
+    pub fn answer(&self, human: &UserId, assistant: &UserId, act: &Act) -> Option<ActAnswer> {
+        self.assistants.consents.read_locked().answer(human, assistant, act)
+    }
+
+    /// The pre-allow rules `human` signed for its assistant `assistant`, standing now.
+    pub fn pre_allow(&self, human: &UserId, assistant: &UserId) -> Option<PreAllow> {
+        self.assistants.consents.read_locked().pre_allow(human, assistant).cloned()
+    }
+
+    /// Each human whose answers or pre-allow rules change from now on, as the watch sees it; a listener lagging
+    /// behind should look again at every human it waits for.
+    pub fn consents(&self) -> broadcast::Receiver<UserId> {
+        self.assistants.consented.subscribe()
     }
 
     /// The human who gets what is meant for the owner of a thread that has none.
@@ -177,12 +208,15 @@ impl Registry {
         let mut updates = kv.watch_all().await.context("watching the humans")?;
         let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
         let mut humans = self.base();
-        let mut granting = Vec::new();
+        let (mut granting, mut consenting) = (Vec::new(), Vec::new());
         for key in keys {
             let value = kv.get(&key).await.with_context(|| format!("reading human {key}"))?;
             if let Some(human) = assistant_grant_of(&key) {
                 granting.push(human);
                 self.set_grant(&key, value.as_deref());
+            } else if ConsentKey::parse(&key).is_some() {
+                self.set_consent(&key, value.as_deref());
+                consenting.push(key);
             } else {
                 self.set(&mut humans, &key, value.as_deref());
             }
@@ -193,11 +227,22 @@ impl Registry {
         for human in gone.into_iter().filter(|h| !granting.contains(h)) {
             self.set_grant(&ants_proto::assistant_grant_key(&human), None);
         }
+        // Consent records deleted while the bucket was not watched.
+        let consenting_now: Vec<UserId> = self.assistants.consents.read_locked().humans().cloned().collect();
+        for human in consenting_now {
+            for key in [ants_proto::confirmations_key(&human), ants_proto::pre_allow_key(&human)] {
+                if !consenting.contains(&key) {
+                    self.set_consent(&key, None);
+                }
+            }
+        }
         while let Some(entry) = updates.next().await {
             let entry = entry.context("watching the humans")?;
             let value = (entry.operation == kv::Operation::Put).then_some(&entry.value[..]);
             if assistant_grant_of(&entry.key).is_some() {
                 self.set_grant(&entry.key, value);
+            } else if ConsentKey::parse(&entry.key).is_some() {
+                self.set_consent(&entry.key, value);
             } else {
                 let mut humans = self.humans.write_locked();
                 self.set(&mut humans, &entry.key, value);
@@ -221,6 +266,17 @@ impl Registry {
                 .withdrawals
                 .send(Withdrawal { human: applied.human.clone(), assistant: assistant.clone() });
         }
+    }
+
+    /// Apply `value`, what the consent key `key` holds now, to the consent records, announcing whose changed.
+    fn set_consent(&self, key: &str, value: Option<&[u8]>) {
+        let Some(account) = &self.assistants.account else { return };
+        let applied = self.assistants.consents.write_locked().apply(key, value, account, chrono::Utc::now());
+        let Some(applied) = applied else { return };
+        if let Some(refused) = &applied.refused {
+            tracing::warn!(key, error = %refused, "not honouring a human's consent to its assistant's acts");
+        }
+        let _ = self.assistants.consented.send(applied.human);
     }
 
     /// Set the human of `key` in `humans` to `value`, or remove it. A malformed entry, or one naming another human
@@ -281,6 +337,58 @@ impl Registry {
         }
         registry.replace(known);
         registry
+    }
+
+    /// Apply `value`, what the grant or consent key `key` holds now, as the watch would.
+    #[cfg(test)]
+    pub fn put_record(&self, key: &str, value: Option<&[u8]>) {
+        if assistant_grant_of(key).is_some() {
+            self.set_grant(key, value);
+        } else {
+            self.set_consent(key, value);
+        }
+    }
+}
+
+/// A device of a human of a team of its own, signing records as the human's devices do.
+#[cfg(test)]
+pub struct TestDevice {
+    account: nkeys::KeyPair,
+    key: nkeys::KeyPair,
+    id: ants_proto::DeviceId,
+}
+
+#[cfg(test)]
+impl Default for TestDevice {
+    fn default() -> Self {
+        let (account, key) = (nkeys::KeyPair::new_account(), nkeys::KeyPair::new_user());
+        Self { account, key, id: ants_proto::DeviceId::generate() }
+    }
+}
+
+#[cfg(test)]
+impl TestDevice {
+    /// The team's account.
+    pub fn account(&self) -> String {
+        self.account.public_key()
+    }
+
+    /// The user JWT of the device's credentials, for `human`.
+    pub fn jwt(&self, human: &UserId) -> String {
+        use data_encoding::BASE64URL_NOPAD;
+        let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
+        let claims = serde_json::json!({
+            "sub": self.key.public_key(), "iss": self.account.public_key(), "name": human,
+            "nats": { "type": "user", "tags": [self.id.tag()] },
+        });
+        let body = BASE64URL_NOPAD.encode(claims.to_string().as_bytes());
+        let signature = BASE64URL_NOPAD.encode(&self.account.sign(format!("{header}.{body}").as_bytes()).unwrap());
+        format!("{header}.{body}.{signature}")
+    }
+
+    /// The signature of `signed`, base64url without padding.
+    pub fn sign(&self, signed: &[u8]) -> String {
+        data_encoding::BASE64URL_NOPAD.encode(&self.key.sign(signed).unwrap())
     }
 }
 

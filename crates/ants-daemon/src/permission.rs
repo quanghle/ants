@@ -156,6 +156,40 @@ pub fn rule_for(tool: &ToolCall) -> Option<String> {
     (fits && KINDS.contains(&tool.kind.as_str())).then(|| format!("{}:{pattern}", tool.kind))
 }
 
+/// Whether the allowlist rule `rule` covers `tool`, a call as an approver is shown it ([`Approver::decide`]): how a
+/// human's pre-allow rule for its assistant's decisions ([`ants_proto::PreAllow`]) is matched, by the requester's
+/// daemon and the CLI alike. Stricter than an ant's allowlist, as the summary is all there is: an input shortened for
+/// showing, or one that does not read as JSON, matches no `execute` pattern; a `read`, `edit`, `delete` or `move`
+/// pattern must be absolute, and matches only calls whose every location is an absolute, normalised path; a malformed
+/// rule covers nothing.
+pub fn covers(rule: &str, tool: &ToolCall) -> bool {
+    let Ok(rule) = rule.parse::<Rule>() else { return false };
+    if rule.kind.as_deref().is_some_and(|k| k != tool.kind) {
+        return false;
+    }
+    let Some(pattern) = &rule.pattern else { return true };
+    let input = tool.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok());
+    match tool.kind.as_str() {
+        "execute" => input.as_ref().and_then(command_in).is_some_and(|c| !has_shell_control(&c) && glob(pattern, &c)),
+        "read" | "edit" | "delete" | "move" => {
+            pattern.starts_with('/')
+                && !tool.locations.is_empty()
+                && tool.locations.iter().all(|l| {
+                    let path = Path::new(l);
+                    path.is_absolute() && normalize(path) == path && glob(pattern, l)
+                })
+        }
+        "fetch" => {
+            let url = input.as_ref().and_then(|i| i.get("url")).and_then(Value::as_str);
+            glob(pattern, url.unwrap_or(&tool.title))
+        }
+        _ => {
+            let mcp = tool.title.strip_prefix("mcp__").and_then(|t| t.split_once("__")).map(|(_, tool)| tool);
+            glob(pattern, &tool.title) || mcp.is_some_and(|t| !t.is_empty() && glob(pattern, t))
+        }
+    }
+}
+
 /// The humans and the ant's chain, or whoever stands in: decide tool requests outside the allowlist.
 pub trait Approver: Send + Sync {
     /// The decision on `tool`, requested on `thread`, among the `options` the harness offers. Never fails: anything
@@ -596,6 +630,34 @@ mod tests {
         for none in [shell("git status; rm -rf ~"), shell("rm *.o"), shell(" ls"), edit("src/x"), two] {
             assert_eq!(rule(&none), None, "{:?}", none.tool_call.fields.raw_input);
         }
+    }
+
+    #[test]
+    fn pre_allow_rules_cover_the_shown_call_conservatively() {
+        let shown = |request: &RequestPermissionRequest| {
+            let fields = &request.tool_call.fields;
+            summary(&Tool { kind: kind_name(fields), fields }, &Redactor::default())
+        };
+        let test = shown(&shell("cargo test -p ants"));
+        assert!(covers("execute:cargo test*", &test) && covers("execute", &test) && covers("*", &test));
+        assert!(!covers("execute:cargo build*", &test) && !covers("read", &test) && !covers("nonsense", &test));
+        assert!(!covers("execute:cargo test*", &shown(&shell("cargo test; rm -rf ~"))), "shell control");
+        let long = shown(&shell(&format!("cargo test {}", "x".repeat(MAX_INPUT))));
+        assert!(long.input.as_deref().is_some_and(|i| i.ends_with('…')));
+        assert!(!covers("execute:cargo test*", &long), "a shortened input matches no command pattern");
+
+        let edit = shown(&edit("/work/repo/src/main.rs"));
+        assert!(covers("edit:/work/repo/*", &edit));
+        assert!(!covers("edit:src/*", &edit), "no workdir to be relative to");
+        let climbing = ToolCall { locations: vec!["/work/repo/../../etc/passwd".to_owned()], ..edit.clone() };
+        assert!(!covers("edit:/work/repo/*", &climbing));
+        let none = ToolCall { locations: Vec::new(), ..edit };
+        assert!(!covers("edit:/work/repo/*", &none));
+
+        let fetch = shown(&request(ToolKind::Fetch, "Fetch", json!({ "url": "https://docs.rs/x" }), &[]));
+        assert!(covers("fetch:https://docs.rs/*", &fetch) && !covers("fetch:Fetch", &fetch));
+        let mcp = shown(&request(ToolKind::Other, "mcp__bd__show", json!({}), &[]));
+        assert!(covers("other:show", &mcp) && covers("other:mcp__bd__*", &mcp) && !covers("other:list", &mcp));
     }
 
     /// Answers every request with a fixed verdict, recording what it was asked.

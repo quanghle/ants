@@ -71,7 +71,9 @@ pub fn how(state: &State, ant: &ants_proto::UserId) -> String {
             let by = d.by.as_ref().map_or("a human", ants_proto::UserId::as_str);
             format!("{} by {by} at {}", verdict(d.verdict), hm(d.decided_at))
         }
-        State::DecidedByAnt(by, d) => format!("{} by {by} at {}", verdict(d.verdict), hm(d.decided_at)),
+        State::DecidedByAnt(by, d) => {
+            format!("{} by {} at {}", verdict(d.verdict), crate::tools::deciders(by, d), hm(d.decided_at))
+        }
         State::Expired => format!("expired unanswered: {ant} rejected it"),
     }
 }

@@ -3,7 +3,8 @@
 //! [`ants_proto::Grants`] for how readers honour it. `ants assistant seal on|off` enrolls the assistant as a device of
 //! the human by the same grant, or ends it, so the assistant opens and seals the human's sealed messages
 //! ([`ants_daemon::sealing`]), with a key whose seed waits beside its credentials (`ants assistant key`).
-//! `enable` and `disable` ([`dedicated`]) create and retire a dedicated assistant ant around the grant.
+//! `enable` and `disable` ([`dedicated`]) create and retire a dedicated assistant ant around the grant. `confirm` and
+//! `allow` ([`consent`]) sign the human's consent to what the assistant decides for it.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,7 @@ use serde::Deserialize;
 use crate::cli::{AssistantCommand, SealCommand};
 use crate::{Nats, auth, devices, humans, revoke, roster};
 
+mod consent;
 mod dedicated;
 
 pub use dedicated::{DisableArgs, EnableArgs};
@@ -148,6 +150,8 @@ pub async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'
         AssistantCommand::Seal(SealCommand::On { key }) => seal_on(&nats()?, key).await,
         AssistantCommand::Seal(SealCommand::Off) => seal_off(&nats()?).await,
         AssistantCommand::Key { ant } => key(&ant),
+        AssistantCommand::Confirm { act, deny } => Box::pin(consent::confirm(&nats()?, act.as_deref(), deny)).await,
+        AssistantCommand::Allow { rules, remove, clear } => consent::allow(&nats()?, rules, remove, clear).await,
     }
 }
 
@@ -432,12 +436,7 @@ async fn put(
     assistant: Option<UserId>,
     sealing: Sealing,
 ) -> Result<(Option<VerifiedGrant>, AssistantGrant)> {
-    let (jwt, key) = auth::read_creds(creds)?;
-    let finding = Finding::from_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
-    if finding.kind != Kind::Human || finding.name != human.as_str() {
-        bail!("credentials {} are not a device of {human}'s", creds.display());
-    }
-    let account = devices::account_of(Some(creds))?.context("credentials without an issuer")?;
+    let (jwt, key, account) = device_creds(creds, human)?;
     let kv = humans::ensure(js).await?;
     let grant_key = assistant_grant_key(human);
     for _ in 0..CONFLICTS {
@@ -477,6 +476,17 @@ async fn put(
         }
     }
     bail!("storing the assistant grant: another device of {human} kept storing one")
+}
+
+/// The user JWT, key and account of the device credentials `creds` of `human`, which sign its records.
+fn device_creds(creds: &Path, human: &UserId) -> Result<(String, nkeys::KeyPair, String)> {
+    let (jwt, key) = auth::read_creds(creds)?;
+    let finding = Finding::from_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
+    if finding.kind != Kind::Human || finding.name != human.as_str() {
+        bail!("credentials {} are not a device of {human}'s", creds.display());
+    }
+    let account = devices::account_of(Some(creds))?.context("credentials without an issuer")?;
+    Ok((jwt, key, account))
 }
 
 /// When a record replacing one issued at `before` is issued: `now`, or just after `before` when this clock is behind
@@ -762,5 +772,81 @@ mod tests {
         put(&js, &creds, &alice, None, Sealing::Keep).await.unwrap();
         assert_eq!(acting(&pa, Some(&alice)).await, Acting::Forged(alice.clone()), "withdrawn");
         assert_eq!(Acting::For(alice.clone()).label("pa"), "alice via pa");
+    }
+
+    /// pa decides three of dev-a's requests for alice: alice confirms one, denies one, and pre-allows the third, so
+    /// that her CLI and the daemons reading her records see the first and third decided for her.
+    #[tokio::test]
+    async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
+        use ants_proto::{Act, ActAnswer, ApprovalDecision, ApprovalRequest, Envelope, ThreadId, ToolCall, Verdict};
+
+        use crate::tools::{self, State};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, pa, dev_a) = (p("alice"), p("pa"), p("dev-a"));
+        let creds = server.creds_as(&alice, Role::Human);
+        let account = devices::account_of(Some(&creds)).unwrap();
+        let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        let (_, human) = server.connect(&UserId::human()).await;
+        let stream = bus::ensure_stream(&human).await.unwrap();
+        put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        let reader = Registry::new(alice.clone()).verifying_grants(account);
+        let _watching = reader.watch(js.clone(), ants_daemon::humans::RETRY);
+
+        let (_, ant_js) = server.connect(&dev_a).await;
+        let (_, pa_js) = server.connect(&pa).await;
+        let [push, rm, test] = ["git push", "rm -rf build", "cargo test"].map(|command| {
+            let input = Some(serde_json::json!({ "command": command }).to_string());
+            let tool = ToolCall { kind: "execute".into(), title: command.into(), input, ..Default::default() };
+            let offered = vec![Verdict::AllowOnce, Verdict::Reject];
+            ApprovalRequest::new(dev_a.clone(), ThreadId::generate(), tool, offered, Duration::from_secs(60))
+        });
+        for r in [&push, &rm, &test] {
+            bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
+            let decision = ApprovalDecision::new(r.id, dev_a.clone(), Verdict::AllowOnce);
+            let envelope = Envelope::decision(r.thread_id.clone(), pa.clone(), decision).on_behalf(Some(alice.clone()));
+            bus::publish_json(&pa_js, envelope.subject(), &envelope, None).await.unwrap();
+        }
+        let held = tools::held(&js, &stream, Utc::now()).await.unwrap();
+        assert_eq!(held.len(), 3, "each waits for alice");
+        assert!(held.iter().all(|(_, acts)| acts.len() == 1 && acts[0].assistant == pa && acts[0].human == alice));
+
+        let nats = crate::Nats::new(&server.url, Some(&creds), None).unwrap();
+        consent::confirm(&nats, Some(&tools::qualified(&push)), false).await.unwrap();
+        consent::confirm(&nats, Some(&tools::qualified(&rm)), true).await.unwrap();
+        let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false).await.unwrap_err();
+        assert!(err.to_string().contains("ANT/RULE"), "{err}");
+        consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false).await.unwrap();
+
+        let state_of = async |r: &ApprovalRequest| {
+            let (seq, _) = tools::find(&stream, &tools::qualified(r)).await.unwrap();
+            tools::state(&js, &stream, seq, r, Utc::now()).await.unwrap()
+        };
+        for r in [&push, &test] {
+            let State::DecidedByAnt(by, decision) = state_of(r).await else { panic!("{} decided", r.tool.title) };
+            assert_eq!(
+                (by, decision.on_behalf_of, decision.verdict),
+                (pa.clone(), Some(alice.clone()), Verdict::AllowOnce)
+            );
+        }
+        assert_eq!(state_of(&rm).await, State::Pending, "denied, waiting for a decision");
+        assert!(tools::held(&js, &stream, Utc::now()).await.unwrap().is_empty(), "nothing waits for alice");
+
+        let act =
+            |r: &ApprovalRequest| Act::Decision { ant: dev_a.clone(), request_id: r.id, verdict: Verdict::AllowOnce };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while reader.answer(&alice, &pa, &act(&rm)).is_none() || reader.pre_allow(&alice, &pa).is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the daemons' reader verifies alice's records");
+        assert_eq!(reader.answer(&alice, &pa, &act(&push)), Some(ActAnswer::Confirm));
+        assert_eq!(reader.answer(&alice, &pa, &act(&rm)), Some(ActAnswer::Deny));
+        assert_eq!(reader.pre_allow(&alice, &pa).unwrap().rules, ["dev-a/execute:cargo test*"]);
+
+        consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false).await.unwrap();
+        assert_eq!(state_of(&test).await, State::Pending, "the rule removed");
     }
 }

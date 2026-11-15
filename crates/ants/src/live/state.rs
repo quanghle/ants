@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ants_proto::{ApprovalRequest, Mark, RosterEntry, StatusEvent, ThreadId, ThreadMarks, UserId};
+use ants_proto::{ApprovalRequest, Mark, RosterEntry, StatusEvent, ThreadId, ThreadMarks, UserId, Uuid};
 use chrono::{DateTime, Utc};
 
 use crate::progress;
 use crate::thread::{self, Entry, Summary, Threads};
-use crate::tools::Update;
+use crate::tools::{HeldAct, Update};
 
 /// The ants' live progress on a thread.
 #[derive(Debug)]
@@ -43,6 +43,8 @@ pub struct State {
     pub roster_at: Option<DateTime<Utc>>,
     /// The pending tool requests, oldest first.
     pub approvals: Vec<ApprovalRequest>,
+    /// The decisions assistants made on pending requests for their humans, waiting for consent, by ant and request.
+    pub held: HashMap<(UserId, Uuid), Vec<HeldAct>>,
     pub link: Link,
     /// When the stream was last read.
     pub stored_at: Option<DateTime<Utc>>,
@@ -61,6 +63,7 @@ impl State {
             roster: Vec::new(),
             roster_at: None,
             approvals: Vec::new(),
+            held: HashMap::new(),
             link: Link::Connected,
             stored_at: None,
         }
@@ -126,13 +129,23 @@ impl State {
                     self.approvals.push(request.clone());
                 }
             }
-            Update::Resolved(request, _) => self.approvals.retain(|r| !(r.ant == request.ant && r.id == request.id)),
+            Update::Held(request, held) if held.is_empty() => {
+                self.held.remove(&(request.ant.clone(), request.id));
+            }
+            Update::Held(request, held) => {
+                self.held.insert((request.ant.clone(), request.id), held.clone());
+            }
+            Update::Resolved(request, _) => {
+                self.approvals.retain(|r| !(r.ant == request.ant && r.id == request.id));
+                self.held.remove(&(request.ant.clone(), request.id));
+            }
         }
     }
 
     /// Following the tool requests starts over: it lists the pending ones again.
     pub fn approvals_reset(&mut self) {
         self.approvals.clear();
+        self.held.clear();
     }
 
     /// Take the connection's state at `now`: whether it is back after being lost, so what was missed meanwhile is to
@@ -272,9 +285,13 @@ mod tests {
             s.approval(&update);
         }
         assert_eq!(s.approvals, [push.clone(), rm.clone()]);
+        let held = HeldAct { human: user("alice"), assistant: user("pa"), verdict: Verdict::AllowOnce, sent_at: at(1) };
+        s.approval(&Update::Held(push.clone(), vec![held.clone()]));
+        assert_eq!(s.held[&(push.ant.clone(), push.id)], [held]);
         let decision = ApprovalDecision::new(push.id, push.ant.clone(), Verdict::Reject);
         s.approval(&Update::Resolved(push, tools::State::DecidedByAnt(user("lead"), decision)));
         assert_eq!(s.approvals, [rm]);
+        assert!(s.held.is_empty(), "with the request resolved");
         s.approvals_reset();
         assert!(s.approvals.is_empty());
     }
