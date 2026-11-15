@@ -124,6 +124,7 @@ impl Bus {
             signed_out: None,
             limited: None,
             failing: None,
+            memory_low: None,
         };
         roster.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     }
@@ -2738,6 +2739,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         signed_out: None,
         limited: None,
         failing: None,
+        memory_low: None,
     };
     roster.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
     let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");
