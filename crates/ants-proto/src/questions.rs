@@ -185,12 +185,18 @@ impl Envelope {
     /// picks one of its options, or is typed where that is taken. Anything else is no answer, and the envelope an
     /// ordinary message. Trust it only once both envelopes passed [`Envelope::check_subject`].
     pub fn answers<'q>(&self, question: &'q Envelope) -> Option<Answered<'q>> {
+        self.answers_as(question, &self.from)
+    }
+
+    /// [`Envelope::answers`], taking `answerer` for the one who answers rather than the sender: the human its
+    /// `on_behalf_of` names once a reader verified that claim, as an assistant answers for its human.
+    pub fn answers_as<'q>(&self, question: &'q Envelope, answerer: &UserId) -> Option<Answered<'q>> {
         let answer = self.answer.as_ref()?;
         let asked = question.asks()?;
         let ours = answer.question == question.id
             && question.thread_id == self.thread_id
             && question.from == self.to
-            && question.to == self.from;
+            && question.to == *answerer;
         if !ours {
             return None;
         }

@@ -5,7 +5,7 @@
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
-use ants_proto::{Answered, Envelope, UserId, Uuid, sent_reader, subject};
+use ants_proto::{Acting, Answered, Envelope, UserId, Uuid, sent_reader, subject};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, consumer};
 
@@ -50,8 +50,9 @@ fn made_at(id: Uuid) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos))
 }
 
-/// The question `ant` asked that `envelope`, a message to it, answers validly ([`Envelope::answers`]), read back
-/// through the ant's [`sent_reader`]; None for a message carrying no answer, or an invalid one.
+/// The question `ant` asked that `envelope`, a message to it, answers validly ([`Envelope::answers`]), or answers for
+/// the human its `on_behalf_of` names, which the caller verified ([`answerer`]), read back through the ant's
+/// [`sent_reader`]; None for a message carrying no answer, or an invalid one.
 pub async fn asked(js: &jetstream::Context, ant: &UserId, envelope: &Envelope) -> Result<Option<Envelope>> {
     let Some(answer) = &envelope.answer else { return Ok(None) };
     let question = {
@@ -60,13 +61,19 @@ pub async fn asked(js: &jetstream::Context, ant: &UserId, envelope: &Envelope) -
             .await
             .context("reading back the question answered")?
     };
-    Ok(question.filter(|question| envelope.answers(question).is_some()))
+    Ok(question.filter(|question| envelope.answers_as(question, answerer(envelope)).is_some()))
+}
+
+/// Who answers with `envelope`: the human its `on_behalf_of` names, an assistant answering for its human, else its
+/// sender. Trust it only once the claim was verified, a forged one cleared.
+pub fn answerer(envelope: &Envelope) -> &UserId {
+    envelope.on_behalf_of.as_ref().unwrap_or(&envelope.from)
 }
 
 /// The `[ants]` line a prompt with `answer`, a valid answer to `question`, starts with: who answers which question,
 /// and with what option, or that the answer is typed.
 pub fn answer_line(answer: &Envelope, question: &Envelope) -> Option<String> {
-    let answered = answer.answers(question)?;
+    let answered = answer.answers_as(question, answerer(answer))?;
     let asked = question.asks()?;
     let quoted = quote(&asked.text);
     let with = match answered {
@@ -75,8 +82,17 @@ pub fn answer_line(answer: &Envelope, question: &Envelope) -> Option<String> {
     };
     Some(format!(
         "[ants] {} answers the question asked with ask_human as message {} ({quoted:?}) with {with}.",
-        answer.from, question.id
+        by(answer),
+        question.id
     ))
+}
+
+/// Who answered with `answer`, as the `[ants]` line names it: `alice via pa` for an assistant answering for its human.
+fn by(answer: &Envelope) -> String {
+    match &answer.on_behalf_of {
+        Some(human) => Acting::For(human.clone()).label(answer.from.as_str()),
+        None => answer.from.to_string(),
+    }
 }
 
 /// The first line of `text`, cut to [`QUOTED`] characters.
@@ -121,6 +137,16 @@ mod tests {
         assert!(answer_line(&typed, &asked).unwrap().ends_with("with a typed answer, the message."));
         let plain = Envelope::on_thread(asked.thread_id.clone(), user("alice"), user("dev-a"), "2");
         assert_eq!(answer_line(&plain, &asked), None);
+    }
+
+    #[test]
+    fn an_assistant_answers_for_the_human_asked_only() {
+        let asked = question("Ship it?", true);
+        let by_pa = Envelope::answering(&asked, user("pa"), Choice::Option(1)).unwrap();
+        assert_eq!(answer_line(&by_pa, &asked), None, "pa was not asked");
+        let line = answer_line(&by_pa.clone().on_behalf(Some(user("alice"))), &asked).unwrap();
+        assert!(line.starts_with("[ants] alice via pa answers the question"), "{line}");
+        assert_eq!(answer_line(&by_pa.on_behalf(Some(user("bob"))), &asked), None, "bob was not asked");
     }
 
     #[test]

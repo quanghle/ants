@@ -1525,3 +1525,329 @@ async fn read_attachment_returns_images_and_text_and_saves_other_files() {
     let handle = late.attachment_handle(late.attachments[0].id);
     assert_eq!(listed, format!("here\n📎 log.txt (text/plain, 2 B) handle {handle}"));
 }
+
+/// A reaction: who reacted, to which message, with what, for whom.
+type Reacted = (UserId, Uuid, Reaction, Option<UserId>);
+
+/// What the assistant tools read and write, in memory.
+#[derive(Default)]
+struct MemoryHuman {
+    messages: StdMutex<Vec<HumanMessage>>,
+    requests: StdMutex<Vec<ants_proto::ApprovalRequest>>,
+    titles: StdMutex<Vec<ThreadTitle>>,
+    done: StdMutex<Vec<ants_proto::ThreadDone>>,
+    reactions: StdMutex<Vec<Reacted>>,
+}
+
+impl MemoryHuman {
+    fn store(&self, envelope: Envelope) {
+        let mut messages = self.messages.locked();
+        let seq = messages.len() as u64 + 1;
+        messages.push(HumanMessage { seq, envelope });
+    }
+}
+
+impl HumanStore for MemoryHuman {
+    fn messages(
+        &self,
+        human: UserId,
+        assistant: UserId,
+        _: std::time::SystemTime,
+    ) -> BoxFuture<'_, Result<Vec<HumanMessage>>> {
+        let involved = |e: &Envelope| {
+            e.to == human || e.from == human || (e.from == assistant && e.on_behalf_of.as_ref() == Some(&human))
+        };
+        let found = self.messages.locked().iter().filter(|m| involved(&m.envelope)).cloned().collect();
+        Box::pin(async move { Ok(found) })
+    }
+
+    fn approvals(
+        &self,
+        _: std::time::SystemTime,
+    ) -> BoxFuture<'_, Result<(Vec<ants_proto::ApprovalRequest>, std::collections::HashSet<Uuid>)>> {
+        let requests = self.requests.locked().clone();
+        Box::pin(async move { Ok((requests, Default::default())) })
+    }
+
+    fn read_marker(&self, _: UserId) -> BoxFuture<'_, Result<ants_proto::ReadMarker>> {
+        Box::pin(async { Ok(ants_proto::ReadMarker::default()) })
+    }
+
+    fn done(&self, thread: ThreadId) -> BoxFuture<'_, Result<Option<ants_proto::ThreadDone>>> {
+        let done = self.done.locked().iter().rfind(|d| d.thread_id == thread).cloned();
+        Box::pin(async move { Ok(done) })
+    }
+
+    fn last_sequence(&self) -> BoxFuture<'_, Result<u64>> {
+        let last = self.messages.locked().len() as u64;
+        Box::pin(async move { Ok(last) })
+    }
+
+    fn put_title(&self, title: ThreadTitle) -> BoxFuture<'_, Result<()>> {
+        self.titles.locked().push(title);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn put_done(&self, done: ants_proto::ThreadDone) -> BoxFuture<'_, Result<()>> {
+        self.done.locked().push(done);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn react(
+        &self,
+        by: UserId,
+        message: Uuid,
+        reaction: Reaction,
+        remove: bool,
+        human: UserId,
+    ) -> BoxFuture<'_, Result<bool>> {
+        let mut reactions = self.reactions.locked();
+        reactions.retain(|(b, m, r, _)| !(*b == by && *m == message && *r == reaction));
+        if !remove {
+            reactions.push((by, message, reaction, Some(human)));
+        }
+        Box::pin(async { Ok(true) })
+    }
+}
+
+/// Opens and seals as [`crate::sealing::AssistantSealing`] does as far as enrollment goes: only while the grant
+/// standing enrolls the ant as a device of its human. The sealed body is the text itself.
+struct EnrolledSealing(Registry);
+
+impl EnrolledSealing {
+    fn enrolled(&self, human: &UserId) -> Option<ants_proto::DeviceId> {
+        self.0.grant(human)?.sealing.map(|s| s.device)
+    }
+}
+
+impl HumanSealing for EnrolledSealing {
+    fn open<'a>(&'a self, human: &'a UserId, envelope: &'a Envelope) -> BoxFuture<'a, Result<crate::sealing::Opening>> {
+        use crate::sealing::Opening;
+        let opening = match (self.enrolled(human), &envelope.sealed) {
+            (Some(_), Some(sealed)) => Opening::Opened(ants_proto::SealedBody {
+                from: envelope.from.clone(),
+                to: envelope.to.clone(),
+                thread_id: envelope.thread_id.clone(),
+                id: envelope.id,
+                text: sealed.body.clone(),
+                title: None,
+                attachments: Vec::new(),
+            }),
+            _ => Opening::Unreadable,
+        };
+        Box::pin(async move { Ok(opening) })
+    }
+
+    fn seal<'a>(&'a self, human: &'a UserId, envelope: &'a mut Envelope) -> BoxFuture<'a, Result<()>> {
+        let sealed = self.enrolled(human).map(|device| {
+            let body = std::mem::take(&mut envelope.text);
+            envelope.sealed = Some(Box::new(ants_proto::Sealed { v: 1, device, keys: Vec::new(), body }));
+        });
+        Box::pin(async move { sealed.ok_or_else(|| anyhow::anyhow!("{human} has not enrolled the ant")) })
+    }
+}
+
+/// Alice's grant naming `assistant`, or withdrawing hers with none, enrolling it as a device with `sealing`.
+fn grant(humans: &Registry, device: &crate::humans::TestDevice, assistant: Option<&str>, sealing: bool) {
+    let alice = user("alice");
+    let sealing = sealing.then(|| ants_proto::SealingDevice {
+        device: ants_proto::DeviceId::generate(),
+        xkey: "XBLFEIK7UCHY5XKH7LGNQ4JZNVOZEWMIHPZH3LP4JUBJ6KQZDVBEWHWB".parse().unwrap(),
+    });
+    let mut grant =
+        ants_proto::AssistantGrant::new(alice.clone(), assistant.map(user), chrono::Utc::now(), device.jwt(&alice))
+            .with_sealing(sealing);
+    grant.signature = device.sign(&grant.signed());
+    humans.put_record(&grant.key(), Some(&serde_json::to_vec(&grant).unwrap()));
+}
+
+/// `dev-a` as the assistant of alice, its tools acting for her through the store and sealing returned.
+async fn assistant(
+    name: &str,
+) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::humans::TestDevice, Arc<MemoryHuman>) {
+    let device = crate::humans::TestDevice::default();
+    let humans = Registry::with(UserId::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
+    let (mcp, sent) = start_with(&home(name), Vec::new(), Arc::default(), humans.clone()).await;
+    let store = Arc::new(MemoryHuman::default());
+    mcp.with_assisting(user("alice"));
+    mcp.with_human_store(store.clone());
+    mcp.with_sealing(Arc::new(EnrolledSealing(humans.clone())));
+    (mcp, sent, humans, device, store)
+}
+
+const ASSIST_TOOLS: [&str; 7] = [
+    "human_queue",
+    "answer_for_human",
+    "send_for_human",
+    "react_for_human",
+    "title_for_human",
+    "done_for_human",
+    "decide_for_human",
+];
+
+#[tokio::test]
+async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
+    let (mcp, _sent, humans, device, _store) = assistant("assist-grant").await;
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+    let tools = async || -> Vec<String> {
+        client.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect()
+    };
+    let offered = |tools: &[String]| ASSIST_TOOLS.iter().filter(|t| tools.iter().any(|n| n == *t)).count();
+
+    let before = tools().await;
+    assert_eq!((before.len(), offered(&before)), (17, 0), "no grant: {before:?}");
+    let (ok, refused) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(!ok && refused.contains("no longer names dev-a"), "{refused}");
+
+    grant(&humans, &device, Some("dev-a"), false);
+    let granted = tools().await;
+    assert_eq!((granted.len(), offered(&granted)), (24, 7), "{granted:?}");
+    assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
+
+    // The same connection loses them at once.
+    grant(&humans, &device, None, false);
+    let withdrawn = tools().await;
+    assert_eq!((withdrawn.len(), offered(&withdrawn)), (17, 0), "{withdrawn:?}");
+    let (ok, refused) = call(&client, "send_for_human", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
+    assert!(!ok && refused.contains("the grant of alice no longer names dev-a"), "{refused}");
+
+    grant(&humans, &device, Some("pb"), false);
+    assert_eq!(offered(&tools().await), 0, "the grant names another ant");
+}
+
+#[tokio::test]
+async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
+    let (mcp, mut sent, humans, device, store) = assistant("assist-acts").await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, dev_a, dev_b) = (user("alice"), user("dev-a"), user("dev-b"));
+    let thread = ThreadId::generate();
+    let question = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], false).unwrap();
+    let asked =
+        Envelope::asking(thread.clone(), dev_b.clone(), alice.clone(), question).with_owner(Some(alice.clone()));
+    store.store(asked.clone());
+    let mut request = ants_proto::ApprovalRequest::new(
+        dev_b.clone(),
+        thread.clone(),
+        ants_proto::ToolCall { kind: "execute".into(), title: "git push".into(), ..Default::default() },
+        vec![Verdict::AllowOnce],
+        Duration::from_secs(600),
+    )
+    .for_human(Some(alice.clone()), None);
+    store.requests.locked().push(request.clone());
+    request.human = Some(user("bob"));
+    store.requests.locked().push(request.clone());
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(ok, "{queue}");
+    assert!(queue.contains(&format!("message {} on thread {thread}, dev-b to alice: Ship it?", asked.id)), "{queue}");
+    assert!(queue.contains("[options: 1. yes, 2. no]"), "{queue}");
+    assert!(queue.contains("Tool requests (1)") && queue.contains("dev-b/"), "bob's is not hers: {queue}");
+
+    let (ok, answered) =
+        call(&client, "answer_for_human", serde_json::json!({"message_id": asked.id.to_string(), "answer": "1"})).await;
+    assert!(ok, "{answered}");
+    let answer = sent.try_recv().unwrap();
+    assert_eq!((&answer.from, &answer.to, answer.on_behalf_of.as_ref()), (&dev_a, &dev_b, Some(&alice)));
+    assert_eq!(answer.answers_as(&asked, &alice), Some(ants_proto::Answered::Option(1, "yes")), "an answer for alice");
+    assert!(humans.honours_assistant(&alice, &answer.from, Some(&alice)), "readers verify it against the grant");
+    store.store(answer);
+    let (_, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(queue.contains("Questions to alice (0)"), "answered: {queue}");
+
+    let (ok, decided) = call(
+        &client,
+        "decide_for_human",
+        serde_json::json!({"request": format!("dev-b/{}", request.id), "verdict": "allow_once"}),
+    )
+    .await;
+    assert!(ok && decided.contains("ants assistant confirm dev-b/"), "{decided}");
+    let decision = sent.try_recv().unwrap();
+    let approval = decision.approval.as_deref().unwrap();
+    assert_eq!((&decision.to, decision.on_behalf_of.as_ref()), (&dev_b, Some(&alice)));
+    assert_eq!((approval.verdict, approval.on_behalf_of.as_ref()), (Verdict::AllowOnce, Some(&alice)));
+
+    let (ok, to_ant) = call(
+        &client,
+        "send_for_human",
+        serde_json::json!({"to": "dev-b", "text": "ship it", "thread": thread.to_string()}),
+    )
+    .await;
+    assert!(ok, "{to_ant}");
+    let message = sent.try_recv().unwrap();
+    assert_eq!((&message.to, &message.thread_id, message.on_behalf_of.as_ref()), (&dev_b, &thread, Some(&alice)));
+    assert_eq!((message.owner.as_ref(), message.text.as_str()), (Some(&alice), "ship it"));
+    assert!(sent.try_recv().is_err(), "dev-b's daemon tells alice");
+
+    let (ok, titled) =
+        call(&client, "title_for_human", serde_json::json!({"thread": thread.to_string(), "title": "Release"})).await;
+    assert!(ok, "{titled}");
+    let title = store.titles.locked().pop().unwrap();
+    assert_eq!((title.title.as_str(), &title.by, title.on_behalf_of.as_ref()), ("Release", &dev_a, Some(&alice)));
+    let notice = sent.try_recv().unwrap();
+    assert_eq!((&notice.to, notice.on_behalf_of.as_ref()), (&alice, None), "alice is told: {}", notice.text);
+    assert!(notice.text.contains("as the assistant of alice, titled thread"), "{}", notice.text);
+
+    let (ok, _) =
+        call(&client, "react_for_human", serde_json::json!({"message_id": asked.id.to_string(), "reaction": "check"}))
+            .await;
+    assert!(ok);
+    assert_eq!(store.reactions.locked()[0].3.as_ref(), Some(&alice));
+    sent.try_recv().unwrap();
+    let (ok, _) = call(&client, "done_for_human", serde_json::json!({"thread": thread.to_string()})).await;
+    assert!(ok);
+    assert_eq!(store.done.locked()[0].on_behalf_of.as_ref(), Some(&alice));
+    sent.try_recv().unwrap();
+
+    let (ok, refused) =
+        call(&client, "title_for_human", serde_json::json!({"thread": ThreadId::generate().to_string(), "title": "x"}))
+            .await;
+    assert!(!ok && refused.contains("alice has no message on thread"), "{refused}");
+}
+
+#[tokio::test]
+async fn the_assistant_reads_and_sends_its_human_s_sealed_messages_only_when_enrolled() {
+    let (mcp, mut sent, humans, device, store) = assistant("assist-sealed").await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, bob) = (user("alice"), user("bob"));
+    let mut sealed = Envelope::new(bob.clone(), alice.clone(), "");
+    let device_id = ants_proto::DeviceId::generate();
+    sealed.sealed =
+        Some(Box::new(ants_proto::Sealed { v: 1, device: device_id, keys: Vec::new(), body: "lunch at one?".into() }));
+    store.store(sealed.clone());
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+    let read =
+        async || call(&client, "human_queue", serde_json::json!({"thread": sealed.thread_id.to_string()})).await.1;
+    let to_bob = serde_json::json!({"to": "bob", "text": "yes", "thread": sealed.thread_id.to_string()});
+
+    assert!(read().await.contains("bob to alice: [sealed]"), "not enrolled");
+    let (ok, refused) = call(&client, "send_for_human", to_bob.clone()).await;
+    assert!(!ok && refused.contains("nothing sent: set plaintext"), "{refused}");
+    assert!(sent.try_recv().is_err());
+
+    grant(&humans, &device, Some("dev-a"), true);
+    assert!(read().await.contains("bob to alice: lunch at one?"), "enrolled");
+    let (ok, result) = call(&client, "send_for_human", to_bob.clone()).await;
+    assert!(ok, "{result}");
+    let reply = sent.try_recv().unwrap();
+    assert_eq!((&reply.to, reply.on_behalf_of.as_ref(), reply.text.as_str()), (&bob, Some(&alice), ""));
+    assert_eq!(reply.sealed.as_ref().unwrap().body, "yes");
+    let notice = sent.try_recv().unwrap();
+    assert!(notice.to == alice && notice.text.contains("sent bob a sealed message"), "{}", notice.text);
+    assert!(!notice.text.contains("yes"), "the notice is in the clear, so it never quotes a sealed message");
+    let (ok, refused) =
+        call(&client, "title_for_human", serde_json::json!({"thread": sealed.thread_id.to_string(), "title": "Lunch"}))
+            .await;
+    assert!(!ok && refused.contains("sealed"), "{refused}");
+
+    grant(&humans, &device, Some("dev-a"), false);
+    assert!(read().await.contains("bob to alice: [sealed]"), "enrollment ended");
+    let (ok, plain) =
+        call(&client, "send_for_human", serde_json::json!({"to": "bob", "text": "yes", "plaintext": true})).await;
+    assert!(ok, "{plain}");
+    let reply = sent.try_recv().unwrap();
+    assert!(reply.sealed.is_none() && reply.text == "yes");
+}
