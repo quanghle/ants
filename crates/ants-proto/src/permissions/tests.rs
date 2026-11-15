@@ -136,7 +136,7 @@ fn leaf_permissions_cover_each_user_once() {
             "$KV.ants_machines.m1",
             "$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines.m1.>",
             "$KV.ants_machines.m1.>",
-            "$JS.API.DIRECT.GET.KV_ants_devices.$KV.ants_devices.revoked.*",
+            // Its revocation reads are already an ant's.
             "$JS.API.CONSUMER.INFO.ANTS.admin-m1",
             "$JS.API.CONSUMER.CREATE.ANTS.admin-m1.ants.admin.m1.>",
             "$JS.API.CONSUMER.MSG.NEXT.ANTS.admin-m1",
