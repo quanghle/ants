@@ -1,6 +1,7 @@
-//! Snoozing a thread from home: `z` on a home item asks in the footer for how long, `1h` unless edited, at most
-//! [`SNOOZE_MAX`], and Enter keeps the thread off home on all the human's devices until then, or until an item for
-//! the human arrives on it ([`ThreadSnoozes`]).
+//! Snoozing a thread from home: `z` on a home item, or on a thread in the work or thread view, asks in the footer
+//! for how long, `1h` unless edited, at most [`SNOOZE_MAX`], and Enter keeps the thread off home on all the human's
+//! devices until then, or until an item for the human arrives on it ([`ThreadSnoozes`]). `z` on a thread a snooze
+//! holds off home wakes it instead, as `/unsnooze` does; `/snooze [DURATION]` snoozes without asking.
 
 #[cfg(doc)]
 use ants_proto::ThreadSnoozes;
@@ -10,6 +11,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 
 use super::acts::Change;
+use super::home;
 use super::model::{Action, Data, Key, Model};
 
 /// How long a snooze lasts unless edited.
@@ -45,22 +47,46 @@ impl Prompt {
 
     /// Until when the text says to snooze, from `now`.
     fn until(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-        let duration = ants_proto::duration::parse(self.text.trim())?;
-        let duration = TimeDelta::from_std(duration).map_err(|_| "too long: at most 7d".to_owned())?;
-        if duration <= TimeDelta::zero() {
-            return Err("a snooze lasts longer than 0".to_owned());
-        }
-        if duration > SNOOZE_MAX {
-            return Err("too long: at most 7d".to_owned());
-        }
-        Ok(now + duration)
+        duration(&self.text).map(|d| now + d)
     }
 }
 
+/// How long snoozing for `text`, a duration such as `1h`, lasts; `1h` for an empty one.
+pub fn duration(text: &str) -> Result<TimeDelta, String> {
+    let text = match text.trim() {
+        "" => DEFAULT,
+        text => text,
+    };
+    let duration = ants_proto::duration::parse(text)?;
+    let duration = TimeDelta::from_std(duration).map_err(|_| "too long: at most 7d".to_owned())?;
+    if duration <= TimeDelta::zero() {
+        return Err("a snooze lasts longer than 0".to_owned());
+    }
+    if duration > SNOOZE_MAX {
+        return Err("too long: at most 7d".to_owned());
+    }
+    Ok(duration)
+}
+
 impl Model {
-    /// Ask how long to snooze `thread`.
-    pub fn snooze(&mut self, thread: ThreadId) {
+    /// `z` on `thread`: wake it when a snooze holds it off home, else ask how long to snooze it.
+    pub fn snooze(&mut self, thread: ThreadId, now: DateTime<Utc>) -> Option<Action> {
+        if home::snoozed(&self.data, now).contains_key(&thread) {
+            return Some(self.set_snooze(thread, None, now));
+        }
         self.snoozing = Some(Prompt::new(thread));
+        None
+    }
+
+    /// Snooze `thread` until `until`, or wake it for none: here at once, not once the snooze is read back, and on
+    /// all the human's devices through the action.
+    pub fn set_snooze(&mut self, thread: ThreadId, until: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Action {
+        match until {
+            Some(until) => self.data.cards.snoozed.snooze(&thread, now, until),
+            None => _ = self.data.cards.snoozed.wake(&thread, now),
+        }
+        let last = self.data.live.summary(&thread).map_or(0, |s| s.last_reopening);
+        Action::Change(thread, Change::Snooze(until), last)
     }
 
     /// Take `key` while the footer asks how long to snooze.
@@ -83,10 +109,7 @@ impl Model {
                 Ok(until) => {
                     let thread = prompt.thread.clone();
                     self.snoozing = None;
-                    // Off home at once, not once the snooze is read back.
-                    self.data.cards.snoozed.snooze(&thread, now, until);
-                    let last = self.data.live.summary(&thread).map_or(0, |s| s.last_reopening);
-                    return Some(Action::Change(thread, Change::Snooze(Some(until)), last));
+                    return Some(self.set_snooze(thread, Some(until), now));
                 }
                 Err(error) => prompt.error = Some(error),
             },
@@ -106,12 +129,15 @@ mod tests {
     fn z_asks_how_long_one_hour_unless_edited_and_refuses_over_seven_days() {
         let thread = ThreadId::generate();
         let mut m = model();
-        m.snooze(thread.clone());
+        assert_eq!(m.snooze(thread.clone(), at(0)), None);
         assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Change(thread.clone(), Change::Snooze(Some(at(3600))), 0)));
         assert!(m.snoozing.is_none());
         assert!(m.data.cards.snoozed.get(&thread, at(1)).is_some(), "off home at once");
 
-        m.snooze(thread);
+        assert_eq!(m.snooze(thread.clone(), at(1)), Some(Action::Change(thread.clone(), Change::Snooze(None), 0)));
+        assert!(m.data.cards.snoozed.get(&thread, at(1)).is_none(), "z on a snoozed thread wakes it at once");
+
+        m.snooze(thread, at(0));
         for c in "8d".chars() {
             m.key(Key::Char(c), at(0));
         }

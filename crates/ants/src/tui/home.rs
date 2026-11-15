@@ -3,6 +3,8 @@
 //! one, each with its one-key actions: answer ([`question`]), grant, reply, follow up, cancel, mark done, snooze ([`super::snooze`])
 //! or open. A snoozed thread's items stay off home until the snooze ends or an item for the human arrives on it.
 
+use std::collections::HashMap;
+
 use ants_proto::{ApprovalRequest, Question, ThreadId, Uuid, Verdict};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -108,6 +110,34 @@ impl Item {
 
 /// What waits on the human at `now`.
 pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
+    let mut items = unsnoozed(data, now);
+    let held = held(data, &items, now);
+    items.retain(|i| !held.contains_key(&i.thread));
+    // The requests waiting for the human before those settled lately.
+    items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
+    items
+}
+
+/// The threads a snooze keeps off home at `now`, with when each snooze ends.
+pub fn snoozed(data: &Data, now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Utc>> {
+    held(data, &unsnoozed(data, now), now)
+}
+
+/// The threads a snooze keeps off home among `items`: it holds until an item for the human arrives on the thread
+/// after it was set.
+fn held(data: &Data, items: &[Item], now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Utc>> {
+    data.cards
+        .snoozed
+        .0
+        .keys()
+        .filter_map(|thread| data.cards.snoozed.get(thread, now).map(|s| (thread, s)))
+        .filter(|(thread, s)| !items.iter().any(|i| i.thread == **thread && i.at > s.at))
+        .map(|(thread, s)| (thread.clone(), s.until))
+        .collect()
+}
+
+/// What would wait on the human at `now` were no thread snoozed, unordered.
+fn unsnoozed(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
     let mut items: Vec<Item> = approvals::cards(data, None, now)
         .into_iter()
         .map(|card| {
@@ -154,16 +184,6 @@ pub fn items(data: &Data, now: DateTime<Utc>) -> Vec<Item> {
             items.push(item(Why::Finished, thread, latest.at, format!("{} answered", latest.from)));
         }
     }
-    // A snooze holds until an item for the human arrives on the thread after it was set.
-    let snoozes = &data.cards.snoozed;
-    let woken: Vec<ThreadId> = items
-        .iter()
-        .filter(|i| snoozes.get(&i.thread, now).is_some_and(|s| i.at > s.at))
-        .map(|i| i.thread.clone())
-        .collect();
-    items.retain(|i| snoozes.get(&i.thread, now).is_none() || woken.contains(&i.thread));
-    // The requests waiting for the human before those settled lately.
-    items.sort_by_key(|i| (i.why, i.request.as_ref().is_some_and(|(_, settled)| settled.is_some()), i.at));
     items
 }
 

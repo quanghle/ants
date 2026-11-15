@@ -83,7 +83,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · t tree · S TL;DR · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · i reply · y copy · o open file · ] next file · + react · p pin · m mute · e archive · d done · z snooze · t tree · S TL;DR · s steer · x cancel · a A r answer a tool request · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -195,6 +195,7 @@ impl Page {
                 return question::thread_key(key, data, &self.history.thread, &self.history.entries, now);
             }
             Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
+            Key::Char('z') => return Some(To::Snooze(self.history.thread.clone())),
             Key::Char('S') => return Some(To::Tldr(self.history.thread.clone())),
             Key::Char('o') => {
                 let listed = self.attachment()?.clone();
@@ -336,11 +337,17 @@ impl Page {
             lines.push(field("FROM", format!("{} {}", origin(first, data), hm(first.stored_at))));
         }
         let flags = self.flags(data, now);
-        let held: Vec<&str> =
-            [(flags.pinned, "pinned"), (flags.muted, "muted"), (flags.archived, "archived"), (flags.done, "done")]
-                .into_iter()
-                .filter_map(|(on, name)| on.then_some(name))
-                .collect();
+        let snoozed = super::home::snoozed(data, now).contains_key(thread);
+        let held: Vec<&str> = [
+            (flags.pinned, "pinned"),
+            (flags.muted, "muted"),
+            (flags.archived, "archived"),
+            (flags.done, "done"),
+            (snoozed, "snoozed"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
         if !held.is_empty() {
             lines.push(field("HELD", held.join(" · ")));
         }

@@ -138,7 +138,7 @@ const HELP: &[(&str, &str)] = &[
     ("/command", "in the bar: a command on the selection (Ctrl-K lists them)"),
     ("Alt-Enter Ctrl-E", "in the bar: a new line, the text in the editor"),
     ("↑↓ Tab", "in the bar: pick and complete an @ant, #channel or /command"),
-    ("y p m e d", "in a thread: copy, pin, mute, archive, mark done (again to undo)"),
+    ("y p m e d z", "in a thread: copy, pin, mute, archive, done, snooze (again to undo)"),
     ("a A r, y", "on a tool request: allow once, always or reject, then confirm"),
     ("1-9 r", "on a question: answer with that option, or type an answer"),
     ("g r f x d z s", "on home: grant, reply, follow up, cancel, done, snooze, digest"),

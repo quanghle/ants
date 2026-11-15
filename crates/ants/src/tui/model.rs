@@ -228,7 +228,7 @@ pub enum To {
     Interrupt(Intent, ThreadId),
     /// The thread, with the command bar open to reply on it.
     Reply(ThreadId),
-    /// Ask how long to keep the thread off home.
+    /// Ask how long to keep the thread off home, or wake it if a snooze holds it off.
     Snooze(ThreadId),
     /// The command bar, open on this text.
     Bar(String),
@@ -793,10 +793,7 @@ impl Model {
                 self.bar.focused = true;
                 self.go(To::Thread(thread), now)
             }
-            To::Snooze(thread) => {
-                self.snooze(thread);
-                None
-            }
+            To::Snooze(thread) => self.snooze(thread, now),
             To::Bar(text) => {
                 self.bar.set_text(&text);
                 self.bar.focused = true;
