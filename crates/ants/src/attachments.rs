@@ -7,7 +7,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use ants_daemon::files;
-use ants_proto::{Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, Uuid};
+use ants_proto::{Attachment, AttachmentHandle, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, Uuid, guess_mime};
 use anyhow::{Context as _, Result, bail, ensure};
 use async_nats::jetstream;
 use serde::{Serialize, Serializer};
@@ -46,7 +46,7 @@ pub fn read_all(paths: &[PathBuf]) -> Result<Vec<File>> {
 }
 
 /// Read the file at `path` to attach: a regular file of at most [`MAX_ATTACHMENT_SIZE`] bytes, named by its base name,
-/// of the media type its extension gives ([`mime_of`]).
+/// of the media type its extension gives ([`guess_mime`]).
 pub fn read(path: &Path) -> Result<File> {
     let shown = path.display();
     let name = path.file_name().with_context(|| format!("{shown} names no file to attach"))?;
@@ -59,7 +59,7 @@ pub fn read(path: &Path) -> Result<File> {
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
     file.take(MAX_ATTACHMENT_SIZE + 1).read_to_end(&mut bytes).with_context(|| format!("reading {shown}"))?;
     ensure!(bytes.len() as u64 <= MAX_ATTACHMENT_SIZE, too_big(bytes.len() as u64));
-    let attachment = files::reference(name, mime_of(name), &bytes).with_context(|| format!("attaching {shown}"))?;
+    let attachment = files::reference(name, guess_mime(name), &bytes).with_context(|| format!("attaching {shown}"))?;
     Ok(File { attachment, bytes })
 }
 
@@ -79,53 +79,6 @@ pub async fn store(
         files::put(js, &handle_of(file.attachment.id), &file.attachment, &file.bytes).await?;
     }
     Ok(())
-}
-
-/// The media type of a file named `name`, from its extension, whatever the case; [`Attachment::UNKNOWN_MIME`] for
-/// one not listed.
-pub fn mime_of(name: &str) -> &'static str {
-    let Some((_, extension)) = name.rsplit_once('.') else { return Attachment::UNKNOWN_MIME };
-    match extension.to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "ico" => "image/vnd.microsoft.icon",
-        "tif" | "tiff" => "image/tiff",
-        "avif" => "image/avif",
-        "heic" => "image/heic",
-        "txt" | "log" | "text" => "text/plain",
-        "md" | "markdown" => "text/markdown",
-        "csv" => "text/csv",
-        "tsv" => "text/tab-separated-values",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" | "mjs" => "text/javascript",
-        "diff" | "patch" => "text/x-diff",
-        "rs" => "text/x-rust",
-        "py" => "text/x-python",
-        "go" => "text/x-go",
-        "c" | "h" => "text/x-c",
-        "sh" => "application/x-sh",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "yaml" | "yml" => "application/yaml",
-        "toml" => "application/toml",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "tar" => "application/x-tar",
-        "wasm" => "application/wasm",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        "webm" => "video/webm",
-        _ => Attachment::UNKNOWN_MIME,
-    }
 }
 
 /// A size for people: bytes, KiB or MiB, with one decimal under 10.
@@ -279,12 +232,12 @@ mod tests {
 
     #[test]
     fn media_types_come_from_the_extension() {
-        assert_eq!(mime_of("Shot.PNG"), "image/png");
-        assert_eq!(mime_of("photo.jpeg"), "image/jpeg");
-        assert_eq!(mime_of("build.log"), "text/plain");
-        assert_eq!(mime_of("archive.tar.gz"), "application/gzip");
+        assert_eq!(guess_mime("Shot.PNG"), "image/png");
+        assert_eq!(guess_mime("photo.jpeg"), "image/jpeg");
+        assert_eq!(guess_mime("build.log"), "text/plain");
+        assert_eq!(guess_mime("archive.tar.gz"), "application/gzip");
         for unknown in ["Makefile", "data.bin", "trailing."] {
-            assert_eq!(mime_of(unknown), Attachment::UNKNOWN_MIME, "{unknown}");
+            assert_eq!(guess_mime(unknown), Attachment::UNKNOWN_MIME, "{unknown}");
         }
         assert_eq!(
             [0, 1023, 1024, 1536, 240 * 1024, 8 * 1024 * 1024].map(size),

@@ -591,8 +591,16 @@ async fn credentials_confine_each_user_to_its_role() {
     let got = timeout(WAIT, decisions.next()).await.unwrap().unwrap();
     assert_eq!(&got.payload[..], b"allow");
     // It reads back the decision stored on its own request, and on no one else's.
-    let stored = stream.direct_get_last_for_subject(subject::approval_decision(&dev_a, &request)).await.unwrap();
-    assert_eq!(&stored.payload[..], b"allow");
+    // The subscriber can see the core publish before the stream stores it.
+    let stored = timeout(WAIT, async {
+        loop {
+            match stream.direct_get_last_for_subject(subject::approval_decision(&dev_a, &request)).await {
+                Ok(stored) => break stored,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    });
+    assert_eq!(&stored.await.unwrap().payload[..], b"allow");
     let of_b = format!("$JS.API.DIRECT.GET.{STREAM}.{}", subject::approval_decision(&dev_b, &request));
     a_raw.publish(of_b.clone(), "".into()).await.unwrap();
     let v = next_violation(&a_raw, &mut errors).await;
