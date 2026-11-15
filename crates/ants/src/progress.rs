@@ -42,6 +42,26 @@ pub fn clear() {
     *line = (None, false);
 }
 
+/// Log lines kept instead of written while `ants dash` holds the terminal ([`hold_logs`]).
+static HELD: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// How many of the latest log lines are kept.
+const HELD_MAX: usize = 100;
+
+/// Keep log lines instead of writing them to stderr, until [`release_logs`].
+pub fn hold_logs() {
+    *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+}
+
+/// Write log lines to stderr again; returns those kept meanwhile.
+pub fn release_logs() -> Vec<String> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+}
+
+/// The latest log line kept, if any.
+pub fn last_held_log() -> Option<String> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|held| held.last().cloned())
+}
+
 /// Stderr for log lines: the status line goes off the screen before one and comes back after it.
 pub fn log_writer() -> LogWriter {
     LogWriter { hid: false }
@@ -53,6 +73,12 @@ pub struct LogWriter {
 
 impl std::io::Write for LogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(held) = HELD.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            held.extend(String::from_utf8_lossy(buf).lines().map(str::to_owned));
+            let over = held.len().saturating_sub(HELD_MAX);
+            held.drain(..over);
+            return Ok(buf.len());
+        }
         if !self.hid {
             self.hid = true;
             let mut line = LINE.lock().unwrap_or_else(|e| e.into_inner());

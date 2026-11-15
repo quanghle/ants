@@ -383,6 +383,15 @@ impl Threads {
         }
     }
 
+    /// Every thread read so far.
+    pub fn summaries(&self) -> impl Iterator<Item = &Summary> {
+        self.by_id.values()
+    }
+
+    pub fn get(&self, thread: &ThreadId) -> Option<&Summary> {
+        self.by_id.get(thread)
+    }
+
     /// The threads `select` keeps, as the CLI's human marked them (`marks`), least recently active first and its
     /// pinned ones after the others, and how many more it left out for its limit. Archived threads are left out,
     /// unless a message was stored on one since it was archived, or `select` asks for archived threads.
@@ -499,7 +508,7 @@ pub fn render(entries: &[Entry]) -> String {
 }
 
 /// Where a read of the last `since` starts: everything kept for zero.
-fn window(since: Duration) -> consumer::DeliverPolicy {
+pub fn window(since: Duration) -> consumer::DeliverPolicy {
     match SystemTime::now().checked_sub(since) {
         Some(start) if !since.is_zero() => consumer::DeliverPolicy::ByStartTime { start_time: start.into() },
         _ => consumer::DeliverPolicy::All,
@@ -834,26 +843,33 @@ fn marked_start<'a>(threads: impl Iterator<Item = &'a ThreadId>) -> Option<consu
     earliest.map(|start| consumer::DeliverPolicy::ByStartTime { start_time: start.into() })
 }
 
-/// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
-pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
-    let js = connect(nats).await?;
-    let thread = &pick.resolve(&js, &nats.me).await?;
+/// Every message stored on `thread`, in stream order, with the reactions to each: read from `since` ago, else from the
+/// thread's start when its id is time-ordered, else from all the stream keeps.
+pub async fn history(js: &jetstream::Context, thread: &ThreadId, since: Option<Duration>) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    scan(&js, show_start(thread, since), |entry| {
+    scan(js, show_start(thread, since), |entry| {
         if entry.thread_id == *thread {
             entries.push(entry);
         }
     })
     .await?;
     let ids: Vec<Uuid> = entries.iter().filter_map(|e| e.id).collect();
-    let mut reactions = crate::inbox::reactions_or_none(&js, &ids).await;
-    let (title, mark) =
-        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last()).await };
+    let mut reactions = crate::inbox::reactions_or_none(js, &ids).await;
     for entry in &mut entries {
         if let Some(id) = entry.id {
             entry.reactions = reactions.remove(&id).unwrap_or_default();
         }
     }
+    Ok(entries)
+}
+
+/// `ants thread show THREAD`: every message stored on the thread `pick` picks, in the order the stream stored them.
+pub async fn show(nats: &crate::Nats<'_>, pick: Pick, since: Option<Duration>, json: bool) -> Result<()> {
+    let js = connect(nats).await?;
+    let thread = &pick.resolve(&js, &nats.me).await?;
+    let entries = history(&js, thread, since).await?;
+    let (title, mark) =
+        if json { (None, None) } else { thread_meta::of_or_none(nats, &js, thread, entries.last()).await };
     if json {
         for entry in &entries {
             println!("{}", serde_json::to_string(entry)?);
