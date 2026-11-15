@@ -1,0 +1,96 @@
+//! `ants dead`: the dead letters of ants.
+
+use ants_daemon::dead;
+use ants_proto::DeadLetter;
+use anyhow::{Context as _, Result};
+use clap::Subcommand;
+use clap_complete::engine::ArgValueCandidates;
+
+use crate::{Nats, completions, excerpt};
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DeadCommand {
+    /// List dead letters, oldest first.
+    List,
+    /// Send a dead letter's message to its inbox again, as it was, and remove the dead letter.
+    Replay {
+        #[arg(add = ArgValueCandidates::new(completions::dead_letters))]
+        seq: u64,
+    },
+    /// Remove a dead letter without replaying it.
+    Drop {
+        #[arg(add = ArgValueCandidates::new(completions::dead_letters))]
+        seq: u64,
+    },
+    /// Keep dead-lettering, until Ctrl-C, the messages JetStream stops delivering without the daemon having stored
+    /// them as dead letters, and print each one. `ants inbox --follow` does the same while it runs.
+    Watch,
+}
+
+pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
+    let (client, js) = nats.connect("ants-cli").await?;
+    let stream = || async { js.get_stream(ants_proto::STREAM).await.context("opening the ANTS stream") };
+    match command {
+        DeadCommand::List => {
+            let letters = dead::list(&stream().await?).await?;
+            if letters.is_empty() {
+                println!("no dead letters");
+            }
+            for (seq, letter) in &letters {
+                println!("{}", dead_row(*seq, letter));
+            }
+        }
+        DeadCommand::Replay { seq } => {
+            let envelope = dead::replay(&js, &stream().await?, seq).await?;
+            println!("replayed to {} on thread {}", envelope.to, envelope.thread_id);
+        }
+        DeadCommand::Drop { seq } => {
+            dead::discard(&stream().await?, seq).await?;
+            println!("dropped dead letter {seq}");
+        }
+        DeadCommand::Watch => {
+            let watch = dead::watch(&client, &js, &nats.me.id, |seq, letter| println!("{}", dead_row(seq, letter)));
+            tokio::select! {
+                watched = watch => watched?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text.
+pub(crate) fn dead_row(seq: u64, letter: &DeadLetter) -> String {
+    let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
+    let (thread, from, text) = match &letter.envelope {
+        Some(e) => (e.thread_id.as_str(), e.from.as_str(), e.text.as_str()),
+        None => ("-", "-", letter.payload.as_deref().unwrap_or("")),
+    };
+    format!(
+        "{seq}\t{}\t{thread}\t{from}\t{}x\t{time}\t{}\t{}",
+        letter.ant,
+        letter.deliveries,
+        excerpt(&letter.error, 60),
+        excerpt(text, 60)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use ants_proto::{Envelope, UserId};
+
+    use super::*;
+
+    #[test]
+    fn dead_rows_show_the_message_or_the_bad_payload() {
+        let mut ask = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "build it\nand test it");
+        ask.thread_id = "t1".parse().unwrap();
+        let letter = DeadLetter::of_envelope("dev-a".parse().unwrap(), 3, 5, "harness crashed", ask);
+        let row = dead_row(12, &letter);
+        assert!(row.starts_with("12\tdev-a\tt1\thuman\t5x\t"), "{row}");
+        assert!(row.ends_with("\tharness crashed\tbuild it…"), "{row}");
+
+        let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, "not an envelope", b"{oops");
+        assert!(dead_row(13, &letter).ends_with("\tnot an envelope\t{oops"));
+    }
+}

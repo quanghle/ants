@@ -13,7 +13,7 @@ use ants_daemon::config::{CliDefaults, Summary};
 use ants_daemon::keystore::Store;
 use ants_daemon::{bus, dead, roster};
 use ants_proto::{CHANNELS_BUCKET, JsDomain, ROSTER_BUCKET, STREAM, UserId};
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream;
 use clap::CommandFactory as _;
 use clap_complete::engine::CompletionCandidate;
@@ -141,6 +141,19 @@ impl std::fmt::Display for Install {
         }
         Ok(())
     }
+}
+
+/// `ants completions`: print the script of `shell` (default: the login shell's), or install it.
+pub fn run(shell: Option<Shell>, install: bool) -> Result<()> {
+    let shell = match shell.or_else(Shell::login) {
+        Some(shell) => shell,
+        None => bail!("$SHELL is not bash, zsh or fish: name the shell"),
+    };
+    match install {
+        true => println!("{}", self::install(shell, &std::env::home_dir().context("no home directory")?, false)?),
+        false => print!("{}", shell.script(&bin())?),
+    }
+    Ok(())
 }
 
 /// Write the completions script of `shell` where the shell of a user whose home is `home` loads it from, unless
