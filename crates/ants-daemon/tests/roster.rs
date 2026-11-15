@@ -38,6 +38,7 @@ fn entry_on(ant: &str, machine: &str) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
     }
 }
 

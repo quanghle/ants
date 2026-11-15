@@ -40,5 +40,9 @@ expression: value
   "failing": {
     "since": "2025-01-01T12:04:00Z",
     "error": "harness exited"
+  },
+  "fallback": {
+    "name": "claude:sonnet",
+    "since": "2025-01-01T12:05:00Z"
   }
 }

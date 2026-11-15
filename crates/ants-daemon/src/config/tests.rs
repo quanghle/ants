@@ -355,6 +355,28 @@ fn unknown_harness_references_and_bad_definitions_fail_to_load() {
 }
 
 #[test]
+fn fallbacks_name_known_harnesses_and_models() {
+    let ant = |fallback: &str| {
+        format!(
+            "messenger = false\nharness = \"my-agent\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nmodel = \"m1\"\n\
+             fallback = {fallback}\n[harnesses.my-agent]\ncommand = \"x\""
+        )
+    };
+    let (ants, harnesses) = parse_with_harnesses(&ant(r#"["claude", "copilot:gpt-5", ":m2"]"#)).unwrap();
+    let config = ants.into_iter().next().unwrap().into_config("nats://unused", &harnesses).unwrap();
+    let names: Vec<_> = config.fallbacks.iter().map(crate::fallback::Fallback::name).collect();
+    assert_eq!(names, ["claude", "copilot:gpt-5", "my-agent:m2"]);
+    assert_eq!(config.fallbacks[2].harness, config.harness, "another model of the ant's own harness");
+
+    let err = |fallback: &str| format!("{:#}", parse_here(&ant(fallback)).unwrap_err());
+    let unknown = err(r#"["vim"]"#);
+    assert!(unknown.contains("config.toml: ant dev-a: fallback \"vim\": unknown harness \"vim\""), "{unknown}");
+    assert!(err(r#"[":m1"]"#).contains("the ant's own harness and model"));
+    assert!(err(r#"["claude:"]"#).contains("names no model"));
+    assert!(err(r#""claude""#).contains("invalid type"), "a list");
+}
+
+#[test]
 fn the_summary_resolves_harnesses_for_direct_use() {
     let text = "harness = \"my-agent\"\n[harnesses.my-agent]\ncommand = \"./my-agent\"";
     let summary = Summary::parse(text, Path::new("/c/config.toml"), Path::new("/h")).unwrap();

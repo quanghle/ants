@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ants_proto::{
     ANTS_VERSION, Activity, HarnessAgent, HarnessFailing, HarnessLimit, PERMISSIONS_VERSION, ROSTER_HEARTBEAT,
-    ROSTER_TTL, RosterEntry, SignInNeeded, UserId,
+    ROSTER_TTL, RosterEntry, ServingFallback, SignInNeeded, UserId,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, kv};
@@ -30,8 +30,8 @@ pub struct Registration {
 }
 
 /// What the daemon is doing, shared by the inbox loop and the heartbeats: the messages being handled, the live
-/// harnesses, the agent the latest harness start named and whether the harness is signed out, held back by a provider
-/// limit or failing to start.
+/// harnesses, the agent the latest harness start named, whether the harness is signed out, held back by a provider
+/// limit or failing to start, and the fallback answering meanwhile.
 #[derive(Debug, Default)]
 pub struct Workload {
     handling: AtomicUsize,
@@ -40,9 +40,10 @@ pub struct Workload {
     signed_out: Mutex<Option<SignInNeeded>>,
     limited: Mutex<Option<HarnessLimit>>,
     failing: Mutex<Option<HarnessFailing>>,
+    fallback: Mutex<Option<ServingFallback>>,
     /// Wakes the heartbeats when the ant turns idle or working, its harness signed out or in or started with another
-    /// agent, a provider limit starts or ends, or the harness's start failures hold messages or no longer do, so the
-    /// roster shows it before the next beat.
+    /// agent, a provider limit starts or ends, the harness's start failures hold messages or no longer do, or a
+    /// fallback starts or stops answering, so the roster shows it before the next beat.
     changed: Notify,
 }
 
@@ -111,6 +112,19 @@ impl Workload {
         self.failing.locked().clone()
     }
 
+    /// Note the fallback answering for the ant's own harness, or with `None` that the ant's own answers again.
+    pub fn set_fallback(&self, fallback: Option<ServingFallback>) {
+        let mut current = self.fallback.locked();
+        if *current != fallback {
+            *current = fallback;
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn fallback(&self) -> Option<ServingFallback> {
+        self.fallback.locked().clone()
+    }
+
     pub fn handling(&self) -> usize {
         self.handling.load(Ordering::Relaxed)
     }
@@ -133,6 +147,7 @@ impl Workload {
         entry.signed_out = self.signed_out();
         entry.limited = self.limited();
         entry.failing = self.failing();
+        entry.fallback = self.fallback();
     }
 }
 
@@ -170,6 +185,7 @@ pub async fn entry(config: &Config) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
     }
 }
 
@@ -338,6 +354,7 @@ async fn due(ticks: &mut tokio::time::Interval, workload: Option<&Workload>, ent
                 && entry.signed_out == workload.signed_out()
                 && entry.limited == workload.limited()
                 && entry.failing == workload.failing()
+                && entry.fallback == workload.fallback()
             {
                 // Turned and turned back before this task ran: nothing new to show.
                 continue;
@@ -550,7 +567,8 @@ pub fn is_live(entry: &RosterEntry, now: DateTime<Utc>) -> bool {
 
 /// The ant a request needing `capability` goes to, of the entries other than `asking` that advertise it: ants whose
 /// harness is signed in and starting before those signed out or failing to start, then those held back by no provider
-/// limit before limited ones, then live entries before stale ones, then idle ants before those of unknown activity
+/// limit before limited ones, unless a fallback answers for them, then those answered by their own harness before
+/// those answered by a fallback, then live entries before stale ones, then idle ants before those of unknown activity
 /// (older daemons) and those working, then the fewest messages in hand, then the first by id. The same roster at the
 /// same time always gives the same answer.
 pub fn pick<'a>(
@@ -566,8 +584,9 @@ pub fn pick<'a>(
             Some(Activity::Working) => 2,
         };
         (
-            e.signed_out.is_some() || e.failing.is_some(),
-            e.limited.is_some(),
+            (e.signed_out.is_some() || e.failing.is_some()) && e.fallback.is_none(),
+            e.limited.is_some() && e.fallback.is_none(),
+            e.fallback.is_some(),
             !is_live(e, now),
             busyness,
             e.handling.unwrap_or(u32::MAX),
@@ -626,6 +645,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
         }
     }
 
@@ -677,6 +697,12 @@ mod tests {
         assert_eq!(stamped.limited, Some(limited));
         workload.set_limited(None);
         assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "its end too");
+
+        let fallback = ServingFallback { name: "claude:opus".to_owned(), since: now };
+        workload.set_fallback(Some(fallback.clone()));
+        assert!(futures::FutureExt::now_or_never(workload.changed.notified()).is_some(), "a fallback shows at once");
+        workload.stamp(&mut stamped);
+        assert_eq!(stamped.fallback, Some(fallback));
     }
 
     #[test]
@@ -742,6 +768,10 @@ mod tests {
         assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "an ant held back by no limit before a limited one");
         entries[0].failing = Some(HarnessFailing { since: now, error: "not found".to_owned() });
         assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "a limited ant before one failing to start");
+        entries[0].fallback = Some(ServingFallback { name: "claude".to_owned(), since: now });
+        assert_eq!(picked(&entries).as_deref(), Some("dev-a"), "an ant a fallback answers for before a limited one");
+        entries[1].limited = None;
+        assert_eq!(picked(&entries).as_deref(), Some("dev-0"), "its own harness before a fallback");
     }
 
     #[test]

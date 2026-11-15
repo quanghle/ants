@@ -52,10 +52,13 @@ fn chain(entry: &RosterEntry) -> String {
     entry.escalate_to.iter().map(UserId::as_str).collect::<Vec<_>>().join(",")
 }
 
-/// What the ant is doing: `signed-out` while its harness is, `failing` while its harness keeps failing to start,
-/// `rate-limited` or `out-of-quota` while a provider limit holds its messages, else its activity, or `-` when its daemon
-/// does not say.
+/// What the ant is doing: `fallback` while a fallback answers for its harness, `signed-out` while its harness is,
+/// `failing` while its harness keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
+/// messages, else its activity, or `-` when its daemon does not say.
 pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
+    if entry.fallback.is_some() {
+        return "fallback";
+    }
     match (&entry.signed_out, &entry.failing, &entry.limited, entry.activity) {
         (Some(_), _, _, _) => "signed-out",
         (None, Some(_), _, _) => "failing",
@@ -65,25 +68,45 @@ pub(crate) fn activity(entry: &RosterEntry) -> &'static str {
 }
 
 /// One line per ant whose harness is signed out (since when, and how to sign it in), keeps failing to start (since
-/// when, with its last error) or is held back by a provider limit (until when).
+/// when, with its last error) or is held back by a provider limit (until when), or a fallback answers for.
 pub fn held(entries: &[RosterEntry], now: DateTime<Utc>) -> Vec<String> {
-    entries.iter().filter_map(|e| held_line(e, now)).collect()
+    entries.iter().filter_map(|e| held_line(e, now).or_else(|| fallback_line(e, now))).collect()
 }
 
 fn held_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     signed_out_line(e, now).or_else(|| failing_line(e, now)).or_else(|| limited_line(e, now))
 }
 
+/// What becomes of the messages to the ant of `e` meanwhile: `wait`, unless a fallback answers them.
+fn meanwhile(e: &RosterEntry, now: DateTime<Utc>, wait: String) -> String {
+    match &e.fallback {
+        Some(fallback) => {
+            format!(
+                "fallback {} answers messages to {} (for {})",
+                fallback.name,
+                e.ant,
+                short(since(fallback.since, now))
+            )
+        }
+        None => wait,
+    }
+}
+
+fn fallback_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
+    e.fallback.as_ref()?;
+    Some(format!("{}: {} until harness {} answers again.", e.ant, meanwhile(e, now, String::new()), e.harness))
+}
+
 fn failing_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
     let failing = e.failing.as_ref()?;
+    let wait = format!("messages to {} wait, spending no attempts", e.ant);
     Some(format!(
-        "{}: harness {} failing to start for {} ({}); messages to {} wait, spending no attempts. Run `ants harness \
-         check --harness {}` on {}.",
+        "{}: harness {} failing to start for {} ({}); {}. Run `ants harness check --harness {}` on {}.",
         e.ant,
         e.harness,
         short(since(failing.since, now)),
         failing.error,
-        e.ant,
+        meanwhile(e, now, wait),
         e.harness,
         e.machine
     ))
@@ -96,12 +119,13 @@ fn limited_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
         LimitKind::RateLimit => "rate limited",
         LimitKind::Unknown => "held back by a provider limit",
     };
+    let wait = format!("messages to {} wait, spending no attempts", e.ant);
     Some(format!(
-        "{}: harness {} {what} for {}; messages to {} wait, spending no attempts, until {} (in {}).",
+        "{}: harness {} {what} for {}; {}, until {} (in {}).",
         e.ant,
         e.harness,
         short(since(limited.since, now)),
-        e.ant,
+        meanwhile(e, now, wait),
         limited.until.format("%H:%M:%SZ"),
         short(since(now, limited.until))
     ))
@@ -114,17 +138,17 @@ fn signed_out_line(e: &RosterEntry, now: DateTime<Utc>) -> Option<String> {
         None => format!("Sign {} in on {}", e.harness, e.machine),
     };
     Some(format!(
-        "{}: harness {} signed out for {}; messages to {} wait. {how} as the user the daemon runs as.",
+        "{}: harness {} signed out for {}; {}. {how} as the user the daemon runs as.",
         e.ant,
         e.harness,
         short(since(out.since, now)),
-        e.ant
+        meanwhile(e, now, format!("messages to {} wait", e.ant)),
     ))
 }
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry (with no escalation chain
 /// kept for it either, the name may be wrong), a stale entry, or a harness signed out or held back by a provider
-/// limit.
+/// limit with no fallback answering for it.
 pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now: DateTime<Utc>) -> Option<String> {
     let Some(entry) = entry else {
         let hint = if chain_kept { "" } else { " (`ants roster` lists the ants served: check the name)" };
@@ -136,6 +160,9 @@ pub fn unserved(ant: &UserId, entry: Option<&RosterEntry>, chain_kept: bool, now
             entry.machine,
             short(since(entry.heartbeat_at, now))
         ));
+    }
+    if entry.fallback.is_some() {
+        return None;
     }
     held_line(entry, now)
 }
@@ -313,6 +340,7 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
         }
     }
 
@@ -432,6 +460,22 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&super::json(&out, now).unwrap()).unwrap();
         assert_eq!(json["signed_out"]["sign_in"].as_str(), Some("copilot login"));
 
+        let fallback = Some(ants_proto::ServingFallback { name: "claude:opus".to_owned(), since });
+        let mut covered = entry("dev-i", 600, 2, now);
+        (covered.signed_out, covered.fallback) = (out.signed_out, fallback.clone());
+        let mut back = entry("dev-j", 600, 2, now);
+        back.fallback = fallback;
+        let entries = [covered, back];
+        assert_eq!(activity(&entries[0]), "fallback");
+        assert_eq!(
+            held(&entries, now),
+            [
+                "dev-i: harness copilot signed out for 5m; fallback claude:opus answers messages to dev-i (for 5m). \
+                 Run `copilot login` on m1 as the user the daemon runs as.",
+                "dev-j: fallback claude:opus answers messages to dev-j (for 5m) until harness copilot answers again.",
+            ]
+        );
+
         let mut led = entry("dev-a", 0, 30, now);
         led.escalate_to = vec!["lead".parse().unwrap()];
         let json: serde_json::Value = serde_json::from_str(&super::json(&led, now).unwrap()).unwrap();
@@ -465,6 +509,8 @@ mod tests {
         assert!(
             unserved(&dev_a, Some(&limited), true, now).unwrap().starts_with("dev-a: harness copilot out of quota")
         );
+        limited.fallback = Some(ants_proto::ServingFallback { name: "claude".to_owned(), since: now });
+        assert_eq!(unserved(&dev_a, Some(&limited), true, now), None, "a fallback answers");
     }
 
     /// Read with the human's credentials: an ant registered, one with only its escalation chain kept, one unknown.

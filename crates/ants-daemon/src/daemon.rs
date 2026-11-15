@@ -27,6 +27,7 @@ use crate::caps::{Caps, Ledger, Recorded, Warning};
 use crate::channel::{self, Channels, Context, Earlier, Threads, Wake};
 use crate::dead::{self, Attempt, Burial, Buried};
 use crate::escalation::{self, Chain, Escalator, Route, Stuck};
+use crate::fallback::{Failover, OnFallback};
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
 use crate::mcp::{Mcp, Roster};
@@ -94,6 +95,8 @@ pub struct Config {
     pub env: BTreeMap<String, String>,
     pub harness: std::sync::Arc<Harness>,
     pub model_settings: ModelSettings,
+    /// Harnesses and models tried in order while the ant's own harness cannot serve.
+    pub fallbacks: Vec<crate::fallback::Fallback>,
     /// Tool requests the harness may run without asking (see [`crate::permission`] for the rules). Every other one
     /// goes to the human on `ants.approvals.<ant>`.
     pub allow: Vec<String>,
@@ -265,6 +268,8 @@ async fn serve(config: &Config, stop: &Stop) -> Result<Served> {
         breaker: Breaker::default(),
         throttle: Throttle::default(),
         backoffs: ratelimit::BACKOFFS,
+        failover: Failover::default(),
+        fallback_retry: crate::fallback::RETRY_AFTER,
     };
     let handed_over = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     registration.deregister().await;
@@ -309,6 +314,8 @@ struct Ran {
     reached: Option<String>,
     /// The spend still to record.
     spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
+    /// The fallback the prompt ran on, `None` for the ant's own harness.
+    fallback: Option<usize>,
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
@@ -435,8 +442,10 @@ async fn harness_pool(
     sessions: SessionStore,
     workload: &std::sync::Arc<roster::Workload>,
 ) -> Pool {
-    let mut pool =
-        Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout).reporting_to(workload.clone());
+    let fallbacks = config.fallbacks.iter().map(|f| (f.name(), launch.with_fallback(f))).collect();
+    let mut pool = Pool::new(launch, sessions, config.max_harnesses, config.idle_timeout)
+        .with_fallbacks(fallbacks)
+        .reporting_to(workload.clone());
     let isolating =
         if config.worktrees { Worktrees::find(&config.ant, &config.workdir, &config.home).await } else { None };
     if let Some(worktrees) = isolating {
@@ -660,6 +669,8 @@ enum Handled {
     Limited(Box<InHand>),
     /// The harness keeps failing to start: the message, as it arrived, waits in hand for a check to start it.
     Broken(Box<InHand>),
+    /// A fallback turned the message away: it goes, as it arrived, to the next one, or waits like the others.
+    Failover(Box<InHand>),
 }
 
 /// What a message handed back waits for, first on its thread.
@@ -744,6 +755,10 @@ struct Inbox<'a> {
     /// Whether messages wait out a provider limit.
     throttle: Throttle,
     backoffs: Backoffs,
+    /// Which fallbacks answer while the harness is signed out, out of quota or failing to start.
+    failover: Failover,
+    /// How long a fallback that turned a message away is passed over, unless its provider limit says.
+    fallback_retry: Duration,
 }
 
 impl Inbox<'_> {
@@ -780,6 +795,10 @@ impl Inbox<'_> {
         let mut answering = FuturesUnordered::new();
         loop {
             let retry_deadline = threads.values().filter_map(|t| t.retry.map(|r| r.until)).min();
+            // Every fallback was turned away lately: the first to be tried again lets the messages on.
+            let now = tokio::time::Instant::now();
+            let fallback_up =
+                self.failover.next_up(now).filter(|_| self.outage().is_some() && self.fallback(now).is_none());
             let mut ready = None;
             tokio::select! {
                 () = &mut shutdown => break,
@@ -796,6 +815,7 @@ impl Inbox<'_> {
                 () = &mut signing_in => ready = Some(threads.keys().cloned().collect()),
                 () = &mut lifting => ready = Some(threads.keys().cloned().collect()),
                 () = &mut repairing => ready = Some(threads.keys().cloned().collect()),
+                () = sleep_until(fallback_up), if fallback_up.is_some() => ready = Some(threads.keys().cloned().collect()),
                 Some(ask) = asks.next() => {
                     if let Some(request) = queue_request(&ask) {
                         answering.push(self.answer_queue(request, in_hand(&threads)));
@@ -821,8 +841,11 @@ impl Inbox<'_> {
                 }
             }
             // While the harness is signed out, a provider limit holds or the harness keeps failing to start, messages
-            // wait in hand: the consumer's limit on them stops deliveries.
-            let held = self.sign_in.is_out() || self.throttle.is_held() || self.breaker.is_open();
+            // wait in hand, unless a fallback answers them: the consumer's limit on them stops deliveries. A rate limit
+            // is waited out.
+            let now = tokio::time::Instant::now();
+            let held = self.throttle.is_held() && !self.throttle.is_quota_held()
+                || self.outage().is_some() && self.fallback(now).is_none();
             for thread in ready.into_iter().flatten().filter(|_| !held) {
                 if let Some((incoming, msg)) = next_turn(&mut threads, thread.clone()) {
                     if let Some(t) = threads.get_mut(&thread) {
@@ -877,7 +900,7 @@ impl Inbox<'_> {
                 t.queued.insert(message);
                 status::publish(self.client, self.ant, &thread, StatusUpdate::Queued { message, ahead });
             }
-            if self.sign_in.is_out() {
+            if self.sign_in.is_out() && self.fallback(tokio::time::Instant::now()).is_none() {
                 status::state(self.client, self.ant, &thread, State::SignedOut);
             }
         }
@@ -1350,6 +1373,9 @@ impl Inbox<'_> {
             self.breaker.settled();
             return (thread, Handled::Done);
         };
+        if self.passed_over(&e, &arrived).await {
+            return (thread, Handled::Failover(Box::new((arrived, msg))));
+        }
         match e.downcast_ref::<StartFailed>() {
             Some(failed) => {
                 if let Some(hold) = self.breaker.failed(&thread, &self.redactor.redact(&failed.detail)) {
@@ -1449,6 +1475,42 @@ impl Inbox<'_> {
         self.done(msg, seq).await
     }
 
+    /// Why the ant's own harness cannot answer now, if it cannot: messages go to a fallback meanwhile, if one is up.
+    fn outage(&self) -> Option<&'static str> {
+        if self.sign_in.is_out() {
+            Some("signed out")
+        } else if self.breaker.is_open() {
+            Some("failing to start")
+        } else if self.throttle.is_quota_held() {
+            Some("out of quota")
+        } else {
+            None
+        }
+    }
+
+    /// The fallback messages go to at `now`: the first not passed over, while the ant's own harness cannot answer.
+    fn fallback(&self, now: tokio::time::Instant) -> Option<usize> {
+        self.outage()?;
+        self.failover.pick(self.pool.fallback_count(), now)
+    }
+
+    /// How long the fallback `e` came from is passed over, when it turned the prompt away: signed out, limited or
+    /// failing to start.
+    fn turned_away(&self, e: &anyhow::Error) -> Option<Duration> {
+        if let Some(limited) = e.downcast_ref::<Limited>() {
+            return Some(limited.retry_after.unwrap_or(self.fallback_retry));
+        }
+        (e.is::<SignedOut>() || e.is::<StartFailed>()).then_some(self.fallback_retry)
+    }
+
+    /// The ant's own harness answers again: no fallback serves.
+    fn back_on_own(&self) {
+        if self.failover.clear() {
+            tracing::info!("the harness answers again; fallbacks stand down");
+        }
+        self.workload.set_fallback(None);
+    }
+
     /// Hold the messages, `incoming` having found the harness signed out, show that in the roster entry, and tell its
     /// thread's owner, else the default human, how to sign it in, unless told already since the harness last worked.
     /// The notice goes to the human directly: no ant up the chain can sign the harness in.
@@ -1466,9 +1528,18 @@ impl Inbox<'_> {
         };
         tracing::warn!(%thread, error = %signed_out, "harness signed out; messages wait until it is signed in");
         let machine = roster::machine().await;
+        let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
-        let notice =
-            signin::notice(self.ant, &incoming.envelope, post, signed_out, &machine, self.sign_in_every, self.humans);
+        let notice = signin::notice(
+            self.ant,
+            &incoming.envelope,
+            post,
+            signed_out,
+            &machine,
+            self.sign_in_every,
+            &fallbacks,
+            self.humans,
+        );
         let id = format!("sign-in-{}-{since}", self.ant);
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human to sign the harness in");
@@ -1487,6 +1558,9 @@ impl Inbox<'_> {
                     tracing::info!(%agent, "harness signed in; answering the waiting messages");
                     self.sign_in.back();
                     self.workload.set_signed_out(None);
+                    if self.outage().is_none() {
+                        self.back_on_own();
+                    }
                     return;
                 }
                 harness::Readiness::SignedOut { detail } => {
@@ -1515,10 +1589,20 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %limited, %until, "provider quota exhausted; messages wait");
         let machine = roster::machine().await;
+        let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
         let max = self.backoffs.quota.max;
-        let notice =
-            ratelimit::notice(self.ant, &incoming.envelope, post, limited, &hold.shown, &machine, max, self.humans);
+        let notice = ratelimit::notice(
+            self.ant,
+            &incoming.envelope,
+            post,
+            limited,
+            &hold.shown,
+            &machine,
+            max,
+            &fallbacks,
+            self.humans,
+        );
         let id = format!("quota-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "telling a human of the exhausted quota");
@@ -1540,9 +1624,18 @@ impl Inbox<'_> {
         }
         tracing::warn!(%thread, error = %failed, "harness keeps failing to start; messages wait until a check starts it");
         let machine = roster::machine().await;
+        let fallbacks = self.pool.fallbacks();
         let post = incoming.post.is_some();
-        let mut notice =
-            breaker::notice(self.ant, &incoming.envelope, post, failed, &machine, self.sign_in_every, self.humans);
+        let mut notice = breaker::notice(
+            self.ant,
+            &incoming.envelope,
+            post,
+            failed,
+            &machine,
+            self.sign_in_every,
+            &fallbacks,
+            self.humans,
+        );
         self.redactor.redact_string(&mut notice.text);
         let id = format!("harness-{}-{}", self.ant, hold.shown.since.timestamp_millis());
         if let Err(e) = bus::publish_json(self.js, notice.subject(), &notice, Some(&id)).await {
@@ -1570,6 +1663,9 @@ impl Inbox<'_> {
             }
             self.breaker.closed();
             self.workload.set_failing(None);
+            if self.outage().is_none() {
+                self.back_on_own();
+            }
             return;
         }
     }
@@ -1704,6 +1800,33 @@ impl Inbox<'_> {
         Ok(())
     }
 
+    /// Whether a fallback turned the message away with `e`, which then goes to the next one up.
+    async fn passed_over(&self, e: &anyhow::Error, arrived: &Incoming) -> bool {
+        let (Some(on), Some(retry)) = (e.downcast_ref::<OnFallback>(), self.turned_away(e)) else {
+            return false;
+        };
+        let thread = &arrived.envelope.thread_id;
+        tracing::warn!(%thread, error = format!("{e:#}"), "fallback turned the message away; passing it over");
+        self.failover.down(on.index, tokio::time::Instant::now() + retry);
+        if e.is::<StartFailed>() {
+            self.attempts.release(&arrived.envelope).await;
+        }
+        true
+    }
+
+    /// Record which backend answered: the roster names a fallback, and the reply's notice says why it answered.
+    fn served_by(&self, fallback: Option<usize>) -> Option<String> {
+        let Some(name) = fallback.and_then(|i| self.pool.fallbacks().into_iter().nth(i)) else {
+            self.back_on_own();
+            return None;
+        };
+        let since = self.failover.served();
+        self.workload.set_fallback(Some(ants_proto::ServingFallback { name: name.clone(), since }));
+        let why = self.outage().unwrap_or("unavailable");
+        let own = self.pool.launch().harness_name();
+        Some(format!("[ants] Answered by fallback {name}, harness {own} being {why}."))
+    }
+
     /// Answer the message at stream sequence `seq`, given what an earlier attempt at it left. Every attempt after one
     /// that started, whether it failed or was cut off, is told that tools may already have run; one whose reply was
     /// recorded is not prompted again.
@@ -1765,7 +1888,7 @@ impl Inbox<'_> {
         let _asking = self.approvals.map(|approvals| approvals.begin(envelope));
         let flush = tokio::time::interval_at(tokio::time::Instant::now() + status::FLUSH_EVERY, status::FLUSH_EVERY);
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off).await;
-        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, mut spend } =
+        let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, mut spend, fallback } =
             self.run_prompt(incoming, msg, seq, text, flush).await;
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
@@ -1776,6 +1899,7 @@ impl Inbox<'_> {
             Err(e) => return self.prompt_failed(e, incoming, msg, seq, cut_off, worked).await,
             Ok(reply) => reply,
         };
+        let fallback_notice = self.served_by(fallback);
         // Spend reported as the prompt ended, such as its tokens.
         while let Ok(spent) = spend.try_recv() {
             if let Some(cap) = self.record(envelope, &spent).await {
@@ -1792,7 +1916,11 @@ impl Inbox<'_> {
         let branch_notice = self.pool.branch_ahead(thread).await.map(|branch| {
             format!("[ants] Branch {} holds {} not in the repository's HEAD.", branch.name, branch.commits_text())
         });
-        let notice = [limit_notice, cancel_notice, branch_notice].into_iter().flatten().collect::<Vec<_>>().join("\n");
+        let notice = [fallback_notice, limit_notice, cancel_notice, branch_notice]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = self.redactor.redact(&text).into_owned();
         let Some(reply) = self.reply_for(incoming, read, text, limit.as_ref(), msg, seq).await? else {
@@ -2005,7 +2133,11 @@ impl Inbox<'_> {
         let (cancellable, mut cancel) = self.cancels.register(thread);
         let (mut cancelled_by, mut cut_by_cancel) = (None, false);
         let prompting = self.metrics.prompting();
-        let prompt = self.pool.run(thread, prompt);
+        let fallback = self.fallback(tokio::time::Instant::now());
+        if let Some(i) = fallback {
+            tracing::info!(%thread, fallback = self.pool.fallbacks().get(i).map(String::as_str), "prompting a fallback");
+        }
+        let prompt = self.pool.run_on(thread, prompt, fallback);
         tokio::pin!(prompt);
         let mut progress = self.progress();
         // Whether a tool call started, so tools may have run; streamed text, such as a harness's error, runs nothing.
@@ -2047,7 +2179,7 @@ impl Inbox<'_> {
         }
         status.flush();
         drop((cancellable, prompting));
-        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend }
+        Ran { reply, cancelled_by, cut_by_cancel, worked, reached, spend, fallback }
     }
 
     /// The prompt for a channel post, with what was read of its thread: the posts not shown before, and the turns left.
@@ -2210,6 +2342,10 @@ fn handed_back(threads: &mut HashMap<ThreadId, Thread>, thread: &ThreadId, handl
         Handled::Broken(held) => {
             t.waiting.push_front(*held);
             Some(Wait::Repair)
+        }
+        Handled::Failover(held) => {
+            t.waiting.push_front(*held);
+            None
         }
     }
 }

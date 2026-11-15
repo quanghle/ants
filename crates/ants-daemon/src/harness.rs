@@ -564,6 +564,20 @@ impl Launch {
         }
     }
 
+    /// The same launch, running `fallback` instead of the ant's own harness and model.
+    #[must_use]
+    pub fn with_fallback(&self, fallback: &crate::fallback::Fallback) -> Self {
+        let (process, settings) = (fallback.harness.clone(), fallback.settings.clone());
+        let env = self.process_env.clone().unwrap_or_default();
+        let connect: Connector = Arc::new(move || DynConnectTo::new(process.agent(&env, &settings)));
+        Self { harness: fallback.harness.clone(), settings: fallback.settings.clone(), connect, ..self.clone() }
+    }
+
+    /// The name of the harness it starts.
+    pub fn harness_name(&self) -> &str {
+        &self.harness.name
+    }
+
     /// The same launch, for sessions serving `thread`.
     #[must_use]
     pub fn for_thread(&self, thread: &ThreadId) -> Self {
@@ -633,6 +647,13 @@ impl Launch {
     #[cfg(test)]
     pub(crate) fn with_harness(self, harness: Arc<Harness>) -> Self {
         Self { harness, ..self }
+    }
+
+    /// The same launch, its harness named `name`.
+    #[cfg(test)]
+    pub(crate) fn named(self, name: &str) -> Self {
+        let harness = Arc::new(Harness { name: name.to_owned(), ..(*self.harness).clone() });
+        self.with_harness(harness)
     }
 }
 
@@ -735,10 +756,19 @@ impl Session {
     /// Start a harness and open a session in it: `resume` through session/load when the harness can, else a new one.
     /// A failure other than for want of signing in or a provider limit is a [`StartFailed`] one.
     pub async fn start(launch: &Launch, resume: Option<SessionId>) -> Result<Self> {
+        Self::open(launch, resume, None).await
+    }
+
+    /// Start a harness in a new session whose first prompt is seeded with the thread's history for `why`.
+    pub async fn start_over(launch: &Launch, why: Rebuild) -> Result<Self> {
+        Self::open(launch, None, Some(why)).await
+    }
+
+    async fn open(launch: &Launch, resume: Option<SessionId>, rebuild: Option<Rebuild>) -> Result<Self> {
         let (opened_tx, opened) = oneshot::channel();
         let (turns, turns_rx) = mpsc::channel(1);
         let id = Arc::new(Mutex::new(SessionId::new("")));
-        let task = tokio::spawn(serve(launch.clone(), resume, id.clone(), opened_tx, turns_rx));
+        let task = tokio::spawn(serve(launch.clone(), resume, rebuild, id.clone(), opened_tx, turns_rx));
         // Given up on before the session opens (a timed-out probe), the harness stops.
         let mut abort = AbortOnDrop(Some(task.abort_handle()));
         let opened =
@@ -956,6 +986,7 @@ fn name(value: &impl serde::Serialize) -> Option<String> {
 async fn serve(
     launch: Launch,
     resume: Option<SessionId>,
+    rebuild: Option<Rebuild>,
     current: Arc<Mutex<SessionId>>,
     opened: oneshot::Sender<Result<Option<HarnessAgent>>>,
     mut turns: mpsc::Receiver<Turn>,
@@ -1009,10 +1040,13 @@ async fn serve(
                     .map(|info| HarnessAgent { name: info.name.clone(), version: info.version.clone() });
                 let _ = tx.send(Ok(agent));
             }
-            let mut lost = resume.filter(|old| *old != id).map(|old| {
-                tracing::warn!(lost = %old, session = %id, "the session was not resumed; rebuilding its context");
-                Rebuild::Lost
-            });
+            let mut lost = resume
+                .filter(|old| *old != id)
+                .map(|old| {
+                    tracing::warn!(lost = %old, session = %id, "the session was not resumed; rebuilding its context");
+                    Rebuild::Lost
+                })
+                .or(rebuild);
             let connected = Connected {
                 cx: &cx,
                 launch: &launch,

@@ -245,6 +245,8 @@ struct Period {
     hits: u32,
     /// A human has been told of an exhausted quota since then.
     told: bool,
+    /// The wait is for an exhausted quota.
+    quota: bool,
 }
 
 /// How a limit holds the messages.
@@ -274,6 +276,7 @@ impl Throttle {
             _ => next,
         };
         period.until = Some(until);
+        period.quota = limited.kind == LimitKind::Quota || waiting.is_some() && period.quota;
         let tell = limited.kind == LimitKind::Quota && !std::mem::replace(&mut period.told, true);
         Hold { shown: HarnessLimit { kind: limited.kind, since, until: until.1 }, tell }
     }
@@ -281,6 +284,12 @@ impl Throttle {
     /// Whether prompts wait.
     pub fn is_held(&self) -> bool {
         self.period().until.is_some()
+    }
+
+    /// Whether prompts wait out an exhausted quota, so they may go to a fallback ([`crate::fallback`]) meanwhile.
+    pub fn is_quota_held(&self) -> bool {
+        let period = self.period();
+        period.until.is_some() && period.quota
     }
 
     /// When prompts start again, while they wait.
@@ -317,8 +326,9 @@ impl Throttle {
 }
 
 /// The message on the thread of `envelope`, which found the quota of `ant`'s harness on `machine` exhausted, that
-/// tells its owner, else the default human of `humans`, that messages wait and when they are tried again, at most
-/// `max` apart. A reply to `envelope` unless it stands for a channel post.
+/// tells its owner, else the default human of `humans`, that messages wait, or go to the ant's `fallbacks`
+/// ([`crate::fallback`]), and when the harness is tried again, at most `max` apart. A reply to `envelope` unless it
+/// stands for a channel post.
 #[allow(clippy::too_many_arguments)]
 pub fn notice(
     ant: &UserId,
@@ -328,6 +338,7 @@ pub fn notice(
     shown: &HarnessLimit,
     machine: &str,
     max: Duration,
+    fallbacks: &[String],
     humans: &Registry,
 ) -> Envelope {
     let mut detail: String = limited.detail.trim().chars().take(DETAIL_CHARS).collect();
@@ -341,10 +352,17 @@ pub fn notice(
         s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
         _ => format!("{max:?}"),
     };
+    let back = format!("{harness} once its quota is back, tried at {until}, then at most {max} apart");
+    let meanwhile = crate::fallback::meanwhile(ant, fallbacks, &back).unwrap_or_else(|| {
+        format!(
+            "Messages to {ant} wait meanwhile, spending no attempts; they are tried again at {until}, then at most \
+             {max} apart until the quota is back."
+        )
+    });
     let text = format!(
-        "[ants] {ant} cannot answer: harness {harness} on {machine} is out of quota ({detail}).\nMessages to {ant} \
-         wait meanwhile, spending no attempts; they are tried again at {until}, then at most {max} apart until the \
-         quota is back. Raising the provider plan's limit, or a quota reset, lets them through."
+        "[ants] {ant} cannot answer{own}: harness {harness} on {machine} is out of quota ({detail}).\n{meanwhile} \
+         Raising the provider plan's limit, or a quota reset, lets them through.",
+        own = crate::fallback::own(fallbacks),
     );
     let owner = humans.human_owner(envelope.owner.as_ref());
     let mut notice = Envelope::on_thread(
@@ -590,6 +608,7 @@ mod tests {
 
         let first = throttle.hit(&rate, &backoffs);
         assert!(throttle.is_held() && !first.tell, "a rate limit is waited out quietly");
+        assert!(!throttle.is_quota_held(), "a rate limit sends nothing to a fallback");
         assert!((28..=30).contains(&waited(&first)), "{first:?}");
         assert_eq!(throttle.hit(&rate, &backoffs).shown.until, first.shown.until, "met while waiting: no new step");
         let hinted = throttle.hit(&limited(LimitKind::RateLimit, Some(Duration::from_secs(50))), &backoffs);
@@ -609,6 +628,9 @@ mod tests {
         let quota = limited(LimitKind::Quota, None);
         let out = throttle.hit(&quota, &backoffs);
         assert!(out.tell && out.shown.kind == LimitKind::Quota && out.shown.since == first.shown.since);
+        assert!(throttle.is_quota_held());
+        throttle.hit(&rate, &backoffs);
+        assert!(throttle.is_quota_held(), "a rate limit met while the quota is waited out");
         assert!((3598..=3600).contains(&waited(&out)), "the fourth step, at most the quota's cap");
         assert!(!throttle.hit(&quota, &backoffs).tell, "told once");
         throttle.untold();
@@ -617,6 +639,7 @@ mod tests {
         throttle.settled();
         assert!(throttle.is_held(), "a message handled while waiting ends nothing");
         lifted(&throttle);
+        assert!(!throttle.is_quota_held());
         throttle.settled();
         let again = throttle.hit(&quota, &backoffs);
         assert!(again.tell && again.shown.since > first.shown.since, "a new period, told again");

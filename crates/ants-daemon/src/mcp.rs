@@ -1309,8 +1309,8 @@ fn ask_wait(timeout: Option<&str>) -> Result<Duration, String> {
     Ok(wait)
 }
 
-/// Ant, capabilities, harness and the agent it runs, machine, activity or a signed-out harness, and advertised role
-/// instructions.
+/// Ant, capabilities, harness and the agent it runs, machine, activity or a signed-out harness, the fallback answering
+/// for it, and advertised role instructions.
 fn describe(entries: &[&RosterEntry]) -> String {
     let lines: Vec<String> = entries
         .iter()
@@ -1325,7 +1325,15 @@ fn describe(entries: &[&RosterEntry]) -> String {
             };
             let agent = e.agent.as_ref().map_or_default(|a| format!(" running {a}"));
             let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);
-            if let Some(out) = &e.signed_out {
+            if let Some(fallback) = &e.fallback {
+                let _ = write!(
+                    text,
+                    "\n  fallback {} answers messages to {} since {}, until its own harness can again",
+                    fallback.name,
+                    e.ant,
+                    fallback.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                );
+            } else if let Some(out) = &e.signed_out {
                 let how = out.sign_in.as_ref().map_or_default(|c| format!(" (`{c}` on {})", e.machine));
                 let _ = write!(
                     text,
@@ -1390,7 +1398,7 @@ fn nobody_has(capability: &str, entries: &[RosterEntry]) -> String {
 
 /// Why no daemon serves `ant` now, given its roster entry, or None when one does: no entry, a stale one (see
 /// [`roster::is_live`]), a harness signed out or failing to start, or a provider limit holding its messages past `wait`
-/// from `now`.
+/// from `now`, with no fallback answering for it.
 fn why_unserved(
     ant: &UserId,
     entry: Option<&RosterEntry>,
@@ -1407,6 +1415,9 @@ fn why_unserved(
             entry.machine,
             ants_proto::duration::format(Duration::from_secs(ago.as_secs()))
         ));
+    }
+    if entry.fallback.is_some() {
+        return None;
     }
     if let Some(failing) = entry.failing.as_ref().filter(|_| entry.signed_out.is_none()) {
         return Some(format!(
@@ -1457,8 +1468,8 @@ fn alternatives(
     if let Some(entry) = entry {
         let sharing: Vec<&RosterEntry> = others
             .iter()
-            .filter(|e| e.ant != *ant && roster::is_live(e, now) && e.signed_out.is_none() && e.failing.is_none())
-            .filter(|e| e.limited.is_none())
+            .filter(|e| e.ant != *ant && roster::is_live(e, now))
+            .filter(|e| e.fallback.is_some() || e.signed_out.is_none() && e.failing.is_none() && e.limited.is_none())
             .filter(|e| entry.capabilities.iter().any(|c| roster::has_capability(e, c)))
             .take(SHOWN_NAMES)
             .collect();

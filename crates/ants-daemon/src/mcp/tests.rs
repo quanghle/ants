@@ -106,6 +106,7 @@ fn listed(name: &str, capabilities: &[&str]) -> RosterEntry {
         signed_out: None,
         limited: None,
         failing: None,
+        fallback: None,
     }
 }
 
@@ -547,6 +548,17 @@ fn a_provider_limit_counts_only_while_it_outlasts_the_wait() {
     entry.failing = Some(ants_proto::HarnessFailing { since: now, error: "not found".to_owned() });
     let why = why_unserved(&ant, Some(&entry), now, Duration::from_mins(30)).expect("held until fixed");
     assert!(why.starts_with("the harness of dev-q (copilot on m1) fails to start since"), "{why}");
+
+    let since = "2026-01-01T00:00:00Z".parse().unwrap();
+    entry.fallback = Some(ants_proto::ServingFallback { name: "claude".to_owned(), since });
+    assert_eq!(why_unserved(&ant, Some(&entry), now, Duration::ZERO), None, "a fallback answers");
+    assert!(
+        describe(&[&entry]).contains(
+            "\n  fallback claude answers messages to dev-q since 2026-01-01T00:00:00Z, until its own harness can again"
+        ),
+        "{}",
+        describe(&[&entry])
+    );
 }
 
 #[tokio::test]

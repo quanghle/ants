@@ -73,6 +73,19 @@ pub struct RosterEntry {
     /// check starts it. Missing otherwise, and from entries of older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing: Option<HarnessFailing>,
+    /// Set while a fallback of the ant answers its messages, its own harness signed out, out of quota or failing to
+    /// start. Missing otherwise, and from entries of older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<ServingFallback>,
+}
+
+/// A fallback answering an ant's messages, as its roster entry reports it ([`RosterEntry::fallback`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServingFallback {
+    /// The fallback as the ant's config names it: `<harness>`, or `<harness>:<model>`.
+    pub name: String,
+    /// When it first answered since the ant's own harness last could.
+    pub since: DateTime<Utc>,
 }
 
 /// An ant's harness that keeps failing to start, as its roster entry reports it ([`RosterEntry::failing`]).
@@ -212,13 +225,14 @@ mod tests {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("workdir") && !json.contains("activity") && !json.contains("harnesses"), "{json}");
         assert!(!json.contains("escalate_to") && !json.contains("instance"), "{json}");
         assert!(!json.contains("version") && !json.contains("perms"), "{json}");
         assert!(!json.contains("signed_out") && !json.contains("limited") && !json.contains("failing"), "{json}");
-        assert!(!json.contains("agent"), "{json}");
+        assert!(!json.contains("agent") && !json.contains("fallback"), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), entry);
         assert_eq!(entry.leader(), None);
         let agent = HarnessAgent { name: "copilot-agent".to_owned(), version: "1.0.3".to_owned() };
@@ -272,6 +286,13 @@ mod tests {
         let json = serde_json::to_string(&failing).unwrap();
         assert!(json.contains(r#""failing":{"since":"2026-01-01T00:00:00Z","error":"copilot: not found"}"#), "{json}");
         assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), failing);
+        let fallback = RosterEntry {
+            fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since }),
+            ..entry.clone()
+        };
+        let json = serde_json::to_string(&fallback).unwrap();
+        assert!(json.contains(r#""fallback":{"name":"claude:sonnet","since":"2026-01-01T00:00:00Z"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<RosterEntry>(&json).unwrap(), fallback);
         assert_eq!(entry.key(), "dev-a");
         assert_eq!(entry.check_key("dev-a"), Ok(()));
         assert_eq!(entry.check_key("dev-b").unwrap_err().to_string(), "roster entry of dev-a found at key dev-b");
@@ -287,6 +308,7 @@ mod tests {
         assert_eq!(entry.signed_out, None, "an older daemon's entry");
         assert_eq!(entry.limited, None, "an older daemon's entry");
         assert_eq!(entry.failing, None, "an older daemon's entry");
+        assert_eq!(entry.fallback, None, "an older daemon's entry");
 
         let newer = r#"{"ant":"dev-b","machine":"m","harness":"copilot","activity":"draining","harnesses":3,
             "signed_out":{"since":"2026-01-01T00:00:05Z","sign_in":"x login","reason":"expired"},

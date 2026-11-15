@@ -187,6 +187,7 @@ fn roster() {
             signed_out: Some(SignInNeeded { since: at(2), sign_in: Some("copilot login".to_owned()) }),
             limited: Some(HarnessLimit { kind: LimitKind::RateLimit, since: at(3), until: at(8) }),
             failing: Some(HarnessFailing { since: at(4), error: "harness exited".to_owned() }),
+            fallback: Some(ServingFallback { name: "claude:sonnet".to_owned(), since: at(5) }),
         },
     );
     snap("activity_variants", &[Activity::Idle, Activity::Working, Activity::Unknown]);
@@ -655,6 +656,7 @@ fn older_documents_parse() {
             signed_out: None,
             limited: None,
             failing: None,
+            fallback: None,
         }
     );
     let signed_out: SignInNeeded = parse(r#"{"since": "2025-01-01T12:00:00Z"}"#);
