@@ -233,7 +233,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
-        daemons.iter().for_each(|daemon| daemon.abort());
+        daemons.iter().for_each(tokio::task::JoinHandle::abort);
         let messages: Vec<Envelope> = stored(&js, &inbox).await;
         let [message] = &messages[..] else { panic!("one message: {messages:?}") };
         let late = format!("check the nightly build\n\n(Sent late: due {}.)", due.format("%Y-%m-%d %H:%M UTC"));

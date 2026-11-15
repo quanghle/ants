@@ -493,11 +493,11 @@ pub fn render(entries: &[Entry]) -> String {
     let mut out = String::new();
     for e in entries {
         let forged = if e.forged { " (forged)" } else { "" };
-        let note = e.note.as_ref().map(|n| format!(" [{n}]")).unwrap_or_default();
+        let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
         let mut lines = e.text.lines();
         let first = lines.next().unwrap_or("");
         let kind = e.kind.as_str();
-        let id = e.id.map(|id| format!(" (message {id})")).unwrap_or_default();
+        let id = e.id.map_or_default(|id| format!(" (message {id})"));
         let _ = writeln!(out, "{}  {kind:<10}  {}{forged}{note}{id}: {first}", time(e.stored_at), e.route());
         for line in lines {
             let _ = writeln!(out, "    {line}");

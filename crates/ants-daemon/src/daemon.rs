@@ -942,7 +942,7 @@ impl Inbox<'_> {
                 tracing::warn!(error = %e, "answering a cancel request");
             }
         }
-        std::future::pending().await
+        std::future::pending::<()>().await;
     }
 
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an
@@ -1112,7 +1112,7 @@ impl Inbox<'_> {
             Ok(Some(_)) => {}
             Ok(None) => tracing::debug!(thread = %envelope.thread_id, "no owner recorded for the thread"),
             Err(e) => {
-                tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's owner")
+                tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "reading the thread's owner");
             }
         }
     }
@@ -1616,7 +1616,7 @@ impl Inbox<'_> {
                 let kept = dead::Kept {
                     dead: dead.clone(),
                     post: post.cloned(),
-                    last_delivery: msg.reply.as_ref().filter(|_| last).map(|reply| reply.to_string()),
+                    last_delivery: msg.reply.as_ref().filter(|_| last).map(ToString::to_string),
                 };
                 if let Err(e) = self.buried.add(&incoming.envelope, &kept).await {
                     // The redelivery buries it with an error of its own, under the same message id.

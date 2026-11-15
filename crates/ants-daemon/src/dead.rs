@@ -139,17 +139,17 @@ impl Buried {
 
     /// Forget `message` once its dead letter is in the hub's stream and the message terminated.
     pub async fn forget(&self, message: &Envelope) {
-        self.0.forget(message).await
+        self.0.forget(message).await;
     }
 
     /// [`Buried::forget`], by the message's envelope id.
     pub async fn forget_id(&self, message: Uuid) {
-        self.0.forget_id(message).await
+        self.0.forget_id(message).await;
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
     pub async fn prune(&self, max_age: Duration) {
-        self.0.prune(max_age).await
+        self.0.prune(max_age).await;
     }
 }
 

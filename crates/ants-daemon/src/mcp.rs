@@ -1320,12 +1320,12 @@ fn describe(entries: &[&RosterEntry]) -> String {
                 (Some(_), _, _, _) => ", signed out".to_owned(),
                 (None, Some(_), _, _) => ", failing".to_owned(),
                 (None, None, Some(limited), _) => format!(", {}", limited.kind.as_str()),
-                (None, None, None, activity) => activity.map(|a| format!(", {}", a.as_str())).unwrap_or_default(),
+                (None, None, None, activity) => activity.map_or_default(|a| format!(", {}", a.as_str())),
             };
-            let agent = e.agent.as_ref().map(|a| format!(" running {a}")).unwrap_or_default();
+            let agent = e.agent.as_ref().map_or_default(|a| format!(" running {a}"));
             let mut text = format!("{}: {capabilities} ({}{agent} on {}{activity})", e.ant, e.harness, e.machine);
             if let Some(out) = &e.signed_out {
-                let how = out.sign_in.as_ref().map(|c| format!(" (`{c}` on {})", e.machine)).unwrap_or_default();
+                let how = out.sign_in.as_ref().map_or_default(|c| format!(" (`{c}` on {})", e.machine));
                 let _ = write!(
                     text,
                     "\n  harness signed out since {}: messages to {} wait unanswered until a human signs it in{how}",

@@ -161,7 +161,7 @@ impl Hangup {
         if self.0.recv().await.is_some() {
             return;
         }
-        std::future::pending().await
+        std::future::pending::<()>().await;
     }
 }
 

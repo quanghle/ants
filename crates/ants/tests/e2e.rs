@@ -711,11 +711,8 @@ fn stub_harness() {
         let overridden = std::env::var("OVERRIDDEN").unwrap_or_default();
         format!("\nargs={}; OVERRIDDEN={overridden}", args[1..].join(" "))
     });
-    let context = args
-        .windows(2)
-        .find(|args| args[0] == "--context")
-        .map(|args| args[1].clone())
-        .unwrap_or_else(|| "unset".to_owned());
+    let context =
+        args.windows(2).find(|args| args[0] == "--context").map_or_else(|| "unset".to_owned(), |args| args[1].clone());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let served = runtime.block_on(
         Agent

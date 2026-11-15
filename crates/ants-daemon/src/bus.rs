@@ -5,6 +5,7 @@ use std::hash::{Hash as _, Hasher as _};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use ants_proto::{
@@ -647,7 +648,8 @@ fn subject_kind(subject: &str) -> &str {
 /// Warn that the hub's stream does not capture `subject` ([`uncaptured_hint`]), once per process for each kind of
 /// subject ([`subject_kind`]), then only at debug level. True when it warned.
 fn warn_uncaptured(subject: &str, done: &str) -> bool {
-    let first = WARNED_UNCAPTURED.lock().unwrap_or_else(|e| e.into_inner()).insert(subject_kind(subject).to_owned());
+    let first =
+        WARNED_UNCAPTURED.lock().unwrap_or_else(PoisonError::into_inner).insert(subject_kind(subject).to_owned());
     if first {
         tracing::warn!(%subject, "{}; {done}", uncaptured_hint(subject));
     } else {

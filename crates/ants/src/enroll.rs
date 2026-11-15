@@ -310,7 +310,7 @@ impl Approver {
         }
         for r in pending {
             let age = (Utc::now() - r.sent_at).num_seconds().max(0);
-            let leaf = r.leaf.map(|l| format!("  leaf {}", l.machine)).unwrap_or_default();
+            let leaf = r.leaf.map_or_default(|l| format!("  leaf {}", l.machine));
             println!("{}  {}  host {}{leaf}  asked {age}s ago", r.ant, r.public_key, r.host);
         }
         Ok(())

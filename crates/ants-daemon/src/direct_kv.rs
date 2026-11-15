@@ -41,7 +41,7 @@ impl DirectKv {
     /// was made for ([`crate::bus::jetstream`]).
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
         let stream = js.get_stream_no_info(format!("KV_{bucket}")).await.with_context(|| format!("naming {bucket}"))?;
-        let api = js_domain.map(|domain| format!("$JS.{domain}.API.")).unwrap_or_default();
+        let api = js_domain.map_or_default(|domain| format!("$JS.{domain}.API."));
         Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api })
     }
 

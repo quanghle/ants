@@ -63,7 +63,11 @@ mod tests {
     }
 
     fn connection(cli: &Cli) -> (&str, Option<&str>, Option<&str>) {
-        (&cli.nats, cli.creds.as_deref().and_then(Path::to_str), cli.js_domain.as_ref().map(|d| d.as_str()))
+        (
+            &cli.nats,
+            cli.creds.as_deref().and_then(Path::to_str),
+            cli.js_domain.as_ref().map(ants_proto::JsDomain::as_str),
+        )
     }
 
     #[test]

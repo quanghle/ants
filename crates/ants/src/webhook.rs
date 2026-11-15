@@ -587,7 +587,7 @@ impl Webhook {
                 let signature = headers
                     .get(header)
                     .and_then(|v| v.to_str().ok())
-                    .map(|v| v.trim())
+                    .map(str::trim)
                     .map(|v| v.strip_prefix("sha256=").unwrap_or(v))
                     .and_then(|hex| HEXLOWER_PERMISSIVE.decode(hex.as_bytes()).ok());
                 signature.is_some_and(|signature| hmac::verify(&key, body, &signature).is_ok())
@@ -599,19 +599,18 @@ impl Webhook {
     /// The event in an authenticated request: its id and its text from the template.
     fn event(&self, headers: &HeaderMap, body: &[u8]) -> Result<Event, Refusal> {
         let wants_json = matches!(self.id, IdSource::Json(_)) || self.text.iter().any(|p| matches!(p, Piece::Json(_)));
-        let parsed = match wants_json {
-            true => match serde_json::from_slice::<Value>(body) {
+        let parsed = if wants_json {
+            match serde_json::from_slice::<Value>(body) {
                 Ok(value) => Some(value),
                 Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("the body is no JSON: {e}")),
-            },
-            false => None,
+            }
+        } else {
+            None
         };
         let id = match &self.id {
             IdSource::BodySha256 => HEXLOWER.encode(digest::digest(&digest::SHA256, body).as_ref()),
             IdSource::Header(name) => header_text(headers, name),
-            IdSource::Json(pointer) => {
-                parsed.as_ref().and_then(|v| v.pointer(pointer)).map(json_text).unwrap_or_default()
-            }
+            IdSource::Json(pointer) => parsed.as_ref().and_then(|v| v.pointer(pointer)).map_or_default(json_text),
         };
         if id.is_empty() {
             return refuse(StatusCode::BAD_REQUEST, "the event has no id");
@@ -628,7 +627,7 @@ impl Webhook {
                 Piece::Webhook => text.push_str(self.name.as_str()),
                 Piece::Header(name) => text.push_str(&header_text(headers, name)),
                 Piece::Json(pointer) => {
-                    text.push_str(&parsed.as_ref().and_then(|v| v.pointer(pointer)).map(json_text).unwrap_or_default())
+                    text.push_str(&parsed.as_ref().and_then(|v| v.pointer(pointer)).map_or_default(json_text));
                 }
             }
         }
@@ -638,7 +637,7 @@ impl Webhook {
 }
 
 fn header_text(headers: &HeaderMap, name: &HeaderName) -> String {
-    headers.get(name).map(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned()).unwrap_or_default()
+    headers.get(name).map_or_default(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
 }
 
 /// A JSON value as text: a string as itself, null as nothing, anything else as JSON.

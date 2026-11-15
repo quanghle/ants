@@ -228,7 +228,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
     let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
-    let mut lines: Vec<String> = fixed.iter().map(|finding| finding.fixed()).collect();
+    let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
     humans::register_or_warn(&js, &nats.me).await;
     lines.push(format!(
         "stream {} and buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {} ready",

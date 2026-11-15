@@ -459,13 +459,12 @@ impl Remote {
         }
         let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         let authority = format!("{host}:{port}");
-        let tls = match tls {
-            true => {
-                let name = host.trim_start_matches('[').trim_end_matches(']').to_owned();
-                let name = ServerName::try_from(name).with_context(|| format!("bridge URL {url:?}: host name"))?;
-                Some((tls_connector()?, name))
-            }
-            false => None,
+        let tls = if tls {
+            let name = host.trim_start_matches('[').trim_end_matches(']').to_owned();
+            let name = ServerName::try_from(name).with_context(|| format!("bridge URL {url:?}: host name"))?;
+            Some((tls_connector()?, name))
+        } else {
+            None
         };
         let mut all = Vec::new();
         if let Some(token) = token.filter(|t| !t.is_empty()) {

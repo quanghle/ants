@@ -306,10 +306,8 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
     for full in [false, true] {
         let Some(hub) = ants_test_support::NatsServer::spawn_with(|dir| {
             auth::init(&dir.join("auth")).unwrap();
-            let resolver = match full {
-                true => format!("resolver {{ type: full, dir: {:?} }}\n", dir.join("jwt")),
-                false => String::new(),
-            };
+            let resolver =
+                if full { format!("resolver {{ type: full, dir: {:?} }}\n", dir.join("jwt")) } else { String::new() };
             format!("include \"auth/{}\"\n{resolver}", auth::SERVER_CONF)
         }) else {
             return;
@@ -326,12 +324,11 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
             home: None,
         };
         let check = check_resolver(&setup, false).await;
-        match full {
-            true => assert_eq!(check.status, Status::Ok, "{check}"),
-            false => {
-                assert_eq!(check.status, Status::Warn, "{check}");
-                assert!(check.fix[0].starts_with("add `resolver { type: full"), "{check}");
-            }
+        if full {
+            assert_eq!(check.status, Status::Ok, "{check}");
+        } else {
+            assert_eq!(check.status, Status::Warn, "{check}");
+            assert!(check.fix[0].starts_with("add `resolver { type: full"), "{check}");
         }
         assert_eq!(check_resolver(&setup, true).await.status, Status::Skip, "through the leaf node");
 
@@ -623,9 +620,10 @@ async fn the_webhook_config_needs_private_secrets_and_a_public_url_reaching_it()
             let mut head = [0; 4096];
             let n = stream.read(&mut head).await.unwrap_or_default();
             let page = "<h1>Bad link</h1><p>The link is incomplete.</p>";
-            let answer = match head[..n].starts_with(b"GET /hooks/_approval HTTP/1.1") {
-                true => format!("HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\n\r\n{page}", page.len()),
-                false => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_owned(),
+            let answer = if head[..n].starts_with(b"GET /hooks/_approval HTTP/1.1") {
+                format!("HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\n\r\n{page}", page.len())
+            } else {
+                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_owned()
             };
             let _ = stream.write_all(answer.as_bytes()).await;
         }

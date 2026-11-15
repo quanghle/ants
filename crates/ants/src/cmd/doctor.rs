@@ -37,10 +37,7 @@ pub(crate) async fn run(
     };
     let checks = Box::pin(doctor::run(&setup)).await;
     for check in &checks {
-        match json {
-            true => println!("{}", serde_json::to_string(check)?),
-            false => println!("{check}"),
-        }
+        if json { println!("{}", serde_json::to_string(check)?) } else { println!("{check}") }
     }
     let failed = checks.iter().filter(|c| c.status == doctor::Status::Fail).count();
     match failed {

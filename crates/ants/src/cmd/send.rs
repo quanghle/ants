@@ -37,9 +37,10 @@ pub(crate) async fn ask(
     let envelope = ask_envelope(&nats.me, thread, to, text);
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
-    let inbox = match replies.wait || replies.follow {
-        true => bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.role).await?,
-        false => bus::live_inbox(&client, &nats.me.id).await?,
+    let inbox = if replies.wait || replies.follow {
+        bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.role).await?
+    } else {
+        bus::live_inbox(&client, &nats.me.id).await?
     };
     // Warned rather than refused: a daemon may start later and take the message, which waits in the stream.
     let warnings = roster::unserved_warnings(&js, &[&envelope.to]).await;
@@ -54,9 +55,10 @@ pub(crate) async fn ask(
             tracing::warn!("a reply waits for a daemon to serve {}: {flag} may not end until one does", envelope.to);
         }
     }
-    let status = match (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
-        true => client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok(),
-        false => None,
+    let status = if (replies.wait || replies.follow) && !to_human && progress::wanted(nats.me.role.is_human()) {
+        client.subscribe(subject::status(&envelope.to, &envelope.thread_id)).await.ok()
+    } else {
+        None
     };
     if let Some(owner) = &envelope.owner {
         owners::recording(&js, nats.domain, &envelope.thread_id, &envelope.to, owner).await;
@@ -146,9 +148,10 @@ pub(crate) async fn post(
     } else {
         None
     };
-    let status = match room.is_some() && progress::wanted(nats.me.role.is_human()) {
-        true => client.subscribe(subject::status_on(&post.thread_id)).await.ok(),
-        false => None,
+    let status = if room.is_some() && progress::wanted(nats.me.role.is_human()) {
+        client.subscribe(subject::status_on(&post.thread_id)).await.ok()
+    } else {
+        None
     };
     let stored = bus::store_acked(&js, post.subject(), &post, &post.id.to_string()).await?.map(|ack| ack.sequence);
     if stored.is_none() {
@@ -203,15 +206,15 @@ pub(crate) async fn react(nats: &Nats<'_>, message: Uuid, reaction: Reaction, re
     let (_, js) = nats.connect("ants-cli").await?;
     let me = &nats.me.id;
     let line = if remove {
-        match reactions::remove(&js, nats.domain, me, &message, &reaction).await? {
-            true => format!("removed {reaction} from message {message}"),
-            false => format!("no {reaction} reaction to message {message} to remove"),
+        if reactions::remove(&js, nats.domain, me, &message, &reaction).await? {
+            format!("removed {reaction} from message {message}")
+        } else {
+            format!("no {reaction} reaction to message {message} to remove")
         }
+    } else if reactions::add(&js, nats.domain, me, &message, &reaction).await? {
+        format!("reacted {reaction} to message {message}")
     } else {
-        match reactions::add(&js, nats.domain, me, &message, &reaction).await? {
-            true => format!("reacted {reaction} to message {message}"),
-            false => format!("already reacted {reaction} to message {message}"),
-        }
+        format!("already reacted {reaction} to message {message}")
     };
     println!("{line}");
     Ok(())

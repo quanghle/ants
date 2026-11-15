@@ -217,10 +217,7 @@ impl QuietHours {
         let Ok(at) = jiff::Timestamp::from_second(at.timestamp()) else { return false };
         let time = self.zone.to_datetime(at);
         let now = u16::try_from(time.hour()).unwrap_or(0) * 60 + u16::try_from(time.minute()).unwrap_or(0);
-        match self.start < self.end {
-            true => self.start <= now && now < self.end,
-            false => now >= self.start || now < self.end,
-        }
+        if self.start < self.end { self.start <= now && now < self.end } else { now >= self.start || now < self.end }
     }
 }
 
@@ -368,10 +365,7 @@ impl Human {
                 Bypass::Escalations => "escalations",
             })
             .collect();
-        let through = match through.is_empty() {
-            true => "nothing".to_owned(),
-            false => through.join(" and "),
-        };
+        let through = if through.is_empty() { "nothing".to_owned() } else { through.join(" and ") };
         Some(format!("quiet hours {quiet} ({state}); quiet hours and a snooze let {through} through"))
     }
 
@@ -390,9 +384,10 @@ impl Human {
 /// The program of an exec sink as it is run: a path, one with a separator or starting with `~`, resolved as the
 /// config file's paths are; a bare name left to be found on `PATH`.
 pub fn resolve_program(program: &str, resolve: &impl Fn(&Path) -> PathBuf) -> String {
-    match program.starts_with('~') || program.contains(std::path::is_separator) {
-        true => resolve(Path::new(program)).to_string_lossy().into_owned(),
-        false => program.to_owned(),
+    if program.starts_with('~') || program.contains(std::path::is_separator) {
+        resolve(Path::new(program)).to_string_lossy().into_owned()
+    } else {
+        program.to_owned()
     }
 }
 
@@ -434,9 +429,8 @@ impl Sink {
             Some(s) if s.is_empty() => bail!("empty secret"),
             other => other,
         };
-        let only = |what: &str, given: bool| match given {
-            true => Err(anyhow!("{what} does not go with kind = {:?}", entry.kind)),
-            false => Ok(()),
+        let only = |what: &str, given: bool| {
+            if given { Err(anyhow!("{what} does not go with kind = {:?}", entry.kind)) } else { Ok(()) }
         };
         if entry.kind != SinkKind::Exec {
             only("command", entry.command.is_some())?;
@@ -911,25 +905,23 @@ fn approval_notice(
             suggested.approved_before, suggested.rule, request.ant
         );
     }
-    let buttons = links
-        .map(|links| {
-            request
-                .options
-                .iter()
-                .map(|&verdict| {
-                    let action = Action {
-                        ant: request.ant.clone(),
-                        id: request.id,
-                        seq,
-                        verdict,
-                        by: human.clone(),
-                        expires: request.expires_at.timestamp(),
-                    };
-                    Button { label: label(verdict), url: links.url(&action), verdict }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let buttons = links.map_or_default(|links| {
+        request
+            .options
+            .iter()
+            .map(|&verdict| {
+                let action = Action {
+                    ant: request.ant.clone(),
+                    id: request.id,
+                    seq,
+                    verdict,
+                    by: human.clone(),
+                    expires: request.expires_at.timestamp(),
+                };
+                Button { label: label(verdict), url: links.url(&action), verdict }
+            })
+            .collect()
+    });
     Notice {
         about: About::Approval { request: Box::new(request.clone()), seq },
         human: human.clone(),
@@ -1037,13 +1029,12 @@ async fn fetch(
     let tcp = TcpStream::connect((host.trim_start_matches('[').trim_end_matches(']'), port))
         .await
         .with_context(|| format!("connecting to {host}:{port}"))?;
-    let io: Box<dyn Io> = match https {
-        true => {
-            let name = ServerName::try_from(host.trim_start_matches('[').trim_end_matches(']').to_owned())
-                .context("the URL's host name")?;
-            Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
-        }
-        false => Box::new(tcp),
+    let io: Box<dyn Io> = if https {
+        let name = ServerName::try_from(host.trim_start_matches('[').trim_end_matches(']').to_owned())
+            .context("the URL's host name")?;
+        Box::new(tls()?.connect(name, tcp).await.context("TLS handshake")?)
+    } else {
+        Box::new(tcp)
     };
     let (mut send, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
     tokio::spawn(async move {
@@ -1062,7 +1053,7 @@ async fn fetch(
         send.send_request(request.body(Full::new(Bytes::from(body.unwrap_or_default())))?).await.context("sending")?;
     let status = response.status();
     let answer = Limited::new(response.into_body(), MAX_ANSWER * 8).collect().await;
-    let answer = answer.map(|b| b.to_bytes()).unwrap_or_default();
+    let answer = answer.map_or_default(http_body_util::Collected::to_bytes);
     Ok((status, String::from_utf8_lossy(&answer[..answer.len().min(MAX_ANSWER)]).into_owned()))
 }
 
@@ -1311,7 +1302,7 @@ async fn watch(human: &Notified, bus: &HumanBus, links: Option<&Links>) -> Resul
                 continue;
             }
         };
-        let seq = message.info().map(|i| i.stream_sequence).unwrap_or_default();
+        let seq = message.info().map_or_default(|i| i.stream_sequence);
         if human.first_time(seq) {
             notify(human, bus, links, &message.subject, &message.payload, seq).await;
         }

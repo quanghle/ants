@@ -86,7 +86,7 @@ fn members_label(entry: &ChannelEntry) -> String {
 
 /// One line describing a channel, as `ants channel` prints it after a change.
 pub fn describe(entry: &ChannelEntry) -> String {
-    let owner = entry.owner.as_ref().map(|o| format!("; owner {o}")).unwrap_or_default();
+    let owner = entry.owner.as_ref().map_or_default(|o| format!("; owner {o}"));
     format!("#{}: members {}; messenger {}{owner}", entry.channel, members_label(entry), messenger_label(entry))
 }
 
@@ -129,7 +129,7 @@ pub async fn notify_mentioned(
     humans: &Humans,
 ) -> Vec<UserId> {
     let mut notified = Vec::new();
-    for human in entry.map(|entry| entry.notified(post, humans)).unwrap_or_default() {
+    for human in entry.map_or_default(|entry| entry.notified(post, humans)) {
         let notice = post.mention_notice(&human);
         match bus::store(js, notice.subject(), &notice, &post.mention_msg_id(&human)).await {
             Ok(_) => notified.push(human),

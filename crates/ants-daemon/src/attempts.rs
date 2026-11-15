@@ -192,12 +192,12 @@ impl Answered {
 
     /// Forget `request` once it is acked. A failure only leaves the note until [`prune`](Self::prune).
     pub async fn forget(&self, request: &Envelope) {
-        self.0.forget(request).await
+        self.0.forget(request).await;
     }
 
     /// Remove notes older than `max_age`, by when the stream no longer keeps their messages.
     pub async fn prune(&self, max_age: Duration) {
-        self.0.prune(max_age).await
+        self.0.prune(max_age).await;
     }
 }
 
@@ -272,7 +272,7 @@ impl Notes {
 
     /// Remove the note of `message`. A failure only leaves it until [`prune`](Self::prune).
     pub async fn forget(&self, message: &Envelope) {
-        self.forget_id(message.id).await
+        self.forget_id(message.id).await;
     }
 
     /// Remove the note of the message with envelope id `id`, as [`forget`](Self::forget) does.

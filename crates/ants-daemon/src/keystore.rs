@@ -42,7 +42,7 @@ impl std::error::Error for Unavailable {}
 
 /// Whether `e` comes of a store that is locked or not available yet ([`Unavailable`]).
 pub fn is_unavailable(e: &anyhow::Error) -> bool {
-    e.chain().any(|cause| cause.is::<Unavailable>())
+    e.chain().any(<dyn std::error::Error>::is::<Unavailable>)
 }
 
 /// The OS credential store of this machine.

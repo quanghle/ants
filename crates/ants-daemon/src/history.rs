@@ -301,8 +301,8 @@ fn left_out(dropped: &[Entry]) -> String {
         named.push(count(senders.len() - named.len(), "other"));
     }
     let minute = |at: SystemTime| chrono::DateTime::<chrono::Utc>::from(at).format("%Y-%m-%d %H:%M").to_string();
-    let first = dropped.iter().map(|e| e.at).min().map(minute).unwrap_or_default();
-    let last = dropped.iter().map(|e| e.at).max().map(minute).unwrap_or_default();
+    let first = dropped.iter().map(|e| e.at).min().map_or_default(minute);
+    let last = dropped.iter().map(|e| e.at).max().map_or_default(minute);
     let when = if first == last { format!("at {first} UTC") } else { format!("between {first} and {last} UTC") };
     let (n, verb) = match dropped.len() {
         1 => ("1 older entry".to_owned(), "is"),

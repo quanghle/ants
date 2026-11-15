@@ -72,10 +72,7 @@ impl fmt::Display for Members {
         if self.enroll_approver {
             parts.push("enroll approver".to_owned());
         }
-        match parts.is_empty() {
-            true => f.write_str("no members"),
-            false => f.write_str(&parts.join("; ")),
-        }
+        if parts.is_empty() { f.write_str("no members") } else { f.write_str(&parts.join("; ")) }
     }
 }
 

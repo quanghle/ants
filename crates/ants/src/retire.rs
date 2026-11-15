@@ -97,13 +97,14 @@ pub fn forget(path: &Path) -> Result<()> {
 
 /// What `ants retire` and `retire_ant` say of the ant's stop.
 pub fn stop_note(name: &UserId, stopped: bool) -> String {
-    match stopped {
-        true => format!("{name} stopped, its prompts in flight ended."),
-        false => format!(
+    if stopped {
+        format!("{name} stopped, its prompts in flight ended.")
+    } else {
+        format!(
             "{name} was still in the roster after {}m, so its prompts in flight, if any, are cut off by the \
              revocation.",
             STOP_WAIT.as_secs() / 60
-        ),
+        )
     }
 }
 

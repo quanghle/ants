@@ -237,7 +237,7 @@ pub fn summary_table(reports: &[AntReport], days: u32) -> String {
         .iter()
         .map(|r| {
             let caps = r.caps.unwrap_or_default();
-            let today = r.days.first().map(|d| d.spent).unwrap_or_default();
+            let today = r.days.first().map_or_default(|d| d.spent);
             vec![
                 r.ant.to_string(),
                 tokens(today.tokens, caps.daily_tokens),
@@ -316,7 +316,7 @@ pub async fn show(nats: &crate::Nats<'_>, select: &Select, caps: &BTreeMap<UserI
                 println!("{}", serde_json::to_string(report)?);
             }
         } else if reports.is_empty() {
-            let by = ant.map(|ant| format!(" by {ant}")).unwrap_or_default();
+            let by = ant.map_or_default(|ant| format!(" by {ant}"));
             println!("no spend recorded on thread {id}{by}");
         } else {
             println!("{}", thread_table(&reports));

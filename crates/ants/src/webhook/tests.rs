@@ -554,7 +554,7 @@ async fn a_test_notice_goes_to_every_sink_and_each_failure_is_reported() {
     let results = notify::test(&config.humans[0], "laptop").await;
     let shown: Vec<(&str, String)> = results
         .iter()
-        .map(|(sink, sent)| (sink.as_str(), sent.as_ref().map_or_else(|e| e.to_string(), |()| "ok".into())))
+        .map(|(sink, sent)| (sink.as_str(), sent.as_ref().map_or_else(ToString::to_string, |()| "ok".into())))
         .collect();
     assert_eq!(
         shown,

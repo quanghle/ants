@@ -296,7 +296,7 @@ fn dedup(permissions: &mut Permissions) {
 /// The publish and subscribe allow lists of a user JWT's claims.
 fn allowed(claims: &Value) -> Permissions {
     let list = |kind: &str| -> Vec<String> {
-        let list = claims["nats"][kind]["allow"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let list = claims["nats"][kind]["allow"].as_array().map_or_default(Vec::as_slice);
         list.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()
     };
     Permissions { publish: list("pub"), subscribe: list("sub") }
@@ -317,7 +317,7 @@ fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, V
     if claims.name != leaf_user(machine) {
         bail!("issued to {}, not to the leaf node of {machine}", claims.name);
     }
-    let types = body["nats"]["allowed_connection_types"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let types = body["nats"]["allowed_connection_types"].as_array().map_or_default(Vec::as_slice);
     if types.is_empty() || !types.iter().all(|t| t.as_str().is_some_and(|t| LEAF_CONNECTIONS.contains(&t))) {
         bail!("not the uplink credentials of a leaf node");
     }
