@@ -25,6 +25,7 @@ mod inbox;
 mod keys;
 mod leaf;
 mod live;
+mod login;
 mod manager;
 mod members;
 mod notify;
@@ -159,6 +160,7 @@ async fn run() -> Result<()> {
             };
             retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats).await
         }
+        Command::Login(args) => login::run(args).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
         Command::Signer { config, approval_timeout, dir, upgrade } => {

@@ -14,7 +14,8 @@ use crate::cmd::{
     harness::HarnessCommand, leaf::LeafCommand, thread::ThreadCommand, tools::ToolsCommand, webhook::WebhookCommand,
 };
 use crate::{
-    add, channel, completions, compose, hook, keys, progress, renew, retire, serve, setup, spend, thread, upgrade,
+    add, channel, completions, compose, hook, keys, login, progress, renew, retire, serve, setup, spend, thread,
+    upgrade,
 };
 
 #[derive(Parser)]
@@ -300,6 +301,12 @@ pub(crate) enum Command {
         #[command(flatten)]
         upgrade: upgrade::UpgradeArgs,
     },
+    /// Register a device of a human with a GitHub sign-in: generate its NKey here, ask `ants signer` on the hub with
+    /// the team's bootstrap credentials, show GitHub's device login page and the code to enter there, and wait for
+    /// the credentials or a refusal (repeating the request every 5 s, for up to 15 min, until Ctrl-C). Then write
+    /// ~/.config/ants/auth/NAME.creds and set `creds` and `nats` of [cli] in the config file when [cli] names no
+    /// credentials. A refusal, an expiry or Ctrl-C leaves no key and no file.
+    Login(login::LoginArgs),
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
     /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.

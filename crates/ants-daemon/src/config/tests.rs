@@ -601,6 +601,41 @@ fn schedules_take_the_top_level_server_and_unique_names() {
 }
 
 #[test]
+fn ants_login_sets_the_cli_connection_where_cli_names_no_credentials() {
+    let (path, home) = (Path::new("/team/config.toml"), Path::new("/home/alice"));
+    let creds = Path::new("/home/alice/.config/ants/auth/alice.creds");
+    let set = |text: &str| cli_login_text(text, path, home, "wss://hub.example/nats", creds);
+    let (fresh, nats) = set("").unwrap().unwrap();
+    assert!(nats);
+    assert_eq!(
+        fresh,
+        "[cli]\ncreds = \"/home/alice/.config/ants/auth/alice.creds\"\nnats = \"wss://hub.example/nats\"\n"
+    );
+
+    let top = "nats = \"nats://127.0.0.1:4222\" # the leaf node\n";
+    let (appended, nats) = set(top).unwrap().unwrap();
+    assert!(nats, "the top-level server is the ants'");
+    assert!(
+        appended.starts_with(top)
+            && appended.ends_with(
+                "\n\n[cli]\ncreds = \"/home/alice/.config/ants/auth/alice.creds\"\nnats = \"wss://hub.example/nats\"\n"
+            ),
+        "{appended}"
+    );
+
+    let own = "# mine\n[cli] # the CLI\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\"\n";
+    let (inserted, nats) = set(own).unwrap().unwrap();
+    assert!(!nats, "[cli] names a server");
+    assert_eq!(
+        inserted,
+        "# mine\n[cli] # the CLI\ncreds = \"/home/alice/.config/ants/auth/alice.creds\"\nnats = \"nats://hub:4222\"\n\n[[ant]]\nname = \"dev-a\"\n"
+    );
+    assert_eq!(set("[cli]\ncreds = \"bob.creds\"\n").unwrap(), None, "the CLI's credentials stay");
+    assert!(set("cli.js_domain = \"hub\"\n").is_err(), "no [cli] header to put the keys under");
+    assert!(set("[cli\n").is_err());
+}
+
+#[test]
 fn the_cli_section_overrides_the_top_level_server() {
     let (path, home) = (Path::new("/team/config.toml"), Path::new("/home/alice"));
     let cli = |text: &str| CliDefaults::parse(text, path, home);

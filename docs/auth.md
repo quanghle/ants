@@ -111,6 +111,14 @@ A registration request on `ants.login.<name>` carries the name asked for, the de
 
 Requests that are malformed, unsigned by their key, expired or for another subject get no answer. A key whose registration ended gets the same answer until its request expires; another attempt uses a new key.
 
+On the machine being registered:
+
+```sh
+ants login --hub wss://hub.example/nats --name alice [--label laptop] [--store-key] [--bootstrap FILE]
+```
+
+`--bootstrap` defaults to `~/.config/ants/auth/bootstrap.creds`. `ants login` makes the device's NKey in memory, repeats its request until an answer comes, the request expires (15 min) or Ctrl-C, and shows the sign-in URL and user code only when the URL is GitHub's device login page (`https://github.com/login/device`); any other URL stops the login without showing it. Signed credentials are accepted only when issued to its key, for the name asked, by the account of the bootstrap credentials; they go to `~/.config/ants/auth/NAME.creds` (mode `0600`, replacing an earlier file, as a new login does to renew an `email-domain` grant), or with `--store-key` the seed goes to the [OS credential store](#private-keys-in-the-os-credential-store) after the credentials authenticate at the hub. When `[cli]` in `ANTS_CONFIG` (`~/.ants/config.toml`) names no `creds`, it gets `creds` set to that file and, when it has no `nats`, `nats` set to the hub. A refusal, expiry or Ctrl-C leaves no key and no file behind.
+
 ### GitHub bindings
 
 A name registered with a GitHub sign-in belongs to that GitHub user's numeric ID for good: renamed GitHub accounts keep their names, and no other GitHub user can register it. The binding is recorded on each device's record in `issued.jsonl`, with the grant that admitted the device (`org`, `team`, `email-domain` or `approval`), so it is kept across renewals and in backups. An existing human name (issued with `ants auth user --human` before registration was enabled) is bound by the operator before its owner registers more devices with `ants login`:

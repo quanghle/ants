@@ -991,6 +991,71 @@ impl CliDefaults {
     }
 }
 
+/// The text of the config file at `path` (none when missing) with `[cli]` naming the credentials at `creds`, and the
+/// server at `nats` unless `[cli]` names one, as `ants login` sets them; None when `[cli]` names credentials already,
+/// which stay the CLI's. Returns whether `nats` was set too. The text around stays as it is, comments included: the
+/// keys go right after the `[cli]` header, or in a new `[cli]` table at the end. Fails when the file does not parse,
+/// or would not with the keys in place.
+pub fn with_cli_login(path: &Path, nats: &str, creds: &Path) -> Result<Option<(String, bool)>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading config {}", path.display())),
+    };
+    cli_login_text(&text, &std::path::absolute(path)?, &home_dir()?, nats, creds)
+}
+
+fn cli_login_text(text: &str, path: &Path, home: &Path, nats: &str, creds: &Path) -> Result<Option<(String, bool)>> {
+    CliDefaults::parse(text, path, home)?;
+    let table: toml::Table = toml::from_str(text).with_context(|| format!("parsing config {}", path.display()))?;
+    let cli = table.get("cli").and_then(toml::Value::as_table);
+    if cli.is_some_and(|cli| cli.contains_key("creds")) {
+        return Ok(None);
+    }
+    let set_nats = !cli.is_some_and(|cli| cli.contains_key("nats"));
+    let quoted = |s: &str| serde_json::to_string(s).expect("a string serializes");
+    let creds_text = creds.to_str().with_context(|| format!("{} is not UTF-8", creds.display()))?;
+    let mut keys = format!("creds = {}\n", quoted(creds_text));
+    if set_nats {
+        let _ = writeln!(keys, "nats = {}", quoted(nats));
+    }
+    let is_header = |line: &str| {
+        let Some(rest) = line.trim_start().strip_prefix('[') else { return false };
+        let Some((inside, after)) = rest.split_once(']') else { return false };
+        let after = after.trim_start();
+        inside.trim() == "cli" && (after.is_empty() || after.starts_with('#'))
+    };
+    let mut new = String::with_capacity(text.len() + keys.len() + 8);
+    let mut placed = false;
+    for line in text.split_inclusive('\n') {
+        new.push_str(line);
+        if !placed && is_header(line) {
+            if !line.ends_with('\n') {
+                new.push('\n');
+            }
+            new.push_str(&keys);
+            placed = true;
+        }
+    }
+    if !placed {
+        if !new.is_empty() {
+            if !new.ends_with('\n') {
+                new.push('\n');
+            }
+            new.push('\n');
+        }
+        new.push_str("[cli]\n");
+        new.push_str(&keys);
+    }
+    let fail = || format!("cannot set [cli] in config {}: set creds = {creds_text:?} there by hand", path.display());
+    let defaults = CliDefaults::parse(&new, path, home).with_context(fail)?;
+    let nats_ok = !set_nats || defaults.nats.as_deref() == Some(nats);
+    if defaults.creds.as_deref() != Some(creds) || !nats_ok {
+        bail!(fail());
+    }
+    Ok(Some((new, set_nats)))
+}
+
 /// Add `entry` ([`entry`]) at the end of the config file at `path`, creating the file (and its directory) when
 /// missing. The text already there stays as it is, comments included; the file must still parse ([`parse`]) with the
 /// entry, or nothing is written.
