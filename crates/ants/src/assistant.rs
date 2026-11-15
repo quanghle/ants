@@ -704,6 +704,12 @@ mod tests {
             let (opened, state) = crate::sealed::read(answer.clone(), Some(keyring));
             assert_eq!((opened.text.as_str(), state), ("alice will be there", Some(State::Opened)));
         }
+        let mut title = ants_proto::ThreadTitle::new(answer.thread_id.clone(), "Board", pa.clone()).unwrap();
+        assistant.seal_title(&alice, &bob, &mut title).await.unwrap();
+        assert!(title.title.is_empty() && title.sealed.as_ref().unwrap().key_for(&device).is_some());
+        for keyring in [&bob_keyring, &alice_keyring] {
+            assert_eq!(keyring.open_title(&title).await, Some(Opening::Opened("Board".to_owned())));
+        }
         let mut as_alice = Envelope::new(alice.clone(), bob.clone(), "pay pa double".to_owned());
         let content = XSalsa20Poly1305::generate_key(&mut OsRng);
         let bob_devices = Directory::open(&bob_js, &account).await.unwrap().devices(std::slice::from_ref(&bob)).await;
