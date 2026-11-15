@@ -18,8 +18,8 @@ use super::react::{self, Pick, Picker};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
 use super::{
-    ant, cards, catchup, channel, credentials, dm, home, images, memories, nav, people, search, snooze, thread,
-    timeline, tree, work,
+    ant, cards, catchup, channel, credentials, dm, home, images, memories, nav, people, search, settings, snooze,
+    thread, timeline, tree, work,
 };
 use crate::live::{self, State};
 use crate::thread::{Entry, Kind};
@@ -85,6 +85,8 @@ pub enum Action {
     Summarise(catchup::Ask),
     /// Answer a request for credentials, as `ants enroll approve`, `reject` or `renew` does.
     Credentials(credentials::Order),
+    /// Read an ant's settings, or send an order changing them, as `ants ant set` does.
+    Settings(settings::Ask),
     Quit,
 }
 
@@ -669,6 +671,13 @@ impl Model {
         {
             return action;
         }
+        if !self.bar.focused
+            && self.focus == Focus::View
+            && let Some(Page::Ant(page)) = self.pages.last_mut()
+            && let Some(action) = page.write(key)
+        {
+            return action;
+        }
         if let Some(action) = self.bar_key(key, now) {
             return action;
         }
@@ -858,6 +867,25 @@ impl Model {
     pub fn ant_shown(&self) -> Option<UserId> {
         let Page::Ant(page) = self.page() else { return None };
         Some(page.ant.clone())
+    }
+
+    /// The ant whose settings pane shows, and whether its settings are to be read.
+    pub fn settings_shown(&self) -> Option<(UserId, bool)> {
+        let Page::Ant(page) = self.page() else { return None };
+        (page.pane == ant::Pane::Settings).then(|| (page.ant.clone(), page.settings.reading.is_none()))
+    }
+
+    /// Take in what a read of an ant's settings or orders, or an order changing them, brought.
+    pub fn settings_event(&mut self, event: settings::Event) {
+        let mut event = Some(event);
+        for page in self.pages.iter_mut().rev() {
+            if let Page::Ant(page) = page
+                && event.as_ref().is_some_and(|e| e.ant() == &page.ant)
+                && let Some(event) = event.take()
+            {
+                page.settings.take(event);
+            }
+        }
     }
 
     /// Take in what a gathering of the credentials asked for, or an answer to one, brought.

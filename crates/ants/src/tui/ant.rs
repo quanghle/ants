@@ -1,7 +1,8 @@
 //! The ant view: one ant at a glance, as `ants ant show` prints it ([`crate::ant`]). Above, where and how it runs, as
 //! its roster entry tells, beside what holds it back, what it does now on each thread (as `ants watch ANT` follows
 //! it) and what it spent that UTC day; below, one pane at a time ([`Pane`]): its threads, the messages waiting for it,
-//! which [`Io`] asks its daemon for every while (as `ants queue` does), or its memories ([`super::memories`]).
+//! which [`Io`] asks its daemon for every while (as `ants queue` does), its memories ([`super::memories`]), or its
+//! settings and the admin orders to it ([`settings`]).
 
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ use super::frame::{self, ago};
 use super::memories;
 use super::model::{Action, Data, Key, To};
 use super::select::Selection;
+use super::settings;
 use super::work::{self, Filter};
 use crate::live::maybe;
 use crate::queue::{self, Waiting};
@@ -38,16 +40,19 @@ pub enum Pane {
     Queue,
     /// The ant's core and harness memories, read-only.
     Memories,
+    /// Its settings, and the admin orders to it.
+    Settings,
 }
 
 impl Pane {
-    pub const ALL: [Self; 3] = [Self::Threads, Self::Queue, Self::Memories];
+    pub const ALL: [Self; 4] = [Self::Threads, Self::Queue, Self::Memories, Self::Settings];
 
     fn label(self) -> &'static str {
         match self {
             Self::Threads => "threads",
             Self::Queue => "queue",
             Self::Memories => "memories",
+            Self::Settings => "settings",
         }
     }
 
@@ -79,6 +84,7 @@ pub struct Page {
     message: Selection<Uuid>,
     pub queue: Queue,
     pub memories: memories::Page,
+    pub settings: settings::Pane,
     /// Whether `r` asked to restart the ant's harnesses, which the next key confirms.
     armed: bool,
 }
@@ -94,7 +100,8 @@ impl Page {
     pub fn new(ant: UserId) -> Self {
         let threads = work::Page::new(Filter { user: Some(ant.clone()), ..Filter::default() });
         let (message, queue, memories) = (Selection::default(), Queue::Asking, memories::Page::new());
-        Self { ant, pane: Pane::Threads, threads, message, queue, memories, armed: false }
+        let settings = settings::Pane::default();
+        Self { ant, pane: Pane::Threads, threads, message, queue, memories, settings, armed: false }
     }
 
     pub fn keys(&self) -> &'static str {
@@ -103,7 +110,16 @@ impl Page {
             Pane::Threads => Self::THREADS_KEYS,
             Pane::Queue => Self::QUEUE_KEYS,
             Pane::Memories => memories::Page::KEYS,
+            Pane::Settings => self.settings.keys(),
         }
+    }
+
+    /// Take `key` into the change of a setting being written, if one is.
+    pub fn write(&mut self, key: Key) -> Option<Option<super::model::Action>> {
+        if self.pane != Pane::Settings {
+            return None;
+        }
+        self.settings.write(key, &self.ant)
     }
 
     fn waiting(&self) -> &[Waiting] {
@@ -122,7 +138,7 @@ impl Page {
         match self.pane {
             Pane::Threads => self.threads.thread(data),
             Pane::Queue => self.waiting().get(self.message.at(&self.messages())).map(|m| m.thread_id.clone()),
-            Pane::Memories => None,
+            Pane::Memories | Pane::Settings => None,
         }
     }
 
@@ -158,6 +174,7 @@ impl Page {
         }
         match self.pane {
             Pane::Threads => return self.threads.key(key, data),
+            Pane::Settings => return self.settings.key(key, &self.ant),
             Pane::Memories => {
                 self.memories.key(key);
                 return None;
@@ -197,7 +214,7 @@ impl Page {
         let block = frame::block(" now ".to_owned(), false);
         frame.render_widget(Paragraph::new(status).block(block).wrap(Wrap { trim: false }), right);
         let threads = self.threads.rows(data).len();
-        let counts = [threads.to_string(), self.queued(), self.memories.count()];
+        let counts = [threads.to_string(), self.queued(), self.memories.count(), self.settings.count()];
         let mut spans = vec![Span::raw(" ")];
         for (pane, count) in Pane::ALL.iter().zip(counts) {
             let style = if *pane == self.pane { frame::highlight(focused) } else { frame::dim() };
@@ -210,6 +227,7 @@ impl Page {
             Pane::Threads => self.threads.draw(frame, pane, data, now, focused),
             Pane::Queue => self.draw_queue(frame, pane, data, now, focused),
             Pane::Memories => self.memories.draw(frame, pane, &self.ant, focused),
+            Pane::Settings => self.settings.draw(frame, pane, &self.ant, now, focused),
         }
     }
 
@@ -541,6 +559,8 @@ mod tests {
         m.data.live.roster(vec![entry("dev-a", 60, 2, at(2))], at(2));
         m.select(nav::Item::Ant(user("dev-a")));
         assert_eq!(m.memories_wanted(), None, "not before the pane shows");
+        m.key(Key::Left, at(3));
+        assert_eq!(m.memories_wanted(), None, "not on the settings pane");
         m.key(Key::Left, at(3));
         assert!(screen(&m, at(3)).contains("asking the daemon of dev-a for its memories…"));
         assert_eq!(m.memories_wanted(), Some((user("dev-a"), 1)));

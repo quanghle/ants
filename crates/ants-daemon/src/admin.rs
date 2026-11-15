@@ -6,10 +6,10 @@
 //! deciding again. It refuses every order while the config sets `[admin] remote = false`.
 //!
 //! An order an admin signed it carries out ([`apply`]) with the module of its op: [`set`] edits the ant's settings in
-//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`pause`] pauses or resumes
-//! the ant there; [`restart`] has the daemon serving the ant restart its harnesses; [`memories`] reads the ant's
-//! memories, only while online; [`add`] adds an ant to the config, its credentials signed by `ants signer` on the
-//! order, and [`retire`] removes one, its credentials revoked so.
+//! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once; [`settings`] reads them;
+//! [`pause`] pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
+//! [`memories`] reads the ant's memories, only while online; [`add`] adds an ant to the config, its credentials signed
+//! by `ants signer` on the order, and [`retire`] removes one, its credentials revoked so.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ mod pause;
 pub mod restart;
 mod retire;
 mod set;
+mod settings;
 
 /// How long an order may stay in hand unacked before the stream delivers it again.
 const ACK_WAIT: Duration = Duration::from_secs(60);
@@ -301,6 +302,7 @@ async fn apply(js: &jetstream::Context, orders: &Orders, order: &AdminOrder, sto
         AdminOp::Add { settings } => add::apply(js, orders, order, settings).await,
         AdminOp::Retire => retire::apply(js, orders, order).await,
         AdminOp::ReadMemories => memories::apply(orders, order, stored_at).await,
+        AdminOp::ReadSettings => settings::apply(orders, order),
     }
 }
 
