@@ -41,7 +41,9 @@ allow_tools = false                        # true equals allow = ["*"]
 approval_timeout = "5m"                    # default
 capabilities = ["rust", "backend"]         # routing tags published in roster
 max_harnesses = 4                          # default
-worktrees = false                          # default; true gives each thread a git worktree
+worktrees = true                           # git worktree per thread; default: on for a git workdir
+                                           # not ignored by git, with max_harnesses > 1 (see Worktrees);
+                                           # false shares the workdir
 idle_timeout = "10m"                       # default
 prompt_timeout = "30m"                     # default; "0" disables
 max_tool_calls = 300                       # default; 0 disables
@@ -91,6 +93,19 @@ allow = ["read:*", "execute:cargo test*"]
 - Added schedules start; removed schedules stop immediately; changed or stopped schedules restart.
 - Invalid reloads log an error and keep running the previous config. `metrics` requires a process restart.
 
+## Worktrees
+
+With worktrees on, each thread works in its own git worktree at `<home>/worktrees/<thread>` on branch `ants/<ant>/<thread>`, created from `HEAD` on the thread's first prompt and removed once its session expires (a branch with unmerged commits is kept, and its thread is told). A workdir outside a git work tree stays shared.
+
+- Unset `worktrees` turns them on when the workdir is inside a git work tree (a `.git` directory or file in it or above it) that does not ignore it (`git check-ignore`, as for a directory in `target/`) and `max_harnesses > 1`, logging so at daemon start; otherwise threads share the workdir.
+- `worktrees = true` (`--worktrees`) turns them on; `worktrees = false` (`--no-worktrees`) keeps every thread in the shared workdir, with a warning at daemon start and in `ants doctor` when `max_harnesses > 1` and the workdir is a git work tree, as threads running at once may clobber each other's edits.
+
+Trade-offs of worktrees:
+
+- **Disk:** one full checkout per thread, plus build outputs (`target/`, `node_modules`) each thread builds from scratch, for up to `max_harnesses` live threads and every thread whose session has not expired.
+- **Branches:** a branch `ants/<ant>/<thread>` per thread in the repository; branches with unmerged commits remain after their worktree is removed until merged or deleted by hand.
+- **Starting point:** a worktree starts from `HEAD` without uncommitted changes of the workdir, and edits land on the thread's branch, not in the workdir, until merged; tools keyed by the workdir path (trust prompts, per-directory config, caches) see a new directory per thread.
+
 ## Ant templates
 
 An `[[ant_template]]` bounds worker ants added by manager ants. A templated `[[ant]]` sets `template`, `added_by`, `name`, `creds`, optional `nats`/`js_domain`, and any allowed request overrides below; any other key or out-of-bounds value fails config load and reload. Escalations go to `added_by` first (`escalate_to = [manager]`). Templated ants cannot be managers (`managers` and `added_by` reject them).
@@ -115,8 +130,8 @@ allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named
 pool_daily_cost = 25.0                     # optional shared UTC daily cap across template ants; also pool_daily_tokens
 whoami = "Implement what the manager assigns." # overridable defaults: whoami, memory, tasks, capabilities
 capabilities = ["rust"]
-env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees, idle_timeout,
-worktrees = true                           # approval_timeout, spend_warn_percent
+env = { CARGO_TARGET_DIR = "target" }      # fixed on template: env, worktrees (unset: the ant default),
+worktrees = true                           # idle_timeout, approval_timeout, spend_warn_percent
 ```
 
 Allowed per-ant overrides within template bounds:

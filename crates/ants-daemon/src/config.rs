@@ -26,7 +26,9 @@
 //! creds = "~/.config/ants/auth/dev-a.creds"
 //! escalate_to = ["lead", "dev-b"]   # escalations go to these ants first, lead leading
 //! idle_timeout = "10m"              # durations: 90s, 10m, 1h30m, 0
-//! worktrees = true                  # a git worktree per thread, under the ant's home
+//! worktrees = true                  # a git worktree per thread, under the ant's home; unset: on for a git
+//!                                   # workdir git does not ignore, with max_harnesses above 1
+//!                                   # (crate::worktrees::per_thread)
 //! harness = "my-agent"
 //!
 //! [harnesses.my-agent]              # an ACP adapter on stdio, besides the built-in ones (harnesses.toml)
@@ -192,9 +194,9 @@ pub struct Ant {
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_harnesses")]
     pub max_harnesses: usize,
-    /// Give each thread its own git worktree of the workdir's repository under the home.
-    #[serde(default)]
-    pub worktrees: bool,
+    /// Give each thread its own git worktree of the workdir's repository under the home; unset, see
+    /// [`crate::worktrees::per_thread`].
+    pub worktrees: Option<bool>,
     #[serde(default = "default_idle_timeout", deserialize_with = "ants_proto::duration::deserialize")]
     pub idle_timeout: Duration,
     /// How long a prompt may run before it is cancelled; 0 for no limit.
@@ -309,7 +311,7 @@ impl Ant {
             approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             capabilities: Vec::new(),
             max_harnesses: DEFAULT_MAX_HARNESSES,
-            worktrees: false,
+            worktrees: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             prompt_timeout: DEFAULT_PROMPT_TIMEOUT,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
@@ -1165,8 +1167,8 @@ pub fn entry(ant: &Ant) -> Result<String> {
     if ant.allow_tools {
         set("allow_tools", "true".to_owned());
     }
-    if ant.worktrees {
-        set("worktrees", "true".to_owned());
+    if let Some(worktrees) = ant.worktrees {
+        set("worktrees", worktrees.to_string());
     }
     if !ant.allow.is_empty() {
         set("allow", strings(&mut ant.allow.iter().map(String::as_str)));

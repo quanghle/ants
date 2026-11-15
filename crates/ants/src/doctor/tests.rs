@@ -225,16 +225,17 @@ async fn a_missing_harness_fails_with_its_fix() {
 }
 
 #[test]
-fn ants_sharing_a_git_workdir_without_worktrees_are_warned() {
+fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     let dir = ants_test_support::scratch_dir("doctor-shared-workdir").canonicalize().unwrap();
     std::fs::create_dir(dir.join(".git")).unwrap();
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
         "messenger = false\n\
-             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworktrees = false\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
-             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\n",
+             [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\nworktrees = false\n\
+             [[ant]]\nname = \"dev-d\"\nworkdir = \".\"\n",
     )
     .unwrap();
     let loaded = config::load(&config).unwrap();
