@@ -119,7 +119,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check`, and `ants daemo
 | `ants signer [--config FILE] [--approval-timeout DUR] [--dir DIR]` | Sign or human-gate `request_ant` requests and process `retire_ant` revocations ([docs/config.md](docs/config.md#manager-ants)). |
 | `ants enroll list` / `approve NAME [...]` / `reject NAME [--reason TEXT]` | List, sign (`--webhook --to/--channel` for webhooks) or reject `ants add --enroll` requests. |
 | `ants enroll renewals` / `renew NAME [--public-key KEY]` / `renew --auto` | List or sign over-NATS `ants renew` requests ([docs/auth.md](docs/auth.md#renewing-over-nats)). |
-| `ants renew [FILE] [--config FILE] [--leaf-config FILE]` | Rotate `.creds` over NATS and reload/restart the daemon or leaf node. |
+| `ants renew [FILE] [--config FILE] [--leaf-config FILE]` | Rotate `.creds` over NATS and reload the daemon, or reconnect the leaf node's uplink. |
 | `ants keys store` / `unstore` / `remove [FILE...]` | Move NKey seeds into/out of the OS credential store, or delete local credentials ([docs/auth.md](docs/auth.md#private-keys-in-the-os-credential-store)). |
 | `ants harness check` / `prompt TEXT` | Verify harness install and sign-in, or run one standalone prompt (`--harness NAME`, `--config FILE`). |
 | `ants setup [--ant NAME --workdir DIR] [--harness NAME] [--config FILE] [--nats-server PATH] [--no-services] [--no-harness] [--no-completions] [--dry-run]` | Idempotently set up a single machine and run `ants doctor`. |
@@ -355,7 +355,7 @@ Options: `--ants PATH`, `--nats-server PATH`, `--nats-conf FILE` (default `~/.co
 | HTTPS bridge (`ants bridge connect` / `serve`) | `ants.bridge[-serve]` | `ants-bridge[-serve].service` | `--bridge URL` / `--bridge-serve` |
 | Log rotation (macOS) | `ants.logrotate` (`logrotate.log`) | — (`journald` rotates) | Always on macOS |
 
-- **Reload & restart:** `ants.daemon` and `ants.webhook` auto-reload edited config files (~6 s) and accept `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/<label>`, `systemctl --user reload <unit>`); `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` reload or restart matching running units automatically.
+- **Reload & restart:** `ants.daemon` and `ants.webhook` auto-reload edited config files (~6 s) and accept `SIGHUP` (`launchctl kill SIGHUP gui/$(id -u)/<label>`, `systemctl --user reload <unit>`); `ants add`, `ants webhook add`, `ants renew`, `ants leaf config`, `request_ant` and `ants tools approve --rule` reload or restart matching running units automatically. For renewed leaf uplink credentials (`ants add --enroll`, `ants renew`, `request_ant`), `ants.nats` gets a reload that reconnects only the uplink, keeping local connections (`nats-server` 2.14+, as the running leaf node reports; `ants add` and `ants renew` restart older ones).
 - **Logs & linger:** on macOS, `ants.logrotate` copy-truncates logs > 10 MiB hourly (keeping `.1`..`.5.gz`). On Linux, enable `loginctl enable-linger $USER` (`[boot] systemd=true` in `/etc/wsl.conf` on WSL 2). Remove units with `launchctl bootout gui/$(id -u)/<label>` or `systemctl --user disable --now <unit>`.
 
 ## Monitoring
