@@ -23,6 +23,7 @@ use async_nats::jetstream::kv::{self, Operation, UpdateErrorKind};
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::attachments;
+use crate::avatars::Faces;
 use crate::sealed::{Keyring, State};
 
 /// How often a followed inbox is read again with no message announced, against an announcement missed.
@@ -367,9 +368,10 @@ pub fn render_question(id: Uuid, question: &Question, answers: Vec<String>) -> S
 /// A message for the terminal: a header line with its id, then the text indented, its attachments and the reactions to
 /// it. A mention notice names its channel, the sender that relayed it if any, and how to answer there; a question shows
 /// its options numbered, whether a typed answer is taken and how to answer it. An assistant's message for its human
-/// names both ([`Acting::label`]).
-pub fn render(e: &Envelope, acting: &Acting, reactions: &[Reacted]) -> String {
-    let from = acting.label(e.from.as_str());
+/// names both ([`Acting::label`]). An ant's name comes after its face in `faces`.
+pub fn render(e: &Envelope, acting: &Acting, reactions: &[Reacted], faces: Option<&Faces>) -> String {
+    let from = faces.and_then(|f| f.known(&e.from)).unwrap_or_else(|| e.from.to_string());
+    let from = acting.label(&from);
     let at = e.sent_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
     let indent = |text: &str| text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
     let attached = attachments::render(&attachments::listed(&e.attachments, |id| e.attachment_handle(id)), "  ");
@@ -433,7 +435,7 @@ mod tests {
         let post = ants_proto::ChannelPost::new("ops".parse().unwrap(), "github".parse().unwrap(), "deploy failed")
             .from_webhook(vec![alice.clone()]);
         let notice = post.relayed_notice(&alice, &dev_a);
-        let shown = render(&notice, &Acting::Own, &[]);
+        let shown = render(&notice, &Acting::Own, &[], None);
         let header = format!(
             "github mentioned alice in #ops on thread {} (relayed by dev-a), message {}\n",
             post.thread_id, notice.id
@@ -447,11 +449,28 @@ mod tests {
         let options = ["yes".to_owned(), "not yet".to_owned()];
         let question = Question::new("Ship it?", &options, false).unwrap();
         let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
-        let shown = render(&asked, &Acting::Own, &[]);
+        let shown = render(&asked, &Acting::Own, &[], None);
         assert!(shown.contains(&format!("dev-a asks on thread t1, message {}\n  Ship it?\n", asked.id)), "{shown}");
         assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
         assert!(shown.contains("\n  Answer with an option's number.\n"), "{shown}");
         assert!(shown.contains(&format!("\n  (`ants answer {} N` answers it)\n", asked.id)), "{shown}");
+    }
+
+    #[test]
+    fn an_ant_s_face_comes_before_its_name() {
+        let dev_a: UserId = "dev-a".parse().unwrap();
+        let record = ants_proto::AntIdentity::new(dev_a.clone(), "a-id".to_owned(), chrono::Utc::now());
+        let identities = crate::avatars::Identities::from([(dev_a.clone(), record)]);
+        let faces = Faces::new(identities, crate::avatars::Depth::Plain, ants_proto::Theme::Dark);
+        let face = ants_proto::Avatar::derive("a-id").face();
+        let reply = Envelope::new(dev_a, UserId::human(), "done");
+        let shown = render(&reply, &Acting::Own, &[], Some(&faces));
+        assert!(shown.contains(&format!("  {face} dev-a on thread ")), "{shown}");
+        let from_human = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "go");
+        assert!(
+            render(&from_human, &Acting::Own, &[], Some(&faces)).contains("  human on thread "),
+            "no record, no face"
+        );
     }
 
     #[test]
@@ -460,7 +479,7 @@ mod tests {
         let shot = ants_daemon::files::reference("shot.png", "image/png", &[0; 2048]).unwrap();
         reply.attachments = vec![shot.clone()];
         let handle = format!("dev-a.inbox.human.{}", shot.id);
-        let shown = render(&reply, &Acting::Own, &[]);
+        let shown = render(&reply, &Acting::Own, &[], None);
         assert!(shown.contains(&format!("\n  the screenshot\n  📎 shot.png (2.0 KiB) {handle}\n")), "{shown}");
         let json = serde_json::to_string(&Shown::new(&reply, &[])).unwrap();
         assert_eq!(json.matches("\"attachments\"").count(), 1, "{json}");

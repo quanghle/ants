@@ -41,6 +41,11 @@ pub fn summaries() -> Result<config::SummaryConfig> {
     Ok(CliDefaults::load(&path()?)?.summaries)
 }
 
+/// The `[cli]` defaults of the config file.
+pub fn cli() -> Result<CliDefaults> {
+    CliDefaults::load(&path()?)
+}
+
 /// Whether `ants chat` draws image attachments in the terminal: `inline_images` of the config file's `[cli]`.
 pub fn inline_images() -> Result<bool> {
     Ok(CliDefaults::load(&path()?)?.inline_images)

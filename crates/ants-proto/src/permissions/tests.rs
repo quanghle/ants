@@ -102,6 +102,13 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
         assert!(publish.iter().any(|have| have == s), "{s} missing from {publish:?}");
     }
     assert!("hub.x".parse::<JsDomain>().is_err());
+
+    // A human's leaf outbox rights name any domain already, so the hub's form takes no more room.
+    let human = Permissions::for_user(&p("alice"), Role::Human);
+    let in_domain = human.with_js_domain(Some(&domain)).publish;
+    assert!(in_domain.iter().any(|s| s == "$JS.*.API.STREAM.INFO.ANTS_OUT"));
+    assert!(in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_IN"));
+    assert!(!in_domain.iter().any(|s| s == "$JS.hub.API.STREAM.INFO.ANTS_OUT"));
 }
 
 #[test]
@@ -683,10 +690,35 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
 
     let revoker = Permissions::for_device_revoker();
     let puts: Vec<&String> = revoker.publish.iter().filter(|s| s.starts_with("$KV.")).collect();
-    assert_eq!(puts, ["$KV.ants_devices.revoked.*"]);
+    assert_eq!(puts, ["$KV.ants_devices.revoked.*", "$KV.ants_identities.*"]);
     assert!(revoker.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_devices"));
     assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
     assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
+}
+
+#[test]
+fn each_ant_writes_only_its_own_identity_and_humans_read_all() {
+    let identities = |perms: &Permissions| -> Vec<String> {
+        perms.publish.iter().chain(&perms.subscribe).filter(|s| s.contains("ants_identities")).cloned().collect()
+    };
+    assert_eq!(
+        identities(&Permissions::for_user(&p("dev-a"), Role::Ant)),
+        ["$JS.API.DIRECT.GET.KV_ants_identities", "$KV.ants_identities.dev-a"]
+    );
+    assert_eq!(
+        identities(&Permissions::for_user(&p("alice"), Role::Human)),
+        ["$JS.API.STREAM.CREATE.KV_ants_identities", "$JS.API.DIRECT.GET.KV_ants_identities", "$KV.ants_identities.*"]
+    );
+    // An assistant reads them as its human does, and writes only its own.
+    assert_eq!(
+        identities(&Permissions::for_assistant(&p("pa"), &p("alice"))),
+        ["$JS.API.DIRECT.GET.KV_ants_identities", "$KV.ants_identities.pa"]
+    );
+    let observer = Permissions::for_observer(&p("watcher"));
+    let webhook = Permissions::for_webhook(&p("hook"), &[Destination::Ant(p("dev-a"))]);
+    for none in [observer, webhook, Permissions::for_channel_manager(), Permissions::for_host(&"m1".parse().unwrap())] {
+        assert_eq!(identities(&none), Vec::<String>::new());
+    }
 }
 
 #[test]

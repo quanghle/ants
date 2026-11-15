@@ -204,3 +204,35 @@ async fn a_directory_without_its_bucket_is_empty() {
     assert_eq!(directory.devices(std::slice::from_ref(&alice)).await.unwrap(), Devices::default());
     assert_eq!(directory.device(&alice, &DeviceId::generate()).await.unwrap(), Lookup::Missing);
 }
+
+/// Revoking an ant by name deletes its identity, so an ant later given the name is born afresh; a bucket not created
+/// yet holds nothing to delete.
+#[tokio::test]
+async fn revoking_an_ant_by_name_deletes_its_identity() {
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let (dev_a, dev_b) = (p("dev-a"), p("dev-b"));
+    issue(&team, &dev_a, Role::Ant);
+    forget_identity(&server.url, None, &team, "dev-a").await.unwrap();
+
+    let (_, js) = server.connect_as(&p("alice"), Role::Human).await;
+    let kv = js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
+    for ant in [&dev_a, &dev_b] {
+        let record = ants_proto::AntIdentity::new(ant.clone(), format!("{ant}-id"), chrono::Utc::now());
+        kv.put(ant.as_str(), serde_json::to_vec(&record).unwrap().into()).await.unwrap();
+    }
+    crate::cmd::auth::revoke_credentials(
+        Some("dev-a".to_owned()),
+        vec![],
+        vec![],
+        false,
+        Some(team),
+        &server.url,
+        None,
+    )
+    .await
+    .unwrap();
+    let read = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
+    assert!(read.get("dev-a").await.unwrap().is_none(), "dev-a's identity is left");
+    assert!(read.get("dev-b").await.unwrap().is_some(), "dev-b's identity is gone");
+}

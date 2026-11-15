@@ -5,6 +5,7 @@ use ants_proto::{Envelope, Following, Uuid};
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
+use crate::avatars::Faces;
 use crate::behalf::Checker;
 use crate::{Listing, Nats, inbox, presence, reacted, sealed, thread, tools};
 
@@ -15,11 +16,12 @@ fn print(
     acting: ants_proto::Acting,
     reactions: &[reactions::Reacted],
     json: bool,
+    faces: &Faces,
 ) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&inbox::Shown::new(e, reactions).sealed(state).acting(acting))?);
     } else {
-        println!("{}", inbox::render(e, &acting, reactions));
+        println!("{}", inbox::render(e, &acting, reactions, Some(faces)));
     }
     Ok(())
 }
@@ -42,10 +44,11 @@ pub(crate) async fn show(
     let keyring = sealed::Keyring::load(nats, &js).await;
     let behalf = Checker::new(nats, &js);
     let shown = reacted::Shown::default();
+    let faces = Faces::stdout(crate::avatars::read_or_none(&js).await);
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
         let (e, state) = sealed::read(e.clone(), keyring.as_ref());
         shown.add(e.id, &e.from, &e.text);
-        print(&e, state, behalf.acting(&e.from, e.on_behalf_of.as_ref()), reactions, json)
+        print(&e, state, behalf.acting(&e.from, e.on_behalf_of.as_ref()), reactions, json, &faces)
     };
     // Watched before reading, so no reaction to a message shown is missed.
     let changes = if follow { reacted::changes(nats, &js).await } else { futures::stream::pending().boxed() };

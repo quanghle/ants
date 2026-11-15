@@ -580,7 +580,7 @@ fn each_ant_added_grows_the_uplink_by_the_same_measure() {
         assert!(max - min <= 4, "ants of names of one length grow it alike: {growth:?}");
         assert!((least..=most).contains(&max), "{max} bytes per ant, domain {domain:?}");
         let room = (MAX_UPLINK_JWT - jwt.len()) / max + 6;
-        assert!(room >= if domain.is_some() { 48 } else { 54 }, "{room} ants fit");
+        assert!(room >= if domain.is_some() { 48 } else { 53 }, "{room} ants fit");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -2598,4 +2598,22 @@ async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_a
     assert!(as_ant.put("m1", b"{}".to_vec()).await.is_err(), "an ant has no host powers");
     drop(ants);
     timeout(WAIT, task).await.unwrap().unwrap().expect("the host stops once its daemon drops it");
+}
+
+/// A human's credentials, the longest a client connects with, fit in its `CONNECT` line with room for the rest of it
+/// (signature, name and options, some 400 bytes): nats-server closes a connection whose line is longer than
+/// `max_control_line`.
+#[test]
+fn a_humans_credentials_fit_max_control_line() {
+    let dir = ants_test_support::scratch_dir("human-jwt-size");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    for domain in [None, Some(&hub)] {
+        let out = dir.join("alice.creds");
+        issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
+        let (jwt, _) = read_creds(&out).unwrap();
+        assert!(jwt.len() + 400 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

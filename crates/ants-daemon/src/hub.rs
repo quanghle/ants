@@ -4,7 +4,7 @@
 //! the stream and the attachments' store a duplicate window of [`DUPLICATE_WINDOW`] when theirs is shorter, their
 //! messages kept.
 //!
-//! An object whose stream info the credentials do not get, as the presence bucket for every human's, cannot be
+//! An object whose stream info the credentials do not get, as the presence and identities buckets for every human's, cannot be
 //! checked: [`init`] creates it all the same, which changes nothing when it exists with the same settings.
 
 use std::fmt;
@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use ants_proto::{
     ATTACHMENT_CHUNK, ATTACHMENT_HEADROOM, ATTEMPTS_BUCKET, CHAINS_BUCKET, CHANNELS_BUCKET, DEVICES_BUCKET,
-    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET, OWNERS_BUCKET,
-    PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL, SESSIONS_BUCKET,
-    STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET, WEBHOOK_RETENTION,
-    WEBHOOKS_BUCKET,
+    FILES_BUCKET, FILES_STREAM, HUMANS_BUCKET, IDENTITIES_BUCKET, LINKS_BUCKET, MACHINES_BUCKET, NOTIFY_BUCKET,
+    OWNERS_BUCKET, PRESENCE_BUCKET, PRESENCE_TTL, REACTIONS_BUCKET, READ_BUCKET, ROSTER_BUCKET, ROSTER_TTL,
+    SESSIONS_BUCKET, STORED_INBOX_DESTINATION, STORED_INBOX_SOURCE, STREAM, STREAM_SUBJECTS, THREADS_BUCKET,
+    WEBHOOK_RETENTION, WEBHOOKS_BUCKET,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind};
@@ -44,13 +44,14 @@ pub enum Object {
     Notify,
     Devices,
     Machines,
+    Identities,
     /// The attachments' store ([`FILES_BUCKET`]).
     Files,
 }
 
 impl Object {
     /// Every object, the stream first.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Stream,
         Self::Roster,
         Self::Sessions,
@@ -68,6 +69,7 @@ impl Object {
         Self::Notify,
         Self::Devices,
         Self::Machines,
+        Self::Identities,
         Self::Files,
     ];
 
@@ -91,6 +93,7 @@ impl Object {
             Self::Notify => NOTIFY_BUCKET,
             Self::Devices => DEVICES_BUCKET,
             Self::Machines => MACHINES_BUCKET,
+            Self::Identities => IDENTITIES_BUCKET,
         })
     }
 
@@ -128,6 +131,7 @@ impl Object {
             Self::Notify => Spec::Bucket(Box::new(notify_config())),
             Self::Devices => Spec::Bucket(Box::new(devices_config())),
             Self::Machines => Spec::Bucket(Box::new(machines_config())),
+            Self::Identities => Spec::Bucket(Box::new(identities_config())),
         }
     }
 
@@ -446,6 +450,11 @@ pub fn machines_config() -> kv::Config {
     lasting_config(MACHINES_BUCKET, "The ants each machine's daemon serves, each record written by its machine")
 }
 
+/// The identities bucket ([`IDENTITIES_BUCKET`]): an ant's record lasts until `ants auth revoke` of the ant deletes it.
+pub fn identities_config() -> kv::Config {
+    lasting_config(IDENTITIES_BUCKET, "Each ant's identity: its id, birth, avatar and prompts, written by its daemon")
+}
+
 /// The read markers of the humans ([`READ_BUCKET`]).
 pub fn read_config() -> kv::Config {
     lasting_config(READ_BUCKET, "What each human has read of its inbox, on any of its devices")
@@ -605,15 +614,23 @@ mod tests {
             denied.to_string(),
             format!("bucket ants_read is missing, and the credentials may not create it ({read_create})")
         );
-        let left = [Object::Read, Object::Presence, Object::Notify, Object::Devices, Object::Machines, Object::Files];
+        let left = [
+            Object::Read,
+            Object::Presence,
+            Object::Notify,
+            Object::Devices,
+            Object::Machines,
+            Object::Identities,
+            Object::Files,
+        ];
         assert_eq!(problems(&check(&js, |_| true).await), left, "the rest is created");
-        // As a human's credentials, which get no stream info of the presence bucket but may create it.
-        let human = |s: &str| s != Object::Presence.info_subject();
+        // As a human's credentials, which get no stream info of the presence and identities buckets but may create them.
+        let human = |s: &str| s != Object::Presence.info_subject() && s != Object::Identities.info_subject();
         assert_eq!(
             problems(&init(&js, human).await.unwrap()),
             [Object::Read, Object::Notify, Object::Devices, Object::Machines, Object::Files]
         );
-        assert!(init(&js, human).await.unwrap().is_empty(), "creating the presence bucket again changes nothing");
+        assert!(init(&js, human).await.unwrap().is_empty(), "creating those buckets again changes nothing");
         assert!(check(&js, |_| true).await.is_empty(), "all there");
         for object in Object::ALL.into_iter().filter(|o| o.bucket().is_some() && *o != Object::Owners) {
             let kv = js.get_key_value(object.bucket().unwrap()).await.unwrap();

@@ -34,6 +34,7 @@ use crate::fallback::{Failover, OnFallback};
 use crate::files::Attached;
 use crate::harness::{self, Harness, Launch, ModelSettings, Prompt, PromptLimits, SignedOut, Spend};
 use crate::humans::Registry;
+use crate::identity::Identity;
 use crate::mcp::{Mcp, Roster};
 use crate::notes::{self, NotesStore};
 use crate::overflow::ContextOverflow;
@@ -259,9 +260,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(config, &sessions_kv);
     let escalator = escalator(config, &js, &roster, &humans, &ledger, &redactor);
-    if let Err(e) = crate::chains::publish(&js, &config.ant, &config.escalation.escalate_to).await {
-        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
-    }
+    let identity = ant_records(config, &js).await;
     let mut mcp = Mcp::start(
         config.ant.clone(),
         &config.home,
@@ -324,6 +323,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         backoffs: ratelimit::BACKOFFS,
         failover: Failover::default(),
         fallback_retry: crate::fallback::RETRY_AFTER,
+        identity: identity.as_ref(),
     };
     let handed_over = Box::pin(serve_inbox(&inbox, messages, channels, config, stop, &registration, &storage)).await?;
     registration.deregister().await;
@@ -333,6 +333,25 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     }
     tracing::info!("stopped");
     Ok(Served::Stopped)
+}
+
+/// Keep the ant's escalation chain past the roster, and return its identity record, created when absent: None when it
+/// cannot be read, which the warning says.
+async fn ant_records(config: &Config, js: &jetstream::Context) -> Option<Identity> {
+    if let Err(e) = crate::chains::publish(js, &config.ant, &config.escalation.escalate_to).await {
+        tracing::warn!(error = format!("{e:#}"), "keeping the escalation chain past the roster");
+    }
+    let identity = Identity::new(js, config.js_domain.as_ref(), &config.ant).await;
+    let ensured = match &identity {
+        Ok(identity) => identity.ensure().await,
+        Err(e) => Err(anyhow::anyhow!("{e:#}")),
+    };
+    match ensured {
+        Ok(Some(_)) => {}
+        Ok(None) => tracing::warn!("no identities bucket: `ants init` creates it; the ant's prompts go uncounted"),
+        Err(e) => tracing::warn!(error = format!("{e:#}"), "reading the ant's identity; its prompts go uncounted"),
+    }
+    identity.ok()
 }
 
 /// The ant's approver of tool requests, and the permission policy asking it for calls its allowlist does not cover.
@@ -964,6 +983,8 @@ struct Inbox<'a> {
     failover: Failover,
     /// How long a fallback that turned a message away is passed over, unless its provider limit says.
     fallback_retry: Duration,
+    /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
+    identity: Option<&'a Identity>,
 }
 
 impl Inbox<'_> {
@@ -2152,6 +2173,15 @@ impl Inbox<'_> {
         [branch_notice, publish_notice]
     }
 
+    /// Add the prompt just completed to the ant's identity record; a failure only warns.
+    async fn count_prompt(&self) {
+        if let Some(identity) = self.identity
+            && let Err(e) = identity.count_prompt().await
+        {
+            tracing::warn!(error = format!("{e:#}"), "counting the prompt in the ant's identity");
+        }
+    }
+
     async fn answer(
         &self,
         incoming: &Incoming,
@@ -2233,6 +2263,7 @@ impl Inbox<'_> {
             Err(e) => return self.prompt_failed(e, incoming, msg, seq, cut_off, worked).await,
             Ok(reply) => reply,
         };
+        self.count_prompt().await;
         let fallback_notice = self.served_by(fallback);
         let tokens = tokens + self.record_ended(envelope, spend, &mut reached).await;
 

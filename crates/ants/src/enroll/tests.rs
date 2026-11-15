@@ -410,7 +410,8 @@ async fn a_refusal_of_the_enrollment_credentials_ends_the_request() {
 #[tokio::test]
 async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     let Some(server) = Server::start() else { return };
-    let (team, dev_x) = (server.dir().join("auth"), p("dev-x"));
+    // As long a name as that of the first ant the uplink had no room for.
+    let (team, dev_x) = (server.dir().join("auth"), p("dev-xx"));
     let creds = enrollment(&server, &dev_x, Duration::from_secs(60));
     let m1: Machine = "m1".parse().unwrap();
     let uplink = server.dir().join("leaf-m1.creds");
@@ -433,13 +434,13 @@ async fn an_ant_the_uplink_has_no_room_for_is_neither_signed_nor_recorded() {
     };
     let (asked, refused) = Box::pin(timeout(WAIT * 2, async { tokio::join!(asking, approving) })).await.unwrap();
     let err = format!("{:#}", refused.unwrap_err());
-    assert!(err.contains("the uplink of the leaf node m1 cannot carry dev-x"), "{err}");
+    assert!(err.contains("the uplink of the leaf node m1 cannot carry dev-xx"), "{err}");
     assert!(err.contains("would take") && err.contains("another leaf node"), "{err}");
     let asked = format!("{:#}", asked.unwrap_err());
     assert!(asked.contains("stopped before an answer came"), "no answer: {asked}");
     let issued = revoke::issued(&team).unwrap();
-    assert!(!issued.iter().any(|i| i.name == "dev-x"), "dev-x is not signed");
+    assert!(!issued.iter().any(|i| i.name == "dev-xx"), "dev-xx is not signed");
     assert_eq!(issued.len(), issued_before);
-    assert_eq!(members::issued(&team, &m1).unwrap(), members_before, "dev-x is not among m1's members");
+    assert_eq!(members::issued(&team, &m1).unwrap(), members_before, "dev-xx is not among m1's members");
     assert_eq!(std::fs::read_to_string(&uplink).unwrap(), before);
 }

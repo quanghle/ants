@@ -153,7 +153,9 @@ fn exercise_daemon(custom_tools: bool) {
 
     let shown = run(ants(&["ant", "show", "dev-a"]));
     let text = String::from_utf8_lossy(&shown.stdout);
-    assert!(text.starts_with("dev-a: live") && text.contains("holds:\n  none"), "{text}");
+    // The ant's face goes before its name.
+    let first = text.lines().next().unwrap_or_default();
+    assert!(first.contains(" dev-a: live") && text.contains("holds:\n  none"), "{text}");
     assert!(text.contains("no messages waiting") && text.contains(&thread[..8]), "{text}");
     let shown = run(ants(&["ant", "show", "dev-a", "--json"]));
     assert!(shown.status.success(), "ants ant show: {}", String::from_utf8_lossy(&shown.stderr));

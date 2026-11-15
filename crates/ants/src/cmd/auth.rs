@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::{ChannelId, DEVICES_BUCKET, Destination, DeviceKey, JsDomain, Machine, Permissions, UserId};
+use ants_proto::{
+    ChannelId, DEVICES_BUCKET, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
+};
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 
@@ -590,7 +592,7 @@ fn leaf_creds(
 }
 
 /// `ants auth revoke`.
-async fn revoke_credentials(
+pub(crate) async fn revoke_credentials(
     name: Option<String>,
     mut keys: Vec<String>,
     devices: Vec<String>,
@@ -606,6 +608,10 @@ async fn revoke_credentials(
         keys.extend(revoke::device_keys(&dir, human, &devices)?);
         name = None;
     }
+    let ant = name.clone().filter(|name| {
+        let issued = revoke::issued(&dir).unwrap_or_default();
+        issued.iter().any(|i| &i.name == name && matches!(i.kind, revoke::Kind::Ant | revoke::Kind::Assistant))
+    });
     for r in revoke::revoke(&dir, name.as_deref(), &keys)? {
         let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
         println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
@@ -616,9 +622,17 @@ async fn revoke_credentials(
             "push them to the hub with: ants auth push --nats URL (leaf nodes with a system account uplink get \
              them with the push and keep them)"
         );
+        if let Some(ant) = &ant {
+            println!("{IDENTITIES_BUCKET} keeps {ant}'s identity: revoking {ant} again without --no-push deletes it");
+        }
         return Ok(());
     }
-    push(url, domain, &dir).await
+    push(url, domain, &dir).await?;
+    if let Some(ant) = ant {
+        devices::forget_identity(url, domain, &dir, &ant).await?;
+        println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
+    }
+    Ok(())
 }
 
 /// Push the team's account to the server at `url` ([`revoke::push`]), saying how to apply it otherwise on failure;

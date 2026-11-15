@@ -8,6 +8,7 @@ use ants_proto::{
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
+use crate::avatars::Faces;
 use crate::{Nats, escalation_note, thread, tools};
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
@@ -34,7 +35,8 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
     let (client, js) = nats.connect("ants-watch").await?;
     let filter = watch_filter(target, thread::resolve(thread, &js, &nats.me).await?.as_ref())?;
     let mut sub = client.subscribe(filter).await?;
-    let mut printer = Printer::default();
+    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
+    let mut printer = Printer { faces: Some(faces), ..Printer::default() };
     let mut reacted = watched_reactions(&js, target, nats.me.role.is_human()).await;
     let behalf = crate::behalf::Checker::new(nats, &js);
     loop {
@@ -57,7 +59,8 @@ pub(crate) async fn watch(nats: &Nats<'_>, target: &str, thread: Option<thread::
             let genuine = e.check_subject(&msg.subject).is_ok();
             let acting = behalf.check(&e.from, e.on_behalf_of.as_ref()).await;
             e.on_behalf_of = None;
-            printer.line(&envelope_line(&e, &acting, &forged(genuine)))
+            let line = envelope_line(&e, &acting, &forged(genuine), printer.faces.as_ref());
+            printer.line(&line)
         } else if let Ok(post) = serde_json::from_slice::<ChannelPost>(&msg.payload) {
             // Before notes posts: a channel post has every field of one.
             printer.line(&channel_line(&post, &forged(post.check_subject(&msg.subject).is_ok())))
@@ -128,8 +131,9 @@ pub(crate) fn reaction_line(change: &reactions::Change) -> String {
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
 /// leader and the ants visited; an ant's approval decision in place of its text; the size of a sealed message's
 /// ciphertext in place of its text. An assistant's message for its human names both ([`Acting::label`]).
-pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str) -> String {
-    let head = format!("[{}] {} -> {}{forged}", e.thread_id, acting.label(e.from.as_str()), e.to);
+pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: Option<&Faces>) -> String {
+    let from = faces.and_then(|f| f.known(&e.from)).unwrap_or_else(|| e.from.to_string());
+    let head = format!("[{}] {} -> {}{forged}", e.thread_id, acting.label(&from), e.to);
     if let Some(d) = &e.approval {
         return format!("{head} decides {} on approval request {}/{}", tools::spelling(d.verdict), d.ant, d.request_id);
     }
@@ -161,6 +165,8 @@ pub(crate) fn channel_line(post: &ChannelPost, forged: &str) -> String {
 pub(crate) struct Printer {
     /// Whose text the output ends with, unterminated.
     streaming: Option<(UserId, ThreadId, &'static str)>,
+    /// The ants' faces, put before their names.
+    faces: Option<Faces>,
 }
 
 impl Printer {
@@ -172,17 +178,18 @@ impl Printer {
 
     fn status(&mut self, event: &StatusEvent, forged: &str) -> String {
         let (who, thread) = (&event.ant, &event.thread_id);
+        let named = self.faces.as_ref().map_or_else(|| who.to_string(), |f| f.named(who));
         let (verb, text) = match &event.update {
             StatusUpdate::Message { text } => ("says", text),
             StatusUpdate::Thought { text } => ("thinks", text),
             StatusUpdate::State { state } => {
-                return self.line(&format!("[{thread}] {who}{forged}: {}", state.as_str()));
+                return self.line(&format!("[{thread}] {named}{forged}: {}", state.as_str()));
             }
             StatusUpdate::Tool { id, title, tool_kind, status, .. } => {
                 let kind = tool_kind.as_deref().map_or_default(|k| format!(" ({k})"));
                 let status = status.as_deref().map_or_default(|s| format!(": {s}"));
                 let title = title.as_deref().unwrap_or(id);
-                return self.line(&format!("[{thread}] {who}{forged} tool {title}{kind}{status}"));
+                return self.line(&format!("[{thread}] {named}{forged} tool {title}{kind}{status}"));
             }
             StatusUpdate::Plan { steps } => {
                 let steps: Vec<String> = steps
@@ -196,25 +203,25 @@ impl Printer {
                         format!("[{mark}] {}", s.content)
                     })
                     .collect();
-                return self.line(&format!("[{thread}] {who}{forged} plan: {}", steps.join("; ")));
+                return self.line(&format!("[{thread}] {named}{forged} plan: {}", steps.join("; ")));
             }
             StatusUpdate::Queued { message, ahead: 0 } => {
-                return self.line(&format!("[{thread}] {who}{forged}: message {message} starts"));
+                return self.line(&format!("[{thread}] {named}{forged}: message {message} starts"));
             }
             StatusUpdate::Queued { message, ahead } => {
-                return self.line(&format!("[{thread}] {who}{forged}: message {message} queued behind {ahead}"));
+                return self.line(&format!("[{thread}] {named}{forged}: message {message} queued behind {ahead}"));
             }
             StatusUpdate::Approval { request_id } => {
-                return self.line(&format!("[{thread}] {who}{forged} waits for approval {who}/{request_id}"));
+                return self.line(&format!("[{thread}] {named}{forged} waits for approval {who}/{request_id}"));
             }
             StatusUpdate::Escalated { to, escalation } => {
                 let (stuck, level, reason) = (&escalation.stuck, escalation.level, escalation.reason.as_str());
                 return self
-                    .line(&format!("[{thread}] {who}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
+                    .line(&format!("[{thread}] {named}{forged} escalated {stuck}'s {reason} to {to} (level {level})"));
             }
             StatusUpdate::Asked { to, message, question } => {
                 let question = question.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                return self.line(&format!("[{thread}] {who}{forged} asked {to} {question:?} (message {message})"));
+                return self.line(&format!("[{thread}] {named}{forged} asked {to} {question:?} (message {message})"));
             }
             StatusUpdate::Decided { request_id, verdict, by, decider, via } => {
                 let verdict = tools::spelling(*verdict);
@@ -225,17 +232,17 @@ impl Printer {
                     (DecidedBy::Human, None, _) => format!("decided {verdict} by a human"),
                     (DecidedBy::Chain, None, _) => format!("decided {verdict} by its chain"),
                 };
-                return self.line(&format!("[{thread}] {who}{forged}: approval {who}/{request_id} {outcome}"));
+                return self.line(&format!("[{thread}] {named}{forged}: approval {who}/{request_id} {outcome}"));
             }
         };
         let key = (who.clone(), thread.clone(), verb);
         if !forged.is_empty() {
-            return self.line(&format!("[{thread}] {who} {verb}{forged}: {text}"));
+            return self.line(&format!("[{thread}] {named} {verb}{forged}: {text}"));
         }
         if self.streaming.as_ref() == Some(&key) {
             return text.clone();
         }
-        let start = self.line(&format!("[{thread}] {who} {verb}: "));
+        let start = self.line(&format!("[{thread}] {named} {verb}: "));
         self.streaming = Some(key);
         format!("{}{text}", start.trim_end_matches('\n'))
     }
@@ -309,7 +316,7 @@ mod tests {
         let notice =
             Envelope::on_thread(t1.clone(), p("dev-a"), p("lead"), "[ants] stuck").with_escalation(Some(escalation));
         assert_eq!(
-            envelope_line(&notice, &Acting::Own, ""),
+            envelope_line(&notice, &Acting::Own, "", None),
             "[t1] dev-a -> lead [escalation level 1, turn_budget: dev-a stuck on t1, leader lead, \
              visited dev-a > lead > dev-b]: [ants] stuck"
         );
@@ -332,7 +339,7 @@ mod tests {
         let decision = ApprovalDecision::new(id, p("dev-a"), ants_proto::Verdict::AllowOnce);
         let decided = Envelope::decision(t1, p("lead"), decision);
         assert_eq!(
-            envelope_line(&decided, &Acting::Own, ""),
+            envelope_line(&decided, &Acting::Own, "", None),
             format!("[t1] lead -> dev-a decides allow-once on approval request dev-a/{id}")
         );
 

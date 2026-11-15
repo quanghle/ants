@@ -122,7 +122,12 @@ fn line(
         Item::Ant(ant) => {
             let entries: Vec<&RosterEntry> = data.live.roster.iter().filter(|e| e.ant == *ant).collect();
             let (mark, color) = marker(&entries, now);
-            Line::from(vec![Span::styled(mark, Style::new().fg(color)), Span::raw(format!(" {ant}"))])
+            Line::from(vec![
+                Span::styled(mark, Style::new().fg(color)),
+                Span::raw(" "),
+                data.looks.face(ant),
+                Span::raw(format!(" {ant}")),
+            ])
         }
         Item::Person(person) => super::people::nav_line(data, person),
     }

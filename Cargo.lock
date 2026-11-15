@@ -161,6 +161,7 @@ dependencies = [
  "hyper-util",
  "image",
  "jiff",
+ "libc",
  "nkeys",
  "pulldown-cmark",
  "ratatui",

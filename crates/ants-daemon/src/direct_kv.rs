@@ -11,8 +11,9 @@ use ants_proto::{JsDomain, UserId};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream;
 use async_nats::jetstream::context::{PublishError, PublishErrorKind};
-use async_nats::jetstream::stream::{DirectGetErrorKind, Stream};
-use async_nats::{HeaderMap, StatusCode};
+use async_nats::jetstream::message::StreamMessage;
+use async_nats::jetstream::stream::{DirectGetError, DirectGetErrorKind, Stream};
+use async_nats::{HeaderMap, RequestErrorKind, StatusCode};
 use futures::TryStreamExt as _;
 
 /// The header marking a KV delete or purge, and its values.
@@ -31,6 +32,8 @@ pub struct DirectKv {
     bucket: String,
     /// What puts and deletes go through: the JetStream API of the hub's domain, if it has one, as with `kv::Store`.
     api: String,
+    /// Whether reads name their key in the request rather than in the subject ([`DirectKv::whole`]).
+    whole: bool,
 }
 
 /// What a direct get of a key found.
@@ -47,7 +50,13 @@ impl DirectKv {
     pub async fn new(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
         let stream = js.get_stream_no_info(format!("KV_{bucket}")).await.with_context(|| format!("naming {bucket}"))?;
         let api = js_domain.map_or_default(|domain| format!("$JS.{domain}.API."));
-        Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api })
+        Ok(Self { js: js.clone(), stream, bucket: bucket.to_owned(), api, whole: false })
+    }
+
+    /// [`DirectKv::new`], for credentials that may read the whole bucket by direct gets naming no subject
+    /// (`$JS.API.DIRECT.GET.KV_<bucket>`) rather than its keys one by one: such a get names its key in the request.
+    pub async fn whole(js: &jetstream::Context, js_domain: Option<&JsDomain>, bucket: &str) -> Result<Self> {
+        Ok(Self { whole: true, ..Self::new(js, js_domain, bucket).await? })
     }
 
     /// Whether the bucket exists, found by reading a key of `ant`'s, which its credentials allow.
@@ -79,7 +88,7 @@ impl DirectKv {
     /// [`DirectKv::lookup_last`], with when the key's last message was stored (None for none).
     pub async fn lookup_stored(&self, key: impl AsRef<str>) -> Result<(Lookup, u64, Option<SystemTime>)> {
         let key = key.as_ref();
-        let msg = match self.stream.direct_get_last_for_subject(self.subject(key)).await {
+        let msg = match self.last(key).await {
             Ok(msg) => msg,
             Err(e) if e.kind() == DirectGetErrorKind::NotFound => return Ok((Lookup::NoValue, 0, None)),
             Err(e) if matches!(e.kind(), DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, _)) => {
@@ -89,6 +98,35 @@ impl DirectKv {
         };
         let found = if is_deleted(&msg.headers) { Lookup::NoValue } else { Lookup::Value(msg.payload.to_vec()) };
         Ok((found, msg.sequence, Some(msg.time.into())))
+    }
+
+    /// The last message of `key`, by a direct get naming it in its subject, or in its request for [`DirectKv::whole`].
+    async fn last(&self, key: &str) -> Result<StreamMessage, DirectGetError> {
+        if !self.whole {
+            return self.stream.direct_get_last_for_subject(self.subject(key)).await;
+        }
+        let request = serde_json::json!({ "last_by_subj": self.subject(key) }).to_string();
+        let subject = format!("{}DIRECT.GET.KV_{}", self.request_api(), self.bucket);
+        let msg = match self.js.client().request(subject, request.into()).await {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == RequestErrorKind::NoResponders => {
+                let kind = DirectGetErrorKind::ErrorResponse(StatusCode::NO_RESPONDERS, String::new());
+                return Err(DirectGetError::new(kind));
+            }
+            Err(e) => return Err(DirectGetError::with_source(DirectGetErrorKind::Other, e)),
+        };
+        match msg.status {
+            None => StreamMessage::try_from(msg).map_err(|e| DirectGetError::with_source(DirectGetErrorKind::Other, e)),
+            Some(StatusCode::NOT_FOUND) => Err(DirectGetError::new(DirectGetErrorKind::NotFound)),
+            Some(status) => {
+                Err(DirectGetError::new(DirectGetErrorKind::ErrorResponse(status, msg.description.unwrap_or_default())))
+            }
+        }
+    }
+
+    /// The JetStream API prefix of requests, `$JS.API.` or that of the hub's domain.
+    fn request_api(&self) -> &str {
+        if self.api.is_empty() { "$JS.API." } else { &self.api }
     }
 
     /// Store `value` under `key` if the key's last message is still the one at stream sequence `last` (0: none), as
@@ -129,7 +167,7 @@ impl DirectKv {
             Err(e) if e.kind() == PublishErrorKind::WrongLastSequence => {}
             stored => return stored.map(|()| true).with_context(|| format!("storing {key}")),
         }
-        let deleted = match self.stream.direct_get_last_for_subject(self.subject(key)).await {
+        let deleted = match self.last(key).await {
             Ok(msg) if is_deleted(&msg.headers) => msg.sequence,
             Ok(_) => return Ok(false),
             Err(e) => return Err(e).with_context(|| format!("reading {key}")),
