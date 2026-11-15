@@ -325,6 +325,8 @@ fn a_reply_is_a_completion_and_nothing_else_is() {
     let escalated =
         done.clone().with_escalation(Some(Escalation::new(dev_a, thread.clone(), ants_proto::EscalationReason::Asked)));
     assert!(completion_notice(&escalated).is_none(), "an escalation's notice is its own");
+    let summarised = Envelope { summary: Some(ants_proto::SummaryRequest::thread(thread.clone(), 7)), ..done.clone() };
+    assert!(completion_notice(&summarised).is_none(), "the CLI that asked for a summary takes it");
     let hooked = Envelope { webhook: true, ..done };
     assert!(completion_notice(&hooked).is_none());
 }

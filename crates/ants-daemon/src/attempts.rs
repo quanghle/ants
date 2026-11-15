@@ -37,7 +37,7 @@ pub enum Marker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Reply {
-    Message(Envelope),
+    Message(Box<Envelope>),
     Post(ChannelPost),
     Notes(NotesPost),
 }

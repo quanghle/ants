@@ -1086,12 +1086,14 @@ fn relayed(human: &Human, notice: &Notice, why: &str, is_human: impl Fn(&UserId)
 }
 
 /// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
-/// escalation, decision or mention and comes from no webhook.
+/// escalation, decision, mention or summary and comes from no webhook. The CLI that asked for a summary takes the
+/// reply itself.
 fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let reply = envelope.in_reply_to.is_some()
         && envelope.escalation.is_none()
         && envelope.approval.is_none()
         && envelope.mention.is_none()
+        && envelope.summary.is_none()
         && !envelope.webhook
         && envelope.from != envelope.to;
     if !reply {

@@ -623,9 +623,18 @@ fn the_cli_section_overrides_the_top_level_server() {
     assert_eq!(cli("[cli]\nauto_archive = \"14d\"").unwrap().auto_archive, Some(Duration::from_hours(14 * 24)));
     assert_eq!(cli("[cli]\nauto_archive = \"0\"").unwrap().auto_archive, None);
 
+    assert_eq!(relative.summaries, SummaryConfig::default(), "on demand, by the messenger");
+    let ahead = cli("[cli]\nsummaries = \"ahead\"\nsummary_daily_tokens = 50000\nsummary_ant = \"scribe\"").unwrap();
+    let scribe = "scribe".parse().unwrap();
+    assert_eq!(ahead.summaries, SummaryConfig { mode: Summaries::Ahead, ant: scribe, daily_tokens: 50000 });
+    let unbounded = format!("{:#}", cli("[cli]\nsummaries = \"ahead\"").unwrap_err());
+    assert!(unbounded.contains("needs summary_daily_tokens above 0"), "{unbounded}");
+    assert!(parse_all("[cli]\nsummaries = \"ahead\"").is_err(), "the daemon refuses it too");
+
     for bad in [
         "[cli]\ncred = \"a.creds\"",
         "[cli]\nauto_archive = 14",
+        "[cli]\nsummaries = \"eager\"",
         "nats = 4222",
         "nats = \"nats://u:secret@hub\"",
         "[cli",

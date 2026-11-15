@@ -188,10 +188,19 @@ pub(crate) enum Command {
     },
     /// Threads read back from the stream across inboxes (both ways), channel posts, notes, escalations, tool requests
     /// and decisions, and dead letters: list the recent ones, find those mentioning a text, show one's whole history,
-    /// or search messages by sender, recipient, channel, kind, time and text; title, pin or archive one. Nothing is
-    /// consumed or marked read. Needs a human's credentials.
+    /// or search messages by sender, recipient, channel, kind, time and text; title, pin, archive or summarise one.
+    /// Nothing is consumed or marked read. Needs a human's credentials.
     #[command(subcommand)]
     Thread(ThreadCommand),
+    /// Ask the config file's `[cli]` `summary_ant` (by default the messenger) for a digest of the threads with entries
+    /// within --since: what finished, what is stuck, and what waits on the human. Kept nowhere; the request opens a
+    /// thread of its own, left out of `ants thread list`, `ants inbox` and `ants dash`. Needs a human's credentials.
+    Digest {
+        /// How far back, such as 90m, 24h or 7d; 0 for everything the stream keeps. Only the newest entries within
+        /// 16 KiB are sent.
+        #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "24h")]
+        since: Duration,
+    },
     /// Hold back the notifications `ants webhook serve` pushes to the CLI's human for a while, on every device of the
     /// human: snooze them, resume them, or show what is held. Needs a human's credentials.
     #[command(subcommand)]

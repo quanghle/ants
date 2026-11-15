@@ -34,11 +34,19 @@ pub struct Select {
     pub limit: Option<usize>,
     /// Show without marking read.
     pub peek: bool,
+    /// Take summary requests and replies ([`Envelope::summary`]) too. Otherwise they are left out, and marked read
+    /// unless peeking: the CLI that asked takes its reply as it comes.
+    pub summaries: bool,
 }
 
 impl Select {
     fn wants(&self, e: &Envelope) -> bool {
-        self.thread.as_ref().is_none_or(|t| *t == e.thread_id)
+        self.thread.as_ref().is_none_or(|t| *t == e.thread_id) && (self.summaries || e.summary.is_none())
+    }
+
+    /// Whether `e` is left out only for being a summary's, so taken as read.
+    fn skips_summary(&self, e: &Envelope) -> bool {
+        !self.peek && !self.summaries && e.summary.is_some()
     }
 }
 
@@ -154,6 +162,7 @@ impl Inbox {
             }
             match envelope {
                 Ok(e) if select.wants(&e) && wanted(&e) && self.left(select) > found.len() => found.push((seq, e)),
+                Ok(e) if select.skips_summary(&e) => marks.push(seq),
                 Ok(_) => {}
                 Err(e) => {
                     if !select.peek {
@@ -200,6 +209,7 @@ impl Inbox {
                         show(&e)?;
                         marks.push(seq);
                     }
+                    Ok(e) if select.skips_summary(&e) => marks.push(seq),
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, seq, "skipping a malformed message");
@@ -236,7 +246,7 @@ fn parse(subject: &str, payload: &[u8]) -> Result<Envelope, String> {
 /// after it was delivered, so a miss is retried briefly. Returns whether it was found unread.
 pub async fn mark_read(js: &jetstream::Context, human: &UserId, reply: &Envelope) -> Result<bool> {
     let mut inbox = Inbox::open(js, human).await?;
-    let select = Select { thread: Some(reply.thread_id.clone()), limit: Some(1), peek: false };
+    let select = Select { thread: Some(reply.thread_id.clone()), limit: Some(1), peek: false, summaries: true };
     for _ in 0..5 {
         if !inbox.unread_where(&select, |e| e.id == reply.id).await?.is_empty() {
             return Ok(true);

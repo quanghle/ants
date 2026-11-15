@@ -13,8 +13,8 @@ use crate::{
 #[cfg(doc)]
 use crate::{
     AntRequest, AttachmentHandle, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest,
-    RenewRequest, StatusUpdate, channel_manager_serving_key, daily_spend_key, link_outbox, message_mark_key,
-    owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key, link_outbox,
+    message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -146,12 +146,14 @@ fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
     ]
 }
 
-/// What a human's credentials need for thread titles and done states and its pins and archives ([`THREADS_BUCKET`]):
-/// creating the bucket; reading by direct gets, putting and deleting every title and every done state, which any
-/// human sets; and reading and writing its own [`ThreadMarks`] only, so no human reads or changes another's.
-fn thread_rights(human: &UserId) -> [String; 8] {
+/// What a human's credentials need for thread titles, TL;DRs and done states and its pins and archives
+/// ([`THREADS_BUCKET`]): creating the bucket; reading by direct gets, putting and deleting every title, every TL;DR
+/// ([`ThreadSummary`]) and every done state, which any human sets; and reading and writing its own [`ThreadMarks`]
+/// only, so no human reads or changes another's.
+fn thread_rights(human: &UserId) -> [String; 10] {
     let threads = kv_stream(THREADS_BUCKET);
     let titles = format!("$KV.{THREADS_BUCKET}.title.*");
+    let summaries = format!("$KV.{THREADS_BUCKET}.summary.*");
     let done = format!("$KV.{THREADS_BUCKET}.done.*");
     let marks = format!("$KV.{THREADS_BUCKET}.{}", marks_key(human));
     [
@@ -159,6 +161,8 @@ fn thread_rights(human: &UserId) -> [String; 8] {
         format!("$JS.API.STREAM.CREATE.{threads}"),
         format!("$JS.API.DIRECT.GET.{threads}.{titles}"),
         titles,
+        format!("$JS.API.DIRECT.GET.{threads}.{summaries}"),
+        summaries,
         format!("$JS.API.DIRECT.GET.{threads}.{done}"),
         done,
         format!("$JS.API.DIRECT.GET.{threads}.{marks}"),
@@ -228,7 +232,7 @@ impl Permissions {
     /// ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
-    /// [`subject::react`]); it sets every thread's title and done state and its own pinned and
+    /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned and
     /// archived threads, no other human's ([`thread_rights`]); it reads every device's encryption key in
     /// [`DEVICES_BUCKET`] and puts only its own devices' ([`device_directory_rights`]). A human may send under
     /// any sender, to replay a dead letter as it was. An ant gets no `STREAM.MSG.GET`: it takes any sequence, so it

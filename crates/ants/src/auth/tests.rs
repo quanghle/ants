@@ -1194,7 +1194,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
 }
 
 #[tokio::test]
-async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
+async fn any_human_titles_a_thread_and_keeps_its_tldr_but_each_marks_only_its_own_threads() {
     use crate::thread_meta::{MISSING, Meta};
 
     let Some(server) = Server::start() else { return };
@@ -1219,6 +1219,18 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let ant = Meta::open(&d_js, None, &dev_a).await.unwrap();
     assert!(ant.title(&thread).await.is_err(), "an ant reads no title");
     assert!(ant.set_title(&thread, "mine").await.is_err(), "nor sets one");
+    let tldr = ants_proto::ThreadSummary {
+        thread_id: thread.clone(),
+        text: "Release 1.2.1 is out.".to_owned(),
+        by: dev_a.clone(),
+        asker: alice.clone(),
+        at: chrono::Utc::now(),
+        upto: 7,
+        tokens: 42,
+    };
+    assert!(alice_meta.put_summary(&tldr).await.unwrap());
+    assert_eq!(bob_meta.summary(&thread).await.unwrap(), Some(tldr), "every human reads the TL;DR");
+    assert!(ant.summary(&thread).await.is_err(), "an ant reads no TL;DR");
     assert!(alice_meta.set_done(&thread, 1).await.unwrap());
     assert!(bob_meta.clear_done(&thread).await.unwrap().is_some_and(|d| d.by == alice), "bob clears alice's done");
     assert!(ant.done(&thread).await.is_err(), "an ant reads no done state");
@@ -1242,6 +1254,9 @@ async fn any_human_titles_a_thread_but_each_marks_only_its_own_threads() {
     let (raw, mut errors) = server.watched(&dev_a).await;
     raw.publish(title.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&title), "an ant's title is denied");
+    let tldr = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::summary_key(&thread));
+    raw.publish(tldr.clone(), "{}".into()).await.unwrap();
+    assert!(next_violation(&raw, &mut errors).await.contains(&tldr), "an ant's TL;DR is denied");
     let done = format!("$KV.{}.{}", ants_proto::THREADS_BUCKET, ants_proto::done_key(&thread));
     raw.publish(done.clone(), "{}".into()).await.unwrap();
     assert!(next_violation(&raw, &mut errors).await.contains(&done), "an ant's done state is denied");
