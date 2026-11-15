@@ -256,13 +256,12 @@ pub(crate) async fn run(command: AuthCommand, conn: &Connection<'_>) -> Result<(
         AuthCommand::ChannelManager { dir, out, store_key } => {
             let dir = team_dir(dir)?;
             let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", UserId::channel_manager())));
-            match store_key {
-                true => {
-                    let key = nkeys::KeyPair::new_user();
-                    let jwt = auth::sign_channel_manager(&dir, domain, &key.public_key())?;
-                    keys::issue_stored(&out, &jwt, &key, conn.nats).await?;
-                }
-                false => auth::issue_channel_manager(&dir, domain, &out)?,
+            if store_key {
+                let key = nkeys::KeyPair::new_user();
+                let jwt = auth::sign_channel_manager(&dir, domain, &key.public_key())?;
+                keys::issue_stored(&out, &jwt, &key, conn.nats).await?;
+            } else {
+                auth::issue_channel_manager(&dir, domain, &out)?;
             }
             println!("{}\nrun: ants --creds {} channel serve", out.display(), out.display());
             Ok(())

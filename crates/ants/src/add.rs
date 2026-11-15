@@ -155,7 +155,7 @@ async fn enrolled(
     let name = &args.name;
     let mut uplink = None;
     let leaf = leaf_node(args.leaf_config.as_deref())?;
-    let through = leaf.as_ref().map(|(_, l)| format!(" through the leaf node of {}", l.machine)).unwrap_or_default();
+    let through = leaf.as_ref().map_or_default(|(_, l)| format!(" through the leaf node of {}", l.machine));
     eprintln!(
         "asking for the credentials of {name} ({public_key}){through}; approve with `ants enroll approve {name}`"
     );
@@ -186,7 +186,9 @@ async fn complete(
         match keys::write_new_stored(out, jwt, user, store, url).await {
             Ok(keys::Proven::Authenticated) => {}
             Ok(keys::Proven::Unreached) => {
-                eprintln!("warning: no server answered at {url}, so the stored key of {name} has not authenticated yet")
+                eprintln!(
+                    "warning: no server answered at {url}, so the stored key of {name} has not authenticated yet"
+                );
             }
             Err(e) => {
                 if args.enroll.is_some() {
@@ -247,10 +249,10 @@ fn tell_completed(name: &UserId, out: &Path, uplink: Option<&Uplink>, path: &Pat
     if let Some((true, _, conf)) = uplink {
         match services.apply(Service::Nats, Action::Restart, conf) {
             Outcome::Done(command) => {
-                println!("leaf node restarted to use the renewed uplink credentials ({command})")
+                println!("leaf node restarted to use the renewed uplink credentials ({command})");
             }
             Outcome::NotRunning => {
-                println!("the leaf node service is not running; it uses the renewed uplink credentials once started")
+                println!("the leaf node service is not running; it uses the renewed uplink credentials once started");
             }
             outcome => println!(
                 "{}restart the leaf node to use the renewed uplink credentials ({}); SIGHUP does not read them \
@@ -335,9 +337,10 @@ fn user_key(out: &Path, store: &dyn Store, store_key: bool) -> Result<(KeyPair, 
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let user = KeyPair::new_user();
-    match store_key {
-        true => wait_stored(&seed, &user, store, auth::write_secret)?,
-        false => auth::write_seed(&seed, &user)?,
+    if store_key {
+        wait_stored(&seed, &user, store, auth::write_secret)?;
+    } else {
+        auth::write_seed(&seed, &user)?;
     }
     Ok((user, store_key))
 }

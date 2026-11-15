@@ -343,7 +343,7 @@ impl Watch {
         now: DateTime<Utc>,
     ) -> Unserved {
         let capabilities = self.capabilities.get(&ant).cloned();
-        let peers = capabilities.as_deref().map(|c| peers(c, entries, &[&ant, &self.sender], now)).unwrap_or_default();
+        let peers = capabilities.as_deref().map_or_default(|c| peers(c, entries, &[&ant, &self.sender], now));
         let absent_since = self.absent_since.get(&ant).copied().unwrap_or(now);
         Unserved { ant, owner, messages, absent_since, capabilities, peers }
     }

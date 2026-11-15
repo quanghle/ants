@@ -170,23 +170,24 @@ impl Usage {
 
     /// What to do about it filling up.
     pub fn fix(&self) -> String {
-        match self.leaf {
-            true => format!(
+        if self.leaf {
+            format!(
                 "check the leaf node's uplink: its outbox keeps what the hub has not taken; or raise {} in the leaf's \
                  jetstream block",
                 self.store.setting()
-            ),
-            false => format!(
+            )
+        } else {
+            format!(
                 "raise {0} in the hub's jetstream block, and in [storage] of the ants config, or remove what is no \
                  longer needed (`ants dead list` shows dead letters)",
                 self.store.setting()
-            ),
+            )
         }
     }
 
     /// The warning to the humans, naming the `largest` streams.
     pub fn warning(&self, largest: &[(String, u64)]) -> String {
-        let using_most = using_most(largest).map(|streams| format!(" Using most: {streams}.")).unwrap_or_default();
+        let using_most = using_most(largest).map_or_default(|streams| format!(" Using most: {streams}."));
         format!(
             "{self}.{using_most} Once full, JetStream refuses new messages: webhooks answer 503, and ants keep messages in outboxes or \
              retry them. To fix: {}.",

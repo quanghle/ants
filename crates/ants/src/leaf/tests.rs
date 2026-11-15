@@ -397,9 +397,10 @@ impl Revocable {
         let leaf_port = free_port();
         let hub = NatsServer::spawn_with(|dir| {
             auth::init(&dir.join("auth")).unwrap();
-            let resolver = match full_resolver {
-                true => format!("resolver {{ type: full, dir: {} }}\n", quote(&dir.join("jwt").to_string_lossy())),
-                false => String::new(),
+            let resolver = if full_resolver {
+                format!("resolver {{ type: full, dir: {} }}\n", quote(&dir.join("jwt").to_string_lossy()))
+            } else {
+                String::new()
             };
             format!(
                 "include \"auth/{}\"\n{resolver}leafnodes {{ listen: \"127.0.0.1:{leaf_port}\", no_advertise: true }}\n",

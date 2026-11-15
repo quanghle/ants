@@ -149,9 +149,10 @@ pub fn run(shell: Option<Shell>, install: bool) -> Result<()> {
         Some(shell) => shell,
         None => bail!("$SHELL is not bash, zsh or fish: name the shell"),
     };
-    match install {
-        true => println!("{}", self::install(shell, &std::env::home_dir().context("no home directory")?, false)?),
-        false => print!("{}", shell.script(&bin())?),
+    if install {
+        println!("{}", self::install(shell, &std::env::home_dir().context("no home directory")?, false)?);
+    } else {
+        print!("{}", shell.script(&bin())?);
     }
     Ok(())
 }
@@ -183,7 +184,7 @@ fn install_in(shell: Shell, home: &Path, env: &dyn Fn(&str) -> Option<OsString>,
 /// How the scripts run `ants`: as invoked, when found on PATH by name, else by its absolute path, as clap's
 /// [`CompleteEnv`] does.
 pub fn bin() -> String {
-    let arg0 = std::env::args_os().next().map(PathBuf::from).unwrap_or_else(|| "ants".into());
+    let arg0 = std::env::args_os().next().map_or_else(|| "ants".into(), PathBuf::from);
     let path = match arg0.components().count() {
         1 => arg0,
         _ => std::path::absolute(&arg0).unwrap_or(arg0),
@@ -230,12 +231,13 @@ pub fn threads() -> Vec<CompletionCandidate> {
     let titled = rights.is_ok_and(|r| r.may_publish(&thread_meta::titles_right()));
     let recent = lookup(async |js, me| {
         let entries = thread::recent_threads(js, me).await?;
-        let mut titles = match titled {
-            true => match thread_meta::Meta::open(js, None, me).await {
+        let mut titles = if titled {
+            match thread_meta::Meta::open(js, None, me).await {
                 Ok(meta) => meta.titles(entries.iter().map(|e| &e.thread_id)).await.unwrap_or_default(),
                 Err(_) => Default::default(),
-            },
-            false => Default::default(),
+            }
+        } else {
+            Default::default()
         };
         Ok(entries
             .into_iter()

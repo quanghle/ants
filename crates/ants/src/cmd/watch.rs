@@ -141,7 +141,7 @@ pub(crate) fn request_line(r: &ApprovalRequest, forged: &str) -> String {
 /// A channel post as `ants watch` prints it.
 pub(crate) fn channel_line(post: &ChannelPost, forged: &str) -> String {
     let (thread, from, channel, left) = (&post.thread_id, &post.from, &post.channel, post.turn_budget);
-    let created = post.creator.as_ref().map(|c| format!(", created by {c}")).unwrap_or_default();
+    let created = post.creator.as_ref().map_or_default(|c| format!(", created by {c}"));
     format!("[{thread}] {from} -> #{channel} ({left} turns left{created}){forged}: {}", post.text)
 }
 
@@ -168,8 +168,8 @@ impl Printer {
                 return self.line(&format!("[{thread}] {who}{forged}: {}", state.as_str()));
             }
             StatusUpdate::Tool { id, title, tool_kind, status } => {
-                let kind = tool_kind.as_deref().map(|k| format!(" ({k})")).unwrap_or_default();
-                let status = status.as_deref().map(|s| format!(": {s}")).unwrap_or_default();
+                let kind = tool_kind.as_deref().map_or_default(|k| format!(" ({k})"));
+                let status = status.as_deref().map_or_default(|s| format!(": {s}"));
                 let title = title.as_deref().unwrap_or(id);
                 return self.line(&format!("[{thread}] {who}{forged} tool {title}{kind}{status}"));
             }

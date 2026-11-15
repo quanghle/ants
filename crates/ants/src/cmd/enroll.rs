@@ -102,13 +102,10 @@ pub(crate) async fn run(command: EnrollCommand, conn: &Connection<'_>) -> Result
             println!("{ant} approved for {}", approved.public_key);
             if let Some(leaf) = &approved.leaf {
                 println!("the uplink credentials of {} renewed to carry {ant}", leaf.machine);
-                match leaf.outbox {
-                    true => {
-                        println!("the hub's stream takes {ant}'s messages from the outbox of {}", leaf.machine)
-                    }
-                    false => {
-                        println!("{} has no outbox (`ants leaf outbox`) to admit {ant} from", leaf.machine)
-                    }
+                if leaf.outbox {
+                    println!("the hub's stream takes {ant}'s messages from the outbox of {}", leaf.machine);
+                } else {
+                    println!("{} has no outbox (`ants leaf outbox`) to admit {ant} from", leaf.machine);
                 }
             }
             Ok(())

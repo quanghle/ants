@@ -148,7 +148,7 @@ impl NatsApprover {
             match bus::store(&self.js, told.subject(), &told, &id).await {
                 Ok(_) => {
                     crate::status::escalated(&self.client, &told);
-                    tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request")
+                    tracing::info!(request = %request.id, to = %told.to, "told of the expired approval request");
                 }
                 Err(e) => tracing::warn!(
                     request = %request.id,
@@ -227,9 +227,10 @@ impl NatsApprover {
         let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout);
         // Subscribe first, so a quick answer is not missed.
         let mut decisions = self.client.subscribe(request.decision_subject()).await?;
-        let mut inbox = match self.chain.escalate_to.is_empty() {
-            true => None,
-            false => Some(bus::live_inbox(&self.client, &self.ant).await?),
+        let mut inbox = if self.chain.escalate_to.is_empty() {
+            None
+        } else {
+            Some(bus::live_inbox(&self.client, &self.ant).await?)
         };
         let (chain_decided, mut from_chain) = mpsc::unbounded_channel();
         self.waiting.lock().expect("waiting requests").insert(request.id, (request.clone(), chain_decided));
@@ -272,7 +273,7 @@ impl NatsApprover {
                             heard.get_or_insert(d);
                         }
                         None => {
-                            tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request")
+                            tracing::warn!(subject = %msg.subject, "ignoring a malformed decision or one for another request");
                         }
                     },
                     Heard::Chain((from, decision)) => {

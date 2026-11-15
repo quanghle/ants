@@ -84,7 +84,7 @@ pub async fn title(nats: &crate::Nats<'_>, pick: Pick, text: &[String], clear: b
     } else {
         meta.set_title(thread, &text).await?
     };
-    let was = had.map(|t| format!(" (was: {})", t.title)).unwrap_or_default();
+    let was = had.map_or_default(|t| format!(" (was: {})", t.title));
     match clear {
         true if was.is_empty() => println!("thread {thread} has no title"),
         true => println!("cleared the title of thread {thread}{was}"),

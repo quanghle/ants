@@ -199,8 +199,8 @@ pub fn render(entries: &[Entry], grep: Option<&str>) -> String {
     let mut out = String::new();
     for e in entries {
         let forged = if e.forged { " (forged)" } else { "" };
-        let note = e.note.as_ref().map(|n| format!(" [{n}]")).unwrap_or_default();
-        let id = e.id.map(|id| format!(" (message {id})")).unwrap_or_default();
+        let note = e.note.as_ref().map_or_default(|n| format!(" [{n}]"));
+        let id = e.id.map_or_default(|id| format!(" (message {id})"));
         let line = grep.and_then(|grep| matched(&e.text, grep)).unwrap_or(&e.text);
         let _ = writeln!(
             out,

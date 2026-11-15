@@ -840,7 +840,7 @@ fn reload_daemon(path: &Path, ant: &UserId) {
     use crate::service::{Action, Outcome, Service, Services, failure, manual};
     match Services::local().apply(Service::Daemon, Action::Reload, path) {
         Outcome::Done(command) => {
-            println!("daemon reloaded ({command}): {ant} restarts with the rule once its prompts in flight finish")
+            println!("daemon reloaded ({command}): {ant} restarts with the rule once its prompts in flight finish");
         }
         Outcome::NotRunning => println!("the daemon service is not running; {ant} has the rule once started"),
         outcome => println!(

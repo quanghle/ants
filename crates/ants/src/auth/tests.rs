@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::assert_matches;
 
 use ants_daemon::bus;
@@ -58,7 +60,7 @@ impl Server {
 
     /// Credentials of `user` issued for `domain`, as `ants auth user` without `--human` does.
     fn creds_in(&self, user: &UserId, domain: Option<&JsDomain>) -> PathBuf {
-        let suffix = domain.map(|d| format!("-{d}")).unwrap_or_default();
+        let suffix = domain.map_or_default(|d| format!("-{d}"));
         let out = self.dir().join(format!("{user}{suffix}.creds"));
         issue(&self.dir().join("auth"), user, role(user, false), domain, &out).unwrap();
         out

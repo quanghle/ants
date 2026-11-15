@@ -79,9 +79,10 @@ pub(crate) async fn run(command: WebhookCommand, conn: &Connection<'_>) -> Resul
             let config = webhook::Config::read(&path)?;
             let Some(entry) = config.humans.iter().find(|h| h.name == human) else {
                 let names: Vec<&str> = config.humans.iter().map(|h| h.name.as_str()).collect();
-                match names.is_empty() {
-                    true => bail!("{} lists no [[human]]", path.display()),
-                    false => bail!("{} lists no human {human}, only {}", path.display(), names.join(", ")),
+                if names.is_empty() {
+                    bail!("{} lists no [[human]]", path.display())
+                } else {
+                    bail!("{} lists no human {human}, only {}", path.display(), names.join(", "))
                 }
             };
             let machine = ants_daemon::roster::machine().await;

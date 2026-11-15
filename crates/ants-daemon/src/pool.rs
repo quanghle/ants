@@ -413,6 +413,7 @@ pub(crate) mod fake {
     /// rebuilt for it. While [`Log::signed_out`] is set, sessions and prompts fail as with a harness that is not signed
     /// in; while [`Log::limited`] is, prompts stream its text and fail with it, or end with it as their reply; while
     /// [`Log::broken`] is, the handshake fails.
+    #[allow(clippy::too_many_lines)]
     pub fn launch(can_load: bool) -> (Launch, Arc<Mutex<Log>>, Arc<Semaphore>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let gate = Arc::new(Semaphore::new(0));

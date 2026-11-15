@@ -429,7 +429,7 @@ impl Replies {
                 return Ok(());
             }
         }
-        let within = self.timeout.map(ants_proto::duration::format).unwrap_or_default();
+        let within = self.timeout.map_or_default(ants_proto::duration::format);
         if self.wait {
             bail!("no reply on thread {thread} within {within}");
         }

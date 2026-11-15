@@ -217,7 +217,7 @@ impl Worktrees {
         let kept = self.ahead(thread).await;
         match &kept {
             Some(branch) => {
-                tracing::info!(%thread, branch = branch.name, commits = branch.commits, "keeping the thread's branch")
+                tracing::info!(%thread, branch = branch.name, commits = branch.commits, "keeping the thread's branch");
             }
             // Should counting them have failed, git still refuses to delete a branch with commits not merged.
             None => {

@@ -294,7 +294,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
                 .unwrap()
                 .await
                 .unwrap();
-        })
+        });
     })
     .join()
     .unwrap();

@@ -174,10 +174,7 @@ fn nats_config(report: &mut Report, path: &Path, listen: &str, home: &Path) {
         quoted(listen),
         quoted(&store.to_string_lossy())
     );
-    let written = match report.dry_run {
-        true => Ok(()),
-        false => write_new(path, &text),
-    };
+    let written = if report.dry_run { Ok(()) } else { write_new(path, &text) };
     match written {
         Ok(()) => report.step(
             Mark::Done,
@@ -201,11 +198,10 @@ async fn nats_service(
     let step = "nats-server service";
     let up = listening(listen).await;
     if args.no_services {
-        match up {
-            true => report.step(Mark::Skip, step, format!("--no-services; a server listens on {listen}")),
-            false => {
-                report.step(Mark::Skip, step, format!("--no-services; start one: nats-server -c {}", conf.display()))
-            }
+        if up {
+            report.step(Mark::Skip, step, format!("--no-services; a server listens on {listen}"));
+        } else {
+            report.step(Mark::Skip, step, format!("--no-services; start one: nats-server -c {}", conf.display()));
         }
         return false;
     }
@@ -305,15 +301,16 @@ async fn init(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>
 fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_>, path: &Path) -> bool {
     let step = "config";
     let shown = path.display();
-    let summary = match path.exists() {
-        true => match Summary::load(path) {
+    let summary = if path.exists() {
+        match Summary::load(path) {
             Ok(summary) => Some(summary),
             Err(e) => {
                 report.step(Mark::Fail, step, format!("{e:#}"));
                 return false;
             }
-        },
-        false => None,
+        }
+    } else {
+        None
     };
     let entry = match (&args.ant, &args.workdir) {
         (Some(name), Some(workdir)) => match ant_entry(name, workdir, connection.nats, summary.as_ref()) {
@@ -342,10 +339,7 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
             Some((name, _)) => format!("the messenger and {name}"),
             None => "the messenger".to_owned(),
         };
-        let written = match report.dry_run {
-            true => Ok(()),
-            false => write_new(path, &text),
-        };
+        let written = if report.dry_run { Ok(()) } else { write_new(path, &text) };
         match written {
             Ok(()) => report.step(Mark::Done, step, format!("{shown} serving {listed}")),
             Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
@@ -363,10 +357,7 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
         report.step(Mark::Exists, step, format!("{shown} lists {name} already; its entry kept"));
         return false;
     }
-    let appended = match report.dry_run {
-        true => Ok(()),
-        false => config::append(path, &entry),
-    };
+    let appended = if report.dry_run { Ok(()) } else { config::append(path, &entry) };
     match appended {
         Ok(()) => report.step(Mark::Done, step, format!("{shown}: {name} added")),
         Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),
@@ -378,7 +369,7 @@ fn config_file(report: &mut Report, args: &SetupArgs, connection: &Connection<'_
 fn ant_entry(name: &UserId, workdir: &Path, nats: &str, summary: Option<&Summary>) -> Result<String> {
     let workdir = workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?;
     let ant = Ant::new(name.clone(), workdir);
-    let harnesses = summary.map(|s| s.harnesses.clone()).unwrap_or_default();
+    let harnesses = summary.map_or_default(|s| s.harnesses.clone());
     ant.clone().into_config(nats, &harnesses)?;
     config::entry(&ant)
 }
@@ -449,7 +440,7 @@ fn shell_completions(report: &mut Report, args: &SetupArgs, home: &Path) {
     };
     match completions::install(shell, home, args.dry_run) {
         Ok(install) if install.installed == completions::Installed::Unchanged => {
-            report.step(Mark::Exists, step, install)
+            report.step(Mark::Exists, step, install);
         }
         Ok(install) => report.step(Mark::Done, step, install),
         Err(e) => report.step(Mark::Fail, step, format!("{e:#}")),

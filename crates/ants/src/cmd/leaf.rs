@@ -136,18 +136,17 @@ pub(crate) async fn run(command: LeafCommand, conn: &Connection<'_>) -> Result<(
                 return Ok(());
             }
             let change = members::Change::from(members);
-            let kept = match change.lists() {
-                true => None,
-                false => {
-                    let conf = match leaf_config {
-                        Some(path) => path,
-                        None => auth::default_dir()?.with_file_name("leaf.conf"),
-                    };
-                    let members = members::uplink(&conf, &machine).with_context(|| {
-                        format!("no --ant or --human given: reading the members of {machine} from {}", conf.display())
-                    })?;
-                    Some(members)
-                }
+            let kept = if change.lists() {
+                None
+            } else {
+                let conf = match leaf_config {
+                    Some(path) => path,
+                    None => auth::default_dir()?.with_file_name("leaf.conf"),
+                };
+                let members = members::uplink(&conf, &machine).with_context(|| {
+                    format!("no --ant or --human given: reading the members of {machine} from {}", conf.display())
+                })?;
+                Some(members)
             };
             let set = change.apply(&machine, kept, || anyhow::anyhow!("no members of {machine}"))?;
             let nats = nats()?;

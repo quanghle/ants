@@ -92,7 +92,7 @@ pub fn print(request: &AntRequest, event: &Event) {
         Event::Approved { human: true } => println!("signed {asked}: a human approved"),
         Event::Refused(reason) => println!("refused {asked}: {reason}"),
         Event::Asked { id, why } => {
-            println!("asked the humans about {asked}, as {why}: `ants tools approve|reject {}/{id}`", request.manager)
+            println!("asked the humans about {asked}, as {why}: `ants tools approve|reject {}/{id}`", request.manager);
         }
         Event::Retired { .. } => println!("retired {asked}"),
     }
@@ -319,9 +319,10 @@ impl Signer<'_> {
             Ok(revoked) => revoked,
             Err(e) => return self.refuse(approver, request, format!("{e:#}"), report).await,
         };
-        let push_error = match revoked.is_empty() {
-            true => None,
-            false => crate::revoke::push(self.url, self.dir).await.err().map(|e| format!("{e:#}")),
+        let push_error = if revoked.is_empty() {
+            None
+        } else {
+            crate::revoke::push(self.url, self.dir).await.err().map(|e| format!("{e:#}"))
         };
         report(request, &Event::Retired { revoked: revoked.len(), push_error: push_error.clone() });
         let (manager, name, public_key) = (request.manager.clone(), request.name.clone(), request.public_key.clone());
@@ -462,7 +463,7 @@ pub fn revoke_added(
     let added = |i: &revoke::Issued| {
         i.name == name.as_str() && i.template.is_some() && manager.is_none_or(|m| i.added_by.as_ref() == Some(m))
     };
-    let by = manager.map(|m| format!(" by {m}")).unwrap_or_default();
+    let by = manager.map_or_default(|m| format!(" by {m}"));
     let issued = revoke::issued(dir)?;
     let before = match key {
         Some(key) => {

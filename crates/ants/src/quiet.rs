@@ -91,7 +91,7 @@ pub async fn snooze(nats: &Nats<'_>, hold: Duration) -> Result<()> {
     until(Utc::now(), hold).context("snooze")?;
     let js = connect(nats, "snoozing notifications").await?;
     let prefs = update(&js, &nats.me.id, |prefs, now| prefs.snoozed_until = until(now, hold).ok()).await?;
-    let until = prefs.snoozed_until.map(local).unwrap_or_default();
+    let until = prefs.snoozed_until.map_or_default(local);
     println!("notifications of {} snoozed until {until}, on every device", nats.me.id);
     Ok(())
 }
@@ -105,9 +105,10 @@ pub async fn resume(nats: &Nats<'_>) -> Result<()> {
         prefs.snoozed_until = None;
     })
     .await?;
-    match snoozed.get() {
-        true => println!("notifications of {} resumed", nats.me.id),
-        false => println!("notifications of {} were not snoozed", nats.me.id),
+    if snoozed.get() {
+        println!("notifications of {} resumed", nats.me.id);
+    } else {
+        println!("notifications of {} were not snoozed", nats.me.id);
     }
     Ok(())
 }
@@ -144,7 +145,7 @@ pub async fn mute(nats: &Nats<'_>, pick: thread::Pick, hold: Option<Duration>) -
         }
     })
     .await?;
-    let until = prefs.muted.get(&thread).copied().map(local).unwrap_or_default();
+    let until = prefs.muted.get(&thread).copied().map_or_default(local);
     println!("thread {thread} muted until {until}: no notice of it reaches {}", nats.me.id);
     Ok(())
 }
@@ -156,9 +157,10 @@ pub async fn unmute(nats: &Nats<'_>, pick: thread::Pick) -> Result<()> {
     let was = std::cell::Cell::new(false);
     update(&js, &nats.me.id, |prefs, now| was.set(prefs.muted.remove(&thread).is_some_and(|until| now < until)))
         .await?;
-    match was.get() {
-        true => println!("thread {thread} unmuted"),
-        false => println!("thread {thread} was not muted"),
+    if was.get() {
+        println!("thread {thread} unmuted");
+    } else {
+        println!("thread {thread} was not muted");
     }
     Ok(())
 }

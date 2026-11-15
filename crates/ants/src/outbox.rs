@@ -213,7 +213,7 @@ fn hearing(info: &serde_json::Value, machine: &Machine) -> Hearing {
         return Hearing::Failed(error(e));
     }
     let api = machine.api_prefix();
-    let sources = info["sources"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let sources = info["sources"].as_array().map_or_default(Vec::as_slice);
     let Some(source) = sources.iter().find(|s| s["name"] == OUTBOX_STREAM && s["external"]["api"] == api.as_str())
     else {
         return Hearing::Failed("the hub's intake has no source for it".to_owned());

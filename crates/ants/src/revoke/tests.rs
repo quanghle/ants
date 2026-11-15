@@ -180,9 +180,10 @@ impl Hub {
         ants_test_support::NatsServer::spawn_with(|_| {
             // Both directories are in target/test-tmp; includes are relative to the configuration.
             let files = self.files.file_name().unwrap().to_string_lossy();
-            let resolver = match self.full {
-                true => format!("resolver {{ type: full, dir: {:?} }}\n", self.files.join("jwt")),
-                false => String::new(),
+            let resolver = if self.full {
+                format!("resolver {{ type: full, dir: {:?} }}\n", self.files.join("jwt"))
+            } else {
+                String::new()
             };
             format!("include \"../{files}/hub/{}\"\n{resolver}", auth::SERVER_CONF)
         })

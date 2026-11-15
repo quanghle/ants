@@ -176,7 +176,7 @@ impl Finding {
 
     /// The commands that renew them, in order, all but `ants leaf outbox` on the machine holding the team keys.
     pub fn renew(&self) -> Vec<String> {
-        let domain = self.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
+        let domain = self.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
         let flags = |flag: &str, ids: &[UserId]| ids.iter().map(|id| format!(" --{flag} {id}")).collect::<String>();
         match &self.kind {
             Kind::Ant => vec![format!("ants auth user {}{domain}", self.name)],
@@ -317,7 +317,7 @@ impl Finding {
             )),
             _ => {}
         }
-        let at = || self.expires_at.map(time).unwrap_or_default();
+        let at = || self.expires_at.map_or_default(time);
         match self.expiry(now) {
             Expiry::Expired => warnings.push(format!(
                 "the credentials of {holder} expired at {}; {}",
@@ -325,7 +325,11 @@ impl Finding {
                 self.renew_hint(path, now)
             )),
             Expiry::Soon if !matches!(self.kind, Kind::Enrollment { .. }) => {
-                warnings.push(format!("the credentials of {holder} expire at {}; {}", at(), self.renew_hint(path, now)))
+                warnings.push(format!(
+                    "the credentials of {holder} expire at {}; {}",
+                    at(),
+                    self.renew_hint(path, now)
+                ));
             }
             _ => {}
         }

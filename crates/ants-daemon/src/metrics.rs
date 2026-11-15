@@ -117,9 +117,10 @@ pub fn route(method: &Method, path: &str, source: &dyn Source) -> (StatusCode, &
         return (StatusCode::METHOD_NOT_ALLOWED, TEXT, "GET only\n".to_owned());
     }
     if path == "/healthz" {
-        return match source.healthy() {
-            true => (StatusCode::OK, TEXT, "ok\n".to_owned()),
-            false => (StatusCode::SERVICE_UNAVAILABLE, TEXT, "unhealthy: not connected to NATS\n".to_owned()),
+        return if source.healthy() {
+            (StatusCode::OK, TEXT, "ok\n".to_owned())
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, TEXT, "unhealthy: not connected to NATS\n".to_owned())
         };
     }
     let mut out = Exposition::default();

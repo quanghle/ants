@@ -117,7 +117,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let loaded = check_config(&setup.config, &mut checks);
     let identity = check_cli_creds(setup, now, &mut checks);
     let leaf = Leaf::read(&setup.leaf_config);
-    let ants = loaded.as_ref().map(|l| l.ants.as_slice()).unwrap_or_default();
+    let ants = loaded.as_ref().map_or_default(|l| l.ants.as_slice());
     let reach = reach(setup, identity.as_ref(), leaf.as_ref().and_then(|l| l.as_ref().ok()));
     let ants_checked = async {
         match &loaded {
@@ -130,7 +130,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let resolver = check_resolver(setup, through_leaf);
     let ((reached, connected), ants_checked, resolver) = tokio::join!(reach, ants_checked, resolver);
     checks.extend(reached);
-    let settings = loaded.as_ref().map(|l| l.storage).unwrap_or_default();
+    let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
     checks.extend(ants_checked);
     checks.extend(check_shared_workdirs(ants, &setup.config));
@@ -221,7 +221,7 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
         Some(version) => format!("permissions version {version}"),
         None => "no permissions version".to_owned(),
     };
-    let at = |exp: Option<u64>| exp.map(creds::time).unwrap_or_default();
+    let at = |exp: Option<u64>| exp.map_or_default(creds::time);
     let mut problems = Vec::new();
     match finding.version_status() {
         VersionStatus::Current => {}
@@ -242,7 +242,7 @@ fn check_creds(check: &str, path: &Path, finding: &creds::Finding, now: u64) -> 
     match expiry {
         Expiry::Expired => problems.push(format!("expired at {}", at(finding.expires_at))),
         Expiry::Soon if !matches!(finding.kind, Kind::Enrollment { .. }) => {
-            problems.push(format!("expire at {}", at(finding.expires_at)))
+            problems.push(format!("expire at {}", at(finding.expires_at)));
         }
         _ => {}
     }
@@ -409,7 +409,7 @@ async fn check_jetstream(
     let domain = setup.js_domain.as_ref();
     let config = setup.config.display();
     let issued = identity.finding.as_ref().and_then(|f| f.js_domain.as_ref());
-    let hub_domain = issued.or(leaf.and_then(|l| l.hub_domain.as_ref())).map_or("HUB".to_owned(), |d| d.to_string());
+    let hub_domain = issued.or(leaf.and_then(|l| l.hub_domain.as_ref())).map_or("HUB".to_owned(), ToString::to_string);
     let set_domain = format!("--js-domain {hub_domain}, or js_domain = \"{hub_domain}\" in {config}");
     match (issued, domain, &identity.finding) {
         (Some(issued), Some(used), _) if issued != used => {
@@ -496,9 +496,10 @@ async fn check_hub(js: &jetstream::Context, identity: &Identity) -> Vec<Check> {
     findings
         .iter()
         .map(|finding| {
-            let fix = match finding.rights().iter().all(|s| may(s)) {
-                true => "ants init".to_owned(),
-                false => "ants init with a human's current credentials (`ants auth user NAME --human`)".to_owned(),
+            let fix = if finding.rights().iter().all(|s| may(s)) {
+                "ants init".to_owned()
+            } else {
+                "ants init with a human's current credentials (`ants auth user NAME --human`)".to_owned()
             };
             match finding.problem {
                 hub::Problem::Unchecked(_) => Check::warn(check, finding.to_string(), vec![fix]),
@@ -606,9 +607,10 @@ fn consumers(object: hub::Object, count: usize, limit: Option<usize>) -> Check {
     if count.saturating_mul(5) < limit.saturating_mul(4) {
         return Check::ok(check, detail);
     }
-    let raise = match usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
-        true => "ants init".to_owned(),
-        false => format!("nats stream edit {name} --max-consumers {}", limit.saturating_mul(2)),
+    let raise = if usize::try_from(hub::MAX_CONSUMERS).is_ok_and(|max| limit < max) {
+        "ants init".to_owned()
+    } else {
+        format!("nats stream edit {name} --max-consumers {}", limit.saturating_mul(2))
     };
     let full = match object {
         hub::Object::Stream => "no ant can open a consumer to read its inbox".to_owned(),
@@ -837,9 +839,10 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
         };
         picked.push(index);
     }
-    let handshakes = match setup.harnesses {
-        true => futures::future::join_all(launches.iter().map(|(.., launch)| harness::handshake(launch))).await,
-        false => Vec::new(),
+    let handshakes = if setup.harnesses {
+        futures::future::join_all(launches.iter().map(|(.., launch)| harness::handshake(launch))).await
+    } else {
+        Vec::new()
     };
     let mut checks = Vec::new();
     for (ant, index) in ants.iter().zip(picked) {
@@ -885,7 +888,7 @@ async fn check_ants(ants: &[Ant], harnesses: &Harnesses, setup: &Setup, now: u64
 /// The commands issuing the credentials of `ant` again.
 fn issue(ant: &Ant) -> String {
     let name = &ant.name;
-    let domain = ant.js_domain.as_ref().map(|d| format!(" --js-domain {d}")).unwrap_or_default();
+    let domain = ant.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
     format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
 }
 
@@ -1045,9 +1048,10 @@ async fn check_leaf(
                     let mut renewed = finding.clone();
                     if let Kind::Leaf { ants, humans, .. } = &mut renewed.kind {
                         for user in &missing {
-                            match human.is_some_and(|me| &me.id == *user) {
-                                true => humans.push((*user).clone()),
-                                false => ants.push((*user).clone()),
+                            if human.is_some_and(|me| &me.id == *user) {
+                                humans.push((*user).clone());
+                            } else {
+                                ants.push((*user).clone());
                             }
                         }
                     }
@@ -1269,13 +1273,14 @@ fn check_command(what: &str, program: &str) -> Check {
         metadata.is_file()
     };
     if program.contains(std::path::is_separator) {
-        return match executable(Path::new(program)) {
-            true => Check::ok(check, format!("{what}: {program} is executable")),
-            false => Check::fail(
+        return if executable(Path::new(program)) {
+            Check::ok(check, format!("{what}: {program} is executable"))
+        } else {
+            Check::fail(
                 check,
                 format!("{what}: {program} is no executable file"),
                 vec![format!("put the program at {program} and chmod +x it, or correct command")],
-            ),
+            )
         };
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -1394,7 +1399,7 @@ async fn check_transports(transports: Vec<Transport>, now: u64) -> Vec<Check> {
         });
         match service {
             Service::DevTunnel | Service::DevTunnelHost => {
-                let program = unit.args.first().map(PathBuf::from).unwrap_or_default();
+                let program = unit.args.first().map_or_default(PathBuf::from);
                 if !program.is_file() {
                     let detail = format!("no devtunnel at {}", program.display());
                     let fix = "scripts/install-units.sh again with --devtunnel-bin PATH".to_owned();
@@ -1527,20 +1532,19 @@ fn left(seconds: u64) -> String {
 /// the bridge answers as one taking it.
 async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check> {
     let serving = service == Service::BridgeServe;
-    let (token_check, url_check) = match serving {
-        true => ("bridge serve token", "bridge serve url"),
-        false => ("bridge token", "bridge url"),
-    };
+    let (token_check, url_check) =
+        if serving { ("bridge serve token", "bridge serve url") } else { ("bridge token", "bridge url") };
     let mut checks = Vec::new();
     let token = match unit.flag("--token-file") {
         Some(file) => {
             let file = Path::new(file);
-            let write = match serving {
-                true => format!("write a long random token into {} (mode 0600), then {restart}", file.display()),
-                false => format!(
+            let write = if serving {
+                format!("write a long random token into {} (mode 0600), then {restart}", file.display())
+            } else {
+                format!(
                     "the token of the hub's `ants bridge serve` into {} (mode 0600), then {restart}",
                     file.display()
-                ),
+                )
             };
             match private_file(file, write) {
                 Ok(_) => checks.push(Check::ok(token_check, format!("{}, mode 0600", file.display()))),
@@ -1559,15 +1563,16 @@ async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check
         }
         None => None,
     };
-    let url = match serving {
-        true => format!("http://{}", unit.flag("--listen").unwrap_or(bridge::DEFAULT_SERVE_LISTEN)),
-        false => match bridge_url(&unit.args) {
+    let url = if serving {
+        format!("http://{}", unit.flag("--listen").unwrap_or(bridge::DEFAULT_SERVE_LISTEN))
+    } else {
+        match bridge_url(&unit.args) {
             Some(url) => url.to_owned(),
             None => {
                 checks.push(Check::fail(url_check, "the service names no bridge URL", Vec::new()));
                 return checks;
             }
-        },
+        }
     };
     let remote = bridge::Remote::new(&url, token.as_deref(), &[], unit.flag("--proxy"));
     let remote = match (remote, unit.env("SSL_CERT_FILE")) {
@@ -1578,11 +1583,10 @@ async fn check_bridge(service: Service, unit: &Unit, restart: &str) -> Vec<Check
         Ok(remote) => remote.probe(NETWORK_TIMEOUT).await,
         Err(e) => Err(e),
     };
-    let unreachable = match serving {
-        true => restart.to_owned(),
-        false => {
-            format!("check that the hub's `ants bridge serve` runs and is reached at {url}, through the proxy if any")
-        }
+    let unreachable = if serving {
+        restart.to_owned()
+    } else {
+        format!("check that the hub's `ants bridge serve` runs and is reached at {url}, through the proxy if any")
     };
     checks.push(match probed {
         Ok(Probe::Answers) => Check::ok(url_check, format!("{url} answers as a bridge taking the token")),

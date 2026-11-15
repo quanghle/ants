@@ -372,7 +372,7 @@ impl Services {
                 vec![vec!["launchctl".into(), "bootstrap".into(), domain, unit.to_string_lossy().into_owned()]]
             }
             Manager::Systemd => {
-                let name = unit.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = unit.file_name().map_or_default(|n| n.to_string_lossy().into_owned());
                 let reload = ["systemctl", "--user", "daemon-reload"];
                 let enable = ["systemctl", "--user", "enable", "--now", &name];
                 vec![reload.map(str::to_owned).to_vec(), enable.map(str::to_owned).to_vec()]

@@ -190,6 +190,7 @@ mod tests {
     use crate::{p, subject};
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn roster_entry_round_trips_and_tolerates_additions() {
         let entry = RosterEntry {
             ant: p("dev-a"),

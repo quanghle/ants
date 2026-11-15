@@ -59,7 +59,7 @@ pub(crate) async fn show(
                 }
             };
             tokio::join!(dead, unserved);
-            std::future::pending::<()>().await
+            std::future::pending::<()>().await;
         };
         let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });
         // Following one thread shows no escalation on the others, so only following them all counts as reading.

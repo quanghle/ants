@@ -301,7 +301,7 @@ impl Escalator {
             let sleep = async {
                 match next {
                     Some(at) => {
-                        tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms()).max(0) as u64)).await
+                        tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms()).max(0) as u64)).await;
                     }
                     None => std::future::pending().await,
                 }

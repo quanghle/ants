@@ -52,7 +52,7 @@ pub async fn run(command: KeysCommand, nats: &str, cli_creds: Option<&Path>) -> 
                 match store_seed(&path, store, nats).await? {
                     Moved::Now(key) => println!("{}: seed moved to the OS credential store, key {key}", path.display()),
                     Moved::Before(key) => {
-                        println!("{}: seed already in the OS credential store, key {key}", path.display())
+                        println!("{}: seed already in the OS credential store, key {key}", path.display());
                     }
                 }
             }
