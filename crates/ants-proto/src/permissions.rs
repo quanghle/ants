@@ -319,9 +319,8 @@ impl Permissions {
                     .iter()
                     .any(|prefix| s.starts_with(prefix))
         };
-        as_human.retain(|s| {
-            !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s)
-        });
+        as_human
+            .retain(|s| !devices_only.contains(s) && !notify.contains(s) && !unattributed.contains(s) && !withheld(s));
         publish.extend(as_human);
         let chunks = format!("$O.{FILES_BUCKET}.C");
         publish.push(format!("$JS.API.DIRECT.GET.{FILES_STREAM}.{chunks}.>"));
