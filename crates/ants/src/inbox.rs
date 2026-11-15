@@ -344,7 +344,7 @@ pub fn render_reactions(reactions: &[Reacted], indent: &str) -> String {
     reactions
         .iter()
         .map(|r| {
-            let by: Vec<&str> = r.by.iter().map(UserId::as_str).collect();
+            let by: Vec<String> = r.labels().collect();
             format!("{indent}reacted {}: {}\n", r.reaction, by.join(", "))
         })
         .collect()

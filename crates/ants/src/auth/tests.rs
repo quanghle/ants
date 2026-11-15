@@ -1468,8 +1468,8 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
     let unread = reactions::request(&a_client, &change(between.id, &eyes, false)).await.unwrap();
     assert_eq!(unread, Some(ReactionsOutcome::Unknown), "dev-a reads no message to dev-b");
     let expected = vec![
-        Reacted { reaction: check.clone(), by: vec![dev_a.clone()] },
-        Reacted { reaction: eyes.clone(), by: vec![dev_a.clone(), human.clone()] },
+        Reacted::new(check.clone(), vec![dev_a.clone()]),
+        Reacted::new(eyes.clone(), vec![dev_a.clone(), human.clone()]),
     ];
     let listed = reactions::ask(&a_client, &dev_a, message).await.unwrap();
     assert_eq!(listed, Some(ReactionsOutcome::Listed { reactions: expected.clone() }));
@@ -1478,7 +1478,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
     assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(true));
     assert_eq!(reactions::request(&a_client, &change(message, &eyes, true)).await.unwrap(), applied(false));
     let all = reactions::load(&h_js, &[message]).await.unwrap();
-    assert_eq!(all[&message][1], Reacted { reaction: eyes, by: vec![human] });
+    assert_eq!(all[&message][1], Reacted::new(eyes, vec![human]));
     serving.abort();
 }
 

@@ -4,11 +4,15 @@
 //!
 //! An assistant its human enrolled as one of its devices ([`ants_proto::AssistantGrant::sealing`]) opens its human's
 //! sealed messages and seals messages it sends for its human with its sealing key ([`AssistantSealing`]), whose seed
-//! waits beside its credentials ([`key_path`]); only while the grant standing enrolls that key.
+//! waits beside its credentials ([`key_path`]); only while the grant standing enrolls that key. It seals the titles
+//! it sets for its human on threads whose messages are sealed the same way ([`seal_title`]).
 
 use std::path::{Path, PathBuf};
 
-use ants_proto::{Attachment, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, UserId};
+use ants_proto::{
+    Attachment, DeviceId, DeviceKey, Envelope, SEALED_VERSION, Sealed, SealedBody, SealedKey, SealedTitle, ThreadTitle,
+    UserId,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use crypto_secretbox::aead::{Aead as _, AeadCore as _, KeyInit as _, OsRng};
 use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
@@ -97,6 +101,23 @@ pub fn seal_envelope(
     };
     envelope.attachments = Vec::new();
     envelope.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, key, device, xkey, recipients)?));
+    Ok(())
+}
+
+/// Seal the title of `title` for `recipients` like a message ([`seal_envelope`]), leaving it empty.
+pub fn seal_title(
+    title: &mut ThreadTitle,
+    device: DeviceId,
+    xkey: &XKey,
+    recipients: &[(DeviceId, &DeviceKey)],
+) -> Result<()> {
+    let body = SealedTitle {
+        thread_id: title.thread_id.clone(),
+        by: title.by.clone(),
+        title: std::mem::take(&mut title.title),
+    };
+    let key = XSalsa20Poly1305::generate_key(&mut OsRng);
+    title.sealed = Some(Box::new(seal_plain(&serde_json::to_vec(&body)?, &key, device, xkey, recipients)?));
     Ok(())
 }
 
@@ -259,10 +280,31 @@ impl AssistantSealing {
         if !envelope.attachments.is_empty() {
             bail!("{ant} does not seal attachments");
         }
+        let (device, recipients) = self.recipients(human, &envelope.to.clone()).await?;
+        let recipients: Vec<(DeviceId, &DeviceKey)> = recipients.iter().map(|(id, key)| (*id, key)).collect();
+        let key = XSalsa20Poly1305::generate_key(&mut OsRng);
+        seal_envelope(envelope, &key, Vec::new(), device, &self.xkey, &recipients)
+    }
+
+    /// Seal `title`, which the ant sets for `human` on a thread between `human` and `other` whose messages are
+    /// sealed, for every device of both with a verified key, as [`AssistantSealing::seal`] seals a message.
+    pub async fn seal_title(&self, human: &UserId, other: &UserId, title: &mut ThreadTitle) -> Result<()> {
+        let ant = &self.ant;
+        if title.by != *ant {
+            bail!("{ant} seals only the titles it sets itself, not one by {}", title.by);
+        }
+        let (device, recipients) = self.recipients(human, other).await?;
+        let recipients: Vec<(DeviceId, &DeviceKey)> = recipients.iter().map(|(id, key)| (*id, key)).collect();
+        seal_title(title, device, &self.xkey, &recipients)
+    }
+
+    /// The device the ant is enrolled as for `human`, and the devices with a verified key of `human`, the ant's
+    /// among them, and of `to`: refused when the ant is not enrolled now, or `to` has no device of its own.
+    async fn recipients(&self, human: &UserId, to: &UserId) -> Result<(DeviceId, Vec<(DeviceId, DeviceKey)>)> {
+        let ant = &self.ant;
         let Some(device) = self.device_for(human) else {
             bail!("{human} has not enrolled {ant} as one of its devices: `ants assistant seal on` does");
         };
-        let to = &envelope.to.clone();
         let devices = self.directory.devices(&[human.clone(), to.clone()]).await?;
         let own = self.xkey.public_key();
         if !devices.of(human).any(|d| d.device == device && d.key.as_str() == own) {
@@ -271,13 +313,12 @@ impl AssistantSealing {
         if !devices.of(to).any(|d| d.assistant.is_none()) {
             bail!("{to} has no device whose encryption key is verified, so nothing is sealed");
         }
-        let mut recipients: Vec<(DeviceId, &DeviceKey)> = Vec::new();
+        let mut recipients: Vec<(DeviceId, DeviceKey)> = Vec::new();
         for d in devices.of(human).chain(devices.of(to)) {
             if !recipients.iter().any(|(id, _)| *id == d.device) {
-                recipients.push((d.device, &d.key));
+                recipients.push((d.device, d.key.clone()));
             }
         }
-        let key = XSalsa20Poly1305::generate_key(&mut OsRng);
-        seal_envelope(envelope, &key, Vec::new(), device, &self.xkey, &recipients)
+        Ok((device, recipients))
     }
 }

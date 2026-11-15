@@ -524,7 +524,7 @@ pub fn why(data: &Data, thread: &ThreadId) -> Line<'static> {
             Some("a tool request waits for a decision".to_owned())
         }
         ThreadState::WaitingOnMe if data.asks(thread) => Some("a question waits for an answer".to_owned()),
-        ThreadState::Done => data.done(thread).map(|d| format!("by {}", d.by)),
+        ThreadState::Done => data.done(thread).map(|d| format!("by {}", data.cards.done_by(d))),
         ThreadState::WaitingOnMe => data.unread_on(thread).last().map(|i| format!("{}: {}", i.from, i.text)),
         _ => None,
     };

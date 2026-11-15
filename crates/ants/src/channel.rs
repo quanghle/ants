@@ -513,11 +513,12 @@ pub fn threads(posts: Vec<ChannelPost>) -> Vec<Thread> {
     threads
 }
 
-/// One post at `indent`: time, author and text, the text's further lines and its attachments indented under it.
-fn render_post(out: &mut String, post: &ChannelPost, indent: &str) {
+/// One post at `indent`: time, author as `by` names it and text, the text's further lines and its attachments
+/// indented under it.
+fn render_post(out: &mut String, post: &ChannelPost, by: &dyn Fn(&ChannelPost) -> String, indent: &str) {
     let time = post.sent_at.format("%Y-%m-%d %H:%M:%S");
     let mut lines = post.text.lines();
-    let _ = writeln!(out, "{indent}{time} {}: {}", post.from, lines.next().unwrap_or(""));
+    let _ = writeln!(out, "{indent}{time} {}: {}", by(post), lines.next().unwrap_or(""));
     for line in lines {
         let _ = writeln!(out, "{indent}    {line}");
     }
@@ -526,8 +527,9 @@ fn render_post(out: &mut String, post: &ChannelPost, indent: &str) {
 }
 
 /// Threads as `ants channel read` prints them: a header line with the thread id, the post that started it, then the
-/// replies indented, and a blank line between threads.
-pub fn render(threads: &[Thread]) -> String {
+/// replies indented, and a blank line between threads. `by` names each post's author, as
+/// [`ants_proto::Acting::label`] an assistant's for its human.
+pub fn render(threads: &[Thread], by: &dyn Fn(&ChannelPost) -> String) -> String {
     let mut out = String::new();
     for (i, thread) in threads.iter().enumerate() {
         if i > 0 {
@@ -535,14 +537,14 @@ pub fn render(threads: &[Thread]) -> String {
         }
         let _ = writeln!(out, "thread {}", thread.id);
         let replies = if thread.has_start() {
-            render_post(&mut out, &thread.posts[0], "");
+            render_post(&mut out, &thread.posts[0], by, "");
             &thread.posts[1..]
         } else {
             out.push_str("(the post that started the thread is no longer kept)\n");
             &thread.posts[..]
         };
         for post in replies {
-            render_post(&mut out, post, "    ");
+            render_post(&mut out, post, by, "    ");
         }
     }
     out

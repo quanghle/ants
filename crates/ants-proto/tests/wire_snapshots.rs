@@ -274,7 +274,7 @@ fn kv_entries() {
         let change = Some(ReactionChange::new("eyes".parse().unwrap(), remove));
         snap(&format!("reactions_request_{kind}"), &ReactionsRequest { change, ..request.clone() });
     }
-    let reacted = Reacted { reaction: "eyes".parse().unwrap(), by: vec![user("alice"), user("dev-b")] };
+    let reacted = Reacted::new("eyes".parse().unwrap(), vec![user("alice"), user("dev-b")]);
     for (kind, outcome, responder) in [
         ("listed", ReactionsOutcome::Listed { reactions: vec![reacted] }, Some(ReactionsResponder::Webhook)),
         ("applied", ReactionsOutcome::Applied { changed: true }, Some(ReactionsResponder::Signer)),
@@ -472,6 +472,7 @@ fn notes() {
             turn_budget: 7,
             title: Some("Rewrite the parser".to_owned()),
             attachments: vec![attachment()],
+            on_behalf_of: Some(user("alice")),
             sent_at: at(0),
         },
     );
@@ -547,6 +548,7 @@ fn channels() {
             allow: Some(vec!["read:*".to_owned()]),
             title: Some("Fix CI".to_owned()),
             attachments: vec![attachment()],
+            on_behalf_of: Some(user("alice")),
             sent_at: at(0),
         },
     );
