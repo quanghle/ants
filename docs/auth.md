@@ -273,6 +273,22 @@ On the machine holding the account key, `ants chat` lists the pending requests t
 
 Behind a leaf node (`~/.config/ants/leaf.conf` or `--leaf-config`), `ants add --enroll` signs the request with the leaf uplink key; `ants enroll approve` renews the leaf uplink JWT (up to the 252 KiB limit, ~50 ants with a domain or 54 without; beyond it the approval fails before anything is signed or recorded), records the ant in `issued.jsonl`, admits it to `ANTS_IN` outbox sourcing, and `ants add` has the leaf node reconnect its uplink with the renewed credentials, by a reload keeping local connections (`ants enroll` behind a leaf requires `ants auth leaf --enroll-approver`). After out-of-band `--jwt` behind a leaf, run `ants auth leaf MACHINE --add-ant NAME` and `ants leaf outbox MACHINE`. See [transport.md](transport.md#enrollment-behind-a-leaf-node).
 
+## Moving an ant to another bus
+
+An ant moves between buses as a file ([config.md](config.md#exporting-and-importing-an-ant)), never with its keys:
+
+```sh
+ants ant export dev-c --move                  # old bus: writes ./dev-c.ant and marks dev-c moved
+ants ant import dev-c.ant --enroll enroll-dev-c.creds  # new bus: identity, settings, memories and a new key
+ants auth revoke dev-c                        # old bus, once the import succeeded: ends dev-c there
+```
+
+The import creates the ant's identity record with a KV create, refused when a record of the bus holds its name or its
+id, so no bus holds two copies of one ant; on one bus, `--as NEW` refuses too while the old record stays. `ants auth
+revoke` of the ant deletes its record, after which its id may come back. Until then the moved mark keeps every daemon
+of the old bus from serving it; `ants ant unseal NAME` undoes a move. Nothing signs or checks the file: whoever carries
+it is trusted with the ant's memories.
+
 ## Registering humans
 
 A person joins the team as a human without the operator of the account-key machine issuing credentials: `ants login` on the person's machine asks `ants signer` on the hub for a new device's credentials, the signer has the person sign in to GitHub, checks the GitHub user against the team's registration policy, binds the human name to that GitHub user and signs.

@@ -402,6 +402,52 @@ else takes `dark`. With `NO_COLOR` set, or off a terminal, faces show without co
 `animate = false` keeps the heads in `ants chat` still; otherwise only the head on screen moves, and the screen is drawn
 again only when its frame changes.
 
+## Exporting and importing an ant
+
+`ants ant export ANT` writes the ant to one plain JSON file (default `./ANT.ant`, mode `0600`, never overwritten) for
+another bus, as for a new job; `ants ant import FILE` there adds it from the file, as `ants add` does, with a new key.
+The file is `{"ants_ant": 1, "created_at", "bus", "identity", "settings", "files"}`:
+
+- `bus`: the public key of the account of the bus exported from.
+- `identity`: the ant's identity record, unmarked: its `id`, `born`, `avatar`, `color`, `prompts` and `cloned_from`.
+- `settings`: of its `[[ant]]`, `whoami`, `harness`, `model`, `reasoning_effort`, `context` and `fallback`.
+- `files`: each file of its home (`home`, default `~/.ants/<name>`) as `{path, kind, data}`, `data` in base64, at
+  most 64 MiB in all. `kind` is `harness` for the files of its harness's [memory files](#memory-files) globs, taken
+  relative to the home (`~/` globs are left out), and `core` for every other regular file of the home, symbolic
+  links not followed.
+
+Left out: the home's `worktrees`, `answered`, `buried`, `mcp.json`, `mcp.sock`, `.git`, `.beads` and `.bd`, the task
+database `BD_DB` names when it lies in the home, the rest of the ant's settings (its role on the bus: `capabilities`,
+`escalate_to`, `allow`, `memory`, `tasks`; its machine's: `workdir`, `env`, caps and limits), its credentials,
+sessions, threads and history. A templated ant imports as a plain `[[ant]]`.
+
+The export runs on the machine whose config file lists the ant, with a human's credentials. While another machine
+serves the ant it warns that the home here may be behind; while this one serves it working, it waits up to 2 minutes
+for its prompts in flight to end, so the files are packed between prompts. Nothing signs or encrypts the file: keep it
+safe, as it may hold sensitive memory.
+
+`--move` then marks the ant moved in its identity record. The daemon serving it drains it as on a stop (it takes no
+new message, hands back those waiting and finishes the prompts in flight) and leaves the roster, every daemon listing
+it waits for the mark to go before serving it, and messages to it get the notice of an ant no daemon serves. `ants
+roster`, `ants doctor`, `ants ant show` and the ant view of `ants chat` show it moved. `ants ant unseal ANT` clears
+the mark; `ants auth revoke ANT` ends the ant on the old bus once the import succeeded
+([auth.md](auth.md#moving-an-ant-to-another-bus)).
+
+`ants ant import FILE [--as NEW]` takes the flags of `ants add` and:
+
+1. Refuses a config file already listing the ant, and a home (`--home`, default `~/.ants/<name>`) not empty.
+2. Creates its identity record on the bus by a KV create, refused when a record holds its name, or its id under any
+   name, so no bus holds two copies of one ant. The id is looked up by reading the whole `ants_identities` bucket, one
+   record per ant.
+3. Restores its files into its home, leaving out its harness memory files, with a warning, when the ant runs another
+   harness here (`--harness`, else the exported one, else the file's top-level `harness`).
+4. Lists it in `config.toml` with the exported settings, the flags given winning, and gives it a new key, as `ants
+   add` does: with `--jwt` or `--enroll` its credentials complete at once, else `ants add NAME --jwt ...` completes
+   them later.
+
+A failed import takes back the record it created and the files it restored. `--as NEW` imports the ant under another
+name, keeping its id, birth, avatar and prompts. The ant starts with no tasks.
+
 ## Catch-up summaries
 
 `ants thread tldr THREAD` and `ants digest` ask the ant named by `[cli]` `summary_ant` (default: the messenger) for a
