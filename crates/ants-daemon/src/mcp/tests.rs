@@ -282,7 +282,7 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
 }
 
 #[tokio::test]
-async fn messages_between_agents_spend_the_budget() {
+async fn messages_between_ants_spend_the_budget() {
     let (mcp, mut sent) = start(&home("budget")).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q");
     current.turn_budget = 1;
@@ -291,7 +291,7 @@ async fn messages_between_agents_spend_the_budget() {
         let (url, token) = http_server(&mcp, &current.thread_id);
         http_client(&url, &token).await
     };
-    let (ok, text) = call(&client, "ask_agent", serde_json::json!({"to": "dev-c", "text": "?"})).await;
+    let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "dev-c", "text": "?"})).await;
     assert!(!ok && text.contains("no turns left"), "{text}");
     let (ok, _) = call(&client, "send_message", serde_json::json!({"to": "dev-c", "text": "fyi"})).await;
     assert!(ok);
@@ -363,14 +363,14 @@ async fn registered_humans_are_humans_to_the_tools() {
         let (url, token) = http_server(&mcp, &current.thread_id);
         http_client(&url, &token).await
     };
-    let (ok, text) = call(&client, "ask_agent", serde_json::json!({"to": "alice", "text": "?"})).await;
+    let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "alice", "text": "?"})).await;
     assert!(!ok && text.contains("send_message reaches alice"), "{text}");
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "alice", "text": "stuck"})).await;
     assert!(ok, "a message to a human spends no turn: {text}");
     let out = sent.recv().await.unwrap();
     assert_eq!((out.to.as_str(), out.turn_budget, &out.owner), ("alice", 0, &current.owner));
 
-    // A registered human's message makes messages to agents free, and its owner goes on to threads started from it.
+    // A registered human's message makes messages to ants free, and its owner goes on to threads started from it.
     let mut current = Envelope::new(user("alice"), user("dev-a"), "go").with_owner(Some(user("alice")));
     current.turn_budget = 1;
     let _turn = mcp.begin(&current);
@@ -566,19 +566,19 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let client = http_client(&url, &token).await;
 
     let ask = |to: &str| serde_json::json!({"to": to, "text": "?"});
-    let (ok, text) = call(&client, "ask_agent", ask("dev-bb")).await;
+    let (ok, text) = call(&client, "ask_ant", ask("dev-bb")).await;
     assert!(!ok, "{text}");
     assert_eq!(
         text,
         "Not sent, as dev-bb is not in the roster: no daemon serves dev-bb now. Closest names in the roster: \
              dev-b, dev-c. send_message leaves a message waiting in the inbox of dev-bb instead."
     );
-    let (ok, text) = call(&client, "ask_agent", ask("zed")).await;
+    let (ok, text) = call(&client, "ask_ant", ask("zed")).await;
     assert!(!ok && text.contains("now. In the roster: dev-b, dev-c, ops."), "{text}");
-    let (ok, text) = call(&client, "ask_agent", ask("dev-c")).await;
+    let (ok, text) = call(&client, "ask_ant", ask("dev-c")).await;
     assert!(!ok && text.contains("dev-c is stale in the roster: the daemon on m1 last beat 10m"), "{text}");
     assert!(text.contains("Served ants sharing a capability of dev-c: dev-b."), "{text}");
-    let (ok, text) = call(&client, "ask_agent", ask("ops")).await;
+    let (ok, text) = call(&client, "ask_ant", ask("ops")).await;
     assert!(
         !ok && text.contains(
             "the harness of ops (copilot on m1) is signed out since 2026-01-01T00:00:00Z: messages to ops wait \
@@ -613,7 +613,7 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-x", "text": "hi"})).await;
     assert!(ok && !text.contains("Warning"), "{text}");
     assert_eq!(sent.recv().await.unwrap().to, user("dev-x"));
-    let (ok, text) = call(&client, "ask_agent", serde_json::json!({"to": "dev-x", "text": "?", "timeout": "1s"})).await;
+    let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "dev-x", "text": "?", "timeout": "1s"})).await;
     assert!(!ok && text.starts_with("no reply from dev-x within 1s"), "{text}");
     assert_eq!(sent.recv().await.unwrap().to, user("dev-x"));
 }
@@ -895,7 +895,7 @@ async fn a_bad_timeout_is_refused_before_anything_is_sent() {
     let client = http_client(&url, &token).await;
     for (timeout, why) in [("300", "without a unit"), ("0", "out of range"), ("31m", "at most 30m")] {
         for (tool, args) in [
-            ("ask_agent", serde_json::json!({"to": "dev-b", "text": "?", "timeout": timeout})),
+            ("ask_ant", serde_json::json!({"to": "dev-b", "text": "?", "timeout": timeout})),
             ("route", serde_json::json!({"capability": "rust", "text": "?", "timeout": timeout})),
         ] {
             let (ok, text) = call(&client, tool, args).await;
@@ -906,16 +906,14 @@ async fn a_bad_timeout_is_refused_before_anything_is_sent() {
 }
 
 #[tokio::test]
-async fn ask_agent_gets_the_reply_while_the_inbox_consumer_holds_it() {
+async fn ask_ant_gets_the_reply_while_the_inbox_consumer_holds_it() {
     let (mcp, mut sent) = start(&home("ask")).await;
     let current = from_human();
     let _turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let asking =
-        tokio::spawn(
-            async move { call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "6*7?"})).await },
-        );
+        tokio::spawn(async move { call(&client, "ask_ant", serde_json::json!({"to": "dev-b", "text": "6*7?"})).await });
     let ask = sent.recv().await.unwrap();
     assert_eq!((&ask.to, &ask.thread_id), (&user("dev-b"), &current.thread_id));
 
@@ -941,7 +939,7 @@ async fn the_consumer_can_deliver_the_reply_too() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let asking =
-        tokio::spawn(async move { call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "?"})).await });
+        tokio::spawn(async move { call(&client, "ask_ant", serde_json::json!({"to": "dev-b", "text": "?"})).await });
     let reply = sent.recv().await.unwrap().reply(user("dev-b"), "yes", Role::Ant).unwrap();
     assert!(mcp.claim(&reply).await.unwrap());
     assert!(asking.await.unwrap().1.ends_with("yes"));
@@ -956,7 +954,7 @@ async fn a_late_reply_waits_in_check_inbox_across_restarts() {
     let turn = mcp.begin(&current);
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
-    let (ok, text) = call(&client, "ask_agent", serde_json::json!({"to": "dev-b", "text": "?", "timeout": "1s"})).await;
+    let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "dev-b", "text": "?", "timeout": "1s"})).await;
     assert!(!ok && text.contains("check_inbox"), "{text}");
     let ask = sent.recv().await.unwrap();
     drop((turn, client, mcp));

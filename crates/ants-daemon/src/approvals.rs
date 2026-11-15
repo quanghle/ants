@@ -70,7 +70,7 @@ enum Stored {
     Unknown(String),
 }
 
-/// A decision on a waiting request from an agent of the ant's chain, and who sent it.
+/// A decision on a waiting request from an ant of the ant's chain, and who sent it.
 type FromChain = (UserId, ApprovalDecision);
 
 /// The requests waiting for a decision, by id, with where a chain decision on each goes.
@@ -98,7 +98,7 @@ pub struct NatsApprover {
 enum Heard {
     /// A message on the request's decision subject.
     Human(async_nats::Message),
-    /// A decision from an agent of the ant's chain.
+    /// A decision from an ant of the ant's chain.
     Chain(FromChain),
     /// The subscription to the decision subject ended.
     Closed,
@@ -346,7 +346,7 @@ impl NatsApprover {
         }
     }
 
-    /// The decision on `request` that `msg`, heard on the ant's inbox, carries from an agent of its chain, if any.
+    /// The decision on `request` that `msg`, heard on the ant's inbox, carries from an ant of its chain, if any.
     fn chain_decision(&self, request: &ApprovalRequest, msg: &async_nats::Message) -> Option<FromChain> {
         let envelope = serde_json::from_slice::<Envelope>(&msg.payload).ok().filter(|e| e.approval.is_some())?;
         if let Err(e) = envelope.check_subject(&msg.subject) {

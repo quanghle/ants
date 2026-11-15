@@ -119,7 +119,7 @@ pub(crate) fn reaction_line(change: &reactions::Change) -> String {
 }
 
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
-/// leader and the ants visited; an agent's approval decision in place of its text.
+/// leader and the ants visited; an ant's approval decision in place of its text.
 pub(crate) fn envelope_line(e: &Envelope, forged: &str) -> String {
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, e.from, e.to);
     if let Some(d) = &e.approval {

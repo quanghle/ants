@@ -159,7 +159,7 @@ pub const MAX_TITLE: usize = 120;
 pub const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(10);
 /// Max age of [`PRESENCE_BUCKET`]: a presence not renewed for this long is gone.
 pub const PRESENCE_TTL: Duration = Duration::from_secs(30);
-/// Turns a new thread may spend on agent-to-agent replies before it goes back to a human.
+/// Turns a new thread may spend on ant-to-ant replies before it goes back to a human.
 pub const DEFAULT_TURN_BUDGET: u32 = 8;
 /// The tool rules a thread a webhook or schedule starts is narrowed to when its config sets no `allow`
 /// ([`Envelope::allow`]): reading files in the workdir, searching, thinking, and the ants tools that talk to other ants,
@@ -173,7 +173,7 @@ pub const WEBHOOK_ALLOW: [&str; 12] = [
     "other:read_notes",
     "other:post_notes",
     "other:send_message",
-    "other:ask_agent",
+    "other:ask_ant",
     "other:route",
     "other:escalate",
     "other:react",

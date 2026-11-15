@@ -32,7 +32,7 @@ fn channel_posts_start_threads_and_are_checked_against_their_subject() {
 }
 
 #[test]
-fn every_agent_channel_post_spends_a_turn() {
+fn every_ant_channel_post_spends_a_turn() {
     let humans = Humans::default();
     let c: ChannelId = "ops".parse().unwrap();
     let ask = ChannelPost::new(c.clone(), UserId::human(), "@dev-a deploy?");
@@ -62,7 +62,7 @@ fn every_agent_channel_post_spends_a_turn() {
 }
 
 #[test]
-fn agents_woken_by_one_post_spend_the_thread_s_turns_together() {
+fn ants_woken_by_one_post_spend_the_thread_s_turns_together() {
     let humans = Humans::default();
     let c: ChannelId = "ops".parse().unwrap();
     let mut ask = ChannelPost::new(c.clone(), UserId::human(), "@dev-a @dev-b @dev-c review");
@@ -107,10 +107,7 @@ fn channel_entries_list_members_and_wake_those_mentioned() {
     assert_eq!(entry.woken(&untagged, &humans), [UserId::messenger()], "the default messenger triages");
     entry.messenger = Some(p("dev-c"));
     assert_eq!(entry.woken(&untagged, &humans), [p("dev-c")], "the assigned one, member or not");
-    assert!(
-        entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?"), &humans).is_empty(),
-        "agents never fan out"
-    );
+    assert!(entry.woken(&ChannelPost::new(c.clone(), p("dev-a"), "anyone?"), &humans).is_empty(), "ants never fan out");
     let tagged = ChannelPost::new(c, p("dev-a"), "@dev-b @dev-c @dev-a @human look");
     assert_eq!(entry.woken(&tagged, &humans), [p("dev-b")], "members only, not the author or the human");
     assert!(entry.woken(&ChannelPost::new("dev".parse().unwrap(), human, "@dev-a"), &humans).is_empty());
@@ -131,7 +128,7 @@ fn a_mention_notifies_human_members_and_wakes_ant_members() {
     assert_eq!(entry.woken(&mixed, &humans), [p("dev-b")]);
     assert_eq!(entry.notified(&mixed, &humans), std::slice::from_ref(&alice), "members only: bob is none");
     let human_only = ChannelPost::new(c.clone(), p("dev-a"), "@alice see");
-    assert!(entry.woken(&human_only, &humans).is_empty(), "no agent, nor the messenger");
+    assert!(entry.woken(&human_only, &humans).is_empty(), "no ant, nor the messenger");
     let by_alice = ChannelPost::new(c.clone(), alice.clone(), "@alice @dev-b note");
     assert!(entry.notified(&by_alice, &humans).is_empty(), "not its author");
     assert_eq!(entry.woken(&by_alice, &humans), [p("dev-b")]);
@@ -194,7 +191,7 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
     assert_eq!(entry.woken(&top, &humans), [UserId::messenger()], "alice's post goes to the messenger");
     assert!(entry.woken(&top, &Humans::default()).is_empty(), "unless alice is no human");
     let at_alice = ChannelPost::new(c.clone(), p("dev-a"), "@alice @dev-a look");
-    assert!(entry.woken(&at_alice, &humans).is_empty() && !at_alice.wakes_agents(&humans));
+    assert!(entry.woken(&at_alice, &humans).is_empty() && !at_alice.wakes_ants(&humans));
 
     let answer = top.reply(p("dev-a"), "@dev-a on it", &[], &humans).unwrap();
     assert_eq!((answer.owner.as_ref(), answer.turn_budget), (Some(&alice), DEFAULT_TURN_BUDGET - 1));
@@ -207,9 +204,9 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
     // A thread from before owners: its human author owns it, else the first human to answer on it.
     let old = ChannelPost::new(c.clone(), alice.clone(), "old");
     assert_eq!(old.reply(p("dev-a"), "a", &[], &humans).unwrap().owner, Some(alice.clone()));
-    let agents = ChannelPost::new(c, p("dev-a"), "@dev-b status?");
-    assert_eq!(agents.reply(p("dev-b"), "b", &[], &humans).unwrap().owner, None);
-    assert_eq!(agents.reply(bob.clone(), "b", &[], &humans).unwrap().owner, Some(bob));
+    let ant_post = ChannelPost::new(c, p("dev-a"), "@dev-b status?");
+    assert_eq!(ant_post.reply(p("dev-b"), "b", &[], &humans).unwrap().owner, None);
+    assert_eq!(ant_post.reply(bob.clone(), "b", &[], &humans).unwrap().owner, Some(bob));
     // Only a human owns a thread: an owner an ant names is ignored.
     let named = ChannelPost::new("ops".parse().unwrap(), p("dev-a"), "@dev-b go").with_owner(Some(p("dev-a")));
     assert_eq!(named.thread_owner(&humans), None);

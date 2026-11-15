@@ -242,24 +242,24 @@ Each session gets the `ants` MCP server over streamable HTTP (`127.0.0.1:<port>/
 | Tool | Description |
 |---|---|
 | `send_message(to, text, thread?)` | Send to an ant or human (`thread` omitted: current; `"new"`: fresh; else ID); warns when unserved or limited. |
-| `ask_agent(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
-| `check_inbox(all_threads?)` | Drain late `ask_agent` replies arriving after timeout (persisted in `<home>/mcp.json`). |
+| `ask_ant(to, text, timeout?)` | Ask an ant on the current thread and wait (`timeout` default `5m`, max `30m`; refuses humans, unserved ants, or limits outlasting `timeout`). |
+| `check_inbox(all_threads?)` | Drain late `ask_ant` replies arriving after timeout (persisted in `<home>/mcp.json`). |
 | `react(reaction, message_id?, remove?)` | Add or remove the ant's reaction on a message (default: active message); 0 turns, wakes nobody. |
 | `list_ants(capability?)` | List peer ants from `ants_roster` with capabilities, `agent`, activity and hold states. |
 | `route(capability, text, wait?, timeout?)` | Route to the best peer advertising `capability` (healthy > held, `live` > `stale`, `idle` > `working`, fewest messages); waits unless `wait: false`. |
 | `post_notes(text)` / `read_notes(thread?)` | Append to (1 turn) or read (up to 50 posts, 0 turns) passive thread notes; wakes nobody. |
 | `decide_approval(verdict)` | Answer an incoming chain approval notice (`allow_once`, `allow_always`, `reject`). |
-| `post_channel(channel, text)` | Start a channel thread as `creator` (member or channel messenger only; inherits turns minus 1 for agent messages). |
+| `post_channel(channel, text)` | Start a channel thread as `creator` (member or channel messenger only; inherits turns minus 1 for ant messages). |
 | `manage_channel(channel?, add?, remove?, messenger?, clear_messenger?)` | List owned channels, inspect one, or modify members/messenger via `ants channel serve`. |
 | `escalate(issue)` | Escalate the thread one level up its origin chain (or to the owner) with reason `asked`. |
 | `request_ant(...)` / `retire_ant(name)` | Template managers only: add or retire a templated worker ant via `ants signer` ([docs/config.md](docs/config.md#manager-ants)). |
 
-Human traffic costs 0 turns; agent-to-agent messages cost 1 turn (`ask_agent` requires 1 turn left for the reply), and self-messaging is refused. A 3 s `ants_roster` lookup runs before messaging ants, suggesting closest names or capability peers when the target is unserved.
+Human traffic costs 0 turns; ant-to-ant messages cost 1 turn (`ask_ant` requires 1 turn left for the reply), and self-messaging is refused. A 3 s `ants_roster` lookup runs before messaging ants, suggesting closest names or capability peers when the target is unserved.
 
 ## Messenger and thread notes
 
 - **Messenger:** unaddressed `ants ask` and unmentioned human/webhook channel posts route through `messenger`. Unless `messenger = false` or `[[ant]]` defines `messenger`, daemons run a built-in `messenger` (`~/.ants/messenger`, `~/.config/ants/auth/messenger.creds` if present) with automatic standby failover via `ants_roster` (~1 s on exit or 30 s TTL expiry), yielding immediately to an explicit `[[ant]] name = "messenger"`.
-- **Thread notes:** `ants.notes.<thread>.<from>` provides a passive shared board per thread (wakes nobody). Agent `post_notes` spends 1 turn via CAS from `min(message_budget, last_note_budget)`; exhausting turns escalates `notes` until a human runs `ants notes <thread> TEXT` (8 fresh turns) or escalation climbs a level.
+- **Thread notes:** `ants.notes.<thread>.<from>` provides a passive shared board per thread (wakes nobody). An ant's `post_notes` spends 1 turn via CAS from `min(message_budget, last_note_budget)`; exhausting turns escalates `notes` until a human runs `ants notes <thread> TEXT` (8 fresh turns) or escalation climbs a level.
 
 ## Threads, search, titles and marks
 
@@ -279,7 +279,7 @@ Human traffic costs 0 turns; agent-to-agent messages cost 1 turn (`ask_agent` re
 Channels (`ants.chan.<channel>.<from>`, metadata in `ants_channels`) group ants and humans:
 
 - **Mentions & triage:** `@ant` wakes mentioned ant members; `@human` sends an inbox mention notice to mentioned human members; human/webhook posts with no mentions wake the channel messenger (`--messenger`, default `messenger`) for a 1-turn `@mention` triage reply; unmentioned agent posts wake nobody.
-- **Ownership & budget:** human starters/posters or webhook `owner` set thread `owner`; ant starters set `creator` (propagated across spin-offs via `origin_thread` and `ants_links`). Agent posts share the thread's turn budget (minimum remaining across later posts), escalating `turn_budget` when exhausted.
+- **Ownership & budget:** human starters/posters or webhook `owner` set thread `owner`; ant starters set `creator` (propagated across spin-offs via `origin_thread` and `ants_links`). Ant posts share the thread's turn budget (minimum remaining across later posts), escalating `turn_budget` when exhausted.
 - **Channel owners:** `--owner ANT` lets that ant call `manage_channel` via `ants.chanadm.<channel>.<ant>` to `ants channel serve` (`ants auth channel-manager` creds), which validates ownership/roster and announces changes on `ants.chan.<channel>.channel-manager`.
 - **Delivery:** ants read `ants.chan.>` via durable consumer `chan-<ant>`, prepending up to 50 unseen thread posts (`<ant>.<thread>.seen` in `ants_sessions`).
 

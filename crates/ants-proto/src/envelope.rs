@@ -20,12 +20,12 @@ pub struct Envelope {
     pub from: UserId,
     pub to: UserId,
     pub text: String,
-    /// Agent-to-agent replies left on this thread. At zero the thread goes back to a human: its owner, else the
+    /// Ant-to-ant replies left on this thread. At zero the thread goes back to a human: its owner, else the
     /// default one.
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
-    /// The human who started the thread. Replies and the messages an agent sends on or from the thread keep it. A
+    /// The human who started the thread. Replies and the messages an ant sends on or from the thread keep it. A
     /// daemon takes it as a human or a webhook ([`Envelope::webhook`]) says; from an ant, only as stored state says:
     /// on a channel thread, the thread's posts ([`ThreadOrigin`]); on any other, the thread's record in
     /// [`OWNERS_BUCKET`] for the sender, or for an ant that passed the link to the thread on to it, else that of the
@@ -41,7 +41,7 @@ pub struct Envelope {
     pub creator: Option<UserId>,
     /// The thread this message's thread was spun off, as when an ant handling a message on it sends one on a new
     /// thread, set while the message has a creator or an owner: the link a daemon checks the `creator` and `owner` of
-    /// an ant's message against on a thread no channel post started. Replies and the messages an agent sends on or
+    /// an ant's message against on a thread no channel post started. Replies and the messages an ant sends on or
     /// from the thread keep it. A daemon takes a linked channel thread's creator and owner only when a top-level
     /// channel post kept in the stream started it and the sender, a member or the messenger of its channel, posted on
     /// it or was woken by a post on it, or such an ant passed the link on to it ([`LINKS_BUCKET`]); a linked message
@@ -53,7 +53,7 @@ pub struct Envelope {
     /// [`Envelope::follow_up`]: the daemon sets it with [`Envelope::with_escalation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<Box<Escalation>>,
-    /// An agent's decision on an approval request of `to`, for its daemon rather than its harness. The subject pins the
+    /// An ant's decision on an approval request of `to`, for its daemon rather than its harness. The subject pins the
     /// sender, and the requester takes it only from its own chain ([`Envelope::chain_decision`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<ApprovalDecision>>,
@@ -68,7 +68,7 @@ pub struct Envelope {
     /// from, says: the recipient's daemon allows a tool call unasked only when these and the ant's own `allow` both
     /// allow it, so they never widen what an ant may do and are taken from any sender. A daemon fills in
     /// [`WEBHOOK_ALLOW`] for a webhook's message without them and drops them from a human's. Replies and the messages
-    /// an agent sends on or from the thread keep them, so the narrowing follows a thread's spin-offs, until a human
+    /// an ant sends on or from the thread keep them, so the narrowing follows a thread's spin-offs, until a human
     /// messages the ant on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
@@ -218,7 +218,7 @@ impl Envelope {
     }
 
     /// Reply to the sender, whose role is `to`, keeping the thread's owner, creator, origin thread and tool rules.
-    /// Replies to a human are free; agent-to-agent replies spend one turn, and fail when none are left, so the caller
+    /// Replies to a human are free; ant-to-ant replies spend one turn, and fail when none are left, so the caller
     /// escalates to a human instead of looping.
     pub fn reply(&self, from: UserId, text: impl Into<String>, to: Role) -> Result<Self, Error> {
         let turn_budget = if to.is_human() {
@@ -263,8 +263,8 @@ impl Envelope {
 /// A post to the notes of a thread, on [`subject::notes`]: one shared board per thread, where the ants on it coordinate
 /// together; a post wakes nobody, and each of them can read the whole board.
 ///
-/// Posts spend the thread's turn budget like messages between agents do, and each carries what is left. The post that
-/// spends the last turn hands the thread to the human, and the notes take no more agent posts until the human posts
+/// Posts spend the thread's turn budget like messages between ants do, and each carries what is left. The post that
+/// spends the last turn hands the thread to the human, and the notes take no more ant posts until the human posts
 /// there with a fresh budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotesPost {
@@ -290,7 +290,7 @@ impl NotesPost {
         }
     }
 
-    /// An agent's post, spending one turn of what is left: the lower of `budget`, the turns of the message the agent
+    /// An ant's post, spending one turn of what is left: the lower of `budget`, the turns of the message the ant
     /// is handling, and those the notes' `last` post left. Fails when none are left.
     pub fn spend(
         thread_id: ThreadId,
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_replies_spend_the_budget_until_exhausted() {
+    fn ant_replies_spend_the_budget_until_exhausted() {
         let mut msg = Envelope::new(p("dev-a"), p("dev-b"), "plan?");
         msg.turn_budget = 1;
         let reply = msg.reply(p("dev-b"), "draft", Role::Ant).unwrap();
@@ -461,7 +461,7 @@ mod tests {
         let mut handoff = Envelope { to: p("dev-b"), from: p("dev-a"), ..handoff };
         handoff.turn_budget = 3;
         let back = handoff.reply(p("dev-b"), "fine", Role::Ant).unwrap();
-        assert_eq!((back.turn_budget, back.owner.clone()), (2, Some(alice.clone())), "an agent's reply spends one");
+        assert_eq!((back.turn_budget, back.owner.clone()), (2, Some(alice.clone())), "an ant's reply spends one");
         let notice = back.follow_up(p("dev-b"), alice.clone(), "over to you");
         assert_eq!((notice.thread_id.clone(), notice.owner.clone()), (ask.thread_id, Some(alice)));
         assert_eq!((notice.turn_budget, notice.in_reply_to), (DEFAULT_TURN_BUDGET, None));

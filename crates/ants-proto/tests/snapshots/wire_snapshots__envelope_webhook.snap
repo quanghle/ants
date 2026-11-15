@@ -20,7 +20,7 @@ expression: value
     "other:read_notes",
     "other:post_notes",
     "other:send_message",
-    "other:ask_agent",
+    "other:ask_ant",
     "other:route",
     "other:escalate",
     "other:react"

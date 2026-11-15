@@ -443,7 +443,7 @@ impl Permissions {
             format!("{}.*", subject::approvals(user)),
             subject::cancel_of(user),
             subject::queue(user),
-            // Live replies to its ask_agent calls, which the inbox consumer holds back while the asking prompt runs.
+            // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),
             subject::antreq_reply(user),

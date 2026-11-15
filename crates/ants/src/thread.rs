@@ -54,7 +54,7 @@ pub enum Kind {
     Note,
     /// A tool request an ant escalated to the humans.
     Approval,
-    /// A decision on a tool request: a human's, or an agent's of the requester's chain.
+    /// A decision on a tool request: a human's, or an ant's of the requester's chain.
     Decision,
     /// A message an ant gave up on.
     Dead,

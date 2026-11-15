@@ -4,7 +4,7 @@
 //! and deleted after it, so its credentials need not let it touch any other consumer; the CLI with the ant's
 //! credentials reads through a spare of it, and a human by message gets ([`Reading`]). Posts whose sender or thread
 //! disagrees with their subject are dropped. A post states the stream sequence of the last post it saw in the notes, so
-//! two agents spending the same turn cannot both succeed: the second one reads the notes again.
+//! two ants spending the same turn cannot both succeed: the second one reads the notes again.
 
 use std::ops::ControlFlow;
 

@@ -133,7 +133,7 @@ impl Search {
         if kinds.contains(&Kind::Approval) {
             add(format!("ants.approvals.{from}"));
         }
-        // A human's decision names no sender: with --from only a chain agent's, an inbox message, is one.
+        // A human's decision names no sender: with --from only a chain ant's, an inbox message, is one.
         if kinds.contains(&Kind::Decision) && self.from.is_none() {
             add(format!("ants.approvals.{to}"));
             add(format!("ants.approvals.{to}.*"));

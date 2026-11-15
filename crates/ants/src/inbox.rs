@@ -451,11 +451,11 @@ mod tests {
         let dev_a: UserId = "dev-a".parse().unwrap();
         let (_, human) = server.connect(&UserId::human()).await;
         bus::ensure_stream(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
         let asks =
             [Envelope::new(UserId::human(), dev_a.clone(), "a"), Envelope::new(UserId::human(), dev_a.clone(), "b")];
         for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three")] {
-            bus::publish(&agent, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
+            bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
         let forged = asks[0].reply(dev_a.clone(), "forged", Role::Human).unwrap();
         let subject = ants_proto::subject::inbox(&UserId::human(), &UserId::human());
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(texts(&read(&human, first).await), ["one"]);
 
         let last = asks[0].reply(dev_a.clone(), "four", Role::Human).unwrap();
-        bus::publish(&agent, &last).await.unwrap();
+        bus::publish(&ant_js, &last).await.unwrap();
         assert!(mark_read(&human, &UserId::human(), &last).await.unwrap(), "ask --wait marks its reply read");
         assert_eq!(texts(&read(&human, Select::default()).await), ["three"]);
         assert!(read(&human, Select::default()).await.is_empty());
@@ -487,7 +487,7 @@ mod tests {
         let (_, phone) = device(&server, &alice, "phone").await;
         let (b_client, b_js) = device(&server, &bob, "laptop").await;
         bus::ensure_stream(&laptop).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
         let asks = [Envelope::new(alice.clone(), dev_a.clone(), "a"), Envelope::new(alice.clone(), dev_a.clone(), "b")];
 
         // Both devices follow the inbox; each shows the reply, and the first to show it marks it read for both.
@@ -509,7 +509,7 @@ mod tests {
         };
         let send = async {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            bus::publish(&agent, &asks[0].reply(dev_a.clone(), "one", Role::Human).unwrap()).await.unwrap();
+            bus::publish(&ant_js, &asks[0].reply(dev_a.clone(), "one", Role::Human).unwrap()).await.unwrap();
         };
         let (on_laptop, on_phone, ()) = tokio::join!(follow(&laptop), follow(&phone), send);
         assert_eq!((on_laptop, on_phone), (vec!["one".to_owned()], vec!["one".to_owned()]));
@@ -517,7 +517,7 @@ mod tests {
 
         // Reading one thread on one device leaves the other unread on both.
         for (ask, text) in [(&asks[0], "two"), (&asks[1], "three"), (&asks[0], "four")] {
-            bus::publish(&agent, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
+            bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
         let thread_b = Select { thread: Some(asks[1].thread_id.clone()), ..Default::default() };
         assert_eq!(texts(&read_as(&laptop, &alice, thread_b).await), ["three"]);
@@ -530,7 +530,7 @@ mod tests {
         assert!(marker.read.is_empty(), "every read message is below the marker: {marker:?}");
 
         // Bob has an inbox and a marker of his own, and reaches neither of Alice's.
-        bus::publish(&agent, &Envelope::new(dev_a.clone(), bob.clone(), "for bob")).await.unwrap();
+        bus::publish(&ant_js, &Envelope::new(dev_a.clone(), bob.clone(), "for bob")).await.unwrap();
         assert_eq!(texts(&read_as(&b_js, &bob, Select::default()).await), ["for bob"]);
         assert!(Inbox::open(&b_js, &alice).await.is_err(), "bob reads alice's read marker");
         let b_kv = ensure_bucket(&b_js).await.unwrap();
@@ -546,7 +546,7 @@ mod tests {
         assert!(b_js.create_consumer_on_stream(consumer, STREAM).await.is_err(), "bob reads alice's inbox");
         let mut announced = b_client.subscribe(subject::stored_inbox(&alice)).await.unwrap();
         b_client.flush().await.unwrap();
-        bus::publish(&agent, &asks[0].reply(dev_a.clone(), "five", Role::Human).unwrap()).await.unwrap();
+        bus::publish(&ant_js, &asks[0].reply(dev_a.clone(), "five", Role::Human).unwrap()).await.unwrap();
         assert!(timeout(Duration::from_millis(500), announced.next()).await.is_err(), "bob hears alice's replies");
     }
 
@@ -556,10 +556,10 @@ mod tests {
         let dev_a: UserId = "dev-a".parse().unwrap();
         let (_, human) = server.connect(&UserId::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
-        let (_, agent) = server.connect(&dev_a).await;
+        let (_, ant_js) = server.connect(&dev_a).await;
         let ask = Envelope::new(UserId::human(), dev_a.clone(), "a");
         for text in ["one", "two", "three", "four"] {
-            bus::publish(&agent, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
+            bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
         // As the CLI before the marker kept it: "one" and "three" read, "two" handed back, "four" never fetched.
         let name = inbox_consumer(&UserId::human());

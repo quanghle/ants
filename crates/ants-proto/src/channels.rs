@@ -75,7 +75,7 @@ impl ChannelEntry {
 
     /// The ants `post` wakes: the members it @mentions, except its author and the `humans`; mentions of anyone
     /// else wake nobody. A post of a human or a webhook that mentions nobody wakes the channel's
-    /// [`ChannelEntry::messenger`] instead, to triage it ([`ChannelPost::to_triage`]); an agent's post that mentions
+    /// [`ChannelEntry::messenger`] instead, to triage it ([`ChannelPost::to_triage`]); an ant's post that mentions
     /// nobody wakes nobody. A post to another channel wakes nobody here.
     pub fn woken(&self, post: &ChannelPost, humans: &Humans) -> Vec<UserId> {
         if post.channel != self.channel {
@@ -95,7 +95,7 @@ impl ChannelEntry {
     }
 
     /// The `humans` `post` notifies ([`ChannelPost::mention_notice`]): the members among them it @mentions, except its
-    /// author. They are never woken: a mention of a human wakes no agent, and keeps the post from triage. A post to
+    /// author. They are never woken: a mention of a human wakes no ant, and keeps the post from triage. A post to
     /// another channel notifies nobody here.
     pub fn notified(&self, post: &ChannelPost, humans: &Humans) -> Vec<UserId> {
         if post.channel != self.channel {
@@ -150,7 +150,7 @@ impl ChannelEntry {
 /// A post to a channel, on [`subject::chan`]: like a Slack message, either a top-level post that starts a thread or a
 /// post on an existing thread.
 ///
-/// Posts spend the thread's turn budget like messages between agents do: every agent's post spends a turn of what the
+/// Posts spend the thread's turn budget like messages between ants do: every ant's post spends a turn of what the
 /// thread has left ([`ChannelPost::turns_left`]), and at zero the thread goes to its owner, the human whose post started
 /// it, else the default human; any human's post gives the thread a fresh budget. Each post carries the turns the thread
 /// has left after it, the thread's owner when known, and the ant that created the thread when an ant did.
@@ -167,7 +167,7 @@ pub struct ChannelPost {
     /// The users the post @mentions, in order ([`parse_mentions`] of the text, when built here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<UserId>,
-    /// Agent-to-agent turns left on the thread after this post.
+    /// Ant-to-ant turns left on the thread after this post.
     pub turn_budget: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<Uuid>,
@@ -184,7 +184,7 @@ pub struct ChannelPost {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webhook: bool,
     /// The tool rules the thread is narrowed to, as [`Envelope::allow`]: a webhook's post without them stands for
-    /// [`WEBHOOK_ALLOW`], an agent's reply keeps those of the post it answers ([`ChannelPost::reply`]) and a human's has
+    /// [`WEBHOOK_ALLOW`], an ant's reply keeps those of the post it answers ([`ChannelPost::reply`]) and a human's has
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
@@ -275,7 +275,7 @@ impl ChannelPost {
         carried.cloned().or_else(|| self.by_human(humans).then(|| self.from.clone()))
     }
 
-    /// The post as an agent's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
+    /// The post as an ant's, with what is left of `budget`, the turns its thread has left: one turn less, whoever it
     /// wakes, which fails when none are left.
     pub fn spend(self, budget: u32) -> Result<Self, Error> {
         let turn_budget = budget.checked_sub(1).ok_or_else(|| Error::BudgetExhausted(self.thread_id.clone()))?;
@@ -284,7 +284,7 @@ impl ChannelPost {
 
     /// The turns the thread has left for an answer to this post, given the posts stored on the thread `later` than it,
     /// in order: a post of one of the `humans` gives the thread a fresh budget, and any other leaves the lower of what
-    /// was left and what it carries. So the agents answering one post spend from the thread's turns together, not each
+    /// was left and what it carries. So the ants answering one post spend from the thread's turns together, not each
     /// from the post's.
     pub fn turns_left(&self, later: &[ChannelPost], humans: &Humans) -> u32 {
         later.iter().filter(|post| post.thread_id == self.thread_id).fold(self.turn_budget, |left, post| {
@@ -294,7 +294,7 @@ impl ChannelPost {
 
     /// A reply on the same channel and thread, after the posts stored on it `later` than this one, keeping the
     /// thread's owner ([`ChannelPost::thread_owner`]) and creator ([`ChannelPost::thread_creator`]); a human's reply on
-    /// a thread with no known owner takes it. A human's reply has a fresh budget and no tool rules; an agent's spends
+    /// a thread with no known owner takes it. A human's reply has a fresh budget and no tool rules; an ant's spends
     /// one of the [`ChannelPost::turns_left`] and keeps this post's tool rules.
     pub fn reply(
         &self,
@@ -351,8 +351,8 @@ impl ChannelPost {
         format!("mention.{}.{human}", self.id)
     }
 
-    /// Whether the post @mentions an ant other than its author and the `humans`: an agent it would wake.
-    pub fn wakes_agents(&self, humans: &Humans) -> bool {
+    /// Whether the post @mentions an ant other than its author and the `humans`: an ant it would wake.
+    pub fn wakes_ants(&self, humans: &Humans) -> bool {
         self.mentions.iter().any(|m| *m != self.from && !humans.contains(m))
     }
 

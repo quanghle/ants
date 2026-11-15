@@ -54,7 +54,7 @@ pub enum EscalationReason {
     DeadLetter,
     /// A tool request needs a decision ([`Escalation::request_id`]).
     Approval,
-    /// The agent asked for help with the escalate tool.
+    /// The ant asked for help with the escalate tool.
     Asked,
     /// A prompt does not fit the model's context window, even in a fresh session.
     ContextWindow,

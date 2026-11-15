@@ -2119,7 +2119,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let dev_b: UserId = "dev-b".parse().unwrap();
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
-    // Two ask_agent calls on t1 that gave up, remembered across a restart.
+    // Two ask_ant calls on t1 that gave up, remembered across a restart.
     let asks = [1, 2].map(|_| Envelope::on_thread(t1.clone(), bus.dev.clone(), dev_b.clone(), "?"));
     let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/daemon-t/late");
     let _ = std::fs::remove_dir_all(&home);
@@ -2141,7 +2141,7 @@ async fn the_next_prompt_mentions_late_replies_waiting_on_its_thread() {
     let check = async {
         let mut got = [next_reply(&mut replies).await, next_reply(&mut replies).await];
         got.sort_by_key(|(thread, _)| thread != &t1);
-        let note = "[ants] 2 late replies to ask_agent are waiting on this thread; call check_inbox to read them.";
+        let note = "[ants] 2 late replies to ask_ant are waiting on this thread; call check_inbox to read them.";
         assert_eq!(got, [(t1.clone(), format!("{note}\n\na")), (t2.clone(), "b".to_owned())]);
         ctrl_c.add_permits(1);
     };
@@ -2779,7 +2779,7 @@ async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns()
         let mut spent =
             answer.reply("dev-b".parse().unwrap(), "@dev-a over to you", &[], &bus.humans.humans()).unwrap();
         spent.turn_budget = 0;
-        assert_eq!(spent.owner.as_ref(), Some(&alice), "agents' posts keep the owner");
+        assert_eq!(spent.owner.as_ref(), Some(&alice), "ants' posts keep the owner");
         let seq = bus.post(&spent).await;
         let escalation = next_envelope(&mut alice_inbox).await;
         assert_eq!((&escalation.thread_id, escalation.in_reply_to), (&root.thread_id, Some(spent.id)));

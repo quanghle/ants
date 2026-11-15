@@ -188,7 +188,7 @@ async fn read(js: &jetstream::Context) -> Result<Humans> {
 }
 
 /// [`register`], reporting the outcome rather than failing: the CLI works without the entry, though daemons then take
-/// the human for an agent.
+/// the human for an ant.
 pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
     let id = &me.id;
     if !me.role.is_human() {
@@ -202,7 +202,7 @@ pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
         Ok(true) => tracing::info!("registered {id} in {HUMANS_BUCKET}"),
         Ok(false) => {}
         Err(e) => tracing::warn!(
-            "{id} is not in {HUMANS_BUCKET}, so daemons take its messages for an agent's; the next connection tries \
+            "{id} is not in {HUMANS_BUCKET}, so daemons take its messages for an ant's; the next connection tries \
              again: {e:#}"
         ),
     }

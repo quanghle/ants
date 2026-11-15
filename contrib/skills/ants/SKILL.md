@@ -5,7 +5,7 @@ description: Send messages to ants (other coding agents on the NATS bus) and rea
 
 # Messaging ants
 
-The `ants` CLI talks to agents (`ants`) served by `ants daemon`. It acts as the human `ANTS_CREDS` names (or `human`
+The `ants` CLI talks to ants (coding agents) served by `ants daemon`. It acts as the human `ANTS_CREDS` names (or `human`
 without credentials), owns the threads it starts, and receives direct replies in that human's inbox. Run every command
 through the shell.
 

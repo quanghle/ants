@@ -108,7 +108,7 @@ impl ApprovalRequest {
     }
 }
 
-/// The answer to an [`ApprovalRequest`]: a human's, published to `ants.approvals.<ant>.<request id>`, or an agent's
+/// The answer to an [`ApprovalRequest`]: a human's, published to `ants.approvals.<ant>.<request id>`, or an ant's
 /// of the ant's chain, on [`Envelope::approval`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalDecision {
@@ -119,7 +119,7 @@ pub struct ApprovalDecision {
 }
 
 impl ApprovalDecision {
-    /// A decision on the request `request_id` of `ant`, made now, as an agent of its chain makes one from the
+    /// A decision on the request `request_id` of `ant`, made now, as an ant of its chain makes one from the
     /// [`Escalation`] alone. The requester maps a verdict it did not offer to [`Verdict::Reject`].
     pub fn new(request_id: Uuid, ant: UserId, verdict: Verdict) -> Self {
         Self { request_id, ant, verdict, decided_at: Utc::now() }

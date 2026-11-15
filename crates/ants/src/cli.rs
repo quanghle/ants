@@ -140,7 +140,7 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Show the notes of a thread, or post TEXT to them as the CLI's human, which gives them a fresh turn budget.
-    /// Thread notes are a passive board, one per thread: a post wakes nobody, and agents read the notes with
+    /// Thread notes are a passive board, one per thread: a post wakes nobody, and ants read the notes with
     /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.
     Notes {
         /// The thread: its id, a unique start of one, or `last`.
@@ -227,7 +227,7 @@ pub(crate) enum Command {
     /// their settings. Needs a human's credentials. Every other command run with them does the same on connecting.
     Init,
     /// Tool requests ants escalate to humans: list the pending ones, show one, approve or reject it. Every human
-    /// sees every request; the first decision wins, a human's or that of an agent of the ant's escalation chain.
+    /// sees every request; the first decision wins, a human's or that of an ant of the ant's escalation chain.
     #[command(subcommand)]
     Tools(ToolsCommand),
     /// Messages ants gave up on: inspect, replay or drop them.
