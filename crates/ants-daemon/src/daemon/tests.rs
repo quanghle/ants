@@ -396,7 +396,9 @@ async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_w
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
-    let prompts = log.locked().prompts.clone();
+    // The two threads are prompted in either order.
+    let mut prompts = log.locked().prompts.clone();
+    prompts.sort_by_key(|p| p == "tokens 7");
     let tldr = format!("[ants] A human asks for a TL;DR of thread {summarised} from the entries below");
     assert!(prompts[0].starts_with(&tldr), "{prompts:?}");
     assert!(prompts[0].contains("use no tools and message no one") && prompts[0].ends_with("\n\ntokens 7"));
@@ -2428,7 +2430,7 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     bus.send(&titled, "hold on").await;
 
     let suggest = async |thread: &ThreadId, title: &str| {
-        let servers = bus.mcp.as_ref().unwrap().servers()(thread, true);
+        let servers = bus.mcp.as_ref().unwrap().servers()(thread, std::path::Path::new("/"), true);
         let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
         let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
@@ -2640,7 +2642,9 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     let handle = |id| to.attachment_handle(id);
     let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
     let log_file = attach(&bus, handle, "build.log", "text/plain", b"error: E0308").await;
-    let gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    // Made long ago, so the prompt does not wait for its chunks to come from a leaf's outbox.
+    let mut gone = crate::files::reference("gone.png", "image/png", b"never stored").unwrap();
+    gone.id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_700_000_000, 0));
     message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
     bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
 

@@ -365,6 +365,11 @@ pub fn read_marker(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::READ_BUCKET)
 }
 
+/// The [`super::ChannelReadMarkers`] of a human in [`super::READ_BUCKET`]: the subject only that human puts them on.
+pub fn channel_reads(human: &UserId) -> String {
+    format!("$KV.{}.{}", super::READ_BUCKET, super::channel_reads_key(human))
+}
+
 /// The [`super::NotifyPrefs`] of a human in [`super::NOTIFY_BUCKET`]: the subject only that human puts them on.
 pub fn notify_prefs(human: &UserId) -> String {
     format!("$KV.{}.{human}", super::NOTIFY_BUCKET)

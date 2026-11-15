@@ -27,6 +27,7 @@ mod inbox;
 mod keys;
 mod leaf;
 mod live;
+mod login;
 mod manager;
 mod members;
 mod notify;
@@ -151,19 +152,10 @@ async fn run() -> Result<()> {
         Command::Auth(command) => cmd::auth::run(command, &conn).await,
         Command::Add(args) => add::add(*args, &cli.nats, domain).await,
         Command::Retire(args) => {
-            let connected = match nats() {
-                Ok(nats) => nats.connect("ants-retire").await,
-                Err(e) => Err(e),
-            };
-            let roster = match connected {
-                Ok((_, js)) => Some(js),
-                Err(e) => {
-                    println!("cannot read the roster ({e:#}): not waiting for {} to stop", args.name);
-                    None
-                }
-            };
+            let roster = retire_roster(&conn, &args.name).await;
             retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
         }
+        Command::Login(args) => login::run(args).await,
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
         Command::Signer { config, approval_timeout, dir, upgrade } => {
@@ -178,6 +170,21 @@ async fn run() -> Result<()> {
             hook::Hook { event: on, command, timeout, concurrency }.run(&js, &nats.me.id).await
         }
         Command::Webhook(command) => cmd::webhook::run(command, &conn).await,
+    }
+}
+
+/// The roster `ants retire` waits on for `name` to stop, None (said) when it cannot be read.
+async fn retire_roster(conn: &Connection<'_>, name: &impl std::fmt::Display) -> Option<async_nats::jetstream::Context> {
+    let connected = match conn.nats() {
+        Ok(nats) => nats.connect("ants-retire").await,
+        Err(e) => Err(e),
+    };
+    match connected {
+        Ok((_, js)) => Some(js),
+        Err(e) => {
+            println!("cannot read the roster ({e:#}): not waiting for {name} to stop");
+            None
+        }
     }
 }
 

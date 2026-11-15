@@ -12,9 +12,9 @@ use crate::{
 };
 #[cfg(doc)]
 use crate::{
-    AntRequest, AttachmentHandle, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest, ReactionsRequest,
-    RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key, link_outbox,
-    message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
+    AntRequest, AttachmentHandle, ChannelReadMarkers, EnrollRequest, HeldNotices, NotifyPrefs, QueueRequest,
+    ReactionsRequest, RenewRequest, StatusUpdate, ThreadSummary, channel_manager_serving_key, daily_spend_key,
+    link_outbox, message_mark_key, owner_outbox, storage_warning_key, thread_spend_key, unserved_key,
 };
 
 /// JetStream stream backing a KV bucket.
@@ -37,16 +37,19 @@ fn flow_control_subjects(domain: &str, stream: &str) -> [String; 2] {
     [format!("$JS.FC.{stream}.>"), format!("$JS.FC.{domain}.*.{stream}.>")]
 }
 
-/// What a human's credentials need for its inbox ([`READ_BUCKET`]): creating the bucket and reading and writing its own
-/// [`ReadMarker`] only, by key, so no human reads or moves another's.
-fn read_marker_rights(human: &UserId) -> [String; 4] {
+/// What a human's credentials need for what it read ([`READ_BUCKET`]): creating the bucket and reading and writing its
+/// own [`ReadMarker`] and [`ChannelReadMarkers`] only, by key, so no human reads or moves another's.
+fn read_marker_rights(human: &UserId) -> [String; 6] {
     let read = kv_stream(READ_BUCKET);
     let marker = subject::read_marker(human);
+    let channels = subject::channel_reads(human);
     [
         format!("$JS.API.STREAM.INFO.{read}"),
         format!("$JS.API.STREAM.CREATE.{read}"),
         format!("$JS.API.DIRECT.GET.{read}.{marker}"),
         marker,
+        format!("$JS.API.DIRECT.GET.{read}.{channels}"),
+        channels,
     ]
 }
 
@@ -126,10 +129,11 @@ fn human_reaction_rights(human: &UserId) -> Vec<String> {
 /// What a user's credentials need for attachments ([`FILES_BUCKET`]): writing the chunks of those of the messages it
 /// sends only, with itself as the sender of their handles ([`AttachmentHandle`]), one subject for every kind of message
 /// to keep leaf uplink credentials small, a human's with any, as it sends under any sender to replay dead letters as
-/// they were; each also in its outbox form ([`AttachmentHandle::outbox_chunk_subject`]). A human reads every chunk by direct gets and may create the store and
-/// look it up. An ant reads by direct gets naming their subject, as [`subject::readable_by`] says it reads the messages
-/// carrying them, the chunks of the attachments sent to it and by it, and of every notes and channel post: no stream
-/// info, which lists every subject stored, and no consumer, so none of the attachments between other users.
+/// they were; each also in its outbox form ([`AttachmentHandle::outbox_chunk_subject`]). A human reads every chunk by
+/// direct gets and may create the store, look it up and update it, to source leaf outboxes into it. An ant reads by
+/// direct gets naming their subject, as [`subject::readable_by`] says it reads the messages carrying them, the chunks
+/// of the attachments sent to it and by it, and of every notes and channel post: no stream info, which lists every
+/// subject stored, and no consumer, so none of the attachments between other users.
 fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
     let chunks = format!("$O.{FILES_BUCKET}.C");
     let get = format!("$JS.API.DIRECT.GET.{FILES_STREAM}");
@@ -139,6 +143,7 @@ fn attachment_rights(user: &UserId, role: Role) -> Vec<String> {
             "ants.out.files.>".to_owned(),
             format!("$JS.API.STREAM.INFO.{FILES_STREAM}"),
             format!("$JS.API.STREAM.CREATE.{FILES_STREAM}"),
+            format!("$JS.API.STREAM.UPDATE.{FILES_STREAM}"),
             format!("{get}.{chunks}.>"),
         ];
     }
@@ -233,9 +238,9 @@ impl Permissions {
     /// attempts, channels, humans, chains, links and owners buckets, writes the channels, humans and owners buckets
     /// (the owners also in its outbox form, [`owner_outbox`]), reads the version the channel manager runs
     /// ([`channel_manager_serving_key`]), reads the stream's messages by sequence, one at a time or in batches of
-    /// direct gets, and removes dead letters by sequence; its own read marker in [`READ_BUCKET`], and no other, says which replies it has read on any
-    /// of its devices ([`read_marker_rights`]), and its own keys in [`PRESENCE_BUCKET`] where its devices read,
-    /// reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
+    /// direct gets, and removes dead letters by sequence; its own read markers in [`READ_BUCKET`], and no other's,
+    /// say which replies and channel posts it has read on any of its devices ([`read_marker_rights`]), and its own
+    /// keys in [`PRESENCE_BUCKET`] where its devices read, reading every human's there ([`presence_rights`]), and its own [`NotifyPrefs`] in [`NOTIFY_BUCKET`] what it holds back of its notifications,
     /// and its own [`HeldNotices`] there what was held back ([`notify_prefs_rights`]), and it reads every reaction ([`REACTIONS_BUCKET`]), of which it
     /// puts and removes only its own ([`human_reaction_rights`]), while an ant only asks for those ([`subject::reactions`],
     /// [`subject::react`]); it sets every thread's title, TL;DR and done state and its own pinned and
@@ -762,8 +767,8 @@ impl Permissions {
     /// What `ants enroll` and `ants signer` allow themselves on the machine holding the account key: hearing every
     /// enrollment, renewal and ant request ([`AntRequest`]) and answering it, asking the humans about an ant request
     /// as an approval request of its manager and reading their decision, and admitting an ant new to a leaf node into
-    /// the hub's stream and links bucket from the leaf's outbox, as `ants leaf outbox` does, with the replies of its
-    /// JetStream requests under [`ENROLL_INBOX`].
+    /// the hub's stream, links bucket and attachments' store from the leaf's outbox, as `ants leaf outbox` does, with
+    /// the replies of its JetStream requests under [`ENROLL_INBOX`].
     pub fn for_enroll_approver() -> Self {
         let links = kv_stream(LINKS_BUCKET);
         Self {
@@ -780,6 +785,8 @@ impl Permissions {
                 format!("$JS.API.STREAM.UPDATE.{STREAM}"),
                 format!("$JS.API.STREAM.INFO.{links}"),
                 format!("$JS.API.STREAM.UPDATE.{links}"),
+                format!("$JS.API.STREAM.INFO.{FILES_STREAM}"),
+                format!("$JS.API.STREAM.UPDATE.{FILES_STREAM}"),
             ],
             subscribe: vec![
                 subject::ALL_ENROLL_REQUESTS.to_owned(),

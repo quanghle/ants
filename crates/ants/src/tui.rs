@@ -1,6 +1,7 @@
 //! `ants chat`, which bare `ants` runs on a terminal: the full-screen chat UI. A nav of home (what waits for the
 //! human), work (the threads by state), the human's channels, the ants and the people, beside the view selected in it,
-//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`], [`people::Io`]).
+//! kept live from what the CLI's own connection reads and hears ([`live::Feed`], [`reads::Reads`], [`people::Io`]),
+//! and searched ([`search::Searches`]).
 //!
 //! What it shows and how keys change it is the [`model::Model`]; each view and component has a module of its own,
 //! which draws it and takes its keys.
@@ -10,10 +11,12 @@ mod channel;
 mod dm;
 mod frame;
 mod home;
+mod markdown;
 mod model;
 mod nav;
 mod people;
 mod reads;
+mod search;
 mod thread;
 mod timeline;
 mod work;
@@ -33,6 +36,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use self::acts::Acts;
 use self::model::{Action, Key, Level, Model};
 use self::reads::Reads;
+use self::search::Searches;
 use crate::live::{self, Feed, Screen};
 use crate::{presence, progress, thread_meta};
 
@@ -125,15 +129,19 @@ pub async fn run(nats: &crate::Nats<'_>, since: Duration) -> Result<()> {
     nats.prepare(&js).await;
     let (feed, state) = live::start(nats, client, js.clone(), since).await?;
     let feed = feed.with_timelines();
-    let reads = Reads::new(js.clone(), me.clone());
+    let reads = Reads::new(js.clone(), me.clone(), crate::channel::reads::allowed(nats));
     let acts = Acts::new(js.clone(), nats.domain.cloned(), me.clone(), thread_meta::open(nats, &js).await);
     let may_read = nats.rights.may_publish(&presence::online_right());
     let people = people::Io::new(js.clone(), nats.domain.cloned(), nats.me.clone(), may_read);
+    let searches = Searches::new(js.clone());
     let server = host(nats.url).to_owned();
     // The UI shows the replies and the tool requests as they come, so notifications spare this device theirs meanwhile.
     let shown = async {
         let mut screen = Screen::open()?;
-        Box::pin(Chat { feed, reads, acts, people, model: Model::new(state, server) }.run(&mut screen.terminal)).await
+        Box::pin(
+            Chat { feed, reads, acts, people, searches, model: Model::new(state, server) }.run(&mut screen.terminal),
+        )
+        .await
     };
     let (domain, device) = (nats.domain, nats.device);
     let approvals = presence::while_following(&js, domain, me, device, Following::Approvals, shown);
@@ -171,6 +179,7 @@ struct Chat {
     reads: Reads,
     acts: Acts,
     people: people::Io,
+    searches: Searches,
     model: Model,
 }
 
@@ -223,8 +232,13 @@ impl Chat {
                     self.model.people(event, Utc::now());
                     Vec::new()
                 }
+                found = self.searches.next() => {
+                    dirty = true;
+                    self.model.found(found);
+                    Vec::new()
+                }
             };
-            for action in actions {
+            for action in actions.into_iter().chain(self.model.mark_shown()) {
                 if self.act(action).is_break() {
                     return Ok(());
                 }
@@ -270,8 +284,10 @@ impl Chat {
                 self.model.notify(line.0, line.1, Utc::now());
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
+            Action::MarkChannel(channel, marks) => self.reads.mark_channel(channel, marks),
             Action::Reactions(messages) => self.reads.watch_reactions(messages),
             Action::Send(draft) => self.people.send(draft),
+            Action::Search(search) => self.searches.start(search),
             Action::Refresh => {
                 self.feed.refresh();
                 self.reads.refresh();

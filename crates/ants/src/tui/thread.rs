@@ -6,13 +6,14 @@
 //! those stored on their timelines ([`timeline::Calls::stored`]), each placed before the first message stored after
 //! it started. Messages between a human and an ant, and posts, are the top level; a message from one ant to another
 //! nests a level under the sender, and the receiver's calls and reply nest under that message, unless the receiver
-//! nests the sender already (a reply).
+//! nests the sender already (a reply). Messages, posts and notes render as markdown. Opened from a search, the view
+//! selects the message found and holds it at its top until moved.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use ants_proto::{ThreadId, UserId};
+use ants_proto::{ThreadId, UserId, Uuid};
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -24,7 +25,7 @@ use super::acts::{About, Change};
 use super::frame::{self, ago};
 use super::model::{Action, Data, Key, To};
 use super::timeline::Call;
-use super::work;
+use super::{markdown, work};
 use crate::live::History;
 use crate::thread::{Entry, Kind};
 
@@ -46,11 +47,24 @@ pub struct Page {
     top: Cell<usize>,
     /// What the side panel shows of the thread besides its messages, once read.
     pub about: Option<About>,
+    /// The message the thread was opened at, selected and held at the top of the view until a key moves it.
+    at: Option<Uuid>,
 }
 
 impl Page {
     pub fn new(thread: ThreadId) -> Self {
-        Self { history: History::new(thread), selected: None, top: Cell::new(0), about: None }
+        Self { history: History::new(thread), selected: None, top: Cell::new(0), about: None, at: None }
+    }
+
+    /// The thread, shown at `message` once read.
+    pub fn at(thread: ThreadId, message: Uuid) -> Self {
+        Self { at: Some(message), ..Self::new(thread) }
+    }
+
+    /// The sequence of the message the thread was opened at, once read.
+    fn held(&self) -> Option<u64> {
+        let at = self.at?;
+        self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
     pub const KEYS: &str = "↑↓ select · y copy · p pin · m mute · e archive · d done · End latest · Esc back";
@@ -63,7 +77,7 @@ impl Page {
     /// The selected message, else the latest.
     fn selection(&self) -> Option<&Entry> {
         let mut messages = self.messages();
-        match self.selected {
+        match self.selected.or_else(|| self.held()) {
             Some(seq) => messages.find(|e| e.seq == seq),
             None => messages.last(),
         }
@@ -104,6 +118,15 @@ impl Page {
         let (thread, last) = (self.history.thread.clone(), self.last_reopening(data));
         let change = |change| Some(To::Do(Action::Change(thread, change, last)));
         let flags = self.flags(data, now);
+        if let Some(held) = self.held() {
+            self.selected.get_or_insert(held);
+        }
+        if matches!(
+            key,
+            Key::Up | Key::Down | Key::Char('k' | 'j') | Key::PageUp | Key::PageDown | Key::Home | Key::End
+        ) {
+            self.at = None;
+        }
         match key {
             Key::Up | Key::Char('k') => self.step(-1),
             Key::Down | Key::Char('j') => self.step(1),
@@ -149,7 +172,8 @@ impl Page {
         let shown = Shown { data, now, busy: data.live.progress.contains_key(thread), width };
         let calls = data.calls.get(thread).map_or(&[][..], |c| c.calls());
         let rows = rows(&self.history.entries, calls, |u| data.is_human(u));
-        let selected = self.selection().filter(|_| self.selected.is_some()).map(|e| e.seq);
+        let held = self.held();
+        let selected = self.selected.or(held).and_then(|_| self.selection()).map(|e| e.seq);
         let mut range = None;
         for (at, (row, (first, rest))) in rows.iter().zip(glyphs(&rows)).enumerate() {
             if at > 0 && row.depth == 0 {
@@ -170,6 +194,7 @@ impl Page {
         let bottom = lines.len().saturating_sub(height);
         let top = match range {
             None => bottom,
+            Some((start, _)) if held.is_some() => start.min(bottom),
             Some((start, end)) => {
                 let top = self.top.get().min(bottom);
                 if start < top {
@@ -358,13 +383,21 @@ impl Shown<'_> {
             Item::Message(e) if row.depth == 0 => self.block(lines, e, entries),
             Item::Message(e) => {
                 let (head, style) = nested(e);
-                let text = body(e, entries);
-                let mut text = text.lines();
-                let line = format!("{first}{} {head}  {}", hm(e.stored_at), text.next().unwrap_or(""));
-                push(lines, &line, rest, style, self.width);
-                for more in text {
-                    push(lines, &format!("{rest}      {more}"), rest, style, self.width);
+                let head = format!("{first}{} {head}", hm(e.stored_at));
+                let under = format!("{rest}      ");
+                let mut text = text(e, entries, self.width.saturating_sub(under.chars().count()));
+                let room = self.width.saturating_sub(head.chars().count() + 2);
+                let mut first = Line::styled(head, style);
+                // A text of one line short enough goes on the line of the heading.
+                if let [line] = &mut text[..]
+                    && line.width() <= room
+                {
+                    first.spans.push(Span::raw("  "));
+                    first.spans.append(&mut line.spans);
+                    text.clear();
                 }
+                lines.push(first);
+                lines.extend(text.into_iter().map(|line| indented(&under, line).patch_style(style)));
             }
         }
     }
@@ -405,9 +438,7 @@ impl Shown<'_> {
             head.push(Span::styled("  forged", Style::new().fg(Color::Red).bold()));
         }
         lines.push(Line::from(head));
-        for line in body(e, entries).lines() {
-            push(lines, &format!("  {line}"), "  ", Style::new(), self.width);
-        }
+        lines.extend(text(e, entries, self.width.saturating_sub(2)).into_iter().map(|line| indented("  ", line)));
         let reactions = crate::inbox::render_reactions(&e.reactions, "  ");
         for line in reactions.lines() {
             push(lines, line, "  ", frame::dim(), self.width);
@@ -473,6 +504,30 @@ fn body(e: &Entry, entries: &[Entry]) -> String {
         text.push_str(&crate::thread::answer_line(by, answered));
     }
     text
+}
+
+/// A message's text in lines at most `width` wide: as markdown for a message, post or note, else as it is.
+fn text(e: &Entry, entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+    let text = body(e, entries);
+    match e.kind {
+        Kind::Message | Kind::Escalation | Kind::Mention | Kind::Post | Kind::Note if e.question.is_none() => {
+            markdown::render(&text, width)
+        }
+        _ => {
+            let mut lines = Vec::new();
+            for line in text.lines() {
+                push(&mut lines, line, "", Style::new(), width);
+            }
+            lines
+        }
+    }
+}
+
+/// `line` begun with `indent`, its style kept.
+fn indented(indent: &str, line: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw(indent.to_owned())];
+    spans.extend(line.spans);
+    Line::from(spans).style(line.style)
 }
 
 /// Where the thread came from, as `first`, its first message read, tells: a channel post, a webhook or schedule
@@ -632,6 +687,51 @@ mod tests {
         }
         assert!(shown.contains("FILES") && shown.contains("src/c3.rs"), "{shown}");
         assert!(!screen(&page, &m.data, 80, at(47)).contains("STATE"), "no panel on a narrow view");
+    }
+
+    #[test]
+    fn opened_from_a_search_the_message_found_is_selected_at_the_top_until_moved() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let entries: Vec<Entry> = (1..=30)
+            .map(|n| {
+                let (from, to) = if n % 2 == 0 { ("dev-a", "alice") } else { ("alice", "dev-a") };
+                message(n, &thread, from, to, &format!("line {n}"))
+            })
+            .collect();
+        let mut page = Page::at(thread.clone(), entries[4].id.unwrap());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let rows = |page: &Page| screen(page, &m.data, 80, at(40)).lines().map(str::to_owned).collect::<Vec<_>>();
+        let shown = rows(&page);
+        assert!(shown[1].starts_with("│alice → dev-a"), "{shown:#?}");
+        assert_eq!(shown[2].trim_end_matches('│').trim_end(), "│  line 5");
+        assert_eq!(page.key(Key::Char('y'), &m.data, at(40)), Some(To::Do(Action::Copy("line 5".to_owned()))));
+        assert_eq!(rows(&page)[2], shown[2], "held until moved");
+        page.key(Key::Up, &m.data, at(40));
+        assert_eq!(rows(&page)[2].trim_end_matches('│').trim_end(), "│  line 4", "moving starts from it");
+        page.key(Key::End, &m.data, at(40));
+        assert!(rows(&page)[22].contains("line 30"), "the latest at the bottom");
+    }
+
+    #[test]
+    fn messages_render_as_markdown_at_the_top_level_and_nested() {
+        let thread = ThreadId::generate();
+        let m = model();
+        let mut entries = vec![
+            message(1, &thread, "alice", "dev-a", "**done**:\n\n- one\n- two"),
+            message(2, &thread, "dev-a", "dev-b", "check `retry.rs`"),
+            message(3, &thread, "dev-b", "dev-a", "# Found\n\nin *two* places"),
+        ];
+        entries[2].kind = Kind::Note;
+        let mut page = Page::new(thread.clone());
+        page.history.loaded(&thread, Ok(entries)).unwrap();
+        let shown = screen(&page, &m.data, 80, at(40));
+        let shown: Vec<&str> = shown.lines().map(|l| l.trim_end_matches('│').trim_end()).collect();
+        let from = shown.iter().position(|l| l.contains("alice → dev-a")).unwrap();
+        assert_eq!(shown[from + 1..from + 5], ["│  done:", "│", "│  • one", "│  • two"], "{shown:#?}");
+        assert!(shown[from + 5].ends_with("dev-a → dev-b  check retry.rs"), "one line on its heading");
+        assert!(shown[from + 6].ends_with("dev-b → notes"), "{shown:#?}");
+        assert_eq!(shown[from + 7..from + 10], ["│            Found", "│", "│            in two places"]);
     }
 
     #[test]

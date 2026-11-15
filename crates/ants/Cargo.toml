@@ -34,6 +34,8 @@ tokio = { workspace = true, features = ["rt", "macros", "signal", "time", "net",
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 scrypt = { version = "0.12.0", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
+unicode-width = "0.2.3"
 
 [dev-dependencies]
 agent-client-protocol = { workspace = true, features = ["stdio"] }
