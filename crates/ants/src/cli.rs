@@ -324,13 +324,15 @@ pub(crate) enum Command {
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
     /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
     /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
-    /// messages each ant reads.
+    /// messages each ant reads, and the renewal requests (`ants renew`) of devices registered with `ants login`,
+    /// renewing them while their grant holds.
     Signer {
         /// Config file whose [[ant_template]] tables are the policy; the rest of it is ignored
         /// (default: ~/.ants/config.toml).
         #[arg(long, env = "ANTS_CONFIG")]
         config: Option<PathBuf>,
-        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting.
+        /// How long a human has to decide on a request outside the policy, at most until the manager stops waiting,
+        /// or on a registration (`ants login`) outside the [registration] table, at most until its request expires.
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
         approval_timeout: Duration,
         /// Team directory holding the signing keys (default: ~/.config/ants/auth).
@@ -346,7 +348,8 @@ pub(crate) enum Command {
     /// credentials. A refusal, an expiry or Ctrl-C leaves no key and no file.
     Login(login::LoginArgs),
     /// Renew credentials over NATS: generate a new user NKey here, ask for the credentials of the file renewed for it,
-    /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key. Then
+    /// signed with their key, and wait for `ants enroll renew NAME` on the machine holding the account key (or, for
+    /// a device registered with `ants login`, for `ants signer` there, which may refuse). Then
     /// replace the file and reload the daemon serving an ant with it, or restart the leaf node whose uplink it is.
     /// Expired credentials are renewed with `ants auth` instead.
     Renew(renew::RenewArgs),

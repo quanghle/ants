@@ -126,6 +126,9 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if user.as_str() == REVOKED_DEVICES {
         bail!("{user} is reserved for the revocation records of {DEVICES_BUCKET}; choose another name");
     }
+    if *user == UserId::signer() {
+        bail!("{user} is reserved for the approval requests of `ants signer`; choose another name");
+    }
     Ok(())
 }
 
@@ -581,6 +584,29 @@ pub struct Renewed {
 /// for a new key revoked or already issued to other credentials. Proving that the holder has the seed of `current` is
 /// the caller's part.
 pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKey>) -> Result<Renewed> {
+    renew_as(dir, current, public_key, xkey, None)
+}
+
+/// [`renew`] the credentials of a device a registration granted, as `ants signer` does once their grant still holds:
+/// recorded as now bound to `github` (its current login) and granted by `grant`.
+pub fn renew_registered(
+    dir: &Path,
+    current: &str,
+    public_key: &str,
+    xkey: Option<&DeviceKey>,
+    github: GithubAccount,
+    grant: Grant,
+) -> Result<Renewed> {
+    renew_as(dir, current, public_key, xkey, Some((github, grant)))
+}
+
+fn renew_as(
+    dir: &Path,
+    current: &str,
+    public_key: &str,
+    xkey: Option<&DeviceKey>,
+    registered: Option<(GithubAccount, Grant)>,
+) -> Result<Renewed> {
     check_user_key(public_key)?;
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let (claims, body) = verified_body(current)?;
@@ -670,7 +696,7 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
         bail!("renewing {} would change what they are: {:?} into {:?}", finding.holder(), finding.kind, renewed.kind);
     }
     let previous = issued.iter().rev().find(|i| i.key == claims.sub);
-    let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous);
+    let mut record = inherited(Issued::new(public_key, name, kind, exp)?, previous, registered);
     record.renewed_from = Some(claims.sub.clone());
     if let Some(device) = finding.device {
         record = record.for_device(device, previous.and_then(|p| p.label.clone()), xkey);
@@ -684,11 +710,16 @@ pub fn renew(dir: &Path, current: &str, public_key: &str, xkey: Option<&DeviceKe
 }
 
 /// `record` of renewed credentials, with what the registry recorded of the `previous` ones beyond their key: the
-/// template and manager of an added ant, and the GitHub binding and grant of a registered device.
-fn inherited(record: Issued, previous: Option<&Issued>) -> Issued {
+/// template and manager of an added ant, and the GitHub binding and grant of a registered device, unless `registered`
+/// gives them anew.
+fn inherited(record: Issued, previous: Option<&Issued>, registered: Option<(GithubAccount, Grant)>) -> Issued {
     let Some(p) = previous else { return record };
     let (template, added_by) = (p.template.clone(), p.added_by.clone());
-    Issued { template, added_by, github: p.github.clone(), grant: p.grant.clone(), ..record }
+    let (github, grant) = match registered {
+        Some((github, grant)) => (Some(github), Some(grant)),
+        None => (p.github.clone(), p.grant.clone()),
+    };
+    Issued { template, added_by, github, grant, ..record }
 }
 
 /// The registry's kind of credentials of `kind`, if they may be renewed ([`renew`]).

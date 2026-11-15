@@ -6,11 +6,12 @@ use ants_daemon::reactions::Reactions;
 use ants_proto::{ChannelEntry, ChannelId, ChannelReadMarkers, Humans, ReadMarker, ThreadId, UserId, Uuid};
 use chrono::{DateTime, TimeDelta, Utc};
 
+use super::acts::{Acted, Change};
 use super::reads::{Mark, Read};
 use super::work::{Facts, Filter};
-use super::{cards, channel, dm, home, nav, people, search, thread, work};
+use super::{cards, channel, dm, home, nav, people, search, thread, timeline, work};
 use crate::live::{self, State};
-use crate::thread::Entry;
+use crate::thread::{Entry, Kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -42,6 +43,10 @@ pub enum Action {
     MarkChannel(ChannelId, Mark),
     /// Read the reactions to these messages, and again every while.
     Reactions(Vec<Uuid>),
+    /// Make a change to how the human holds the thread, the last message, post or note on which has this sequence.
+    Change(ThreadId, Change, u64),
+    /// Copy the text to the terminal's clipboard.
+    Copy(String),
     /// Send a message to another human on a new thread, as `ants ask @human` does.
     Send(dm::Draft),
     /// Read again what may have missed changes.
@@ -88,6 +93,8 @@ pub struct Data {
     pub humans: Option<Humans>,
     /// The reactions to the messages watched.
     pub reactions: Reactions,
+    /// The tool calls of the threads, heard live or read from their timelines.
+    pub calls: timeline::Threads,
     /// Who of the other humans is online, and the messages with each.
     pub people: people::People,
     /// The threads' done states, TL;DRs and spend.
@@ -174,6 +181,8 @@ pub enum To {
     /// A thread, shown at a message on it.
     Message(ThreadId, Uuid),
     Work(Filter),
+    /// Not another view: something to do.
+    Do(Action),
 }
 
 pub struct Model {
@@ -203,6 +212,7 @@ impl Model {
             channels: Vec::new(),
             humans: None,
             reactions: Reactions::new(),
+            calls: timeline::Threads::default(),
             people: people::People::default(),
             cards: cards::Cards::default(),
         };
@@ -237,7 +247,10 @@ impl Model {
         match event {
             live::Event::Stored(Ok(entries)) => return self.stored(entries, now),
             live::Event::Stored(Err(e)) => self.notify(format!("{e:#}"), Level::Error, now),
-            live::Event::Status(event) => self.data.live.status(&event, now),
+            live::Event::Status(event) => {
+                self.data.live.status(&event, now);
+                self.data.calls.status(&event);
+            }
             live::Event::Following => self.data.live.approvals_reset(),
             live::Event::Approval(update) => self.data.live.approval(&update),
             live::Event::FollowEnded(Ok(())) | live::Event::Decided(_) => {}
@@ -247,6 +260,7 @@ impl Model {
             live::Event::Roster(Ok(entries)) => self.data.live.roster(entries, now),
             live::Event::Roster(Err(e)) => self.notify(format!("reading the roster: {e:#}"), Level::Error, now),
             live::Event::History(thread, read) => {
+                let read = read.map(|entries| self.tools(entries));
                 let page = self.pages.iter_mut().rev().find_map(|page| match page {
                     Page::Thread(page) if page.history.thread == thread => Some(page),
                     _ => None,
@@ -264,6 +278,7 @@ impl Model {
     /// Take the messages read from the stream. Marks read the human's new messages on an open thread, and reads the
     /// reactions to a shown channel's new posts.
     pub fn stored(&mut self, entries: Vec<Entry>, now: DateTime<Utc>) -> Vec<Action> {
+        let entries = self.tools(entries);
         let data = &mut self.data;
         data.live.stored(&entries, now);
         let me = data.live.me.clone();
@@ -287,6 +302,55 @@ impl Model {
             actions.push(Action::Reactions(self.data.feeds.watched(&page.channel)));
         }
         actions
+    }
+
+    /// Take the tool calls among `entries` into those of their threads: the other entries.
+    fn tools(&mut self, entries: Vec<Entry>) -> Vec<Entry> {
+        let (tools, entries): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| e.kind == Kind::Tool);
+        for tool in &tools {
+            self.data.calls.stored(tool);
+        }
+        entries
+    }
+
+    /// The thread shown, if one is.
+    pub fn open(&self) -> Option<&ThreadId> {
+        match self.page() {
+            Page::Thread(page) => Some(&page.history.thread),
+            _ => None,
+        }
+    }
+
+    /// Take what was done to or read of the open thread besides its messages.
+    pub fn acted(&mut self, acted: Acted, now: DateTime<Utc>) {
+        match acted {
+            Acted::About(thread, Ok(about)) => {
+                if self.data.live.marks != about.marks {
+                    self.data.live.marks.clone_from(&about.marks);
+                    self.data.live.reorder(now);
+                }
+                match &about.done {
+                    Some(done) => self.data.cards.done.insert(thread.clone(), done.clone()),
+                    None => self.data.cards.done.remove(&thread),
+                };
+                for page in &mut self.pages {
+                    if let Page::Thread(page) = page
+                        && page.history.thread == thread
+                    {
+                        page.about = Some(about.clone());
+                    }
+                }
+            }
+            Acted::About(thread, Err(e)) => tracing::debug!(%thread, "reading the thread's marks: {e:#}"),
+            Acted::Changed(thread, change, Ok(changed)) => {
+                let line =
+                    format!("thread {} {}", crate::excerpt(&self.data.title(&thread), 40), change.done_line(changed));
+                self.notify(line, Level::Info, now);
+            }
+            Acted::Changed(thread, _, Err(e)) => {
+                self.notify(format!("changing thread {thread}: {e:#}"), Level::Error, now);
+            }
+        }
     }
 
     /// Take what the UI read besides the live feed.
@@ -515,7 +579,7 @@ impl Model {
             Page::Home(page) => page.key(key, data, now),
             Page::Work(page) => page.key(key, data),
             Page::Channel(page) => page.key(key, data),
-            Page::Thread(page) => page.key(key),
+            Page::Thread(page) => page.key(key, data, now),
             Page::Dm(page) => page.key(key, data),
             Page::Search(page) => page.key(key),
         }?;
@@ -532,6 +596,7 @@ impl Model {
                 self.pages.push(Page::Work(work::Page::new(filter)));
                 None
             }
+            To::Do(action) => Some(action),
         }
     }
 }
@@ -608,6 +673,34 @@ pub mod tests {
         assert_eq!(m.open_thread(), Some(thread), "a refresh reads the open thread again");
         m.key(Key::Esc, at(6));
         assert_eq!((m.page().name(), m.focus), ("work", Focus::View));
+    }
+
+    #[test]
+    fn tool_calls_go_to_their_threads_timelines_and_what_was_done_shows() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.stored(vec![message(1, &thread, "alice", "dev-a", "deploy")], at(1));
+        m.pages.push(Page::Thread(thread::Page::new(thread.clone())));
+        let call = crate::tui::timeline::tests::stored(2, &thread, "dev-a", Uuid::new_v4(), "c1", "completed", 1);
+        let loaded = vec![message(1, &thread, "alice", "dev-a", "deploy"), call.clone()];
+        m.take(live::Event::History(thread.clone(), Ok(loaded)), at(2));
+        m.stored(vec![call, message(3, &thread, "dev-a", "alice", "done")], at(3));
+        let Page::Thread(page) = m.page() else { panic!("not a thread") };
+        assert_eq!(page.history.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3], "no call among them");
+        assert_eq!(m.data.calls.get(&thread).map(|c| c.calls().len()), Some(1), "the call once");
+        assert_eq!(m.open(), Some(&thread));
+
+        let mut about = crate::tui::acts::About::default();
+        about.marks.archive(&thread, 3);
+        m.acted(Acted::About(thread.clone(), Ok(about.clone())), at(4));
+        assert!(m.data.live.order.is_empty(), "archived, the thread leaves the work");
+        let Page::Thread(page) = m.page() else { panic!("not a thread") };
+        assert_eq!(page.about, Some(about));
+        m.acted(Acted::Changed(thread.clone(), Change::Archive(true), Ok(true)), at(5));
+        assert!(
+            m.notice_at(at(5))
+                .is_some_and(|n| n.text == "thread deploy archived; its messages and its work stay as they are")
+        );
     }
 
     #[test]

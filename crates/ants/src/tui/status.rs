@@ -165,7 +165,7 @@ async fn read(nats: &crate::Nats<'_>, js: &jetstream::Context, deadline: tokio::
     let threads_and_cards = async {
         let threads = within(deadline, async {
             let state = live::state(nats, js, SINCE).await?;
-            let (_, read) = live::tail(js.clone(), Parser::default(), None, SINCE).await;
+            let (_, read) = live::tail(js.clone(), Parser::default(), None, SINCE, false).await;
             Ok((state, read?.0))
         })
         .await;

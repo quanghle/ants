@@ -215,6 +215,13 @@ impl Status {
         view.stand = stand;
     }
 
+    /// Where `ant` stands, as the line tells it after the ant's name; None when it is not shown.
+    pub fn of(&self, ant: &UserId) -> Option<String> {
+        let view = self.ants.iter().find(|v| v.ant == *ant)?;
+        let line = describe(view);
+        Some(line.strip_prefix(&format!("{ant}: ")).map_or_else(|| line.clone(), str::to_owned))
+    }
+
     /// The line, cut to `width` characters; empty when no ant is to show.
     pub fn line(&self, width: usize) -> String {
         let line = self.ants.iter().map(describe).collect::<Vec<_>>().join(" | ");

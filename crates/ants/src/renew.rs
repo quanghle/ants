@@ -29,7 +29,7 @@ use nkeys::{KeyPair, XKey};
 
 use crate::enroll::Approver;
 use crate::service::{Action, Outcome, Service, Services, failure};
-use crate::{auth, keys, leaf};
+use crate::{auth, keys, leaf, revoke};
 
 #[derive(clap::Args, Debug)]
 pub struct RenewArgs {
@@ -69,9 +69,14 @@ pub async fn run(args: RenewArgs, nats: &str, cli_creds: Option<&Path>) -> Resul
         _ => path.clone(),
     };
     let user = KeyPair::new_user();
+    let registered = if finding.kind == Kind::Human {
+        " (`ants signer` there renews a device registered with `ants login`)"
+    } else {
+        ""
+    };
     eprintln!(
         "asking to renew {} ({}) for the new key {}: approve with `ants enroll renew {}` on the machine holding the \
-         account key; waiting (Ctrl-C stops)",
+         account key{registered}; waiting (Ctrl-C stops)",
         finding.holder(),
         path.display(),
         user.public_key(),
@@ -132,7 +137,8 @@ fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
 /// `store` rather than in itself, asking for a human's credentials without an encryption key to bind `xkey`, if given:
 /// repeat the signed request every `repeat` until an answer for the key arrives, the credentials expire or `stop`
 /// completes. Returns the user JWT of the answer, checked to be the account's for that key, with the same name, kind,
-/// device and JetStream domain, and the encryption key the credentials bind or `xkey`.
+/// device and JetStream domain, and the encryption key the credentials bind or `xkey`; fails with the reason of an
+/// answer refusing it (from `ants signer`, for credentials a registration granted).
 #[allow(clippy::too_many_arguments)]
 pub async fn request(
     url: &str,
@@ -183,6 +189,9 @@ pub async fn request(
                         continue;
                     }
                 };
+                if let Some(reason) = reply.refused {
+                    bail!("ants signer refused to renew {}: {reason}", finding.holder());
+                }
                 let xkey = finding.xkey.as_ref().or(xkey);
                 match check_renewed(&reply.jwt, &current, &finding, &public_key, xkey) {
                     Ok(()) => return Ok(reply.jwt),
@@ -282,8 +291,8 @@ pub const AUTO_RECONNECT: Duration = Duration::from_mins(5);
 
 impl Approver {
     /// Check that `request` proves credentials of the team's account named as it says, unexpired and not revoked:
-    /// signed with their key.
-    fn check_renewal(&self, request: &RenewRequest) -> Result<()> {
+    /// signed with their key. Returns their claims.
+    fn check_renewal(&self, request: &RenewRequest) -> Result<auth::Claims> {
         auth::check_user_key(&request.public_key)?;
         let current = auth::verified(&request.current).context("the credentials to renew")?;
         if current.iss != self.account {
@@ -298,14 +307,28 @@ impl Approver {
         if self.revoked.contains(&current.sub) {
             bail!("revoked credentials");
         }
-        auth::check_signature(&current.sub, &request.signed(), &request.signature).context("the credentials")
+        auth::check_signature(&current.sub, &request.signed(), &request.signature).context("the credentials")?;
+        Ok(current)
     }
 
-    /// A checked renewal request of `msg`, or why it is ignored.
-    fn renewal(&self, msg: &async_nats::Message) -> Result<RenewRequest> {
+    /// A checked renewal request of `msg`, with the claims of the credentials it renews, or why it is ignored.
+    pub(crate) fn checked_renewal(&self, msg: &async_nats::Message) -> Result<(RenewRequest, auth::Claims)> {
         let request: RenewRequest = serde_json::from_slice(&msg.payload).context("a malformed renewal request")?;
         request.check_subject(&msg.subject)?;
-        self.check_renewal(&request).with_context(|| format!("renewal request of {}", request.name))?;
+        let current = self.check_renewal(&request).with_context(|| format!("renewal request of {}", request.name))?;
+        Ok((request, current))
+    }
+
+    /// A checked renewal request of `msg` for `ants enroll renew`, or why it is ignored: credentials a registration
+    /// granted are `ants signer`'s to renew ([`revoke::registered`]).
+    pub(crate) fn renewal(&self, msg: &async_nats::Message) -> Result<RenewRequest> {
+        let (request, current) = self.checked_renewal(msg)?;
+        if revoke::registered(&revoke::issued(&self.dir)?, &current.sub).is_some() {
+            bail!(
+                "renewal request of {}: a registration granted the credentials, which ants signer renews",
+                request.name
+            );
+        }
         Ok(request)
     }
 
@@ -377,8 +400,7 @@ impl Approver {
             }
         };
         let renewed = auth::renew(dir, &request.current, &request.public_key, request.xkey.as_ref())?;
-        let reply =
-            RenewReply { name: name.to_owned(), public_key: request.public_key.clone(), jwt: renewed.jwt.clone() };
+        let reply = RenewReply::signed(name, &request.public_key, renewed.jwt.clone());
         // An answer lost on the way leaves the holder asking: answer again while it does.
         for _ in 0..3 {
             self.answer_renewal(&reply).await?;
@@ -390,7 +412,7 @@ impl Approver {
         bail!("{name} on {} keeps asking; the answer did not get through", request.host)
     }
 
-    async fn answer_renewal(&self, reply: &RenewReply) -> Result<()> {
+    pub(crate) async fn answer_renewal(&self, reply: &RenewReply) -> Result<()> {
         self.client.publish(reply.subject(), serde_json::to_vec(reply)?.into()).await?;
         self.client.flush().await?;
         Ok(())
@@ -437,11 +459,7 @@ pub async fn auto(
                     }
                     match auth::renew(dir, &request.current, &request.public_key, request.xkey.as_ref()) {
                         Ok(done) => {
-                            let reply = RenewReply {
-                                name: request.name.clone(),
-                                public_key: request.public_key.clone(),
-                                jwt: done.jwt.clone(),
-                            };
+                            let reply = RenewReply::signed(&request.name, &request.public_key, done.jwt.clone());
                             approver.answer_renewal(&reply).await?;
                             answered.insert(key, reply);
                             renewed(&request, &done);
@@ -718,7 +736,7 @@ mod tests {
             let human = auth::sign_user(&team, &p("dev-a"), Role::Human, None, &user.public_key()).unwrap();
             let other = auth::sign_user(&team, &p("dev-b"), Role::Ant, None, &user.public_key()).unwrap();
             for jwt in [human, other] {
-                let reply = RenewReply { name: "dev-a".to_owned(), public_key: user.public_key(), jwt };
+                let reply = RenewReply::signed("dev-a", &user.public_key(), jwt);
                 client.publish(reply.subject(), serde_json::to_vec(&reply).unwrap().into()).await.unwrap();
             }
             client.flush().await.unwrap();

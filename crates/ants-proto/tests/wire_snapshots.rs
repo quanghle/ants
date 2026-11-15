@@ -563,13 +563,10 @@ fn enrollment() {
             signature: "c2lnLXJlbmV3".to_owned(),
         },
     );
+    snap("renew_reply", &RenewReply::signed("dev-a", "UDEF", "eyJ0eXAiOiJKV1QifQ.renewed".to_owned()));
     snap(
-        "renew_reply",
-        &RenewReply {
-            name: "dev-a".to_owned(),
-            public_key: "UDEF".to_owned(),
-            jwt: "eyJ0eXAiOiJKV1QifQ.renewed".to_owned(),
-        },
+        "renew_reply_refused",
+        &RenewReply::refused("alice", "UDEF", "GitHub user octocat is no member of acme any more".to_owned()),
     );
 }
 
