@@ -115,7 +115,7 @@ pub(crate) async fn ask(
     // Subscribe first so a fast reply is not missed. A waiter also reads back what the hub stored while out of its
     // reach.
     let inbox = if replies.wait || replies.follow {
-        bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.role).await?
+        bus::caught_up_inbox(&client, &js, &nats.me.id, nats.me.reading()).await?
     } else {
         bus::live_inbox(&client, &nats.me.id).await?
     };
@@ -431,7 +431,7 @@ pub(crate) async fn thread_notes(
         print_attached(&files, |id| post.attachment_handle(id));
         return Ok(());
     }
-    let read = notes::read(&js, &nats.me.id, Reading::cli(nats.me.role), &thread).await?;
+    let read = notes::read(&js, &nats.me.id, nats.me.reading(), &thread).await?;
     if read.posts.is_empty() {
         println!("thread {thread} has no notes");
     }
@@ -523,7 +523,7 @@ pub(crate) async fn answering(js: &jetstream::Context, human: &UserId, id: Uuid,
     let question = questions::find(js, "", Reading::Gets, &subject::inbox_of(human), id)
         .await?
         .ok_or_else(|| anyhow!("no message {id} to {human} is kept"))?;
-    let me = humans::Me { id: human.clone(), role: Role::Human };
+    let me = humans::Me { id: human.clone(), role: Role::Human, assistant_of: None };
     let asker = &question.from;
     if humans::load(js, &me).await.contains(asker) {
         bail!(
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn an_ask_comes_from_and_belongs_to_the_cli_human() {
         let alice: UserId = "alice".parse().unwrap();
-        let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human };
+        let me = humans::Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
         let ask = ask_envelope(&me, None, "dev-b".parse().unwrap(), "check the build".into());
         assert_eq!((&ask.from, ask.to.as_str(), ask.owner.as_ref()), (&alice, "dev-b", Some(&alice)));
         let thread: ThreadId = "t1".parse().unwrap();
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn an_ask_with_an_ant_s_credentials_has_no_owner() {
-        let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Ant };
+        let me = humans::Me { id: "dev-a".parse().unwrap(), role: ants_proto::Role::Ant, assistant_of: None };
         let ask = ask_envelope(&me, None, "dev-b".parse().unwrap(), "check the build".into());
         assert_eq!((&ask.from, ask.owner), (&me.id, None));
     }
@@ -617,7 +617,9 @@ mod tests {
         // A question from a human, which only a hand-made message carries, is not answered in the clear.
         let bob: UserId = "bob".parse().unwrap();
         let (_, bob_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
-        humans::register(&bob_js, &humans::Me { id: bob.clone(), role: ants_proto::Role::Human }).await.unwrap();
+        humans::register(&bob_js, &humans::Me { id: bob.clone(), role: ants_proto::Role::Human, assistant_of: None })
+            .await
+            .unwrap();
         let options = ["yes".to_owned(), "no".to_owned()];
         let question = ants_proto::Question::new("Lunch?", &options, true).unwrap();
         let by_bob = Envelope::asking(ThreadId::generate(), bob.clone(), alice.clone(), question);

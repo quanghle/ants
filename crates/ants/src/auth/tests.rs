@@ -1005,6 +1005,25 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     bus::publish(&pa_js, &Envelope::new(pa.clone(), alice.clone(), "as itself")).await.unwrap();
     let alice_s = async { crate::inbox::Inbox::open(&pa_js, &alice).await?.unread(&Default::default()).await };
     assert!(alice_s.await.is_err(), "it reads no human's inbox");
+
+    // Its daemon reads a thread back by direct gets, holding none of an ant's readers.
+    let thread = to_pa.thread_id.clone();
+    bus::publish(&pa_js, &Envelope::on_thread(thread.clone(), pa.clone(), alice.clone(), "hi")).await.unwrap();
+    notes::publish(&pa_js, &NotesPost::new(thread.clone(), pa.clone(), "noted"), None).await.unwrap();
+    let read = |reading| ants_daemon::history::Thread {
+        js: pa_js.clone(),
+        ant: pa.clone(),
+        thread: thread.clone(),
+        channel: None,
+        before: u64::MAX,
+        reading,
+    };
+    let history = read(Reading::daemon(true)).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    for said in ["hello", "hi", "noted"] {
+        assert!(history.contains(said), "{said} missing from {history}");
+    }
+    let history = read(Reading::Consumer).history()(ants_daemon::history::DEFAULT_BUDGET).await;
+    assert!(history.contains("could not be read back"), "{history}");
 }
 
 #[tokio::test]
@@ -1185,6 +1204,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
         thread: thread.clone(),
         channel: Some(ops),
         before: u64::MAX,
+        reading: Reading::Consumer,
     };
     assert_eq!(
         read.history()(ants_daemon::history::DEFAULT_BUDGET).await,
@@ -2728,6 +2748,27 @@ fn a_humans_credentials_fit_max_control_line() {
     for domain in [None, Some(&hub)] {
         let out = dir.join("alice.creds");
         issue(&team, &p("alice"), Role::Human, domain, &out).unwrap();
+        let (jwt, _) = read_creds(&out).unwrap();
+        assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An assistant's credentials fit in its `CONNECT` line as a human's do ([`a_humans_credentials_fit_max_control_line`]),
+/// with the same room for the rest of the line and rights yet to come.
+#[test]
+fn an_assistants_credentials_fit_max_control_line() {
+    let dir = ants_test_support::scratch_dir("assistant-jwt-size");
+    let team = dir.join("auth");
+    init(&team).unwrap();
+    let (alice, pa) = (p("alice"), p("pa"));
+    issue(&team, &alice, Role::Human, None, &dir.join("alice.creds")).unwrap();
+    let hub: JsDomain = "hub".parse().unwrap();
+    for domain in [None, Some(&hub)] {
+        let out = dir.join("pa.creds");
+        let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+        let rights = Permissions::for_assistant(&pa, &alice).with_js_domain(domain);
+        issue_device_with(&team, &pa, Kind::Assistant, rights, &new, &out).unwrap();
         let (jwt, _) = read_creds(&out).unwrap();
         assert!(jwt.len() + 3 * 1024 <= MAX_CONTROL_LINE as usize, "{} bytes with domain {domain:?}", jwt.len());
     }

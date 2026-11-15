@@ -167,7 +167,7 @@ async fn the_human_manages_channels_and_reads_them_back() {
     let next = tokio::time::timeout(Duration::from_secs(2), waiting.next()).await.unwrap().unwrap();
     assert_eq!(next.text, "on it", "waiting skips the poster's own posts");
 
-    let me = Me { id: human.clone(), role: ants_proto::Role::Human };
+    let me = Me { id: human.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let posts = read(&js, &me, &ops()).await.unwrap();
     assert_eq!(posts, [top, again, answer]);
     assert!(read(&js, &me, &"dev".parse().unwrap()).await.unwrap().is_empty());
@@ -184,7 +184,7 @@ async fn the_human_manages_channels_and_reads_them_back() {
 async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (a_client, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
@@ -240,7 +240,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     // channel, and the read of dev-a's daemon, through the reader itself, carries on.
     let daemon: consumer::PullConsumer = d_js.create_consumer_on_stream(reader(&dev_a), STREAM).await.unwrap();
     assert_eq!(post(next(&daemon).await), top);
-    let as_dev_a = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };
+    let as_dev_a = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
     let reads = futures::future::join_all((0..8).map(|_| read(&d_js, &as_dev_a, &room))).await;
     for posts in reads {
         assert_eq!(posts.unwrap(), [top.clone(), answer.clone(), on.clone()]);
@@ -255,7 +255,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
     }
 
     // An ant creates the thread it starts, and owns none; a human's post on it keeps the creator.
-    let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant };
+    let ant = crate::humans::Me { id: dev_a.clone(), role: ants_proto::Role::Ant, assistant_of: None };
     let started = compose(&d_js, &ant, &humans, ops(), None, "@dev-b look".to_owned()).await;
     assert_eq!((&started.creator, &started.owner), (&Some(dev_a.clone()), &None));
     bus::publish_json(&d_js, started.subject(), &started, None).await.unwrap();
@@ -270,7 +270,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
 async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a, hook) = (p("alice"), p("bob"), p("dev-a"), p("github"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
@@ -310,7 +310,7 @@ async fn a_post_on_a_thread_an_ant_started_as_a_webhook_counts_it_as_the_ant_s()
 async fn a_mention_of_a_human_member_reaches_its_inbox_once() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human };
+    let me = |id: &UserId| crate::humans::Me { id: id.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let (_, a_js) = server.connect_as(&alice, ants_proto::Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     bus::ensure_stream(&a_js).await.unwrap();
@@ -355,7 +355,7 @@ async fn a_human_marks_channel_posts_read_for_itself_only() {
     let (_, b_js) = server.connect_as(&bob, ants_proto::Role::Human).await;
     let (_, d_js) = server.connect(&dev_a).await;
     bus::ensure_stream(&a_js).await.unwrap();
-    let as_alice = Me { id: alice.clone(), role: ants_proto::Role::Human };
+    let as_alice = Me { id: alice.clone(), role: ants_proto::Role::Human, assistant_of: None };
     let look = ChannelPost::new(ops(), dev_a.clone(), "@alice look");
     let mine = ChannelPost::new(ops(), alice.clone(), "on it");
     let fixed = ChannelPost::new(ops(), dev_a.clone(), "fixed");

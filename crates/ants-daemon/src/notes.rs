@@ -48,21 +48,29 @@ pub trait NotesStore: Send + Sync {
 pub struct JetStreamNotes {
     js: jetstream::Context,
     reader: UserId,
-    /// One read at a time: they share the reader's own consumer.
+    how: Reading,
+    /// One read at a time through the reader's own consumer, which they share.
     reading: tokio::sync::Mutex<()>,
 }
 
 impl JetStreamNotes {
+    /// The notes read through `reader`'s own consumer.
     pub fn new(js: jetstream::Context, reader: UserId) -> Self {
-        Self { js, reader, reading: tokio::sync::Mutex::new(()) }
+        Self { js, reader, how: Reading::Consumer, reading: tokio::sync::Mutex::new(()) }
+    }
+
+    /// Read the notes as `how` says instead: an assistant's daemon by direct gets ([`Reading::daemon`]).
+    #[must_use]
+    pub fn reading(self, how: Reading) -> Self {
+        Self { how, ..self }
     }
 }
 
 impl NotesStore for JetStreamNotes {
     fn read<'a>(&'a self, thread: &'a ThreadId) -> BoxFuture<'a, Result<Notes>> {
         Box::pin(async move {
-            let _one = self.reading.lock().await;
-            read(&self.js, &self.reader, Reading::Consumer, thread).await
+            let _one = if self.how == Reading::Consumer { Some(self.reading.lock().await) } else { None };
+            read(&self.js, &self.reader, self.how, thread).await
         })
     }
 

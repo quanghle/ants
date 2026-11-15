@@ -988,11 +988,23 @@ fn an_assistant_keeps_its_ant_rights_and_a_humans_under_its_own_name() {
     let assistant = Permissions::for_assistant(&p("pa"), &p("alice"));
     let has = |s: &str| assistant.publish.iter().any(|have| have == s);
     let ant = Permissions::for_user(&p("pa"), Role::Ant);
+    // It reads by direct gets: of an ant's readers it keeps only its dead letters'.
+    let readers = ["notes-pa", "chanread-pa", "sentread-pa", "inbox-pa_", "notes-pa_", "chanread-pa_", "notify-pa"];
+    let through_reader = |s: &str| s.split('.').any(|token| readers.iter().any(|r| token.starts_with(r)));
     for s in &ant.publish {
-        assert!(assistant.publish.iter().any(|have| covers(have, s)), "ant right {s} missing");
+        if through_reader(s) {
+            assert!(!assistant.publish.iter().any(|have| covers(have, s)), "reader right {s} kept");
+        } else {
+            assert!(assistant.publish.iter().any(|have| covers(have, s)), "ant right {s} missing");
+        }
     }
+    assert!(!assistant.publish.iter().any(|s| through_reader(s)), "no reader of its own: {:?}", assistant.publish);
+    for s in ["$JS.API.CONSUMER.MSG.NEXT.ANTS.inbox-pa", "$JS.API.CONSUMER.MSG.NEXT.ANTS.chan-pa"] {
+        assert!(has(s), "{s} missing");
+    }
+    assert!(assistant.publish.iter().any(|s| s.contains(".deadread-pa")), "reads its dead letters");
     for s in &ant.subscribe {
-        assert!(assistant.subscribe.contains(s), "ant subscription {s} missing");
+        assert!(assistant.subscribe.iter().any(|have| covers(have, s)), "ant subscription {s} missing");
     }
     assert!(assistant.subscribe.iter().any(|s| s == subject::ALL));
     for s in [

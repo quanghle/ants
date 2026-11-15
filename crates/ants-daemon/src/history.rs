@@ -1,7 +1,8 @@
 //! A thread's history, read back from the ANTS stream, to rebuild the context of a harness session that lost it.
 //!
 //! An ant reads its own inbox and the notes through spares of its readers, so as not to get in the way of the reads
-//! its daemon makes through the readers themselves, and the messages it sent through its own [`sent_reader`].
+//! its daemon makes through the readers themselves, and the messages it sent through its own [`sent_reader`]; an
+//! assistant reads them all by direct gets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -95,6 +96,8 @@ pub struct Thread {
     pub thread: ThreadId,
     pub channel: Option<ChannelId>,
     pub before: u64,
+    /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
+    pub reading: Reading,
 }
 
 impl Thread {
@@ -147,7 +150,8 @@ impl Thread {
 
     async fn received(&self, entries: &mut BTreeMap<u64, Entry>) -> Result<()> {
         let (reader, filter) = (inbox_consumer(&self.ant), subject::inbox_of(&self.ant));
-        reading::read_back(&self.js, &reader, Reading::Spare, &filter, self.start(), |seq, at, subject, payload| {
+        let spare = self.reading.beside();
+        reading::read_back(&self.js, &reader, spare, &filter, self.start(), |seq, at, subject, payload| {
             if seq >= self.before {
                 return ControlFlow::Break(());
             }
@@ -159,9 +163,9 @@ impl Thread {
     }
 
     async fn sent(&self, entries: &mut BTreeMap<u64, Entry>) -> Result<()> {
-        let _one = SENT_READS.lock().await;
+        let _one = if self.reading == Reading::Consumer { Some(SENT_READS.lock().await) } else { None };
         let (reader, filter) = (sent_reader(&self.ant), subject::inbox_from(&self.ant));
-        reading::read_back(&self.js, &reader, Reading::Consumer, &filter, self.start(), |seq, at, subject, payload| {
+        reading::read_back(&self.js, &reader, self.reading, &filter, self.start(), |seq, at, subject, payload| {
             self.take_envelope(seq, at, subject, payload, entries);
             ControlFlow::Continue(())
         })
@@ -188,7 +192,7 @@ impl Thread {
     async fn notes(&self, entries: &mut BTreeMap<u64, Entry>) -> Result<()> {
         let (reader, filter) = (notes_consumer(&self.ant), subject::notes_of(&self.thread));
         let all = consumer::DeliverPolicy::All;
-        reading::read_back(&self.js, &reader, Reading::Spare, &filter, all, |seq, at, subject, payload| {
+        reading::read_back(&self.js, &reader, self.reading.beside(), &filter, all, |seq, at, subject, payload| {
             if let Ok(post) = serde_json::from_slice::<NotesPost>(payload)
                 && post.check_subject(subject).is_ok()
             {
@@ -203,17 +207,24 @@ impl Thread {
 
     async fn posts(&self, channel: &ChannelId, entries: &mut BTreeMap<u64, Entry>) -> Result<()> {
         let room = subject::chan_room(channel);
-        crate::channel::read_back(&self.js, &self.ant, Reading::Spare, &room, self.start(), |seq, at, _, post| {
-            if let Ok(post) = post
-                && post.thread_id == self.thread
-                && (seq < self.before || post.from == self.ant)
-            {
-                let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
-                let place = Place::Channel(post.channel);
-                entries.insert(seq, Entry { from: post.from, place, text: post.text, attachments, at });
-            }
-            ControlFlow::Continue(())
-        })
+        crate::channel::read_back(
+            &self.js,
+            &self.ant,
+            self.reading.beside(),
+            &room,
+            self.start(),
+            |seq, at, _, post| {
+                if let Ok(post) = post
+                    && post.thread_id == self.thread
+                    && (seq < self.before || post.from == self.ant)
+                {
+                    let attachments = earlier_lines(&post.attachments, |id| post.attachment_handle(id));
+                    let place = Place::Channel(post.channel);
+                    entries.insert(seq, Entry { from: post.from, place, text: post.text, attachments, at });
+                }
+                ControlFlow::Continue(())
+            },
+        )
         .await
         .with_context(|| format!("reading back the thread's posts in channel {channel}"))
     }

@@ -188,6 +188,7 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
+            reading: crate::reading::Reading::Consumer,
             pool,
             cancels: Cancels::default(),
             restarts: &self.restarts,

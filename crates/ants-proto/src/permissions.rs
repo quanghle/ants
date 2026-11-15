@@ -351,6 +351,11 @@ impl Permissions {
     /// the read markers, pins, archives and snoozed threads ([`read_marker_rights`], [`thread_rights`]) and the markers
     /// of messages kept waiting ([`unserved_key`]), so it sees what its human has read and set aside.
     ///
+    /// It reads the stream back by direct gets, as a human does, so it holds none of an ant's reader consumers but its
+    /// dead letters' (its inbox and channel consumers still deliver), no spare of one, and no consumer of a human's
+    /// notifications: their rights would not fit a token within `max_control_line` once doubled for a JetStream
+    /// domain.
+    ///
     /// It sends only as itself, never under any sender as a human may, nor writes attachments under another's name.
     /// It gets none of a human's rights whose subjects do not name who acts, which readers could not tell from its
     /// human's: cancelling an ant's prompt or asking for its queue (whose request's `by` no reader can check),
@@ -370,6 +375,16 @@ impl Permissions {
         Self::ant_rights(assistant, &mut publish, &mut subscribe);
         let mut as_human = Vec::new();
         Self::human_rights(assistant, &mut as_human, &mut subscribe);
+        // It reads the stream back by direct gets, as a human does: no reader consumer of an ant's but its dead
+        // letters' (the inbox and channel consumers deliver), no spare of one, and no consumer of a human's
+        // notifications, which it has no preferences for.
+        let (inbox, notes, chan_read) = (inbox_consumer(assistant), notes_consumer(assistant), chan_reader(assistant));
+        let mut readers: Vec<String> =
+            [&inbox, &notes, &chan_read].into_iter().flat_map(|r| spare_readers(r)).collect();
+        readers.extend([notes, chan_read, sent_reader(assistant), notify_consumer(assistant)]);
+        let reads_through = |s: &str| s.split('.').any(|token| readers.iter().any(|r| r == token));
+        publish.retain(|s| !reads_through(s));
+        as_human.retain(|s| !reads_through(s));
         let devices_only = [subject::devices_of(assistant), subject::presence_of(assistant)];
         let notify = notify_prefs_rights(assistant);
         let unattributed = [
@@ -418,6 +433,8 @@ impl Permissions {
         publish.retain(|s| !wider.iter().any(|other| other != s && covers(other, s)));
         let mut seen = std::collections::HashSet::new();
         subscribe.retain(|s| seen.insert(s.clone()));
+        let wider = subscribe.clone();
+        subscribe.retain(|s| !wider.iter().any(|other| other != s && covers(other, s)));
         Self { publish, subscribe }
     }
 

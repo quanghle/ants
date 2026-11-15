@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use ants_daemon::reading::Reading;
 use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
 use anyhow::{Context as _, Result, anyhow};
 use async_nats::jetstream::stream::DirectGetErrorKind;
@@ -28,13 +29,15 @@ pub struct Me {
     pub id: UserId,
     /// A human's credentials, or an ant's (an ant using the CLI).
     pub role: Role,
+    /// The human an ant's credentials make it the assistant of ([`ants_proto::AssistantOf`]).
+    pub assistant_of: Option<UserId>,
 }
 
 impl Me {
     /// The one the credentials file `creds` names, from the `name` of its user JWT; `human` without credentials.
     pub fn from_creds(creds: Option<&Path>) -> Result<Self> {
         let Some(path) = creds else {
-            return Ok(Self { id: UserId::human(), role: Role::Human });
+            return Ok(Self { id: UserId::human(), role: Role::Human, assistant_of: None });
         };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         Self::from_creds_text(&text).with_context(|| format!("credentials {}", path.display()))
@@ -45,7 +48,14 @@ impl Me {
         let name = claims["name"].as_str().context("a user JWT without a name")?;
         let id: UserId = name.parse().with_context(|| format!("a user JWT naming {name:?}, not a user id"))?;
         let role = if writes_humans(&claims) { Role::Human } else { Role::by_default(&id) };
-        Ok(Self { id, role })
+        let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
+        let assistant_of = if role.is_human() { None } else { ants_proto::AssistantOf::from_tags(tags) };
+        Ok(Self { id, role, assistant_of })
+    }
+
+    /// How the CLI reads messages back as this user ([`Reading::cli`]).
+    pub fn reading(&self) -> Reading {
+        Reading::cli(self.role, self.assistant_of.is_some())
     }
 }
 
@@ -215,13 +225,22 @@ mod tests {
 
     #[test]
     fn the_credentials_name_whom_the_cli_acts_as() {
-        assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human });
+        assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human, assistant_of: None });
         let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.>"] } });
         let me = |claims| Me::from_creds_text(&creds_with(claims)).map_err(|e| format!("{e:#}"));
-        assert_eq!(me(json!({ "name": "alice", "nats": human })), Ok(Me { id: p("alice"), role: Role::Human }));
+        assert_eq!(
+            me(json!({ "name": "alice", "nats": human })),
+            Ok(Me { id: p("alice"), role: Role::Human, assistant_of: None })
+        );
         let ant = json!({ "pub": { "allow": ["ants.inbox.*.dev-a"] } });
-        assert_eq!(me(json!({ "name": "dev-a", "nats": ant })), Ok(Me { id: p("dev-a"), role: Role::Ant }));
-        assert_eq!(me(json!({ "name": "human" })), Ok(Me { id: UserId::human(), role: Role::Human }));
+        assert_eq!(
+            me(json!({ "name": "dev-a", "nats": ant })),
+            Ok(Me { id: p("dev-a"), role: Role::Ant, assistant_of: None })
+        );
+        assert_eq!(
+            me(json!({ "name": "human" })),
+            Ok(Me { id: UserId::human(), role: Role::Human, assistant_of: None })
+        );
         assert!(me(json!({ "name": "Alice Smith" })).unwrap_err().starts_with("a user JWT naming \"Alice Smith\""));
         assert_eq!(me(json!({ "sub": "U123" })).unwrap_err(), "a user JWT without a name");
         assert_eq!(Me::from_creds_text("no JWT here").unwrap_err().to_string(), "no user JWT");
@@ -249,7 +268,7 @@ mod tests {
             async |me: &Me, creds: &Path| bus::connect(&server.url, Some(creds), None, &me.id, "test").await.unwrap().1;
         let creds = server.creds_as(&alice, Role::Human);
         let me = Me::from_creds(Some(&creds)).unwrap();
-        assert_eq!(me, Me { id: alice.clone(), role: Role::Human });
+        assert_eq!(me, Me { id: alice.clone(), role: Role::Human, assistant_of: None });
         let a_js = connect(&me, &creds).await;
         assert!(register(&a_js, &me).await.unwrap(), "the first connection registers alice");
         assert!(!register(&a_js, &me).await.unwrap(), "already registered");

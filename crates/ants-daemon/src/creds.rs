@@ -407,6 +407,12 @@ pub fn check(path: &Path) -> Result<Finding> {
     Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))
 }
 
+/// Whether the credentials file at `path` holds an assistant's credentials ([`Kind::Assistant`]); false without one,
+/// or for one that does not check.
+pub fn is_assistant(path: Option<&Path>) -> bool {
+    path.is_some_and(|path| check(path).is_ok_and(|finding| matches!(finding.kind, Kind::Assistant { .. })))
+}
+
 /// The account that signed the credentials file at `path`: the issuer of its user JWT.
 pub fn account(path: &Path) -> Result<String> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;

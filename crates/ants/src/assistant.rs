@@ -571,7 +571,7 @@ mod tests {
         let account = devices::account_of(Some(&creds)).unwrap();
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
         humans::ensure(&js).await.unwrap();
-        let me = humans::Me { id: alice.clone(), role: Role::Human };
+        let me = humans::Me { id: alice.clone(), role: Role::Human, assistant_of: None };
         let messenger = Recipient::from(UserId::messenger());
 
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "no grant");
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(unaddressed(&js, &me, None).await, messenger, "not verified without an account");
         let foreign = Some("AAOTHERACCOUNT");
         assert_eq!(unaddressed(&js, &me, foreign).await, messenger, "signed for another team");
-        let ant = humans::Me { id: alice.clone(), role: Role::Ant };
+        let ant = humans::Me { id: alice.clone(), role: Role::Ant, assistant_of: None };
         assert_eq!(unaddressed(&js, &ant, account.as_deref()).await, messenger, "an ant has no assistant");
         put(&js, &creds, &alice, None, Sealing::Off).await.unwrap();
         assert_eq!(unaddressed(&js, &me, account.as_deref()).await, messenger, "withdrawn");

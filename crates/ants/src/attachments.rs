@@ -315,7 +315,7 @@ async fn save_handle(
     match save(js, keyring, handle, None, None, out).await {
         Err(e) if files::missing(&e) && !files::recent(handle, None, Utc::now()) => {
             let Some(reader) = carrier_reader(me, handle) else { return Err(e) };
-            match carried_recently(js, &reader, Reading::cli(me.role), keyring, handle).await? {
+            match carried_recently(js, &reader, me.reading(), keyring, handle).await? {
                 Some(stored) => save(js, keyring, handle, None, Some(stored), out).await,
                 None => Err(e),
             }
@@ -325,11 +325,11 @@ async fn save_handle(
 }
 
 /// The reader through which `me` reads back the messages on the subject of the message carrying the attachment under
-/// `handle` ([`Reading::cli`]): none to name for a human, who reads by message gets; for an ant, a spare of its inbox
+/// `handle` ([`Me::reading`]): none to name for a human or an assistant, who read by message gets; for an ant, a spare of its inbox
 /// consumer, its notes reader or its channel reader, whose pinned filters cover that subject. None for an inbox message
 /// an ant sent to another, which only its daemon reads back ([`ants_proto::sent_reader`]).
 fn carrier_reader(me: &Me, handle: &AttachmentHandle) -> Option<String> {
-    if me.role.is_human() {
+    if me.reading() == Reading::Gets {
         return Some(String::new());
     }
     match &handle.scope {
@@ -511,7 +511,7 @@ mod tests {
         let handle = message.attachment_handle(kept.id);
         let getting = tokio::spawn({
             let (js, handle, out) = (js.clone(), handle.clone(), out.clone());
-            let me = Me { id: alice.clone(), role: Role::Human };
+            let me = Me { id: alice.clone(), role: Role::Human, assistant_of: None };
             async move { save_handle(&js, &me, None, &handle, Some(&out)).await }
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -521,7 +521,7 @@ mod tests {
 
         // One no recent message carries is not waited for.
         let started = std::time::Instant::now();
-        let me = Me { id: alice, role: Role::Human };
+        let me = Me { id: alice, role: Role::Human, assistant_of: None };
         let gone = save_handle(&js, &me, None, &message.attachment_handle(old(1)), Some(&out)).await.unwrap_err();
         assert!(files::missing(&gone), "{gone:#}");
         assert!(started.elapsed() < files::SETTLE / 2, "not waited for");
@@ -536,7 +536,7 @@ mod tests {
         js.create_stream(ants_daemon::hub::stream_config()).await.unwrap();
         js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
         let (_, ant_js) = server.connect_as(&dev_a, Role::Ant).await;
-        let me = Me { id: dev_a.clone(), role: Role::Ant };
+        let me = Me { id: dev_a.clone(), role: Role::Ant, assistant_of: None };
         let out = server.dir().join("got");
         std::fs::create_dir_all(&out).unwrap();
         // UUIDv7 ids made in November 2023.

@@ -42,6 +42,7 @@ use crate::permission::{Allowlist, PermissionPolicy};
 use crate::pool::{Pool, SessionStore};
 use crate::publish::{Publish, Publisher};
 use crate::ratelimit::{self, Backoffs, Limited, Throttle};
+use crate::reading::Reading;
 use crate::redact::Redactor;
 use crate::signin::{self, SignIn};
 use crate::status::{self, Status};
@@ -291,7 +292,8 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     let (approver, policy) = approval_policy(config, &client, &js, &humans, allow, &redactor);
     let outbox = redacting_outbox(crate::mcp::jetstream_outbox(js.clone()), redactor.clone());
     let roster = crate::mcp::jetstream_roster(js.clone());
-    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone());
+    let reading = Reading::daemon(crate::creds::is_assistant(config.creds.as_deref()));
+    let notes = crate::notes::JetStreamNotes::new(js.clone(), config.ant.clone()).reading(reading);
     let notes = std::sync::Arc::new(RedactingNotes { notes, redactor: redactor.clone() });
     let sessions_kv = bus::ensure_sessions(&js, config.js_domain.as_ref(), &config.ant).await?;
     let ledger = ledger(config, &sessions_kv);
@@ -310,7 +312,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
     connect_mcp(&mut mcp, config, &client, &js, &redactor, &humans).await?;
     let launch = launch(config, policy, &mcp);
     let stream = bus::open_stream(&js, &config.ant).await?;
-    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone());
+    let threads = Threads::new(js.clone(), config.ant.clone(), sessions_kv.clone()).reading(reading);
     let webhooks = Webhooks::new(js.clone());
     let storage = storage_watcher(config, &js, &sessions_kv);
     let sessions = SessionStore::kv(sessions_kv, config.ant.clone());
@@ -327,6 +329,7 @@ async fn serve(config: &Config, stop: &Stop, restarts: &Restarts) -> Result<Serv
         client: &client,
         js: &js,
         ant: &config.ant,
+        reading,
         pool: &pool,
         cancels: Cancels::default(),
         restarts,
@@ -736,7 +739,8 @@ where
 {
     let mut unserved =
         unserved::Watch::new(inbox.js, config.js_domain.as_ref(), config.ant.clone(), Role::Ant, inbox.roster.clone())
-            .await?;
+            .await?
+            .reading(inbox.reading);
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.
@@ -999,6 +1003,8 @@ struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
+    /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).
+    reading: Reading,
     pool: &'a Pool,
     /// The prompts running, for `ants cancel`.
     cancels: Cancels,
@@ -2594,7 +2600,7 @@ impl Inbox<'_> {
         if envelope.answer.is_none() || !human {
             return None;
         }
-        match crate::questions::asked(self.js, self.ant, envelope).await {
+        match crate::questions::asked(self.js, self.ant, self.reading, envelope).await {
             Ok(question) => crate::questions::answer_line(envelope, question.as_ref()?),
             Err(e) => {
                 let thread = &envelope.thread_id;
@@ -2633,6 +2639,7 @@ impl Inbox<'_> {
             thread: thread.clone(),
             channel: incoming.post.as_ref().map(|posted| posted.post.channel.clone()).or(incoming.resume.clone()),
             before: seq,
+            reading: self.reading,
         };
         let prompt = Prompt {
             text,
