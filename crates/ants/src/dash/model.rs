@@ -41,7 +41,7 @@ pub enum Action {
     /// Read the thread's history, dropping any read of another one.
     LoadHistory(ThreadId),
     /// Store the decision on the request, the first decision winning, as `ants tools approve` and `reject` do.
-    Decide(ApprovalRequest, Verdict),
+    Decide(Box<ApprovalRequest>, Verdict),
     /// Read again what may have missed changes: the tool requests, the roster, the selected thread.
     Refresh,
     Quit,
@@ -361,7 +361,7 @@ impl Model {
         if let Some(verdict) = detail.confirm.take() {
             if key == Key::Char('y') {
                 detail.deciding = true;
-                return Some(Action::Decide(detail.request.clone(), verdict));
+                return Some(Action::Decide(Box::new(detail.request.clone()), verdict));
             }
             let id = tools::qualified(&detail.request);
             self.notify(format!("request {id} not answered"), Level::Info, now);
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         assert_eq!(m.key(Key::Char('n'), at(2)), None);
         assert!(m.notice_at(at(2)).is_some_and(|n| n.text.contains("not answered")));
         m.key(Key::Char('r'), at(3));
-        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Decide(push, Verdict::Reject)));
+        assert_eq!(m.key(Key::Char('y'), at(3)), Some(Action::Decide(Box::new(push), Verdict::Reject)));
         assert_eq!(m.key(Key::Char('y'), at(3)), None, "one decision at a time");
         m.decided(Err(anyhow::anyhow!("request was already answered: allow-once")), at(4));
         assert!(m.detail.is_some(), "a refused decision leaves the request open");

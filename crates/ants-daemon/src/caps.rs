@@ -270,6 +270,20 @@ pub struct Reminder {
     pub sent: u32,
 }
 
+/// What a human's message ended on a thread ([`Ledger::reset`]).
+#[derive(Debug, Default, PartialEq)]
+pub struct Ended {
+    pub escalation: Option<Pending>,
+    pub reminder: Option<Reminder>,
+}
+
+impl Ended {
+    /// Whether the thread had an escalation or a reminder.
+    pub fn any(&self) -> bool {
+        self.escalation.is_some() || self.reminder.is_some()
+    }
+}
+
 /// Tokens and cost spent: by the ant in a UTC day, or by a thread since a human's last message on it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Spent {
@@ -388,12 +402,12 @@ impl Ledger {
     }
 
     /// A message from a human: the thread starts over from nothing spent, its escalation is over, with its reminder,
-    /// and its tool rules are no longer narrowed. Returns whether it had an escalation or a reminder.
-    pub async fn reset(&self, thread: &ThreadId) -> Result<bool> {
+    /// and its tool rules are no longer narrowed. Returns the escalation and the reminder it had.
+    pub async fn reset(&self, thread: &ThreadId) -> Result<Ended> {
         self.update(thread, |spent| {
-            let escalated = spent.escalation.take().is_some() | spent.reminder.take().is_some();
+            let ended = Ended { escalation: spent.escalation.take(), reminder: spent.reminder.take() };
             let narrowed = spent.narrowed.take().is_some();
-            (forget_spend(spent) || escalated || narrowed, escalated)
+            (forget_spend(spent) || ended.any() || narrowed, ended)
         })
         .await
     }
@@ -821,7 +835,7 @@ mod tests {
         assert_eq!(ledger.narrowed(&thread(1), None).await.unwrap(), read, "kept without a message's rules");
         assert_eq!(ledger.narrowed(&thread(1), all.clone()).await.unwrap(), read, "the first rules hold");
         assert_eq!(ledger.narrowed(&thread(2), None).await.unwrap(), None);
-        assert!(!ledger.reset(&thread(1)).await.unwrap(), "no escalation ended");
+        assert!(!ledger.reset(&thread(1)).await.unwrap().any(), "no escalation ended");
         assert_eq!(ledger.narrowed(&thread(1), None).await.unwrap(), None);
         assert_eq!(ledger.narrowed(&thread(1), all.clone()).await.unwrap(), all);
     }
@@ -978,9 +992,9 @@ mod tests {
         let ledger = Ledger::with_store(store, ant(), caps);
         let pending = ledger.pending(&t).await.unwrap().unwrap();
         assert_eq!((pending.escalation.level, pending.renewed_by), (1, Some(answer)));
-        assert!(ledger.reset(&t).await.unwrap(), "a human ends it");
+        assert!(ledger.reset(&t).await.unwrap().any(), "a human ends it");
         assert_eq!(ledger.pending(&t).await.unwrap(), None);
-        assert!(!ledger.reset(&t).await.unwrap());
+        assert!(!ledger.reset(&t).await.unwrap().any());
 
         ledger.set_pending(&t, Some(escalated(&[], None))).await.unwrap();
         assert!(!ledger.renew(&t, &lead, again).await.unwrap(), "once with the owner, only a human answers");
@@ -1029,7 +1043,7 @@ mod tests {
         let armed = ledger.reminder(&t).await.unwrap().unwrap();
         assert_eq!((armed.since, armed.at, armed.sent), (1, 30, 1));
 
-        assert!(ledger.reset(&t).await.unwrap(), "a human ends it");
+        assert!(ledger.reset(&t).await.unwrap().reminder.is_some(), "a human ends it");
         assert_eq!(ledger.reminder(&t).await.unwrap(), None);
         assert!(ledger.deadlines().await.unwrap().is_empty());
         ledger.reminded(&t, Some(40)).await.unwrap();

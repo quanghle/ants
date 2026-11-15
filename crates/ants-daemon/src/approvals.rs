@@ -227,7 +227,12 @@ impl NatsApprover {
     }
 
     async fn ask(&self, thread: ThreadId, tool: ToolCall, options: Vec<Verdict>) -> Result<Verdict> {
-        let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout);
+        let human = {
+            let answering = self.answering.locked();
+            self.humans.owner_or_default(answering.get(&thread).and_then(|e| e.owner.as_ref()))
+        };
+        let request = ApprovalRequest::new(self.ant.clone(), thread, tool, options, self.timeout)
+            .for_human(Some(human), self.chain.stand_in.clone());
         // Subscribe first, so a quick answer is not missed.
         let mut decisions = self.client.subscribe(request.decision_subject()).await?;
         let mut inbox = if self.chain.escalate_to.is_empty() {
@@ -287,6 +292,7 @@ impl NatsApprover {
                             Stored::None => None,
                         };
                         if let Some(human) = human {
+                            self.tell_decided(&request, &human).await;
                             return request.decide(human.verdict).verdict;
                         }
                         let verdict = decision.verdict.as_str();
@@ -310,6 +316,7 @@ impl NatsApprover {
                         first.clone()
                     }
                 };
+                self.tell_decided(&request, &decision).await;
                 // A verdict the harness did not offer counts as a rejection.
                 return request.decide(decision.verdict).verdict;
             }
@@ -324,6 +331,22 @@ impl NatsApprover {
         };
         crate::status::state(&self.client, &self.ant, &request.thread_id, State::Working);
         Ok(verdict)
+    }
+
+    /// Tell the human `request` waited for that another human, its stand-in say, decided it ([`decided_notice`]).
+    /// Failing to, it only warns.
+    async fn tell_decided(&self, request: &ApprovalRequest, decision: &ApprovalDecision) {
+        let Some(notice) = decided_notice(request, decision) else { return };
+        let id = format!("approval-decided-{}-{}", self.ant, request.id);
+        match bus::store(&self.js, notice.subject(), &notice, &id).await {
+            Ok(_) => tracing::info!(request = %request.id, to = %notice.to, "told of the decision of another human"),
+            Err(e) => tracing::warn!(
+                request = %request.id,
+                to = %notice.to,
+                error = format!("{e:#}"),
+                "telling of the decision of another human"
+            ),
+        }
     }
 
     /// The decision the stream stored on `request`'s decision subject: its last message, which is also its first, as
@@ -410,6 +433,24 @@ fn expired_notice(
         .with_creator(answering.and_then(|e| humans.ant_creator(e.creator.as_ref())))
         .with_origin_thread(answering.and_then(|e| e.origin_thread.clone()))
         .with_escalation(Some(Escalation::of_request(request)))
+}
+
+/// The message that tells the human `request` waited for that the human `decision` names, another one, decided it: on
+/// a thread of its own, as [`expired_notice`] is, and carrying no escalation, as nothing is left to decide. None for a
+/// decision naming no human, or the one the request waited for.
+fn decided_notice(request: &ApprovalRequest, decision: &ApprovalDecision) -> Option<Envelope> {
+    let (Some(human), Some(by)) = (&request.human, &decision.by) else { return None };
+    if by == human {
+        return None;
+    }
+    let (ant, id, thread, tool) = (&request.ant, request.id, &request.thread_id, &request.tool);
+    let text = format!(
+        "[ants] {by} decided tool request {ant}/{id} on thread {thread} in place of {human}: {}. Tool: {} ({}).",
+        request.decide(decision.verdict).verdict.as_str(),
+        tool.title,
+        tool.kind,
+    );
+    Some(Envelope::new(ant.clone(), human.clone(), text).with_owner(Some(human.clone())))
 }
 
 /// The message on `request`'s thread that tells `member`, an ant of the chain asked to decide it, that it expired

@@ -224,7 +224,7 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
     let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
     client.flush().await.unwrap();
     let escalator = || {
-        let chain = Chain { remind: Some(Duration::from_millis(300)), ..Chain::default() };
+        let chain = Chain { remind: Some(Duration::from_millis(300)), stand_in: Some(ant("bob")), ..Chain::default() };
         let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
         let send = escalation::jetstream_sender(js.clone());
         Escalator::new(ant("dev-a"), chain, roster(), Registry::default(), ledger, send)
@@ -238,6 +238,7 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
     let told = next(&mut to_human).await;
     let escalation = told.escalation.as_deref().expect("an escalation, for push sinks").clone();
     assert_eq!((escalation.level, escalation.reason), (0, EscalationReason::TurnBudget));
+    assert_eq!(escalation.stand_in, Some(ant("bob")), "for the human's notifications to relay while it is away");
     drop(first);
 
     // Restarted, the ant still reminds the human of it, on the thread, carrying it.
@@ -260,14 +261,21 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
         assert!(reminder.sent == 1 && reminder.at > tomorrow, "daily after the first: {reminder:?}");
         assert_eq!(escalator.ledger().deadlines().await.unwrap().get(&thread), Some(&reminder.at));
 
-        let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
-        assert!(!escalator.arrived(&mut human, Role::Human).await.unwrap());
+        let mut stand_in = Envelope::on_thread(thread.clone(), ant("bob"), ant("dev-a"), "carry on");
+        assert!(!escalator.arrived(&mut stand_in, Role::Human).await.unwrap());
         assert_eq!(escalator.ledger().reminder(&thread).await.unwrap(), None, "a human ends it");
         assert!(escalator.ledger().deadlines().await.unwrap().is_empty());
+        let answered = next(&mut to_human).await;
+        let expected =
+            format!("[ants] bob answered the escalation of dev-a on thread {thread} in place of human: carry on");
+        assert_eq!((answered.text.as_str(), &answered.escalation), (expected.as_str(), &None));
+        assert_ne!(answered.thread_id, thread, "on a thread of its own");
+        let mut again = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "thanks");
+        assert!(!escalator.arrived(&mut again, Role::Human).await.unwrap());
     };
     tokio::select! {
         done = timeout(WAIT, check) => done.expect("checked in time"),
         () = escalator.deadlines() => unreachable!(),
     }
-    assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one reminder");
+    assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one reminder, one answer told");
 }

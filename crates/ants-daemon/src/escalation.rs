@@ -39,7 +39,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use crate::caps::{Ledger, Pending, Reminder};
+use crate::caps::{Ended, Ledger, Pending, Reminder};
 use crate::chains::Chains;
 use crate::humans::Registry;
 use crate::mcp::Roster;
@@ -98,6 +98,9 @@ pub struct Chain {
     pub after: Option<Duration>,
     /// How long an escalation that reached a human waits for a human's message before a reminder; None never reminds.
     pub remind: Option<Duration>,
+    /// The human who also gets what reaches a human while that one is away: stamped on the escalations and tool
+    /// requests, for that human's notifications to relay.
+    pub stand_in: Option<UserId>,
 }
 
 impl Default for Chain {
@@ -107,6 +110,7 @@ impl Default for Chain {
             max_hops: DEFAULT_MAX_ESCALATION_HOPS,
             after: Some(DEFAULT_ESCALATE_AFTER),
             remind: Some(DEFAULT_ESCALATION_REMINDER),
+            stand_in: None,
         }
     }
 }
@@ -241,8 +245,10 @@ impl Escalator {
     pub async fn arrived(&self, envelope: &mut Envelope, sender: Role) -> Result<bool> {
         let thread = envelope.thread_id.clone();
         if sender.is_human() {
-            if self.ledger.reset(&thread).await? {
+            let ended = self.ledger.reset(&thread).await?;
+            if ended.any() {
                 tracing::info!(%thread, from = %envelope.from, "a human ended the thread's escalation");
+                self.tell_answered(envelope, ended).await;
             }
             return Ok(false);
         }
@@ -261,6 +267,31 @@ impl Escalator {
             envelope.turn_budget = envelope.turn_budget.max(DEFAULT_TURN_BUDGET);
         }
         Ok(renewed)
+    }
+
+    /// Tell the human the thread's escalation `ended` had reached, if it reached one, that another human answered it
+    /// with `envelope`: the stand-in it went to while that human was away, say. On a thread of its own, as
+    /// [`crate::approvals`] tells of a tool request decided by another human; failing to, it only warns.
+    async fn tell_answered(&self, envelope: &Envelope, ended: Ended) {
+        let reached = match (ended.reminder, ended.escalation) {
+            (Some(reminder), _) => reminder.to,
+            (None, Some(pending)) if pending.at_owner() => self.humans.owner_or_default(pending.owner.as_ref()),
+            _ => return,
+        };
+        if reached == envelope.from || !self.humans.is_human(&reached) {
+            return;
+        }
+        let (ant, thread, from) = (&self.ant, &envelope.thread_id, &envelope.from);
+        let text = format!(
+            "[ants] {from} answered the escalation of {ant} on thread {thread} in place of {reached}: {}",
+            envelope.text.chars().take(SUMMARY_CHARS).collect::<String>(),
+        );
+        let notice = Envelope::new(ant.clone(), reached.clone(), text).with_owner(Some(reached));
+        let to = notice.to.clone();
+        match (self.send)(notice, format!("answered-{ant}-{}", envelope.id)).await {
+            Ok(()) => tracing::info!(%thread, %to, %from, "told of the answer of another human"),
+            Err(e) => tracing::warn!(%thread, %to, error = format!("{e:#}"), "telling of the answer of another human"),
+        }
     }
 
     /// Whether `envelope` tells the ant that a member sent the ant's own escalation one level higher: it
@@ -437,6 +468,7 @@ impl Escalator {
              human's message to {ant} on the thread ends it: `ants ask --thread {thread} @{ant} TEXT`.\n\n{summary}",
             reason_text(escalation.reason),
         );
+        let escalation = Escalation { stand_in: self.chain.stand_in.clone(), ..escalation };
         let notice = Envelope::on_thread(thread.clone(), ant.clone(), to, text)
             .with_owner(owner)
             .with_creator(creator)
@@ -501,6 +533,7 @@ impl Escalator {
         if let Some(why) = because.as_ref().and_then(|because| owner_text(escalation, because)) {
             notice.text = format!("{}\n\n{why}", notice.text);
         }
+        let escalation = &Escalation { stand_in: self.chain.stand_in.clone(), ..escalation.clone() };
         let notice = notice.with_escalation(Some(escalation.clone()));
         let human = notice.to.clone();
         if let Some(remind) = self.chain.remind.filter(|_| escalation.reason != EscalationReason::Approval) {

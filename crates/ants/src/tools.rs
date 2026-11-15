@@ -358,20 +358,21 @@ pub async fn answer(
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let (seq, request) = find(stream, id).await?;
-    answer_request(js, stream, seq, &request, verdict, now).await
+    answer_request(js, stream, seq, &request, verdict, &UserId::human(), now).await
 }
 
-/// Answer `request`, stored at stream sequence `seq`, as [`answer`] does.
+/// Answer `request`, stored at stream sequence `seq`, as [`answer`] does, as the human `by`.
 pub async fn answer_request(
     js: &jetstream::Context,
     stream: &Stream,
     seq: u64,
     request: &ApprovalRequest,
     verdict: Verdict,
+    by: &UserId,
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let last = check(js, stream, seq, request, verdict, now).await?;
-    decide(js, stream, request, verdict, last).await
+    decide(js, stream, request, request.decide(verdict).by(Some(by.clone())), last).await
 }
 
 fn answered(request: &ApprovalRequest, decision: &ApprovalDecision) -> anyhow::Error {
@@ -404,15 +405,14 @@ async fn check(
     Ok(last)
 }
 
-/// Store the decision `verdict` on `request` unless a message came on its decision subject after `last` ([`check`]).
+/// Store `decision` on `request` unless a message came on its decision subject after `last` ([`check`]).
 async fn decide(
     js: &jetstream::Context,
     stream: &Stream,
     request: &ApprovalRequest,
-    verdict: Verdict,
+    decision: ApprovalDecision,
     last: u64,
 ) -> Result<ApprovalDecision> {
-    let decision = request.decide(verdict);
     let message = jetstream::message::PublishMessage::build()
         .payload(serde_json::to_vec(&decision)?.into())
         .expected_last_subject_sequence(last);
@@ -798,7 +798,7 @@ pub async fn decide_request(nats: &crate::Nats<'_>, id: &str, verdict: Verdict, 
         }
         None => None,
     };
-    let decision = answer_request(&js, &stream, seq, &request, verdict, Utc::now()).await?;
+    let decision = answer_request(&js, &stream, seq, &request, verdict, &nats.me.id, Utc::now()).await?;
     println!("answered request {}/{}: {}", decision.ant, decision.request_id, spelling(decision.verdict));
     let ant = &request.ant;
     match edit {

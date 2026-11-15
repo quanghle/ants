@@ -42,6 +42,7 @@ async fn pending_requests_are_listed_and_answered() {
     let id = push.id.to_string();
     let decision = answer(&human, &stream, &id[..id.len() - 4], Verdict::AllowAlways, Utc::now()).await.unwrap();
     assert_eq!((decision.request_id, decision.verdict), (push.id, Verdict::AllowAlways));
+    assert_eq!(decision.by, Some(UserId::human()), "the decider, told to the human the request waited for");
     let stored = stream.get_last_raw_message_by_subject(&push.decision_subject()).await.unwrap();
     assert_eq!(stored.subject.as_str(), format!("ants.approvals.dev-a.{}", push.id));
     assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), decision);
@@ -118,8 +119,8 @@ async fn every_human_sees_every_request_and_the_first_decision_wins() {
     let (seq, _) = find(&a_stream, &push.id.to_string()).await.unwrap();
     let a_last = check(&a_js, &a_stream, seq, &push, Verdict::AllowOnce, Utc::now()).await.unwrap();
     let b_last = check(&b_js, &b_stream, seq, &push, Verdict::Reject, Utc::now()).await.unwrap();
-    let first = decide(&a_js, &a_stream, &push, Verdict::AllowOnce, a_last).await.unwrap();
-    let late = decide(&b_js, &b_stream, &push, Verdict::Reject, b_last).await.unwrap_err();
+    let first = decide(&a_js, &a_stream, &push, push.decide(Verdict::AllowOnce), a_last).await.unwrap();
+    let late = decide(&b_js, &b_stream, &push, push.decide(Verdict::Reject), b_last).await.unwrap_err();
     assert!(late.to_string().contains("already answered: allow-once"), "{late:#}");
     let again = answer(&b_js, &b_stream, &push.id.to_string(), Verdict::Reject, Utc::now()).await.unwrap_err();
     assert!(again.to_string().contains("already answered: allow-once"), "{again:#}");
@@ -202,7 +203,7 @@ async fn repeated_approvals_suggest_an_allow_rule() {
         bus::publish_json(&ant_js, r.subject(), &r, None).await.unwrap();
         let (seq, _) = find(&stream, &qualified(&r)).await.unwrap();
         if let Some(verdict) = verdict {
-            answer_request(&human, &stream, seq, &r, verdict, Utc::now()).await.unwrap();
+            answer_request(&human, &stream, seq, &r, verdict, &UserId::human(), Utc::now()).await.unwrap();
         }
         stored.push((seq, r));
     }

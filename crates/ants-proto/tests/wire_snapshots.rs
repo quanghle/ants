@@ -68,11 +68,19 @@ fn escalation() -> Escalation {
         level: 1,
         leader: user("lead"),
         visited: vec![user("dev-a"), user("lead")],
+        stand_in: None,
+        away: None,
     }
 }
 
 fn decision() -> ApprovalDecision {
-    ApprovalDecision { request_id: id(10), ant: user("dev-a"), verdict: Verdict::AllowOnce, decided_at: at(1) }
+    ApprovalDecision {
+        request_id: id(10),
+        ant: user("dev-a"),
+        verdict: Verdict::AllowOnce,
+        decided_at: at(1),
+        by: None,
+    }
 }
 
 fn mention() -> Mention {
@@ -267,6 +275,12 @@ fn envelopes() {
 #[test]
 fn escalations() {
     snap("escalation", &escalation());
+    let relayed = Escalation {
+        stand_in: Some(user("bob")),
+        away: Some(Away { human: user("alice"), ant: user("lead") }),
+        ..escalation()
+    };
+    snap("escalation_relayed", &relayed);
     snap(
         "escalation_reason_variants",
         &[
@@ -392,19 +406,21 @@ fn dead_letters() {
 fn approvals() {
     snap("verdict_variants", &[Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject]);
     snap("tool_call", &tool_call());
-    snap(
-        "approval_request",
-        &ApprovalRequest {
-            id: id(10),
-            ant: user("dev-a"),
-            thread_id: thread(),
-            tool: tool_call(),
-            options: vec![Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject],
-            requested_at: at(0),
-            expires_at: at(5),
-        },
-    );
+    let request = ApprovalRequest {
+        id: id(10),
+        ant: user("dev-a"),
+        thread_id: thread(),
+        tool: tool_call(),
+        options: vec![Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject],
+        requested_at: at(0),
+        expires_at: at(5),
+        human: None,
+        stand_in: None,
+    };
+    snap("approval_request", &request);
+    snap("approval_request_for_human", &request.for_human(Some(user("alice")), Some(user("bob"))));
     snap("approval_decision", &decision());
+    snap("approval_decision_by", &decision().by(Some(user("bob"))));
 }
 
 #[test]

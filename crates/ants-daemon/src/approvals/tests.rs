@@ -77,6 +77,42 @@ async fn the_human_decides_and_silence_rejects() {
     assert_eq!((&told.to, &told.owner), (&UserId::human(), &None));
 }
 
+#[tokio::test]
+async fn a_request_names_its_human_and_stand_in_who_is_told_of_another_human_deciding() {
+    let Some(server) = Server::start() else { return };
+    let (ant, alice, bob): (UserId, UserId, UserId) =
+        ("dev-a".parse().unwrap(), "alice".parse().unwrap(), "bob".parse().unwrap());
+    let thread: ThreadId = "t1".parse().unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+    let stream = bus::ensure_stream(&js).await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &bob, "human").await.unwrap();
+    let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    subscribed(&human_js).await;
+
+    let chain = Chain { stand_in: Some(bob.clone()), ..Chain::default() };
+    let humans = Registry::with(UserId::human(), &["alice", "bob"]);
+    let approver =
+        NatsApprover::new(client, js, ant.clone(), Duration::from_secs(10)).with_chain(chain).with_humans(humans);
+    let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
+    let _turn = approver.begin(&asked);
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), vec![Verdict::AllowOnce]));
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!((&request.human, &request.stand_in), (&Some(alice.clone()), &Some(bob.clone())));
+
+    let decision = request.decide(Verdict::AllowOnce).by(Some(bob.clone()));
+    human_js.publish(decision.subject(), serde_json::to_vec(&decision).unwrap().into()).await.unwrap().await.unwrap();
+    assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowOnce);
+    let stored = stream.direct_get_last_for_subject(subject::inbox(&alice, &ant)).await.unwrap();
+    let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
+    assert_eq!((&told.from, &told.owner, &told.escalation), (&ant, &Some(alice.clone()), &None));
+    let expected = format!("bob decided tool request dev-a/{} on thread t1 in place of alice: allow_once", request.id);
+    assert!(told.text.contains(&expected), "{}", told.text);
+
+    assert_eq!(decided_notice(&request, &decision.clone().by(Some(alice))), None, "the human's own decision");
+    assert_eq!(decided_notice(&request, &decision.by(None)), None, "a decider unknown");
+}
+
 #[test]
 fn an_expired_request_is_told_to_the_owner_else_the_default_human() {
     let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
