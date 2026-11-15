@@ -606,6 +606,7 @@ fn status() {
                 title: Some("cargo test".to_owned()),
                 tool_kind: Some("execute".to_owned()),
                 status: Some("in_progress".to_owned()),
+                paths: Some(vec!["crates/ants/src/main.rs".to_owned()]),
             },
         ),
         (
@@ -634,6 +635,30 @@ fn status() {
         let event = StatusEvent { ant: user("dev-a"), thread_id: thread(), update, at: at(0) };
         snap(&format!("status_event_{kind}"), &event);
     }
+}
+
+#[test]
+fn timeline() {
+    let call = TimelineCall {
+        id: "call-1".to_owned(),
+        tool_kind: Some("execute".to_owned()),
+        title: "cargo test".to_owned(),
+        status: Some("completed".to_owned()),
+        started: at(0),
+        duration_ms: Some(2100),
+        paths: vec!["crates/ants/src/main.rs".to_owned()],
+    };
+    let plan =
+        TimelineEntry::Plan { steps: vec![PlanStep { content: "fix".to_owned(), status: "in_progress".to_owned() }] };
+    let record = Timeline {
+        ant: user("dev-a"),
+        thread_id: thread(),
+        message: id(1),
+        entries: vec![TimelineEntry::Tool(call), plan],
+        omitted: 3,
+        at: at(1),
+    };
+    snap("timeline", &record);
 }
 
 #[test]

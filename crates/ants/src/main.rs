@@ -47,6 +47,7 @@ mod spend;
 mod thread;
 mod thread_meta;
 mod tools;
+mod tui;
 mod upgrade;
 mod versions;
 mod webhook;
@@ -82,7 +83,11 @@ async fn run() -> Result<()> {
     let domain = cli.js_domain.as_ref();
     let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: domain };
     let nats = || conn.nats();
-    match cli.command {
+    let Some(command) = cli.command else {
+        tui::usage_without_terminal();
+        return Box::pin(tui::run(&nats()?, tui::SINCE)).await;
+    };
+    match command {
         Command::Ask { thread, steer, replies, input, words } => {
             send::ask(&nats()?, thread, steer, &replies, &input, words).await
         }
@@ -114,6 +119,7 @@ async fn run() -> Result<()> {
         Command::Notify(NotifyCommand::Resume) => quiet::resume(&nats()?).await,
         Command::Notify(NotifyCommand::Status { json }) => quiet::status(&nats()?, json).await,
         Command::Watch { subject, thread } => cmd::watch::watch(&nats()?, &subject, thread).await,
+        Command::Chat { since } => Box::pin(tui::run(&nats()?, since)).await,
         Command::Dash { since } => Box::pin(dash::run(&nats()?, since)).await,
         Command::Cancel { ant, thread } => cmd::cancel::cancel(&nats()?, ant, thread).await,
         Command::Queue { ant, json } => queue::list(&nats()?, ant, json).await,
@@ -234,20 +240,26 @@ impl<'a> Nats<'a> {
     /// the user JWT of its device in the directory of encryption keys when it differs ([`devices::publish_or_warn`]).
     pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let (client, js) = self.connect_only(name).await?;
+        self.prepare(&js).await;
+        Ok((client, js))
+    }
+
+    /// What [`Nats::connect`] does once connected: register [`Nats::me`], create what the hub lacks, and put the
+    /// device's user JWT in the directory of encryption keys.
+    async fn prepare(&self, js: &async_nats::jetstream::Context) {
         let create = async {
             if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
-                create_missing(&js, &self.rights).await;
+                create_missing(js, &self.rights).await;
             }
         };
         let publish = async {
             if let Some(own) = &self.own_device
                 && !self.device_published.swap(true, Ordering::Relaxed)
             {
-                devices::publish_or_warn(&js, own).await;
+                devices::publish_or_warn(js, own).await;
             }
         };
-        tokio::join!(humans::register_or_warn(&js, &self.me), create, publish);
-        Ok((client, js))
+        tokio::join!(humans::register_or_warn(js, &self.me), create, publish);
     }
 
     /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
@@ -267,7 +279,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
     let fixed = hub::init(&js, |subject| nats.rights.may_publish(subject)).await;
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
-    let mut lines: Vec<String> = fixed.iter().map(|finding| format!("created {}", finding.object)).collect();
+    let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
     humans::register_or_warn(&js, &nats.me).await;
     if let Some(own) = &nats.own_device {
         devices::publish_or_warn(&js, own).await;
@@ -306,24 +318,24 @@ async fn serve_metrics(
     }
 }
 
-/// Create the hub's stream and buckets that are missing, as `ants init` does ([`hub::check`]), saying what was
-/// created; one already there stays as it is. Those the credentials may not create are reported as needing
-/// `ants init`; those whose stream info the credentials do not get, or that cannot be checked (the hub out of reach),
-/// are left alone. Returns what was created.
+/// Create the hub's stream and buckets that are missing, and add the subjects the stream lacks, as `ants init` does
+/// ([`hub::check`]), saying what was fixed; an object otherwise stays as it is. Those the credentials may not fix are
+/// reported as needing `ants init`; those whose stream info the credentials do not get, or that cannot be checked (the
+/// hub out of reach), are left alone. Returns what was fixed.
 async fn create_missing(js: &async_nats::jetstream::Context, rights: &humans::Rights) -> Vec<hub::Finding> {
     let mut created = Vec::new();
     for finding in hub::check(js, |subject| rights.may_publish(subject)).await {
         if let hub::Problem::Unchecked(_) = finding.problem {
             tracing::debug!("{finding}");
         } else if !finding.rights().iter().all(|subject| rights.may_publish(subject)) {
-            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) creates it");
+            tracing::warn!("{finding}; `ants init` with a human's current credentials (`ants auth user`) fixes it");
         } else {
             match hub::apply(js, &finding).await {
                 Ok(()) => {
-                    tracing::info!("created {}", finding.object);
+                    tracing::info!("{}", finding.fixed());
                     created.push(finding);
                 }
-                Err(e) => tracing::warn!("{finding}; `ants init` as a human creates it: {e:#}"),
+                Err(e) => tracing::warn!("{finding}; `ants init` as a human fixes it: {e:#}"),
             }
         }
     }

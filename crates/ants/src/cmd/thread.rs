@@ -51,6 +51,8 @@ pub(crate) enum ThreadCommand {
         json: bool,
     },
     /// Show a thread's whole history in the order the stream stored it: kind, time, sender and recipient, and text.
+    /// The tool calls its ants made show among them by when each started, as entries of kind tool: the ant, the
+    /// call's title and, in brackets, its kind, status and duration.
     Show {
         /// The thread: its id, a unique start of one, or `last`.
         #[arg(add = ArgValueCandidates::new(completions::threads))]
@@ -62,6 +64,9 @@ pub(crate) enum ThreadCommand {
         /// One JSON entry per line.
         #[arg(long)]
         json: bool,
+        /// Leave out the tool calls the thread's ants made.
+        #[arg(long)]
+        no_tools: bool,
     },
     /// Find the messages stored on any thread that match every filter given, the latest --limit of them, printed
     /// oldest first: time, thread, kind, sender and recipient, message id and a line of text. Times without an offset
@@ -179,7 +184,9 @@ pub(crate) async fn run(nats: &Nats<'_>, command: ThreadCommand) -> Result<()> {
         ThreadCommand::Unarchive { thread } => thread_meta::mark(nats, thread, thread_meta::Marking::Unarchive).await,
         ThreadCommand::Done { thread } => thread_meta::done(nats, thread, true).await,
         ThreadCommand::Undone { thread } => thread_meta::done(nats, thread, false).await,
-        ThreadCommand::Show { thread, since, json } => thread::show(nats, thread, since, json).await,
+        ThreadCommand::Show { thread, since, json, no_tools } => {
+            thread::show(nats, thread, since, json, no_tools).await
+        }
         ThreadCommand::Search { grep, from, to, channel, kinds, since, until, limit, json } => {
             let kinds = kinds.into_iter().collect();
             let search = search::Search { from, to, channel, kinds, grep, limit, ..Default::default() };

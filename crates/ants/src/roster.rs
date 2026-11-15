@@ -332,14 +332,14 @@ pub async fn show(nats: &crate::Nats<'_>, json: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ants_daemon::roster::Registration;
     use ants_proto::{Activity, HarnessLimit, PermissionsVersion, ROSTER_HEARTBEAT};
 
     use super::*;
     use crate::auth::tests::Server;
 
-    fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> RosterEntry {
+    pub(crate) fn entry(ant: &str, started: i64, beat: i64, now: DateTime<Utc>) -> RosterEntry {
         RosterEntry {
             ant: ant.parse().unwrap(),
             machine: "m1".to_owned(),

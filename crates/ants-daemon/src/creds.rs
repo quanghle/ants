@@ -112,11 +112,7 @@ impl Finding {
 
     /// The finding of a user JWT.
     pub fn from_jwt(jwt: &str) -> Result<Self> {
-        let payload = jwt.trim().split('.').nth(1).context("a malformed user JWT")?;
-        let payload = BASE64URL_NOPAD
-            .decode(payload.trim_end_matches('=').as_bytes())
-            .map_err(|e| anyhow!("a malformed user JWT: {e}"))?;
-        Self::from_claims(&serde_json::from_slice(&payload).context("a malformed user JWT")?)
+        Self::from_claims(&claims(jwt)?)
     }
 
     /// The finding of a user JWT's claims.
@@ -345,6 +341,23 @@ impl Finding {
 pub fn check(path: &Path) -> Result<Finding> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
     Finding::from_creds(&text).with_context(|| format!("credentials {}", path.display()))
+}
+
+/// The claims of a user JWT.
+fn claims(jwt: &str) -> Result<Value> {
+    let payload = jwt.trim().split('.').nth(1).context("a malformed user JWT")?;
+    let payload = BASE64URL_NOPAD
+        .decode(payload.trim_end_matches('=').as_bytes())
+        .map_err(|e| anyhow!("a malformed user JWT: {e}"))?;
+    serde_json::from_slice(&payload).context("a malformed user JWT")
+}
+
+/// Whether the credentials file at `path` allows publishing `subject`, listed as it is among the publish allowances of
+/// its user JWT. One without publish allowances, or that cannot be read, is left for the server to judge: true.
+pub fn may_publish(path: &Path, subject: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return true };
+    let Some(Ok(claims)) = creds_jwt(&text).map(claims) else { return true };
+    claims["nats"]["pub"]["allow"].as_array().is_none_or(|allow| allow.iter().any(|s| s == subject))
 }
 
 /// Log a warning for each of [`Finding::warnings`] of the credentials file at `path`; one that cannot be read is
@@ -806,5 +819,30 @@ mod tests {
         let human = Permissions::for_user(&p("alice"), Role::Human);
         let tags = [PERMISSIONS_VERSION.tag()];
         assert!(Finding::from_claims(&claims("alice", &human, &tags, None)).is_err(), "no device id");
+    }
+
+    #[test]
+    fn only_credentials_listing_a_subject_may_publish_it() {
+        let dir = ants_test_support::scratch_dir("creds-may-publish");
+        let path = dir.join("dev-a.creds");
+        let timeline = subject::timeline_from(&p("dev-a"));
+        let write = |permissions: &Permissions| {
+            let claims = claims("dev-a", permissions, &[PERMISSIONS_VERSION.tag()], None);
+            let body = BASE64URL_NOPAD.encode(&serde_json::to_vec(&claims).unwrap());
+            std::fs::write(
+                &path,
+                format!("-----BEGIN NATS USER JWT-----\nhead.{body}.sig\n------END NATS USER JWT------\n"),
+            )
+            .unwrap();
+        };
+        assert!(may_publish(&path, &timeline), "no file: the server judges");
+        let mut ant = Permissions::for_user(&p("dev-a"), Role::Ant);
+        write(&ant);
+        assert!(may_publish(&path, &timeline));
+        assert!(!may_publish(&path, &subject::timeline_from(&p("dev-b"))));
+        ant.publish.retain(|s| *s != timeline);
+        write(&ant);
+        assert!(!may_publish(&path, &timeline), "issued before timelines");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
