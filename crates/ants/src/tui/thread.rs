@@ -67,7 +67,7 @@ impl Page {
         self.messages().find(|e| e.id == Some(at)).map(|e| e.seq)
     }
 
-    pub const KEYS: &str = "↑↓ select · y copy · p pin · m mute · e archive · d done · End latest · Esc back";
+    pub const KEYS: &str = "↑↓ select · y copy · p pin · m mute · e archive · d done · t tree · End latest · Esc back";
 
     /// The messages shown, in the order stored.
     fn messages(&self) -> impl DoubleEndedIterator<Item = &Entry> {
@@ -142,6 +142,7 @@ impl Page {
             Key::Char('m') => return change(Change::Mute(!flags.muted)),
             Key::Char('e') => return change(Change::Archive(!flags.archived)),
             Key::Char('d') => return change(Change::Done(!flags.done)),
+            Key::Char('t') => return Some(To::Tree(self.history.thread.clone())),
             _ => {}
         }
         None
