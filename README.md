@@ -4,7 +4,7 @@
 
 Headless agent teams across machines, communicating with each other and with humans at the terminal over NATS.
 
-- **Backbone:** NATS + JetStream stream `ANTS` for durable inboxes, channels, thread notes, approvals and dead letters, plus 14 NATS KV buckets for roster, sessions, attempts, channels, humans, chains, links, owners, read markers, presence, notifications, reactions, thread metadata and webhooks.
+- **Backbone:** NATS + JetStream stream `ANTS` for durable inboxes, channels, thread notes, approvals and dead letters, plus 15 NATS KV buckets for roster, sessions, attempts, channels, humans, chains, links, owners, read markers, presence, notifications, reactions, thread metadata, webhooks and human devices' encryption keys.
 - **Transport:** `wss://`/`ws://` behind a reverse proxy, `tls://`, a Dev Tunnel, or the plain-HTTPS fallback bridge (`ants bridge`), optionally with a local store-and-forward leaf node per machine. See [docs/transport.md](docs/transport.md).
 - **Harnesses:** ACP (Agent Client Protocol) agents over stdio. Four built-ins, none a default: `copilot` (Copilot CLI), `claude` (Claude Code via `claude-agent-acp`), `codex` (Codex via `codex-acp`) and `antigravity` (Google Antigravity CLI, `agy acp`), plus custom `[harnesses.NAME]` definitions. Built-ins run in their most permissive setting: they run their own tools unasked, so allow rules, tool approvals and webhook/schedule narrowing do not reach those tools (`ants daemon` and `ants doctor` warn) unless the built-in is redefined to ask. See [docs/config.md](docs/config.md#harnesses).
 - **Footprint:** one Rust binary, `ants`, serves as the CLI, ant daemon, signer, stdio MCP bridge, channel manager, webhook ingress and HTTPS bridge. An idle daemon stays under 20 MB RSS; when system memory runs low, idle harnesses stop at once and fewer run ([memory pressure](docs/config.md#memory-pressure)).
@@ -17,14 +17,14 @@ Headless agent teams across machines, communicating with each other and with hum
 | ants daemon                   |      | nats-server (hub)        |      | ants CLI (human)         |
 |   dev-a -> harness per thread |      |   JetStream domain "hub" |      |   ask, post, inbox,      |
 |   dev-b -> harness per thread |      |   stream ANTS            |      |   tools, watch, dash     |
-|   MCP server for sessions     |      |   14 KV buckets          |      |            |             |
+|   MCP server for sessions     |      |   15 KV buckets          |      |            |             |
 |            |                  |      |                          |      |            |             |
 | nats-server (leaf, outbox)  --+----->|                          |<-----+-- nats-server (leaf)     |
 +-------------------------------+      +--------------------------+      +--------------------------+
                         uplink: wss://, tls://, Dev Tunnel, or ants bridge
 ```
 
-- **Hub:** one `nats-server` with JetStream holding stream `ANTS`, 14 KV buckets and the attachment store `ants_files` (`ants init`). With `ants auth`, every ant, human, webhook, observer, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials ([docs/auth.md](docs/auth.md)).
+- **Hub:** one `nats-server` with JetStream holding stream `ANTS`, 15 KV buckets and the attachment store `ants_files` (`ants init`). With `ants auth`, every ant, human, webhook, observer, leaf uplink and channel manager connects using role-scoped NKey/JWT credentials ([docs/auth.md](docs/auth.md)).
 - **Leaf:** optional per-machine `nats-server` (`ants leaf config`) on `127.0.0.1:4222` with a store-and-forward outbox (`ants leaf outbox`). Local `ants` processes target `127.0.0.1:4222`; only the leaf uplink crosses the network.
 - **Daemon:** `ants daemon` serves ants over per-ant NATS connections and durable consumers, runs up to `max_harnesses` ACP processes per ant, enforces tool allowlists, limits and spending caps, refreshes roster heartbeats and exposes an MCP server to each session.
 - **Ants and humans:** ants are named agents (`dev-a`, `reviewer`, `messenger`) with a workdir, harness, capabilities and optional `whoami`. Humans (`human` by default, or named users from `ants auth user NAME --human`) own threads they start and approve tools. Unaddressed `ants ask` requests go to `messenger` for capability routing. Agent-to-agent messages share a per-thread turn budget (default 8).
@@ -42,6 +42,7 @@ Headless agent teams across machines, communicating with each other and with hum
 | KV `ants_owners` | File, 30d | Thread `owner` (`<thread>.<recipient>`); first record wins (`discard_new_per_subject`, 30d dedup window, no delete/purge). |
 | KV `ants_read` | File, none | Per-human inbox read marker (`<human>`: `below` + `read` set), shared across devices. |
 | KV `ants_presence` | Memory, 30s | Per-device follow presence (`<human>.<device>.<inbox\|approvals>`), refreshed every 10s. |
+| KV `ants_devices` | File, none | Directory of human devices' encryption keys: each device's user JWT binding its `ants-xkey:` (`<human>.<device>`), put by its CLI on connecting, and revoked keys of humans' credentials (`revoked.<U...>`), put by `ants auth revoke`/`push`; humans read all and put only their own devices'. |
 | KV `ants_notify` | File, none | Per-human snooze deadline and muted threads (`<human>`), and notices held back for a digest (`held.<human>`). |
 | KV `ants_reactions` | File, 30d | Message reactions (`<reactor>.<message_id>.<reaction>`); humans write/delete their own keys and read all; ants neither read nor write, asking `ants signer` instead. |
 | KV `ants_threads` | File, none (per-message TTLs allowed) | Shared thread titles (`title.<thread>`) and done states (`done.<thread>`), and per-human pin/archive/keep marks (`marks.<human>`); `ants thread list` prunes those of expired threads. |
@@ -118,7 +119,7 @@ Without `ants setup`: `nats-server -js &`, `ants harness check --harness claude`
 | `ants tools list [-f] [--json]` / `show ID [--json]` | List or inspect pending tool requests (`<ant>/<id>`, unique prefix accepted; `-f` records approval presence). |
 | `ants tools approve ID [--always] [--rule [--config FILE]]` / `reject ID` | Decide a pending tool request; `--rule` appends the exact allow rule to `config.toml` and reloads the daemon. |
 | `ants dead list` / `replay SEQ` / `drop SEQ` / `watch` | Inspect, replay or drop dead letters; `watch` converts `MAX_DELIVERIES` advisories into dead letters. |
-| `ants init` | Create whichever of stream `ANTS`, the 14 KV buckets and store `ants_files` is missing, leaving existing ones as they are except for adding the subjects `ANTS` lacks (human creds; also runs automatically on first human CLI connect). |
+| `ants init` | Create whichever of stream `ANTS`, the 15 KV buckets and store `ants_files` is missing, leaving existing ones as they are except for adding the subjects `ANTS` lacks (human creds; also runs automatically on first human CLI connect). |
 | `ants daemon [--ant NAME] [--config FILE] [--metrics ADDR] [ant-flags...]` | Serve config-file ants and schedules, or a single `--ant` ([docs/config.md](docs/config.md)). |
 | `ants add NAME [--config FILE] [--out FILE] [--store-key] [--jwt JWT \| --enroll CREDS [--hub URL] [--leaf-config FILE]] [ant-flags...]` | Generate local NKey, append `[[ant]]` to `config.toml`, and complete credentials ([docs/auth.md](docs/auth.md#adding-an-ant)). |
 | `ants retire NAME [--config FILE] [--dir DIR] [--no-push]` | Unlist, drain, revoke and delete credentials of a templated ant while keeping `~/.ants/<name>` ([docs/config.md](docs/config.md#retiring-an-added-ant)). |

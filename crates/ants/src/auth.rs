@@ -17,7 +17,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ants_daemon::config::registration::{GithubAccount, Grant};
 use ants_daemon::creds::{Finding, Kind as CredsKind, Seed};
-use ants_proto::{Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions, Role, UserId};
+use ants_proto::{
+    DEVICES_BUCKET, Destination, DeviceId, DeviceKey, JsDomain, Machine, PERMISSIONS_VERSION, Permissions,
+    REVOKED_DEVICES, Role, UserId,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use nkeys::{KeyPair, XKey};
@@ -114,10 +117,14 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
-/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take.
+/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take, and
+/// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records.
 pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if *user == UserId::channel_manager() {
         bail!("{user} is reserved for the channel manager (`ants auth channel-manager`); choose another name");
+    }
+    if user.as_str() == REVOKED_DEVICES {
+        bail!("{user} is reserved for the revocation records of {DEVICES_BUCKET}; choose another name");
     }
     Ok(())
 }
@@ -770,6 +777,12 @@ fn signer_permissions() -> Permissions {
     permissions
 }
 
+/// The text of short-lived credentials signed with the account key in `dir`, for the hub's JetStream domain if it has
+/// one, that put the revocation records of humans' keys ([`Permissions::for_device_revoker`]).
+pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
+}
+
 fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
@@ -799,7 +812,7 @@ pub fn verified(jwt: &str) -> Result<Claims> {
 }
 
 /// [`verified`], with all of the JWT's claims.
-fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
+pub(crate) fn verified_body(jwt: &str) -> Result<(Claims, Value)> {
     let jwt = jwt.trim();
     let (signed, signature) = jwt.rsplit_once('.').context("not a JWT")?;
     let (_, body) = signed.split_once('.').context("not a JWT")?;

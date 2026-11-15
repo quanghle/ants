@@ -15,6 +15,7 @@ mod completions;
 mod compose;
 mod dash;
 mod defaults;
+mod devices;
 mod doctor;
 mod enroll;
 mod github;
@@ -157,7 +158,7 @@ async fn run() -> Result<()> {
                     None
                 }
             };
-            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats).await
+            retire::retire(&args, roster.as_ref(), retire::STOP_WAIT, &cli.nats, domain).await
         }
         Command::Renew(args) => renew::run(args, &cli.nats, cli.creds.as_deref()).await,
         Command::Keys(command) => keys::run(command, &cli.nats, cli.creds.as_deref()).await,
@@ -204,8 +205,15 @@ pub struct Nats<'a> {
     /// The device of the human the credentials were issued for; none for an ant's, and without credentials.
     pub device: Option<DeviceId>,
     rights: humans::Rights,
+    /// The account that signed the credentials, whose devices' keys alone the CLI takes from the directory
+    /// ([`devices::Directory`]); none without credentials.
+    pub account: Option<String>,
+    /// The human's device of the credentials, if they bind an encryption key, which a connection puts in the directory.
+    own_device: Option<devices::Own>,
     /// Whether a connection checked the hub's stream and buckets already ([`create_missing`]).
     hub_checked: AtomicBool,
+    /// Whether a connection put [`Nats::own_device`] in the directory already.
+    device_published: AtomicBool,
 }
 
 impl<'a> Nats<'a> {
@@ -213,25 +221,49 @@ impl<'a> Nats<'a> {
         let me = humans::Me::from_creds(creds)?;
         let device = humans::device(creds)?;
         let rights = humans::Rights::from_creds(creds)?;
-        Ok(Self { url, creds, domain, me, device, rights, hub_checked: AtomicBool::new(false) })
+        let account = devices::account_of(creds)?;
+        // Credentials issued before the directory existed may not put in it: asking would only time out.
+        let own_device = devices::Own::from_creds(creds)?
+            .filter(|own| rights.may_publish(&ants_proto::subject::devices_of(&own.human)));
+        Ok(Self {
+            url,
+            creds,
+            domain,
+            me,
+            device,
+            rights,
+            account,
+            own_device,
+            hub_checked: AtomicBool::new(false),
+            device_published: AtomicBool::new(false),
+        })
     }
 
     /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]). The first
-    /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]).
+    /// connection of a human also creates the hub's stream and buckets that are missing ([`create_missing`]), and puts
+    /// the user JWT of its device in the directory of encryption keys when it differs ([`devices::publish_or_warn`]).
     pub async fn connect(&self, name: &str) -> Result<(async_nats::Client, async_nats::jetstream::Context)> {
         let (client, js) = self.connect_only(name).await?;
         self.prepare(&js).await;
         Ok((client, js))
     }
 
-    /// What [`Nats::connect`] does once connected: register [`Nats::me`], and create what the hub lacks.
+    /// What [`Nats::connect`] does once connected: register [`Nats::me`], create what the hub lacks, and put the
+    /// device's user JWT in the directory of encryption keys.
     async fn prepare(&self, js: &async_nats::jetstream::Context) {
         let create = async {
             if self.me.role.is_human() && !self.hub_checked.swap(true, Ordering::Relaxed) {
                 create_missing(js, &self.rights).await;
             }
         };
-        tokio::join!(humans::register_or_warn(js, &self.me), create);
+        let publish = async {
+            if let Some(own) = &self.own_device
+                && !self.device_published.swap(true, Ordering::Relaxed)
+            {
+                devices::publish_or_warn(js, own).await;
+            }
+        };
+        tokio::join!(humans::register_or_warn(js, &self.me), create, publish);
     }
 
     /// Connect as [`Nats::me`] without registering it, naming the connection after its device, if any, too.
@@ -244,7 +276,8 @@ impl<'a> Nats<'a> {
     }
 }
 
-/// `ants init`: create the hub's stream and buckets that are missing, and register the human of the credentials.
+/// `ants init`: create the hub's stream and buckets that are missing, register the human of the credentials and put
+/// the user JWT of its device in the directory of encryption keys.
 /// Returns what was done, a line each.
 async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let (_, js) = nats.connect_only("ants-cli").await?;
@@ -252,8 +285,11 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
     let fixed = fixed.context("`ants init` needs a human's credentials (`ants auth user NAME --human`)")?;
     let mut lines: Vec<String> = fixed.iter().map(hub::Finding::fixed).collect();
     humans::register_or_warn(&js, &nats.me).await;
+    if let Some(own) = &nats.own_device {
+        devices::publish_or_warn(&js, own).await;
+    }
     lines.push(format!(
-        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
+        "stream {}, buckets {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} and {}, and store {} ready",
         ants_proto::STREAM,
         ants_proto::ROSTER_BUCKET,
         ants_proto::SESSIONS_BUCKET,
@@ -269,6 +305,7 @@ async fn init_hub(nats: &Nats<'_>) -> Result<Vec<String>> {
         ants_proto::READ_BUCKET,
         ants_proto::PRESENCE_BUCKET,
         ants_proto::NOTIFY_BUCKET,
+        ants_proto::DEVICES_BUCKET,
         ants_proto::FILES_BUCKET
     ));
     Ok(lines)

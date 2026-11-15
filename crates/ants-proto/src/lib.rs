@@ -145,6 +145,14 @@ pub const READ_BUCKET: &str = "ants_read";
 /// on its own. Each human reads, by direct gets, and writes only its own keys ([`Permissions::for_user`]); `ants
 /// webhook serve` reads them so a notice skips the push targets of a device reading it already.
 pub const PRESENCE_BUCKET: &str = "ants_presence";
+/// KV bucket of the directory of human devices' encryption keys: the user JWT of each device of a human whose
+/// credentials carry an encryption key ([`DeviceKey`]), keyed by [`device_entry_key`] and put by its CLI on connecting
+/// when it differs, and a [`DeviceRevocation`] for each revoked key of a human's credentials, keyed by
+/// [`revoked_device_key`]. Each human reads all of it and writes only its own keys; only the short-lived credentials
+/// `ants auth revoke` and `ants auth push` issue from the account key put the revocation records
+/// ([`Permissions::for_device_revoker`]). A reader takes a device's key only from a JWT it verifies itself. Entries
+/// never expire.
+pub const DEVICES_BUCKET: &str = "ants_devices";
 /// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants
 /// webhook serve` before each notice; and of what a snooze or quiet hours held back from it ([`HeldNotices`]), keyed by
