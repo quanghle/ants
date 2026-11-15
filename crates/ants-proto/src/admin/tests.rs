@@ -5,7 +5,7 @@ use nkeys::KeyPair;
 use serde_json::json;
 
 use super::*;
-use crate::ADMIN_TAG;
+use crate::{ADMIN_TAG, AssistantOf};
 
 fn p(s: &str) -> UserId {
     s.parse().unwrap()
@@ -142,6 +142,67 @@ fn a_daemon_carries_out_only_what_an_admin_signed() {
     assert!(at(&expiring, false, stored).is_ok(), "valid when stored");
     let expired = at(&expiring, false, stored + TimeDelta::days(3));
     assert_matches!(expired, Err(OrderError::Credentials(JwtError::Expired(_))), "stored after it expired");
+}
+
+/// An assistant's order for its human is signed by credentials naming the human, and signs a line naming it too, which
+/// an admin's own order goes without, so its signature stays what it was.
+#[test]
+fn an_assistant_signs_an_order_for_its_human() {
+    let team = Team::new();
+    let account = team.account();
+    let check = |order: &AdminOrder| {
+        order.verify(&order.subject(), [account.as_str()], |_| false, order.sent_at + TimeDelta::seconds(1))
+    };
+    let own = AdminOrder::new(p("pa"), m("box"), p("dev-a"), AdminOp::Pause, team.jwt("pa", &[], None));
+    let for_alice = team.signed(own.clone().on_behalf(Some(p("alice"))));
+    let tagged = team.signed(AdminOrder {
+        credentials: team.jwt("pa", &[&AssistantOf::tag(&p("alice"))], None),
+        ..for_alice.clone()
+    });
+    assert_eq!(check(&tagged).unwrap().id, p("pa"));
+    assert_matches!(check(&for_alice), Err(OrderError::Credentials(JwtError::NotAssistant { .. })));
+    let for_bob = team.signed(AdminOrder { on_behalf_of: Some(p("bob")), ..tagged.clone() });
+    assert_matches!(check(&for_bob), Err(OrderError::Credentials(JwtError::NotAssistant { .. })));
+    let mut unsigned_claim = tagged.clone();
+    unsigned_claim.signature = team.signed(AdminOrder { on_behalf_of: None, ..tagged.clone() }).signature;
+    assert_matches!(check(&unsigned_claim), Err(OrderError::Credentials(JwtError::BadSignature(_))));
+    let own = team.signed(AdminOrder { credentials: tagged.credentials.clone(), ..own });
+    assert_matches!(check(&own), Err(OrderError::Credentials(_)), "an assistant is no admin");
+
+    let lines = |order: &AdminOrder| String::from_utf8(order.signed()).unwrap().lines().count();
+    assert_eq!((lines(&own), lines(&tagged)), (7, 8));
+    assert_eq!(String::from_utf8(tagged.signed()).unwrap().lines().last(), Some("alice"));
+    let json = serde_json::to_value(&own).unwrap();
+    assert_eq!(json.get("on_behalf_of"), None);
+    let outcome = AdminOutcome::of(&tagged, OrderState::Held, None, None);
+    assert_eq!((outcome.state.as_str(), outcome.on_behalf_of), ("held", Some(p("alice"))));
+    assert_eq!(held_orders_key(&m("box")), "box.held");
+    assert_eq!(admin_outcome_of(&held_orders_key(&m("box"))), None);
+}
+
+#[test]
+fn an_order_rule_covers_an_op_of_its_kind() {
+    assert!(covers_order("order:*", &AdminOp::Retire));
+    assert!(covers_order("order:pause", &AdminOp::Pause));
+    assert!(covers_order("order:read_memories", &AdminOp::ReadMemories));
+    for (rule, op) in [("order:resume", AdminOp::Pause), ("pause", AdminOp::Pause), ("execute:*", AdminOp::Pause)] {
+        assert!(!covers_order(rule, &op), "{rule}");
+    }
+    let ops = [
+        set(),
+        AdminOp::Pause,
+        AdminOp::Resume,
+        AdminOp::Restart { now: true },
+        AdminOp::Add { settings: Map::new() },
+        AdminOp::Retire,
+        AdminOp::ReadMemories,
+        AdminOp::ReadSettings,
+        AdminOp::Clone { new: p("dev-b"), settings: Map::new() },
+    ];
+    for op in ops {
+        assert_eq!(op.for_assistant(), ASSISTANT_ORDER_KINDS.contains(&op.kind()), "{}", op.kind());
+        assert_eq!(serde_json::to_value(&op).unwrap()["kind"], op.kind());
+    }
 }
 
 #[test]

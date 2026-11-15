@@ -1546,6 +1546,7 @@ struct MemoryHuman {
     titles: StdMutex<Vec<ThreadTitle>>,
     done: StdMutex<Vec<ants_proto::ThreadDone>>,
     reactions: StdMutex<Vec<Reacted>>,
+    orders: StdMutex<Vec<ants_proto::AdminOrder>>,
 }
 
 impl MemoryHuman {
@@ -1616,6 +1617,11 @@ impl HumanStore for MemoryHuman {
             reactions.push((by, message, reaction, Some(human)));
         }
         Box::pin(async { Ok(true) })
+    }
+
+    fn send_order(&self, order: ants_proto::AdminOrder) -> BoxFuture<'_, Result<ants_proto::AdminOrder>> {
+        self.orders.locked().push(order.clone());
+        Box::pin(async { Ok(order) })
     }
 }
 
@@ -1705,7 +1711,7 @@ async fn assistant_with(
     (mcp, sent, humans, device, store)
 }
 
-const ASSIST_TOOLS: [&str; 9] = [
+const ASSIST_TOOLS: [&str; 10] = [
     "human_queue",
     "answer_for_human",
     "send_for_human",
@@ -1715,6 +1721,7 @@ const ASSIST_TOOLS: [&str; 9] = [
     "title_for_human",
     "done_for_human",
     "decide_for_human",
+    "order_for_human",
 ];
 
 #[tokio::test]
@@ -1734,7 +1741,7 @@ async fn the_assistant_tools_stand_only_while_the_grant_names_the_ant() {
 
     grant(&humans, &device, Some("dev-a"), false);
     let granted = tools().await;
-    assert_eq!((granted.len(), offered(&granted)), (26, 9), "{granted:?}");
+    assert_eq!((granted.len(), offered(&granted)), (27, 10), "{granted:?}");
     assert_eq!(call(&client, "human_queue", serde_json::json!({})).await, (true, "Nothing waits for alice.".into()));
 
     // The same connection loses them at once.
@@ -1837,6 +1844,23 @@ async fn what_the_assistant_does_for_its_human_carries_on_behalf_of() {
         call(&client, "title_for_human", serde_json::json!({"thread": ThreadId::generate().to_string(), "title": "x"}))
             .await;
     assert!(!ok && refused.contains("alice has no message on thread"), "{refused}");
+
+    let (ok, ordered) =
+        call(&client, "order_for_human", serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "restart-now"}))
+            .await;
+    assert!(ok && ordered.contains("until then it is held") && ordered.contains("dev-b/order:restart"), "{ordered}");
+    let order = store.orders.locked().pop().unwrap();
+    assert_eq!((&order.admin, order.on_behalf_of.as_ref()), (&dev_a, Some(&alice)));
+    assert_eq!(
+        (order.machine.as_str(), &order.ant, &order.op),
+        ("m1", &dev_b, &ants_proto::AdminOp::Restart { now: true })
+    );
+    let notice = sent.try_recv().unwrap();
+    assert_eq!(notice.to, alice);
+    assert!(notice.text.contains(&format!("ants assistant confirm m1/dev-b/{}", order.id)), "{}", notice.text);
+    let (ok, refused) =
+        call(&client, "order_for_human", serde_json::json!({"ant": "dev-b", "machine": "m1", "op": "retire"})).await;
+    assert!(!ok && refused.contains("unknown op retire"), "{refused}");
 }
 
 #[tokio::test]

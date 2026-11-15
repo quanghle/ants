@@ -242,7 +242,7 @@ async fn assist(mcp: &Mcp, config: &Config, js: &async_nats::jetstream::Context,
         }
     };
     mcp.with_assisting(human);
-    mcp.with_human_store(crate::mcp::jetstream_store(js.clone(), config.js_domain.clone()));
+    mcp.with_human_store(crate::mcp::jetstream_store(js.clone(), config.js_domain.clone(), creds.clone()));
     match assistant_sealing(config, creds, js, humans).await {
         Ok(Some(sealing)) => mcp.with_sealing(std::sync::Arc::new(sealing)),
         Ok(None) => {}

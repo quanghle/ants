@@ -17,13 +17,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use ants_proto::{
-    Act, ActAnswer, ConsentKey, Consents, Envelope, Grants, HUMANS_BUCKET, HumanEntry, Humans, PreAllow, Role, UserId,
-    VerifiedGrant, assistant_grant_of,
+    Act, ActAnswer, Confirmations, ConsentKey, Consents, Envelope, Grants, HUMANS_BUCKET, HumanEntry, Humans, PreAllow,
+    Role, UserId, VerifiedGrant, assistant_grant_of,
 };
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::{self, context::KeyValueErrorKind, kv};
 use futures::{StreamExt as _, TryStreamExt as _};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::sync::RwLockExt as _;
@@ -53,6 +53,8 @@ struct Assistants {
     consents: RwLock<Consents>,
     /// Each human whose consent records changed.
     consented: broadcast::Sender<UserId>,
+    /// Whether the watch has read the bucket once ([`Registry::loaded`]).
+    loaded: watch::Sender<bool>,
 }
 
 impl Assistants {
@@ -63,6 +65,7 @@ impl Assistants {
             withdrawals: broadcast::channel(WITHDRAWALS).0,
             consents: RwLock::default(),
             consented: broadcast::channel(WITHDRAWALS).0,
+            loaded: watch::channel(false).0,
         }
     }
 }
@@ -124,6 +127,11 @@ impl Registry {
         self.assistants.consents.read_locked().answer(human, assistant, act)
     }
 
+    /// The answers of `human` standing now, as signed: the credentials that signed carry what else the human is.
+    pub fn confirmations(&self, human: &UserId) -> Option<Confirmations> {
+        self.assistants.consents.read_locked().confirmations(human).cloned()
+    }
+
     /// The pre-allow rules `human` signed for its assistant `assistant`, standing now.
     pub fn pre_allow(&self, human: &UserId, assistant: &UserId) -> Option<PreAllow> {
         self.assistants.consents.read_locked().pre_allow(human, assistant).cloned()
@@ -133,6 +141,13 @@ impl Registry {
     /// behind should look again at every human it waits for.
     pub fn consents(&self) -> broadcast::Receiver<UserId> {
         self.assistants.consented.subscribe()
+    }
+
+    /// Wait until the watch has read the bucket once ([`Registry::watch`]): until then, no grant stands, which does not
+    /// mean that a grant was withdrawn.
+    pub async fn loaded(&self) {
+        let mut loaded = self.assistants.loaded.subscribe();
+        let _ = loaded.wait_for(|loaded| *loaded).await;
     }
 
     /// The human who gets what is meant for the owner of a thread that has none.
@@ -236,6 +251,7 @@ impl Registry {
                 }
             }
         }
+        self.assistants.loaded.send_replace(true);
         while let Some(entry) = updates.next().await {
             let entry = entry.context("watching the humans")?;
             let value = (entry.operation == kv::Operation::Put).then_some(&entry.value[..]);
@@ -336,12 +352,14 @@ impl Registry {
             known.add(name, entry).unwrap();
         }
         registry.replace(known);
+        registry.assistants.loaded.send_replace(true);
         registry
     }
 
     /// Apply `value`, what the grant or consent key `key` holds now, as the watch would.
     #[cfg(test)]
     pub fn put_record(&self, key: &str, value: Option<&[u8]>) {
+        self.assistants.loaded.send_replace(true);
         if assistant_grant_of(key).is_some() {
             self.set_grant(key, value);
         } else {

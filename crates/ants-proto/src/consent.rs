@@ -395,6 +395,11 @@ impl Consents {
         self.confirmations.get(human)?.record.as_ref()?.answer(assistant, act)
     }
 
+    /// The answers of `human` standing, whatever assistant they answer.
+    pub fn confirmations(&self, human: &UserId) -> Option<&Confirmations> {
+        self.confirmations.get(human)?.record.as_ref()
+    }
+
     /// The pre-allow rules of `human` standing for `assistant`.
     pub fn pre_allow(&self, human: &UserId, assistant: &UserId) -> Option<&PreAllow> {
         self.pre_allows.get(human)?.record.as_ref().filter(|p| p.assistant == *assistant)

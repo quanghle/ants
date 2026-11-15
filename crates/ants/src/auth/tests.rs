@@ -939,9 +939,10 @@ async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     assert_eq!(heard, [&b"allow"[..], b"reject"]);
 }
 
-/// An assistant decides no approval request on its subject, sends no admin order, cancels no prompt, asks for no
-/// queue, and withdraws no queued message nor records an owner: its decisions wait in its messages for its human's
-/// confirmation, and readers of the rest could not tell its acts from its human's.
+/// An assistant decides no approval request on its subject, cancels no prompt, asks for no queue, and withdraws no
+/// queued message nor records an owner: its decisions wait in its messages for its human's confirmation, and readers
+/// of the rest could not tell its acts from its human's. Its admin orders, which name the human they are for, wait
+/// for the human's confirmation at the machine's daemon.
 #[tokio::test]
 async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let Some(server) = Server::start() else { return };
@@ -953,7 +954,6 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let (client, mut errors) = server.watched_with(&pa, &creds).await;
     for s in [
         "ants.approvals.dev-a.r1",
-        "ants.admin.m1.dev-a",
         "ants.cancel.dev-a.t1",
         "ants.queue.dev-a",
         "$KV.ants_attempts.dev-a.msg.m1",
