@@ -10,7 +10,8 @@
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //! `react` adds or removes the ant's reaction to a message, by default the one being handled, and `list_reactions`
 //! lists the reactions to a message the ant reads (see [`crate::reactions`]).
-//! `suggest_thread_title` has the ant's next message on the thread suggest a title for it ([`Envelope::title`]).
+//! `suggest_thread_title` has the turn's reply on the thread suggest a title for it ([`Envelope::title`],
+//! [`ants_proto::ChannelPost::title`], [`ants_proto::NotesPost::title`]).
 //!
 //! One server per ant, with two ways in: streamable HTTP on a loopback port, for harnesses that take HTTP MCP
 //! servers, and a local socket that `ants mcp` bridges stdio to, for the others (see [`crate::ipc`]). The sessions of each thread get their
@@ -396,8 +397,7 @@ impl Mcp {
         self.hub.asks.lock().await.stored.late.iter().filter(|e| &e.thread_id == thread).count()
     }
 
-    /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry, unless a
-    /// message it sent on the thread already carried it.
+    /// Take the title the session of `thread` suggested for it during the turn, for the reply to carry.
     pub fn take_title(&self, thread: &ThreadId) -> Option<String> {
         self.hub.sessions.locked().titles.remove(thread)
     }
@@ -1721,8 +1721,8 @@ impl Tools {
     }
 
     #[tool(description = "Suggest a short title for the current thread, one line of 1-120 characters naming what \
-        it is about, such as `Fix the flaky login test`. The reply to the message being handled carries it, when that \
-        reply is a message rather than a channel or notes post; calling again in the same turn replaces it. It \
+        it is about, such as `Fix the flaky login test`. The reply to the message being handled carries it, whether \
+        a message, a channel post or a thread notes post; calling again in the same turn replaces it. It \
         becomes the thread's title, shown to humans in their thread lists, only if the thread has never had one: a \
         title a human set, renamed or cleared always stays.")]
     async fn suggest_thread_title(

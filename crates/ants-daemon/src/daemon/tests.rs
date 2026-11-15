@@ -2279,22 +2279,25 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
     let notes = Arc::new(crate::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
     let mcp = Mcp::start(bus.dev.clone(), &home, outbox, roster, notes, bus.humans.clone(), None).await;
     bus.mcp = Some(mcp.unwrap());
+    let (ops, mut posts) = bus.channel("ops", &["dev-a"]).await;
     let (titled, plain) = (ThreadId::generate(), ThreadId::generate());
     bus.send(&titled, "hold on").await;
 
-    let ctrl_c = Arc::new(Semaphore::new(0));
-    let check = async {
-        until("the prompt to run", || log.locked().prompted == 1).await;
-        let servers = bus.mcp.as_ref().unwrap().servers()(&titled, true);
+    let suggest = async |thread: &ThreadId, title: &str| {
+        let servers = bus.mcp.as_ref().unwrap().servers()(thread, true);
         let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
         let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
         let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
-        let args = serde_json::json!({"title": "  Fix the build "});
-        let serde_json::Value::Object(args) = args else { unreachable!() };
+        let serde_json::Value::Object(args) = serde_json::json!({"title": title}) else { unreachable!() };
         let call = CallToolRequestParams::new("suggest_thread_title").with_arguments(args);
         let result = client.call_tool(call).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
+    };
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        suggest(&titled, "  Fix the build ").await;
         gate.add_permits(1);
         let msg = timeout(WAIT, replies.next()).await.expect("no reply").unwrap();
         let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -2307,6 +2310,37 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
             let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
             assert_eq!(reply.title, None, "the suggestion went with its turn's reply");
         }
+
+        // A reply posted to a channel thread carries it too.
+        let ask = ChannelPost::new(ops.clone(), UserId::human(), "hold: @dev-a the deploy failed");
+        bus.post(&ask).await;
+        until("the post to be prompted", || log.locked().prompted == 4).await;
+        suggest(&ask.thread_id, "Fix the deploy").await;
+        gate.add_permits(1);
+        let reply = next_post(&mut posts).await;
+        assert_eq!((&reply.thread_id, reply.title.as_deref()), (&ask.thread_id, Some("Fix the deploy")));
+
+        // And so does a member's answer posted to the thread notes of an escalation.
+        let [carol, lead] = ants(["carol", "lead"]);
+        let member = ThreadId::generate();
+        let escalation = escalated(&carol, &member, &[&[lead, bus.dev.clone()]]);
+        let help =
+            Envelope::on_thread(member.clone(), carol, bus.dev.clone(), "hold: help").with_escalation(Some(escalation));
+        bus::publish_json(&bus.js, help.subject(), &help, None).await.unwrap();
+        until("the member to be prompted", || log.locked().prompted == 5).await;
+        suggest(&member, "Unstick carol").await;
+        gate.add_permits(1);
+        let posted = timeout(WAIT, async {
+            loop {
+                if let Some(post) = read_notes(&bus, &member).await.pop() {
+                    break post;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the member's answer in the thread notes");
+        assert_eq!((&posted.from, posted.title.as_deref()), (&bus.dev, Some("Unstick carol")));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);

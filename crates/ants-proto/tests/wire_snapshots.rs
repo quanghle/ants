@@ -327,6 +327,7 @@ fn notes() {
             from: user("dev-a"),
             text: "taking the parser".to_owned(),
             turn_budget: 7,
+            title: Some("Rewrite the parser".to_owned()),
             sent_at: at(0),
         },
     );
@@ -400,6 +401,7 @@ fn channels() {
             creator: Some(user("planner")),
             webhook: true,
             allow: Some(vec!["read:*".to_owned()]),
+            title: Some("Fix CI".to_owned()),
             sent_at: at(0),
         },
     );
