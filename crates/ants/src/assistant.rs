@@ -1,16 +1,25 @@
 //! `ants assistant set|clear|show`: the human of the CLI's credentials designates its assistant ant, or none, by a
 //! grant its device signs ([`AssistantGrant`]), kept in [`HUMANS_BUCKET`] under the human's own name. See
-//! [`ants_proto::Grants`] for how readers honour it.
+//! [`ants_proto::Grants`] for how readers honour it. `ants assistant seal on|off` enrolls the assistant as a device of
+//! the human by the same grant, or ends it, so the assistant opens and seals the human's sealed messages
+//! ([`ants_daemon::sealing`]), with a key whose seed waits beside its credentials (`ants assistant key`).
 
 use std::path::{Path, PathBuf};
 
+use ants_daemon::config::Summary;
 use ants_daemon::creds::{Finding, Kind};
-use ants_proto::{AssistantGrant, HUMANS_BUCKET, RosterEntry, UserId, VerifiedGrant, assistant_grant_key};
+use ants_daemon::sealing;
+use ants_proto::{
+    AssistantGrant, DeviceId, DeviceKey, HUMANS_BUCKET, RosterEntry, SealingDevice, UserId, VerifiedGrant,
+    assistant_grant_key,
+};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::{self, kv};
 use chrono::{DateTime, TimeDelta, Utc};
+use nkeys::XKey;
 use serde::Deserialize;
 
+use crate::cli::{AssistantCommand, SealCommand};
 use crate::{Nats, auth, devices, humans, revoke, roster};
 
 /// How many times storing a record is tried again when another device of the human stored one meanwhile.
@@ -122,6 +131,18 @@ fn check(ant: &UserId, local: &Local, roster: &[RosterEntry]) -> Result<Vec<Stri
     Ok(warnings)
 }
 
+/// `ants assistant`, with the connection `nats` gives.
+pub async fn run<'a>(command: AssistantCommand, nats: impl Fn() -> Result<Nats<'a>>) -> Result<()> {
+    match command {
+        AssistantCommand::Set { ant } => set(&nats()?, &ant).await,
+        AssistantCommand::Clear => clear(&nats()?).await,
+        AssistantCommand::Show { human } => show(&nats()?, human).await,
+        AssistantCommand::Seal(SealCommand::On { key }) => seal_on(&nats()?, key).await,
+        AssistantCommand::Seal(SealCommand::Off) => seal_off(&nats()?).await,
+        AssistantCommand::Key { ant } => key(&ant),
+    }
+}
+
 /// The credentials of the human the CLI acts as, which sign its grant: a human device's.
 fn signing_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
     match nats.creds {
@@ -153,11 +174,14 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
     for warning in check(ant, &local, &roster)? {
         println!("warning: {warning}");
     }
-    let before = put(&js, creds, human, Some(ant.clone())).await?;
-    match before.and_then(|g| g.assistant) {
-        Some(before) if before == *ant => println!("{ant} stays the assistant of {human}"),
+    let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep).await?;
+    match before.as_ref().and_then(|g| g.assistant.as_ref()) {
+        Some(before) if before == ant => println!("{ant} stays the assistant of {human}"),
         Some(before) => println!("{ant} is now the assistant of {human}, in place of {before}"),
         None => println!("{ant} is now the assistant of {human}"),
+    }
+    if let Some(before) = before.filter(|g| g.assistant.as_ref() != Some(ant)) {
+        ended_sealing(&before);
     }
     println!(
         "It acts for {human} only while its credentials name {human} as the human it assists, as the team's account \
@@ -171,12 +195,121 @@ pub async fn clear(nats: &Nats<'_>) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
     let (_, js) = nats.connect("ants-assistant").await?;
-    let before = put(&js, creds, human, None).await?;
-    match before.and_then(|g| g.assistant) {
-        Some(before) => println!("{before} is no longer the assistant of {human}"),
+    let (before, _) = put(&js, creds, human, None, Sealing::Off).await?;
+    match before.as_ref().and_then(|g| g.assistant.as_ref()) {
+        Some(assistant) => println!("{assistant} is no longer the assistant of {human}"),
         None => println!("{human} has no assistant"),
     }
+    if let Some(before) = &before {
+        ended_sealing(before);
+    }
     Ok(())
+}
+
+/// `ants assistant seal on [--key KEY]`: enroll the human's assistant as one of its devices, with `key`, the public key
+/// `ants assistant key` printed on the assistant's machine, else the key of the assistant on this machine, made if it
+/// has none.
+pub async fn seal_on(nats: &Nats<'_>, key: Option<DeviceKey>) -> Result<()> {
+    let creds = signing_creds(nats)?;
+    let human = &nats.me.id;
+    let (_, js) = nats.connect("ants-assistant").await?;
+    let account = devices::account_of(Some(creds))?.context("credentials without an issuer")?;
+    let standing =
+        read(&js, human).await?.and_then(|g| g.verify(&assistant_grant_key(human), &account, Utc::now()).ok());
+    let Some(ant) = standing.and_then(|g| g.assistant) else {
+        bail!("{human} has no assistant to enroll: `ants assistant set ANT` designates one");
+    };
+    let key = match key {
+        Some(key) => key,
+        None => {
+            let creds = local_creds(&ant).with_context(|| {
+                format!("`ants assistant key {ant}` on the machine running {ant} prints the key `--key` takes")
+            })?;
+            let (xkey, _) = key_of(&creds)?;
+            auth::device_key(&xkey)?
+        }
+    };
+    let (_, grant) = put(&js, creds, human, Some(ant.clone()), Sealing::Set(key.clone())).await?;
+    let device = grant.sealing.map_or_default(|s| s.device.to_string());
+    println!("{ant} is enrolled as device {device} of {human}, with encryption key {key}");
+    println!(
+        "Messages sealed for {human} from now on are sealed for {ant} too, which opens them and seals those it sends \
+         for {human}, until `ants assistant seal off` or `ants assistant clear`."
+    );
+    Ok(())
+}
+
+/// `ants assistant seal off`: end the enrollment of the human's assistant as one of its devices, keeping it the
+/// assistant.
+pub async fn seal_off(nats: &Nats<'_>) -> Result<()> {
+    let creds = signing_creds(nats)?;
+    let human = &nats.me.id;
+    let (_, js) = nats.connect("ants-assistant").await?;
+    let account = devices::account_of(Some(creds))?.context("credentials without an issuer")?;
+    let standing =
+        read(&js, human).await?.and_then(|g| g.verify(&assistant_grant_key(human), &account, Utc::now()).ok());
+    let Some(standing) = standing.filter(|g| g.sealing.is_some()) else {
+        println!("{human} has no assistant enrolled as a device");
+        return Ok(());
+    };
+    let (before, _) = put(&js, creds, human, standing.assistant.clone(), Sealing::Off).await?;
+    if let Some(before) = &before {
+        ended_sealing(before);
+    }
+    Ok(())
+}
+
+/// `ants assistant key ANT`: print the public key `ANT`, an ant on this machine, is enrolled with, making it if it has
+/// none.
+pub fn key(ant: &UserId) -> Result<()> {
+    let creds = local_creds(ant)?;
+    let (xkey, made) = key_of(&creds)?;
+    let path = sealing::key_path(&creds);
+    if made {
+        eprintln!("made the encryption key of {ant}, its seed in {}", path.display());
+    }
+    println!("{}", xkey.public_key());
+    Ok(())
+}
+
+/// The credentials of `ant` on this machine, as the config file names them.
+fn local_creds(ant: &UserId) -> Result<PathBuf> {
+    let config = crate::defaults::path()?;
+    match Summary::load(&config)?.creds_of(ant) {
+        Some(Some(creds)) => Ok(creds.to_path_buf()),
+        Some(None) => bail!("{ant} runs without credentials in {}, so it holds no key", config.display()),
+        None => bail!("{ant} is not an ant of {}", config.display()),
+    }
+}
+
+/// The encryption key of the ant whose credentials are `creds` ([`sealing::load_key`]), and whether it was just made,
+/// its seed written beside them.
+fn key_of(creds: &Path) -> Result<(XKey, bool)> {
+    if let Some(xkey) = sealing::load_key(creds)? {
+        return Ok((xkey, false));
+    }
+    let xkey = XKey::new();
+    let seed = xkey.seed().map_err(|e| anyhow::anyhow!("encoding an encryption key: {e}"))?;
+    auth::write_secret(&sealing::key_path(creds), &format!("{seed}\n"))?;
+    Ok((xkey, true))
+}
+
+/// Say that the enrollment `before` held, if any, ended, and what of the key's seed.
+fn ended_sealing(before: &VerifiedGrant) {
+    let (Some(assistant), Some(sealing)) = (&before.assistant, &before.sealing) else { return };
+    println!(
+        "{assistant} is no longer device {} of {}: nothing is sealed for it from now on, and it opens nothing",
+        sealing.device, before.human
+    );
+    let path = local_creds(assistant).ok().map(|creds| sealing::key_path(&creds)).filter(|p| p.exists());
+    match path.map(|path| std::fs::remove_file(&path).map(|()| path)) {
+        Some(Ok(path)) => println!("Deleted the seed of its encryption key, {}.", path.display()),
+        Some(Err(e)) => println!("warning: the seed of its encryption key stays: {e}"),
+        None => println!(
+            "The seed of its encryption key stays beside its credentials, as {assistant}.xk, on the machine running \
+             it: deleting it there leaves the messages sealed for it before unopened by anyone holding it."
+        ),
+    }
 }
 
 /// `ants assistant show [HUMAN]`.
@@ -204,7 +337,10 @@ fn describe(grant: &VerifiedGrant) -> String {
     let when = grant.issued_at.format("%Y-%m-%d %H:%M UTC");
     match &grant.assistant {
         Some(assistant) => {
-            format!("{} has assistant {assistant}, granted {when} by device {}", grant.human, grant.device)
+            let enrolled = grant.sealing.as_ref().map_or_default(|s| {
+                format!(", enrolled as device {} with encryption key {} for sealed messages", s.device, s.xkey)
+            });
+            format!("{} has assistant {assistant}, granted {when} by device {}{enrolled}", grant.human, grant.device)
         }
         None => format!("{} has no assistant, cleared {when} by device {}", grant.human, grant.device),
     }
@@ -219,14 +355,26 @@ async fn read(js: &jetstream::Context, human: &UserId) -> Result<Option<Assistan
     serde_json::from_slice(&value).map(Some).context("a malformed assistant grant")
 }
 
-/// Sign the record of `assistant` (none: a withdrawal) by `human` with the device credentials `creds`, and store it
-/// in place of the one stored, issued after it. Returns the record it replaced, if one was stored and verifies.
+/// What a record [`put`] stores does with the enrollment of the assistant as a device of its human.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Sealing {
+    /// Keep the one standing, if the assistant stays.
+    Keep,
+    /// Enroll it with this key, as the same device if it already is with it.
+    Set(DeviceKey),
+    Off,
+}
+
+/// Sign the record of `assistant` (none: a withdrawal) by `human` with the device credentials `creds`, enrolling it
+/// as `sealing` says, and store it in place of the one stored, issued after it. Returns the record it replaced, if one
+/// was stored and verifies, and the one it stored.
 async fn put(
     js: &jetstream::Context,
     creds: &Path,
     human: &UserId,
     assistant: Option<UserId>,
-) -> Result<Option<VerifiedGrant>> {
+    sealing: Sealing,
+) -> Result<(Option<VerifiedGrant>, AssistantGrant)> {
     let (jwt, key) = auth::read_creds(creds)?;
     let finding = Finding::from_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
     if finding.kind != Kind::Human || finding.name != human.as_str() {
@@ -246,7 +394,19 @@ async fn put(
         };
         let now = Utc::now();
         let issued_at = after(now, before.as_ref().map(|g| g.issued_at));
-        let mut grant = AssistantGrant::new(human.clone(), assistant.clone(), issued_at, jwt.clone());
+        let verified = before.and_then(|g| g.verify(&grant_key, &account, now).ok());
+        let kept = verified.as_ref().filter(|g| g.assistant.is_some() && g.assistant == assistant);
+        let kept = kept.and_then(|g| g.sealing.clone());
+        let enrolled = match (&sealing, assistant.as_ref()) {
+            (_, None) | (Sealing::Off, _) => None,
+            (Sealing::Keep, _) => kept,
+            (Sealing::Set(xkey), _) => {
+                let device = kept.filter(|s| s.xkey == *xkey).map_or_else(DeviceId::generate, |s| s.device);
+                Some(SealingDevice { device, xkey: xkey.clone() })
+            }
+        };
+        let mut grant =
+            AssistantGrant::new(human.clone(), assistant.clone(), issued_at, jwt.clone()).with_sealing(enrolled);
         grant.signature = auth::sign(&key, &grant.signed())?;
         let value = serde_json::to_vec(&grant)?.into();
         let stored = match revision {
@@ -254,7 +414,7 @@ async fn put(
             None => kv.create(&grant_key, value).await.map_err(|e| e.kind().to_string()),
         };
         match stored {
-            Ok(_) => return Ok(before.and_then(|g| g.verify(&grant_key, &account, now).ok())),
+            Ok(_) => return Ok((verified, grant)),
             Err(e) if e.contains("wrong last") || e.contains("already exists") => {}
             Err(e) => bail!("storing the assistant grant in {HUMANS_BUCKET}: {e}"),
         }
@@ -358,22 +518,22 @@ mod tests {
             .unwrap_or_else(|_| panic!("the reader never saw {wanted:?}"));
         };
 
-        assert_eq!(put(&js, &creds, &alice, Some(p("pa"))).await.unwrap(), None);
+        assert_eq!(put(&js, &creds, &alice, Some(p("pa")), Sealing::Keep).await.unwrap().0, None);
         honoured(Some("pa")).await;
         assert!(reader.honours_assistant(&alice, &p("pa"), Some(&alice)));
         assert!(!reader.honours_assistant(&alice, &p("pa"), None), "without the assistant_of tag");
         assert!(!reader.is_human(&p("alice-assistant")), "a grant is no human's entry");
-        let replaced = put(&js, &creds, &alice, Some(p("pb"))).await.unwrap();
+        let (replaced, _) = put(&js, &creds, &alice, Some(p("pb")), Sealing::Keep).await.unwrap();
         assert_eq!(replaced.and_then(|g| g.assistant), Some(p("pa")));
         honoured(Some("pb")).await;
         assert_eq!(withdrawals.recv().await.unwrap(), Withdrawal { human: alice.clone(), assistant: p("pa") });
-        put(&js, &creds, &alice, None).await.unwrap();
+        put(&js, &creds, &alice, None, Sealing::Off).await.unwrap();
         honoured(None).await;
         assert_eq!(withdrawals.recv().await.unwrap(), Withdrawal { human: alice.clone(), assistant: p("pb") });
         let stored = read(&js, &alice).await.unwrap().unwrap();
         assert_eq!(stored.assistant, None, "a withdrawal is signed and stored");
 
-        let err = put(&js, &creds, &bob, Some(p("pa"))).await.unwrap_err().to_string();
+        let err = put(&js, &creds, &bob, Some(p("pa")), Sealing::Keep).await.unwrap_err().to_string();
         assert!(err.contains("not a device of bob's"), "{err}");
         let (_, bob_js) = server.connect_as(&bob, Role::Human).await;
         let kv = bob_js.get_key_value(HUMANS_BUCKET).await.unwrap();
@@ -383,5 +543,98 @@ mod tests {
         let (_, ant_js) = server.connect_as(&p("pa"), Role::Ant).await;
         let kv = ant_js.get_key_value(HUMANS_BUCKET).await.unwrap();
         assert!(kv.put("alice.assistant", b"{}".to_vec().into()).await.is_err(), "no ant writes a grant");
+    }
+
+    /// Alice enrolls her assistant as one of her devices: Bob's CLI seals for it too, the assistant opens what Bob
+    /// sealed for Alice and seals what it sends Bob for her, which Bob opens as from the assistant and never as from
+    /// Alice; `seal off` ends both at once.
+    #[tokio::test]
+    async fn an_enrolled_assistant_opens_and_seals_for_its_human_until_withdrawn() {
+        use ants_daemon::devices::Directory;
+        use ants_daemon::sealing::{AssistantSealing, Opening, seal_envelope};
+        use ants_proto::Envelope;
+        use crypto_secretbox::XSalsa20Poly1305;
+        use crypto_secretbox::aead::{KeyInit as _, OsRng};
+
+        use crate::sealed::{Keyring, PLAINTEXT, Sealer, State};
+
+        let Some(server) = Server::start() else { return };
+        let (alice, bob, pa) = (p("alice"), p("bob"), p("pa"));
+        let creds: Vec<_> = [&alice, &bob].iter().map(|h| server.creds_as(h, Role::Human)).collect();
+        let nats: Vec<_> = creds.iter().map(|c| crate::Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let (_, alice_js) = nats[0].connect("test").await.unwrap();
+        let (_, bob_js) = nats[1].connect("test").await.unwrap();
+        humans::ensure(&alice_js).await.unwrap();
+        let account = devices::account_of(Some(&creds[0])).unwrap().unwrap();
+
+        let xkey = XKey::new();
+        let key: DeviceKey = xkey.public_key().parse().unwrap();
+        put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        let (_, enrolled) =
+            put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Set(key.clone())).await.unwrap();
+        let device = enrolled.sealing.as_ref().unwrap().device;
+        let (_, again) = put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Set(key.clone())).await.unwrap();
+        assert_eq!(again.sealing.unwrap().device, device, "the same key stays the same device");
+
+        // The assistant's daemon; its credentials reading the directory are Alice's here.
+        let (_, pa_js) = server.connect_as(&pa, Role::Ant).await;
+        let registry = Registry::new(alice.clone()).verifying_grants(Some(account.clone()));
+        let _watching = registry.watch(pa_js, ants_daemon::humans::RETRY);
+        let directory = Directory::open(&alice_js, &account).await.unwrap();
+        let assistant = AssistantSealing::new(pa.clone(), xkey.clone(), registry, directory);
+        let enrolled_now = async |wanted: Option<DeviceId>| {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while assistant.device_for(&alice) != wanted {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the assistant never saw {wanted:?}"));
+        };
+        enrolled_now(Some(device)).await;
+
+        let sealer = Sealer::new(&nats[1], &bob_js, &alice, PLAINTEXT).await.unwrap();
+        let mut asked = Envelope::new(bob.clone(), alice.clone(), "the board meets at nine".to_owned());
+        sealer.seal(&mut asked, &mut []).unwrap();
+        assert!(asked.sealed.as_ref().unwrap().key_for(&device).is_some(), "sealed for the assistant too");
+        let Opening::Opened(body) = assistant.open(&alice, &asked).await.unwrap() else { panic!("does not open") };
+        assert_eq!(body.text, "the board meets at nine");
+        assert_eq!(assistant.open(&bob, &asked).await.unwrap(), Opening::Unreadable, "bob enrolled no one");
+
+        let mut answer = Envelope::new(pa.clone(), bob.clone(), "alice will be there".to_owned());
+        assistant.seal(&alice, &mut answer).await.unwrap();
+        let bob_keyring = Keyring::load(&nats[1], &bob_js).await.unwrap();
+        let alice_keyring = Keyring::load(&nats[0], &alice_js).await.unwrap();
+        for keyring in [&bob_keyring, &alice_keyring] {
+            let (opened, state) = crate::sealed::read(answer.clone(), Some(keyring));
+            assert_eq!((opened.text.as_str(), state), ("alice will be there", Some(State::Opened)));
+        }
+        let mut as_alice = Envelope::new(alice.clone(), bob.clone(), "pay pa double".to_owned());
+        let content = XSalsa20Poly1305::generate_key(&mut OsRng);
+        let bob_devices = Directory::open(&bob_js, &account).await.unwrap().devices(std::slice::from_ref(&bob)).await;
+        let bob_device = bob_devices.unwrap().verified.remove(0);
+        let recipients = [(bob_device.device, &bob_device.key)];
+        seal_envelope(&mut as_alice, &content, Vec::new(), device, &xkey, &recipients).unwrap();
+        assert_eq!(crate::sealed::read(as_alice, Some(&bob_keyring)).1, Some(State::Forged), "not as its human");
+        let refused = assistant.seal(&alice, &mut Envelope::new(alice.clone(), bob.clone(), String::new())).await;
+        assert!(refused.unwrap_err().to_string().contains("seals only what it sends itself"));
+
+        put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Off).await.unwrap();
+        enrolled_now(None).await;
+        assert_eq!(assistant.open(&alice, &asked).await.unwrap(), Opening::Unreadable);
+        let refused = assistant.seal(&alice, &mut Envelope::new(pa.clone(), bob.clone(), String::new())).await;
+        assert!(refused.unwrap_err().to_string().contains("has not enrolled pa"));
+        let sealer = Sealer::new(&nats[1], &bob_js, &alice, PLAINTEXT).await.unwrap();
+        let mut asked = Envelope::new(bob.clone(), alice.clone(), "lunch?".to_owned());
+        sealer.seal(&mut asked, &mut []).unwrap();
+        assert!(asked.sealed.unwrap().key_for(&device).is_none(), "no longer sealed for the assistant");
+
+        let (_, enrolled) = put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Set(key)).await.unwrap();
+        let device = enrolled.sealing.unwrap().device;
+        enrolled_now(Some(device)).await;
+        put(&alice_js, &creds[0], &alice, Some(p("pb")), Sealing::Keep).await.unwrap();
+        enrolled_now(None).await;
+        let (_, stored) = put(&alice_js, &creds[0], &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+        assert_eq!(stored.sealing, None, "an enrollment ends with its assistant");
     }
 }
