@@ -34,6 +34,7 @@ tokio = { workspace = true, features = ["rt", "macros", "signal", "time", "net",
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 scrypt = { version = "0.12.0", default-features = false }
+crypto_secretbox = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "salsa20"] }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 unicode-width = "0.2.3"
 

@@ -239,7 +239,7 @@ impl Searches {
     /// Run `search`, dropping the one running.
     pub fn start(&mut self, search: Search) {
         let js = self.js.clone();
-        self.running = Some(async move { search.run(&js).await }.boxed_local());
+        self.running = Some(async move { search.run(&js, None).await }.boxed_local());
     }
 
     /// The matches of the search running, once found. Cancel-safe.

@@ -236,7 +236,11 @@ pub fn threads() -> Vec<CompletionCandidate> {
         let entries = thread::recent_threads(js, me).await?;
         let mut titles = if titled {
             match thread_meta::Meta::open(js, None, me).await {
-                Ok(meta) => meta.titles(entries.iter().map(|e| &e.thread_id)).await.unwrap_or_default(),
+                Ok(meta) => meta
+                    .opening(crate::sealed::Keyring::lazy(creds.as_deref(), &NoStore, js).map(std::sync::Arc::new))
+                    .titles(entries.iter().map(|e| &e.thread_id))
+                    .await
+                    .unwrap_or_default(),
                 Err(_) => Default::default(),
             }
         } else {

@@ -56,10 +56,8 @@ pub(crate) enum Command {
         #[arg(long, value_name = "THREAD")]
         #[arg(add = ArgValueCandidates::new(completions::threads))]
         thread: Option<thread::Pick>,
-        /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
-        /// ahead of the messages waiting there. Needs --thread and a human's credentials.
-        #[arg(long, requires = "thread")]
-        steer: bool,
+        #[command(flatten)]
+        sending: Sending,
         #[command(flatten)]
         replies: Replies,
         #[command(flatten)]
@@ -434,6 +432,19 @@ pub(crate) enum HookCommand {
     },
 }
 
+/// How `ants ask` sends.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sending {
+    /// Steer the ant: a prompt it runs on the thread is cancelled, and the message prompts its session next,
+    /// ahead of the messages waiting there. Needs --thread and a human's credentials.
+    #[arg(long, requires = "thread")]
+    pub(crate) steer: bool,
+    /// Send a message from a human to another human in the clear: by default it is sealed so only the two humans'
+    /// devices read it.
+    #[arg(long)]
+    pub(crate) plaintext: bool,
+}
+
 /// What `ants ask` and `ants post` do once sent: return at once, wait for the first reply, or follow the thread.
 #[derive(clap::Args, Debug, Default)]
 pub(crate) struct Replies {
@@ -555,9 +566,10 @@ mod tests {
     fn ask_steers_only_a_thread() {
         assert!(Cli::try_parse_from(["ants", "ask", "--steer", "@dev-a", "go", "left"]).is_err());
         let cli = Cli::try_parse_from(["ants", "ask", "--steer", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { steer: true, thread: Some(thread::Pick::Last), .. }));
+        let steering = Sending { steer: true, plaintext: false };
+        assert_matches!(cli.command, Some(Command::Ask { sending, thread: Some(thread::Pick::Last), .. }) if sending == steering);
         let cli = Cli::try_parse_from(["ants", "ask", "--thread", "last", "@dev-a", "go"]).unwrap();
-        assert_matches!(cli.command, Some(Command::Ask { steer: false, .. }));
+        assert_matches!(cli.command, Some(Command::Ask { sending: Sending { steer: false, .. }, .. }));
     }
 
     #[test]

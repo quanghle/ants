@@ -5,7 +5,7 @@ use ants_proto::{Envelope, Following, Uuid};
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
-use crate::{Listing, Nats, inbox, presence, reacted, thread, tools};
+use crate::{Listing, Nats, inbox, presence, reacted, sealed, thread, tools};
 
 pub(crate) async fn show(
     nats: &Nats<'_>,
@@ -22,21 +22,21 @@ pub(crate) async fn show(
     select.thread = thread::resolve(thread, &js, &nats.me).await?;
     let select = &select;
     let mut inbox = inbox::Inbox::open(&js, me).await?;
+    let keyring = sealed::Keyring::load(nats, &js).await;
+    let shown = reacted::Shown::default();
     let show_with = |e: &Envelope, reactions: &[reactions::Reacted]| -> Result<()> {
+        let (e, state) = sealed::read(e.clone(), keyring.as_ref());
+        shown.add(e.id, &e.from, &e.text);
         if json {
-            println!("{}", serde_json::to_string(&inbox::Shown::new(e, reactions))?);
+            println!("{}", serde_json::to_string(&inbox::Shown::new(&e, reactions).sealed(state))?);
         } else {
-            println!("{}", inbox::render(e, reactions));
+            println!("{}", inbox::render(&e, reactions));
         }
         Ok(())
     };
     // Watched before reading, so no reaction to a message shown is missed.
     let changes = if follow { reacted::changes(nats, &js).await } else { futures::stream::pending().boxed() };
-    let shown = reacted::Shown::default();
-    let show = |e: &Envelope| {
-        shown.add(e.id, &e.from, &e.text);
-        show_with(e, &[])
-    };
+    let show = |e: &Envelope| show_with(e, &[]);
     let unread = inbox.unread(select).await?;
     if unread.is_empty() && !follow && !json {
         println!("no unread replies");
@@ -44,7 +44,9 @@ pub(crate) async fn show(
     let ids: Vec<Uuid> = unread.iter().map(|e| e.id).collect();
     let reactions = inbox::reactions_or_none(&js, &ids).await;
     for e in &unread {
-        shown.add(e.id, &e.from, &e.text);
+        if let Some(keyring) = &keyring {
+            keyring.learn(e).await;
+        }
         show_with(e, reactions.get(&e.id).map_or(&[], Vec::as_slice))?;
     }
     if follow {
@@ -64,7 +66,7 @@ pub(crate) async fn show(
             tokio::join!(dead, unserved);
             std::future::pending::<()>().await;
         };
-        let followed = inbox.follow(select, show, async { _ = tokio::signal::ctrl_c().await });
+        let followed = inbox.follow(select, keyring.as_ref(), show, async { _ = tokio::signal::ctrl_c().await });
         // Following one thread shows no escalation on the others, so only following them all counts as reading.
         let followed = async {
             match select.thread {
