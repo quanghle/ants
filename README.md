@@ -309,6 +309,7 @@ js_domain = "hub"                          # default hub JetStream domain; also 
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off); see Monitoring
 timezone = "America/New_York"              # default time zone of schedules' cron (default UTC); see Schedules
+redact = true                              # redact secrets from what ants publish (default true); see Redaction
 
 [cli]                                      # the CLI's connection where no flag or environment variable sets it
 creds = "~/.config/ants/auth/alice.creds"  # the human's credentials (an ant's never apply)
@@ -638,6 +639,15 @@ ants tools approve dev-a/019a7d2e --always # allow-always when offered by the ha
 ants tools approve dev-a/019a7d2e --rule   # also add the exact allow rule to dev-a in config.toml
 ants tools reject dev-a/019a7d2e
 ```
+
+### Redaction
+
+Tool requests, status streams, replies (stored in `ANTS` for 30 days), escalations, thread notes, and the messages and channel posts sent with MCP tools are redacted before the daemon publishes them: each secret found becomes `[redacted]`. Secrets found:
+
+- **Environment values:** the values of the ant's `env`, of its harness's `env` and of the daemon's own environment whose variable name has a part such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `AUTH` or `CREDENTIALS`, and the other values of the ant's and harness's `env` that look like a token (letters and digits, without spaces, slashes or a file extension). Values shorter than 8 characters and paths (starting with `/`, `~` or `.`) stay, so `1`, `true`, a file name, a host or a directory never mangle the text.
+- **Patterns:** PEM private keys, `Bearer` and `Basic` credentials, GitHub, GitLab, Slack, OpenAI, Anthropic, AWS, Google, Stripe, npm, Hugging Face and Telegram bot tokens, Slack and Discord webhook URLs, NKey seeds, JWTs, URL passwords (`scheme://user:password@host`), and values with a digit given to such a secret name (`API_KEY=...`, `"password": "..."`, `--token ...`).
+
+A tool request's input is redacted before it is cut to its 2000-byte excerpt, and streamed text is held back until a secret cannot be split across two status updates. Top-level `redact = false` turns this off for every ant of the config file. Notices of `ants webhook serve` (ntfy topics are public unless the server requires a token) are redacted regardless, by pattern and by the secret-named variables of its own environment. Local logs are not redacted.
 
 ## MCP tools
 

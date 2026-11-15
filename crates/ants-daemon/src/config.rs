@@ -8,6 +8,7 @@
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
+//! redact = true                     # redact secrets from what the ants publish (the default; crate::redact)
 //!
 //! [cli]                             # the CLI's own connection, where no flag or environment variable sets it
 //! creds = "~/.config/ants/auth/alice.creds"
@@ -113,6 +114,9 @@ struct File {
     metrics: Option<SocketAddr>,
     /// Default time zone of the schedules' cron timetables.
     timezone: Option<String>,
+    /// Redact secrets from what the file's ants publish ([`crate::redact`]).
+    #[serde(default = "yes")]
+    redact: bool,
     #[serde(default)]
     cli: CliSection,
     #[serde(default, rename = "ant_template")]
@@ -220,6 +224,9 @@ pub struct Ant {
     /// The daily caps it shares with the other ants added from its template, if the template has any.
     #[serde(skip)]
     pub pool: Option<Pool>,
+    /// Redact secrets from what it publishes: the file's top-level `redact`.
+    #[serde(skip, default = "yes")]
+    pub redact: bool,
 }
 
 fn default_max_harnesses() -> usize {
@@ -305,6 +312,7 @@ impl Ant {
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
             builtin: false,
             pool: None,
+            redact: true,
         }
     }
 
@@ -372,6 +380,7 @@ impl Ant {
             ant: self.name,
             defer_to_others: self.builtin,
             requester: crate::mcp::Requester::default(),
+            redact: self.redact,
         })
     }
 
@@ -556,6 +565,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Loaded> {
         if ant.human.is_none() {
             ant.human.clone_from(&file.human);
         }
+        ant.redact = file.redact;
         ants.push(ant);
     }
     let timezone = file
@@ -1495,6 +1505,14 @@ Review changes for correctness."""
         assert_eq!(loaded.metrics, Some("127.0.0.1:9464".parse().unwrap()));
         let err = format!("{:#}", parse_all("metrics = \"localhost\"").unwrap_err());
         assert!(err.contains("metrics"), "{err}");
+    }
+
+    #[test]
+    fn redaction_is_on_unless_turned_off() {
+        let ant = "[[ant]]\nname = \"dev-a\"\nworkdir = \".\"";
+        let redact = |text: &str| parse_here(text).unwrap().iter().map(|ant| ant.redact).collect::<Vec<_>>();
+        assert_eq!(redact(ant), [true, true]);
+        assert_eq!(redact(&format!("redact = false\n{ant}")), [false, false], "the messenger too");
     }
 
     #[test]

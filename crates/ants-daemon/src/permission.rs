@@ -33,6 +33,8 @@ use anyhow::{Result, bail};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
+use crate::redact::Redactor;
+
 const KINDS: [&str; 10] =
     ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"];
 /// Longest raw tool input shown to the human.
@@ -165,11 +167,18 @@ pub struct PermissionPolicy {
     allow: Allowlist,
     /// Who decides requests outside the allowlist. None rejects them.
     approver: Option<Arc<dyn Approver>>,
+    /// What the request the approver gets hides.
+    redactor: Arc<Redactor>,
 }
 
 impl PermissionPolicy {
     pub fn new(allow: Allowlist, approver: Option<Arc<dyn Approver>>) -> Self {
-        Self { allow, approver }
+        Self { allow, approver, redactor: Arc::default() }
+    }
+
+    /// The same, redacting the tool requests the approver gets with `redactor`.
+    pub fn with_redactor(self, redactor: Arc<Redactor>) -> Self {
+        Self { redactor, ..self }
     }
 
     /// Reject every request, asking no one.
@@ -197,7 +206,8 @@ impl PermissionPolicy {
         } else {
             match (&self.approver, thread) {
                 (Some(approver), Some(thread)) => {
-                    let verdict = approver.decide(thread.clone(), summary(&tool), offered(request)).await;
+                    let verdict =
+                        approver.decide(thread.clone(), summary(&tool, &self.redactor), offered(request)).await;
                     tracing::info!(kind = %tool.kind, title = ?fields.title, ?verdict, "tool request decided");
                     verdict
                 }
@@ -266,8 +276,11 @@ fn offered(request: &RequestPermissionRequest) -> Vec<Verdict> {
     verdicts
 }
 
-fn summary(tool: &Tool<'_>) -> ToolCall {
+/// What the approver is shown of `tool`, redacted before the input is shortened, so no secret is cut in two.
+fn summary(tool: &Tool<'_>, redactor: &Redactor) -> ToolCall {
     let input = tool.fields.raw_input.as_ref().map(|v| {
+        let mut v = v.clone();
+        redactor.redact_json(&mut v);
         let mut s = v.to_string();
         if s.len() > MAX_INPUT {
             let end = (0..=MAX_INPUT).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
@@ -276,12 +289,14 @@ fn summary(tool: &Tool<'_>) -> ToolCall {
         }
         s
     });
-    ToolCall {
+    let mut call = ToolCall {
         kind: tool.kind.clone(),
         title: tool.fields.title.clone().unwrap_or_default(),
         locations: tool.fields.locations.iter().flatten().map(|l| l.path.display().to_string()).collect(),
-        input,
-    }
+        input: None,
+    };
+    redactor.redact_tool(&mut call);
+    ToolCall { input, ..call }
 }
 
 fn command(fields: &ToolCallUpdateFields) -> Option<String> {
@@ -496,7 +511,7 @@ mod tests {
     fn the_suggested_rule_allows_the_escalated_call_exactly() {
         let rule = |request: &RequestPermissionRequest| {
             let fields = &request.tool_call.fields;
-            rule_for(&summary(&Tool { kind: kind_name(fields), fields }))
+            rule_for(&summary(&Tool { kind: kind_name(fields), fields }, &Redactor::default()))
         };
         let fetch = request(ToolKind::Fetch, "Fetch", json!({ "url": "https://docs.rs/x" }), &[]);
         let mcp = request(ToolKind::Other, "mcp__bd__show", json!({}), &[]);
@@ -551,5 +566,20 @@ mod tests {
         assert_eq!(chosen(&PermissionPolicy::reject_all().answer(&push, Some(&thread), workdir).await), Some("no"));
         assert_eq!(chosen(&policy.answer(&push, None, workdir).await), Some("no"), "no thread, no one to ask");
         assert_eq!(chosen(&PermissionPolicy::allow_all().answer(&push, None, workdir).await), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn the_approver_gets_the_request_redacted_before_it_is_shortened() {
+        let fake = Arc::new(Fake(Verdict::Reject, Mutex::default()));
+        let redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret")]);
+        let policy = PermissionPolicy::new(Allowlist::default(), Some(fake.clone())).with_redactor(Arc::new(redactor));
+        let command = format!("{}deploy --key d3pl0y-s3cret", " ".repeat(MAX_INPUT - 37));
+        let thread: ThreadId = "t1".parse().unwrap();
+        let deploy = request(ToolKind::Execute, "deploy --key d3pl0y-s3cret", json!({ "command": command }), &[]);
+        policy.answer(&deploy, Some(&thread), Path::new(WORKDIR)).await;
+        let (_, tool, _) = fake.1.lock().unwrap().pop().unwrap();
+        assert_eq!(tool.title, "deploy --key [redacted]");
+        let input = tool.input.unwrap();
+        assert!(input.ends_with("deploy --key [redacted]\"}") && !input.contains("d3pl0y"), "{input}");
     }
 }
